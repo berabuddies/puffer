@@ -168,8 +168,10 @@ export type AskUserQuestionOption = {
 export type AskUserQuestionItem = {
   question: string;
   header: string;
+  type?: "choice" | "input";
   options: AskUserQuestionOption[];
   multiSelect?: boolean;
+  searchable?: boolean;
 };
 
 export type UserQuestionTimelineItem = TimelineBase & {
@@ -394,6 +396,7 @@ export type WorkflowConnector = {
   connector_slug: string;
   description: string;
   skill: string;
+  runtime_hints?: string[];
   requires_auth: boolean;
   can_subscribe: boolean;
   can_proxy_agent: boolean;
@@ -411,6 +414,41 @@ export type WorkflowConnection = {
   has_consumer: boolean;
   auth_failure_notified?: boolean;
   can_trigger_workflow?: boolean;
+  connect_command?: string | null;
+  monitor_command?: string | null;
+};
+
+export type WorkflowMonitorTaskAction = {
+  name: string;
+  prompt: string;
+};
+
+export type WorkflowMonitorTask = {
+  task_id: string;
+  subject: string;
+  description: string;
+  status: string;
+  monitor_connection?: string | null;
+  monitor_connector?: string | null;
+  monitor_memory_path?: string | null;
+  ignored?: boolean;
+  actions?: WorkflowMonitorTaskAction[];
+  possible_ignore_reasons?: string[];
+  started_at_ms?: number | null;
+  updated_at_ms?: number | null;
+};
+
+export type WorkflowBinding = {
+  slug: string;
+  description: string;
+  connection_slug: string;
+  connector_slug?: string | null;
+  status: string;
+  enabled: boolean;
+  action_type: string;
+  monitor?: boolean;
+  monitor_memory_path?: string | null;
+  created_at_ms?: number | null;
 };
 
 export type WorkflowSnapshot = {
@@ -419,6 +457,10 @@ export type WorkflowSnapshot = {
   connectors?: WorkflowConnector[];
   connections?: WorkflowConnection[];
   connector_error?: string | null;
+  workflow_bindings?: WorkflowBinding[];
+  workflow_binding_error?: string | null;
+  monitor_tasks?: WorkflowMonitorTask[];
+  monitor_task_error?: string | null;
 };
 
 export type ExternalCredential = {

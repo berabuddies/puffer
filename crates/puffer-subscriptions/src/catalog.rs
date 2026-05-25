@@ -106,6 +106,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         slack_login_template(),
         slack_bot_template(),
         email_template(),
+        github_webhook_template(),
         webhook_template(),
     ]
 }
@@ -130,6 +131,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "slack-login" => "slack-login".to_string(),
         "telegram-bot" => "telegram-bot".to_string(),
         "slack-bot" => "slack-bot".to_string(),
+        "github-webhook" => "github-webhook".to_string(),
         "webhook" => "webhook".to_string(),
         _ => connector_slug.to_string(),
     }
@@ -312,6 +314,22 @@ fn webhook_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: message_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn github_webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "github-webhook".to_string(),
+        description: "GitHub event webhook preset backed by puffer serve".to_string(),
+        skill: "github-webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: github_event_output_schema(),
         actions: BTreeMap::new(),
     }
 }
@@ -927,5 +945,22 @@ fn message_output_schema() -> Value {
             "poll": {"type": ["object", "null"]}
         },
         "required": ["message"]
+    })
+}
+
+fn github_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "github_event"},
+            "event": {"type": "string"},
+            "action": {"type": "string"},
+            "repository": {"type": "string"},
+            "sender": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["event", "repository", "message"],
+        "additionalProperties": true
     })
 }

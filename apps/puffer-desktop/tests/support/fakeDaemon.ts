@@ -53,6 +53,10 @@ type WorkflowSnapshotFixture = {
   connectors?: JsonRecord[];
   connections?: JsonRecord[];
   connector_error?: string | null;
+  workflow_bindings?: JsonRecord[];
+  workflow_binding_error?: string | null;
+  monitor_tasks?: JsonRecord[];
+  monitor_task_error?: string | null;
 };
 
 type SessionDetailOverrides = {
@@ -344,30 +348,33 @@ export class FakeDaemon {
         connector_slug: "telegram-login",
         description: "Telegram personal account over MTProto",
         skill: "telegram",
+        runtime_hints: ["subscriber", "internal-tool"],
         requires_auth: true,
         can_subscribe: true,
         can_proxy_agent: false,
         can_trigger_workflow: true,
         suggested_connection_slug: "telegram-user",
         connect_command: "/connect telegram-login telegram-user",
-        action_slugs: ["send_message"]
+        action_slugs: ["send_message", "edit_message", "delete_messages", "vote_poll"]
       },
       {
-        connector_slug: "slack-app",
-        description: "Slack app connector for bot-token Web API actions",
-        skill: "slack",
+        connector_slug: "telegram-bot",
+        description: "Telegram bot connector for agent proxy and bot chats",
+        skill: "telegram-bot",
+        runtime_hints: ["serve"],
         requires_auth: true,
-        can_subscribe: false,
-        can_proxy_agent: false,
+        can_subscribe: true,
+        can_proxy_agent: true,
         can_trigger_workflow: false,
-        suggested_connection_slug: "slack-app",
-        connect_command: "/connect slack-app slack-app",
+        suggested_connection_slug: "telegram-bot",
+        connect_command: "/connect telegram-bot telegram-bot",
         action_slugs: ["send_message"]
       },
       {
         connector_slug: "discord-bot",
         description: "Discord bot connector configured through puffer serve",
         skill: "discord",
+        runtime_hints: ["serve"],
         requires_auth: true,
         can_subscribe: false,
         can_proxy_agent: false,
@@ -377,9 +384,88 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "lark-app",
+        description: "Lark custom app connector over OpenAPI",
+        skill: "lark",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "lark-app",
+        connect_command: "/connect lark-app lark-app",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "lark-login",
+        description: "Lark user-token account connector over OpenAPI",
+        skill: "lark",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "lark-login",
+        connect_command: "/connect lark-login lark-login",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "matrix-bot",
+        description: "Matrix room connector configured through puffer serve",
+        skill: "matrix",
+        runtime_hints: ["serve"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "matrix-bot",
+        connect_command: "/connect matrix-bot matrix-bot",
+        action_slugs: []
+      },
+      {
+        connector_slug: "slack-app",
+        description: "Slack app connector for bot-token Web API actions",
+        skill: "slack",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-app",
+        connect_command: "/connect slack-app slack-app",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "slack-login",
+        description: "Slack workspace account over Web API or local app session",
+        skill: "slack",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-login",
+        connect_command: "/connect slack-login slack-login",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "slack-bot",
+        description: "Legacy Slack bot connector placeholder; use slack-app or slack-login actions",
+        skill: "slack",
+        runtime_hints: ["connector"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-bot",
+        connect_command: "/connect slack-bot slack-bot",
+        action_slugs: []
+      },
+      {
         connector_slug: "email",
         description: "Email connector over SMTP and IMAP-compatible polling",
         skill: "email",
+        runtime_hints: ["subscriber", "internal-tool"],
         requires_auth: true,
         can_subscribe: true,
         can_proxy_agent: false,
@@ -387,6 +473,32 @@ export class FakeDaemon {
         suggested_connection_slug: "email",
         connect_command: "/connect email email",
         action_slugs: ["send_message"]
+      },
+      {
+        connector_slug: "github-webhook",
+        description: "GitHub event webhook preset backed by puffer serve",
+        skill: "github-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "github-webhook",
+        connect_command: "/connect github-webhook github-webhook",
+        action_slugs: []
+      },
+      {
+        connector_slug: "webhook",
+        description: "HTTP webhook connector configured through puffer serve",
+        skill: "webhook",
+        runtime_hints: ["serve"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "webhook",
+        connect_command: "/connect webhook webhook",
+        action_slugs: []
       }
     ],
     connections: [
@@ -397,19 +509,64 @@ export class FakeDaemon {
         state: "authenticated",
         has_consumer: false,
         auth_failure_notified: false,
-        can_trigger_workflow: false
+        can_trigger_workflow: false,
+        connect_command: "/connect slack-app slack-app",
+        monitor_command: null
       },
       {
         slug: "telegram-user",
         connector_slug: "telegram-login",
         description: "Personal Telegram",
-        state: "authenticated",
-        has_consumer: false,
+        state: "active",
+        has_consumer: true,
         auth_failure_notified: false,
-        can_trigger_workflow: true
+        can_trigger_workflow: true,
+        connect_command: "/connect telegram-login telegram-user",
+        monitor_command: "/monitor telegram-user"
       }
     ],
-    connector_error: null
+    connector_error: null,
+    workflow_bindings: [
+      {
+        slug: "monitor-telegram-user",
+        description: "Monitor telegram-user for actionable tasks",
+        connection_slug: "telegram-user",
+        connector_slug: "telegram-login",
+        status: "enabled",
+        enabled: true,
+        action_type: "triage_agent",
+        monitor: true,
+        monitor_memory_path: "/tmp/telegram-user.md",
+        created_at_ms: now - 45_000
+      }
+    ],
+    workflow_binding_error: null,
+    monitor_tasks: [
+      {
+        task_id: "monitor-1",
+        subject: "Reply to Telegram support ping",
+        description: "Alice asked whether the deployment is finished.",
+        status: "pending",
+        monitor_connection: "telegram-user",
+        monitor_connector: "telegram-login",
+        monitor_memory_path: "/tmp/telegram-user.md",
+        ignored: false,
+        actions: [
+          {
+            name: "Draft reply",
+            prompt: "Draft a concise reply to Alice with the deployment status."
+          },
+          {
+            name: "Open context",
+            prompt: "Open the Telegram thread and summarize the latest deployment question."
+          }
+        ],
+        possible_ignore_reasons: ["duplicate support ping", "already answered in thread"],
+        started_at_ms: now - 15_000,
+        updated_at_ms: now - 5_000
+      }
+    ],
+    monitor_task_error: null
   };
   private nextTab = 2;
   private nextPty = 1;
@@ -545,7 +702,11 @@ export class FakeDaemon {
       runs: snapshot.runs.map((run) => ({ ...run })),
       connectors: snapshot.connectors?.map((connector) => ({ ...connector })),
       connections: snapshot.connections?.map((connection) => ({ ...connection })),
-      connector_error: snapshot.connector_error ?? null
+      connector_error: snapshot.connector_error ?? null,
+      workflow_bindings: snapshot.workflow_bindings?.map((binding) => ({ ...binding })),
+      workflow_binding_error: snapshot.workflow_binding_error ?? null,
+      monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
+      monitor_task_error: snapshot.monitor_task_error ?? null
     };
   }
 
@@ -869,13 +1030,11 @@ export class FakeDaemon {
       case "browser_recording":
         return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
       case "workflow_list":
-        return {
-          workflows: this.workflowSnapshot.workflows.map((workflow) => ({ ...workflow })),
-          runs: this.workflowSnapshot.runs.map((run) => ({ ...run })),
-          connectors: this.workflowSnapshot.connectors?.map((connector) => ({ ...connector })) ?? [],
-          connections: this.workflowSnapshot.connections?.map((connection) => ({ ...connection })) ?? [],
-          connector_error: this.workflowSnapshot.connector_error ?? null
-        };
+        return this.workflowListResponse();
+      case "workflow_save":
+        return this.saveWorkflow(request.params);
+      case "workflow_toggle":
+        return this.toggleWorkflow(request.params);
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
@@ -895,6 +1054,56 @@ export class FakeDaemon {
       default:
         throw new Error(`Unhandled fake daemon method: ${request.method}`);
     }
+  }
+
+  private workflowListResponse(): JsonRecord {
+    return {
+      workflows: this.workflowSnapshot.workflows.map((workflow) => ({ ...workflow })),
+      runs: this.workflowSnapshot.runs.map((run) => ({ ...run })),
+      connectors: this.workflowSnapshot.connectors?.map((connector) => ({ ...connector })) ?? [],
+      connections: this.workflowSnapshot.connections?.map((connection) => ({ ...connection })) ?? [],
+      connector_error: this.workflowSnapshot.connector_error ?? null,
+      workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => ({ ...binding })) ?? [],
+      workflow_binding_error: this.workflowSnapshot.workflow_binding_error ?? null,
+      monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
+      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
+    };
+  }
+
+  private saveWorkflow(params: JsonRecord): JsonRecord {
+    const workflow = params.workflow as JsonRecord | undefined;
+    const slug = String(workflow?.slug ?? "");
+    if (!workflow || !slug) throw new Error("missing workflow");
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflows: [
+        ...this.workflowSnapshot.workflows.filter((candidate) => candidate.slug !== slug),
+        { ...workflow }
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
+    };
+    return this.workflowListResponse();
+  }
+
+  private toggleWorkflow(params: JsonRecord): JsonRecord {
+    const slug = String(params.slug ?? "");
+    const enabled = Boolean(params.enabled);
+    if (!slug) throw new Error("missing workflow slug");
+    let matched = false;
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflows: this.workflowSnapshot.workflows.map((workflow) => {
+        if (workflow.slug !== slug) return workflow;
+        matched = true;
+        return { ...workflow, enabled };
+      }),
+      workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => {
+        if (binding.slug !== slug) return binding;
+        matched = true;
+        return { ...binding, enabled, status: enabled ? "enabled" : "paused" };
+      })
+    };
+    if (!matched) throw new Error(`workflow ${slug} not found`);
+    return this.workflowListResponse();
   }
 
   private throwQueuedFailure(method: string): void {

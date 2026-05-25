@@ -2363,6 +2363,27 @@
     tweaks = { ...tweaks, screen: "workspace" };
   }
 
+  async function runPipelineWorkflowCommand(command: string): Promise<boolean> {
+    const trimmed = command.trim();
+    if (!trimmed) return false;
+    try {
+      if (!selectedSession) {
+        const providerId = settingsSnapshot?.config.defaultProvider ?? undefined;
+        const created = await createSession(defaultWorkspaceCwd || undefined, providerId);
+        await openCreatedSession(created, providerId);
+      }
+      const started = await submitMessage(trimmed);
+      if (started && selectedSession) {
+        openAgentSessionId = selectedSession.id;
+        tweaks = { ...tweaks, screen: "workspace" };
+      }
+      return started;
+    } catch (error) {
+      statusMessage = `Workflow command failed: ${errorText(error)}`;
+      return false;
+    }
+  }
+
   function sessionFallbackFromCreated(
     created: CreatedSessionResult,
     requestedProviderId?: string
@@ -3275,7 +3296,9 @@
       .map((item) => ({
         question: typeof item.question === "string" ? item.question : "Question",
         header: typeof item.header === "string" ? item.header : "Question",
+        type: item.type === "input" ? "input" as const : "choice" as const,
         multiSelect: item.multiSelect === true,
+        searchable: item.searchable === true,
         options: Array.isArray(item.options)
           ? item.options
               .map((option) =>
@@ -3430,7 +3453,7 @@
               />
             {/if}
           {:else if tweaks.screen === "pipelines"}
-            <Pipelines />
+            <Pipelines onRunWorkflowCommand={runPipelineWorkflowCommand} />
           {:else if tweaks.screen === "deployments"}
             <Deployments />
           {:else if tweaks.screen === "settings"}

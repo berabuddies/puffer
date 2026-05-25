@@ -4,6 +4,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_resources::LoadedResources;
 use serde_json::{json, Value};
 
+mod catalog;
+mod serve_config;
+
 /// Runs the deterministic `/connect` connector-auth flow without a provider turn.
 pub fn execute_connect_flow(
     state: &mut AppState,
@@ -18,6 +21,19 @@ pub fn execute_connect_flow(
         "lark-app" => connect_lark_app(state, resources, &target.connection_name)?,
         "lark-login" => connect_lark_login(state, resources, &target.connection_name)?,
         "email" => connect_email(state, resources, &target.connection_name)?,
+        "telegram-bot" => {
+            serve_config::connect_telegram_bot(state, resources, &target.connection_name)?
+        }
+        "discord-bot" => {
+            serve_config::connect_discord_bot(state, resources, &target.connection_name)?
+        }
+        "matrix-bot" => {
+            serve_config::connect_matrix_bot(state, resources, &target.connection_name)?
+        }
+        "github-webhook" => {
+            serve_config::connect_github_webhook(state, resources, &target.connection_name)?
+        }
+        "webhook" => serve_config::connect_webhook(state, resources, &target.connection_name)?,
         _ => connect_generic(state, resources, &target)?,
     };
     Ok(TurnExecution {
@@ -46,10 +62,15 @@ fn parse_or_ask_target(
     let mut connection_name = parts.next().unwrap_or_default().to_string();
     let extra = parts.collect::<Vec<_>>().join(" ");
 
-    if connector_slug.is_empty() {
-        connector_slug = ask_connector_slug(state, resources)?;
-    }
+    connector_slug = if connector_slug.is_empty() {
+        catalog::ask_connector_slug(state, resources)?
+    } else {
+        catalog::resolve_connector_slug(state, resources, &connector_slug)?
+    };
     if connection_name.is_empty() || !extra.is_empty() {
+        if !extra.is_empty() {
+            connection_name.clear();
+        }
         connection_name = ask_input(
             state,
             resources,
@@ -567,113 +588,6 @@ fn ask_port(
         .with_context(|| format!("`{value}` is not a valid TCP port"))
 }
 
-fn ask_connector_slug(state: &mut AppState, resources: &LoadedResources) -> Result<String> {
-    let options = connector_catalog_options(state, resources)?;
-    ask_searchable_choice(
-        state,
-        resources,
-        "Connector",
-        "Which connector should Puffer connect?",
-        &options,
-    )
-}
-
-fn connector_catalog_options(
-    state: &mut AppState,
-    resources: &LoadedResources,
-) -> Result<Vec<(String, String)>> {
-    match call_tool(state, resources, "ConnectorList", json!({})) {
-        Ok(output) => connector_options(&output),
-        Err(error)
-            if error
-                .to_string()
-                .contains("subscription runtime is not running") =>
-        {
-            Ok(builtin_connector_options())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn builtin_connector_options() -> Vec<(String, String)> {
-    puffer_subscriptions::builtin_connector_templates()
-        .into_iter()
-        .map(|template| {
-            let mut traits = Vec::new();
-            if template.requires_auth {
-                traits.push("auth");
-            } else {
-                traits.push("no auth");
-            }
-            if template.can_subscribe {
-                traits.push("subscribe");
-            }
-            if template.can_proxy_agent {
-                traits.push("agent proxy");
-            }
-            (
-                template.slug,
-                format!("{} ({})", template.description, traits.join(", ")),
-            )
-        })
-        .collect()
-}
-
-fn connector_options(output: &Value) -> Result<Vec<(String, String)>> {
-    let connectors = output
-        .get("connectors")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("ConnectorList did not return a connectors array"))?;
-    if connectors.is_empty() {
-        bail!("no connector templates are available");
-    }
-    let options = connectors
-        .iter()
-        .filter_map(|connector| {
-            let slug = connector.get("connector_slug").and_then(Value::as_str)?;
-            Some((slug.to_string(), connector_option_description(connector)))
-        })
-        .collect::<Vec<_>>();
-    if options.is_empty() {
-        bail!("ConnectorList did not return any connector slugs");
-    }
-    Ok(options)
-}
-
-fn connector_option_description(connector: &Value) -> String {
-    let description = connector
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Connector template");
-    let mut traits = Vec::new();
-    if connector
-        .get("requires_auth")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        traits.push("auth");
-    } else {
-        traits.push("no auth");
-    }
-    if connector
-        .get("can_subscribe")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        traits.push("subscribe");
-    }
-    if connector
-        .get("can_proxy_agent")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        traits.push("agent proxy");
-    }
-    format!("{description} ({})", traits.join(", "))
-}
-
 fn ask_input(
     state: &mut AppState,
     resources: &LoadedResources,
@@ -877,6 +791,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_target_resolves_unique_connector_search_term() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let target =
+            parse_or_ask_target(&mut state, &resources, "matrix matrix-main").expect("target");
+
+        assert_eq!(target.connector_slug, "matrix-bot");
+        assert_eq!(target.connection_name, "matrix-main");
+    }
+
+    #[test]
+    fn parse_target_resolves_unique_action_search_term() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let target =
+            parse_or_ask_target(&mut state, &resources, "vote telegram-user").expect("target");
+
+        assert_eq!(target.connector_slug, "telegram-login");
+        assert_eq!(target.connection_name, "telegram-user");
+    }
+
+    #[test]
     fn parse_target_asks_for_missing_values_with_input_questions() {
         let mut state = temp_state();
         let resources = LoadedResources::default();
@@ -916,5 +854,104 @@ mod tests {
                 .iter()
                 .any(|option| option["label"] == "telegram-login")));
         assert_eq!(requests[1][0]["type"], "input");
+    }
+
+    #[test]
+    fn execute_connect_flow_dispatches_webhook_setup() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let turn = with_user_question_prompt_handler(
+            |request| {
+                let question = request.questions[0]["question"]
+                    .as_str()
+                    .expect("question text")
+                    .to_string();
+                let answer = match question.as_str() {
+                    "What bind address should the webhook listen on?" => "127.0.0.1:9191",
+                    "Should this webhook require bearer-token auth?" => "No bearer token",
+                    other => panic!("unexpected question: {other}"),
+                };
+                UserQuestionPromptResponse {
+                    answers: Map::from_iter([(question, json!(answer))]),
+                    annotations: Map::new(),
+                }
+            },
+            || execute_connect_flow(&mut state, &resources, "webhook local-hook"),
+        )
+        .expect("connect turn");
+
+        assert!(turn.assistant_text.contains("connection: local-hook"));
+        assert!(turn.assistant_text.contains("run `puffer serve`"));
+        let raw =
+            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        assert!(raw.contains("[connectors.webhook]"));
+    }
+
+    #[test]
+    fn execute_connect_flow_dispatches_github_webhook_setup() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let turn = with_user_question_prompt_handler(
+            |request| {
+                let question = request.questions[0]["question"]
+                    .as_str()
+                    .expect("question text")
+                    .to_string();
+                let answer = match question.as_str() {
+                    "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
+                    "What URL path should GitHub post webhook events to?" => "/github",
+                    other => panic!("unexpected question: {other}"),
+                };
+                UserQuestionPromptResponse {
+                    answers: Map::from_iter([(question, json!(answer))]),
+                    annotations: Map::new(),
+                }
+            },
+            || execute_connect_flow(&mut state, &resources, "github-webhook github-events"),
+        )
+        .expect("connect turn");
+
+        assert!(turn.assistant_text.contains("connector: github-webhook"));
+        assert!(turn.assistant_text.contains("connection: github-events"));
+        assert!(turn.assistant_text.contains("run `puffer serve`"));
+        let raw =
+            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"github-events\""));
+        assert!(raw.contains("path = \"/github\""));
+    }
+
+    #[test]
+    fn execute_connect_flow_dispatches_telegram_bot_setup() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let turn = with_user_question_prompt_handler(
+            |request| {
+                let question = request.questions[0]["question"]
+                    .as_str()
+                    .expect("question text")
+                    .to_string();
+                let answer = match question.as_str() {
+                    "What Telegram bot token should Puffer use?" => "telegram-token",
+                    other => panic!("unexpected question: {other}"),
+                };
+                UserQuestionPromptResponse {
+                    answers: Map::from_iter([(question, json!(answer))]),
+                    annotations: Map::new(),
+                }
+            },
+            || execute_connect_flow(&mut state, &resources, "telegram-bot telegram-bot"),
+        )
+        .expect("connect turn");
+
+        assert!(turn.assistant_text.contains("connector: telegram-bot"));
+        assert!(turn.assistant_text.contains("run `puffer serve`"));
+        let raw =
+            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        assert!(raw.contains("[connectors.telegram]"));
+        assert!(raw.contains("token = \"telegram-token\""));
     }
 }

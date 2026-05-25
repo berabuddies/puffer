@@ -2,13 +2,16 @@
   import "../design/pipeline.css";
 
   import { onMount } from "svelte";
-  import { loadWorkflowSnapshot } from "../api/desktop";
+  import { loadWorkflowSnapshot, saveWorkflow, toggleWorkflow } from "../api/desktop";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import Puffer from "../design/Puffer.svelte";
   import type {
     WorkflowConnection,
+    WorkflowBinding,
     WorkflowConnector,
     WorkflowDefinition,
+    WorkflowMonitorTask,
+    WorkflowMonitorTaskAction,
     WorkflowPipelineNode,
     WorkflowRun,
     WorkflowRunNode,
@@ -48,6 +51,46 @@
     label?: string;
   };
 
+  type ConnectorSearchRow = {
+    connector: WorkflowConnector;
+    searchText: string;
+  };
+
+  type ConnectionSearchRow = {
+    connection: WorkflowConnection;
+    searchText: string;
+  };
+
+  type MonitorTaskSearchRow = {
+    task: WorkflowMonitorTask;
+    searchText: string;
+  };
+
+  type MonitorBindingSearchRow = {
+    binding: WorkflowBinding;
+    searchText: string;
+  };
+
+  type WorkflowDraftSource = {
+    slugBase?: string;
+    name?: string;
+    connectionSlug?: string;
+    connectorSlug?: string;
+    connectionName?: string;
+    saveMessage?: string;
+  };
+
+  type ConnectorFilterPreset = {
+    label: string;
+    query: string;
+  };
+
+  type Props = {
+    onRunWorkflowCommand?: (command: string) => boolean | Promise<boolean>;
+  };
+
+  let { onRunWorkflowCommand }: Props = $props();
+
   const providerOptions: ProviderMeta[] = [
     {
       id: "codex",
@@ -83,33 +126,70 @@
   const NODE_H = 76;
   const PAD_L = 18;
   const PAD_T = 22;
+  const connectorFilterPresets: ConnectorFilterPreset[] = [
+    { label: "All", query: "" },
+    { label: "Trigger", query: "trigger-ready" },
+    { label: "Draft", query: "draft" },
+    { label: "Monitor", query: "monitor" },
+    { label: "Tasks", query: "monitor task" },
+    { label: "Repair", query: "repair" },
+    { label: "Active", query: "active" },
+    { label: "Idle", query: "idle" },
+    { label: "Actions", query: "has-actions" },
+    { label: "Serve", query: "serve" },
+    { label: "Subscriber", query: "subscriber" },
+    { label: "Internal", query: "internal-tool" },
+    { label: "No trigger", query: "no-trigger" }
+  ];
 
   let snapshot = $state<WorkflowSnapshot>({
     workflows: [],
     runs: [],
     connectors: [],
     connections: [],
-    connector_error: null
+    connector_error: null,
+    workflow_bindings: [],
+    workflow_binding_error: null,
+    monitor_tasks: [],
+    monitor_task_error: null
   });
   let editorWorkflows = $state<EditableWorkflow[]>([starterWorkflow()]);
   let workflowSlug = $state("agent-review-pipeline");
   let selectedNodeId = $state<string | null>("codex-implement");
   let connectorQuery = $state("");
   let selectedConnectorSlug = $state<string | null>(null);
+  let selectedConnectorConnectionName = $state("");
   let runIdx = $state<number | null>(null);
   let stepIdx = $state<number | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let connectorCommandRunning = $state(false);
+  let connectorCommandRunningFor = $state<string | null>(null);
+  let connectionCommandRunningFor = $state<string | null>(null);
+  let monitorCommandRunningFor = $state<string | null>(null);
+  let monitorTaskCommandRunningFor = $state<string | null>(null);
+  let togglingWorkflowSlug = $state<string | null>(null);
+  let savingWorkflowSlug = $state<string | null>(null);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
-  let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
+  let saveNotice = $state("Workflow changes save to the daemon.");
 
   let workflows = $derived(editorWorkflows);
   let connectors = $derived(snapshot.connectors ?? []);
   let connections = $derived(snapshot.connections ?? []);
+  let workflowBindings = $derived(snapshot.workflow_bindings ?? []);
+  let monitorBindings = $derived(workflowBindings.filter((binding) => binding.monitor === true));
+  let monitorTasks = $derived(snapshot.monitor_tasks ?? []);
+  let activeMonitorTasks = $derived(monitorTasks.filter((task) => !monitorTaskIgnored(task)));
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
-  let filteredConnections = $derived(filterConnections(connections, connectors, connectorQuery));
-  let filteredConnectors = $derived(filterConnectors(connectors, connectorQuery));
+  let connectorSearchRows = $derived(indexConnectors(connectors, connections));
+  let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
+  let monitorBindingSearchRows = $derived(indexMonitorBindings(monitorBindings));
+  let monitorTaskSearchRows = $derived(indexMonitorTasks(activeMonitorTasks));
+  let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQuery));
+  let filteredMonitorBindings = $derived(filterMonitorBindings(monitorBindingSearchRows, connectorQuery));
+  let filteredMonitorTasks = $derived(filterMonitorTasks(monitorTaskSearchRows, connectorQuery));
+  let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQuery));
   let workflow = $derived(
     workflows.find((item) => item.slug === workflowSlug) ?? workflows[0] ?? null
   );
@@ -132,19 +212,36 @@
     workflow?.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? workflow?.pipeline.nodes[0] ?? null
   );
   let selectedConnector = $derived(connectors.find((connector) => connector.connector_slug === selectedConnectorSlug) ?? null);
-  let selectedConnectorCommand = $derived(selectedConnector ? connectorConnectCommand(selectedConnector) : "");
+  let selectedConnectorConnectionInvalid = $derived(
+    selectedConnector !== null && !connectionSlugValid(selectedConnectorConnectionName)
+  );
+  let selectedConnectorCommand = $derived(
+    selectedConnector && !selectedConnectorConnectionInvalid
+      ? connectorConnectCommand(selectedConnector, selectedConnectorConnectionName.trim())
+      : ""
+  );
+  let selectedConnectorDraftCommand = $derived(
+    selectedConnector && connectorTriggerSupported(selectedConnector) && !selectedConnectorConnectionInvalid
+      ? workflowDraftCommand(selectedConnectorConnectionName.trim())
+      : ""
+  );
+  let workflowDirty = $derived(workflow ? dirtyWorkflowSlugs.includes(workflow.slug) : false);
 
   let wrapEl = $state<HTMLDivElement | undefined>();
   let scale = $state(0.8);
 
-  function starterWorkflow(): EditableWorkflow {
+  function starterWorkflow(
+    slug = "agent-review-pipeline",
+    name = "Agent review pipeline",
+    enabled = true
+  ): EditableWorkflow {
     return {
       schema: "puffer.workflow.v1",
-      slug: "agent-review-pipeline",
-      enabled: true,
+      slug,
+      enabled,
       trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review|implement|ship" },
       pipeline: {
-        name: "Agent review pipeline",
+        name,
         working_dir: "/Users/shou/corbina",
         concurrency: 1,
         nodes: [
@@ -266,31 +363,7 @@
     try {
       const next = await loadWorkflowSnapshot();
       if (generation !== refreshGeneration) return;
-      const incoming = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
-      const dirtyBySlug = new Map(
-        editorWorkflows
-          .filter((item) => dirtyWorkflowSlugs.includes(item.slug))
-          .map((item) => [item.slug, item])
-      );
-      const merged = incoming.map((item) => dirtyBySlug.get(item.slug) ?? item);
-      for (const dirty of dirtyBySlug.values()) {
-        if (!merged.some((item) => item.slug === dirty.slug)) merged.push(dirty);
-      }
-      snapshot = {
-        workflows: next.workflows,
-        runs: [...next.runs].sort((a, b) => b.idx - a.idx),
-        connectors: next.connectors ?? [],
-        connections: next.connections ?? [],
-        connector_error: next.connector_error ?? null
-      };
-      editorWorkflows = merged;
-      if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
-        workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
-      }
-      const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
-      if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
-        selectedNodeId = activeWorkflow?.pipeline.nodes[0]?.id ?? null;
-      }
+      applyWorkflowSnapshot(next);
     } catch (err) {
       if (generation !== refreshGeneration) return;
       error = err instanceof Error ? err.message : String(err);
@@ -305,10 +378,80 @@
     }
   }
 
+  function applyWorkflowSnapshot(next: WorkflowSnapshot) {
+    const incoming = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
+    const dirtyBySlug = new Map(
+      editorWorkflows
+        .filter((item) => dirtyWorkflowSlugs.includes(item.slug))
+        .map((item) => [item.slug, item])
+    );
+    const merged = incoming.map((item) => dirtyBySlug.get(item.slug) ?? item);
+    for (const dirty of dirtyBySlug.values()) {
+      if (!merged.some((item) => item.slug === dirty.slug)) merged.push(dirty);
+    }
+    snapshot = {
+      workflows: next.workflows,
+      runs: [...next.runs].sort((a, b) => b.idx - a.idx),
+      connectors: next.connectors ?? [],
+      connections: next.connections ?? [],
+      connector_error: next.connector_error ?? null,
+      workflow_bindings: next.workflow_bindings ?? [],
+      workflow_binding_error: next.workflow_binding_error ?? null,
+      monitor_tasks: next.monitor_tasks ?? [],
+      monitor_task_error: next.monitor_task_error ?? null
+    };
+    editorWorkflows = merged;
+    if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
+      workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
+    }
+    const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
+    if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
+      selectedNodeId = activeWorkflow?.pipeline.nodes[0]?.id ?? null;
+    }
+  }
+
   function selectWorkflow(slug: string) {
     workflowSlug = slug;
     const next = editorWorkflows.find((item) => item.slug === slug);
     selectedNodeId = next?.pipeline.nodes[0]?.id ?? null;
+  }
+
+  function createWorkflowDraft(source: WorkflowDraftSource = {}) {
+    const slug = uniqueWorkflowSlug(source.slugBase ?? "workflow-draft");
+    const draft = starterWorkflow(slug, source.name ?? "Workflow draft", false);
+    const connection = source.connectionSlug
+      ? connections.find((item) => item.slug === source.connectionSlug)
+      : triggerReadyConnections[0];
+    const connectionSlug = source.connectionSlug ?? connection?.slug;
+    draft.trigger = connection
+      ? { type: "connection", connection_slug: connection.slug, pattern: ".*" }
+      : connectionSlug
+        ? { type: "connection", connection_slug: connectionSlug, pattern: ".*" }
+      : { type: "subscription", source_topic: "workspace.task.created", pattern: ".*" };
+    editorWorkflows = [...editorWorkflows, draft];
+    workflowSlug = slug;
+    selectedNodeId = draft.pipeline.nodes[0]?.id ?? null;
+    if (source.connectorSlug) selectedConnectorSlug = source.connectorSlug;
+    if (source.connectionName ?? connectionSlug) selectedConnectorConnectionName = source.connectionName ?? connectionSlug ?? "";
+    dirtyWorkflowSlugs = Array.from(new Set([...dirtyWorkflowSlugs, slug]));
+    saveNotice = source.saveMessage ?? `Created ${slug} locally. Save to persist this workflow.`;
+  }
+
+  function uniqueWorkflowSlug(base: string): string {
+    const existing = new Set(editorWorkflows.map((item) => item.slug));
+    if (!existing.has(base)) return base;
+    let index = 2;
+    while (existing.has(`${base}-${index}`)) index += 1;
+    return `${base}-${index}`;
+  }
+
+  function titleFromSlug(slug: string): string {
+    const title = slug
+      .split("-")
+      .filter(Boolean)
+      .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+      .join(" ");
+    return title || "Workflow";
   }
 
   function selectRun(idx: number) {
@@ -323,11 +466,17 @@
   function updateCurrentWorkflow(mutator: (item: EditableWorkflow) => EditableWorkflow) {
     if (!workflow) return;
     const dirtySlug = workflow.slug;
-    editorWorkflows = editorWorkflows.map((item) => (item.slug === dirtySlug ? mutator(item) : item));
-    if (!dirtyWorkflowSlugs.includes(dirtySlug)) {
-      dirtyWorkflowSlugs = [...dirtyWorkflowSlugs, dirtySlug];
-    }
-    saveNotice = "Edited locally. Save/export wiring can use this workflow shape.";
+    let updatedSlug = dirtySlug;
+    editorWorkflows = editorWorkflows.map((item) => {
+      if (item.slug !== dirtySlug) return item;
+      const updated = mutator(item);
+      updatedSlug = updated.slug;
+      return updated;
+    });
+    dirtyWorkflowSlugs = Array.from(
+      new Set([...dirtyWorkflowSlugs.filter((slug) => slug !== dirtySlug), updatedSlug])
+    );
+    saveNotice = "Edited locally. Save to persist this workflow.";
   }
 
   function updateWorkflowField(field: "slug" | "enabled" | "name" | "working_dir" | "concurrency", value: string | boolean | number | null) {
@@ -341,6 +490,72 @@
       return { ...item, pipeline: { ...item.pipeline, concurrency: Number(value) || 1 } };
     });
     if (field === "slug") workflowSlug = String(value || oldSlug);
+  }
+
+  function workflowForSave(item: EditableWorkflow): WorkflowDefinition {
+    return {
+      schema: item.schema || "puffer.workflow.v1",
+      slug: item.slug,
+      enabled: item.enabled,
+      trigger: item.trigger,
+      pipeline: {
+        name: item.pipeline.name,
+        working_dir: item.pipeline.working_dir,
+        concurrency: item.pipeline.concurrency,
+        nodes: item.pipeline.nodes.map((node) => ({
+          id: node.id,
+          type: node.type,
+          agent: node.agent,
+          prompt: node.prompt,
+          model: node.model,
+          tools: [...(node.tools ?? [])],
+          env: node.env,
+          depends_on: [...(node.depends_on ?? [])]
+        }))
+      }
+    };
+  }
+
+  async function saveCurrentWorkflow() {
+    if (!workflow || !workflowDirty || savingWorkflowSlug) return;
+    const savedSlug = workflow.slug;
+    savingWorkflowSlug = savedSlug;
+    error = null;
+    saveNotice = `Saving ${savedSlug}...`;
+    try {
+      const next = await saveWorkflow(workflowForSave(workflow));
+      dirtyWorkflowSlugs = dirtyWorkflowSlugs.filter((slug) => slug !== savedSlug);
+      applyWorkflowSnapshot(next);
+      workflowSlug = savedSlug;
+      saveNotice = `Saved ${savedSlug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not save ${savedSlug}: ${message}`;
+    } finally {
+      savingWorkflowSlug = null;
+    }
+  }
+
+  async function toggleCurrentWorkflowEnabled() {
+    if (!workflow || workflowDirty || savingWorkflowSlug || togglingWorkflowSlug) return;
+    const slug = workflow.slug;
+    const enabled = !workflow.enabled;
+    togglingWorkflowSlug = slug;
+    error = null;
+    saveNotice = `${enabled ? "Resuming" : "Pausing"} ${slug}...`;
+    try {
+      const next = await toggleWorkflow(slug, enabled);
+      applyWorkflowSnapshot(next);
+      workflowSlug = slug;
+      saveNotice = `${enabled ? "Resumed" : "Paused"} ${slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not toggle ${slug}: ${message}`;
+    } finally {
+      togglingWorkflowSlug = null;
+    }
   }
 
   function updateTriggerField(field: "source_topic" | "connection_slug" | "pattern" | "cron", value: string) {
@@ -408,7 +623,10 @@
       saveNotice = `${connection.slug} cannot start workflow triggers. Choose an event-capable connection.`;
       return;
     }
-    selectedConnectorSlug = connection?.connector_slug ?? selectedConnectorSlug;
+    if (connection) {
+      selectedConnectorSlug = connection.connector_slug;
+      selectedConnectorConnectionName = connection.slug;
+    }
     updateCurrentWorkflow((item) => ({
       ...item,
       trigger: { type: "connection", connection_slug: connectionSlug, pattern: defaultPattern(item) }
@@ -416,28 +634,333 @@
   }
 
   function useConnectorTemplate(connector: WorkflowConnector) {
-    selectedConnectorSlug = connector.connector_slug;
-    if (!connectorTriggerSupported(connector)) {
-      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. Use an event-capable connector.`;
-      return;
-    }
     const existingConnection = connectionsForConnector(connector.connector_slug)[0];
     const connectionSlug = existingConnection?.slug ?? connectorConnectionHint(connector);
+    const command = connectorConnectCommand(connector, connectionSlug);
+    selectedConnectorSlug = connector.connector_slug;
+    selectedConnectorConnectionName = connectionSlug;
+    if (!connectorTriggerSupported(connector)) {
+      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. ${command} is available for connector setup.`;
+      return;
+    }
     updateCurrentWorkflow((item) => ({
       ...item,
       trigger: { type: "connection", connection_slug: connectionSlug, pattern: defaultPattern(item) }
     }));
     if (!existingConnection) {
-      saveNotice = `Run ${connectorConnectCommand(connector)} before enabling this workflow trigger.`;
+      saveNotice = `Run ${command} before enabling this workflow trigger.`;
     }
+  }
+
+  function createWorkflowDraftForConnection(connection: WorkflowConnection) {
+    if (!connectionTriggerSupported(connection)) {
+      saveNotice = `${connection.slug} cannot start workflow triggers. Choose an event-capable connection.`;
+      return;
+    }
+    createWorkflowDraft({
+      slugBase: `${connection.slug}-workflow`,
+      name: `${titleFromSlug(connection.slug)} workflow`,
+      connectionSlug: connection.slug,
+      connectorSlug: connection.connector_slug,
+      connectionName: connection.slug,
+      saveMessage: `Created ${connection.slug}-backed workflow locally. Save to persist this workflow.`
+    });
+  }
+
+  function createWorkflowDraftForConnector(connector: WorkflowConnector, plannedConnectionName?: string) {
+    const connectorConnections = connectionsForConnector(connector.connector_slug);
+    const matchingConnection = plannedConnectionName
+      ? connectorConnections.find((connection) => connection.slug === plannedConnectionName)
+      : null;
+    const existingConnection =
+      matchingConnection ?? (plannedConnectionName ? null : connectorConnections[0]);
+    const connectionSlug = plannedConnectionName || existingConnection?.slug || connectorConnectionHint(connector);
+    const command = connectorConnectCommand(connector, connectionSlug);
+    selectedConnectorSlug = connector.connector_slug;
+    selectedConnectorConnectionName = connectionSlug;
+    if (!connectorTriggerSupported(connector)) {
+      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. ${command} is available for connector setup.`;
+      return;
+    }
+    createWorkflowDraft({
+      slugBase: `${connectionSlug}-workflow`,
+      name: `${titleFromSlug(connectionSlug)} workflow`,
+      connectionSlug,
+      connectorSlug: connector.connector_slug,
+      connectionName: connectionSlug,
+      saveMessage: existingConnection
+        ? `Created ${connectionSlug}-backed workflow locally. Save to persist this workflow.`
+        : `Created ${connectionSlug}-backed workflow locally. Run ${command} before enabling it.`
+    });
+  }
+
+  function createWorkflowDraftForSelectedConnector() {
+    if (!selectedConnector || selectedConnectorConnectionInvalid) return;
+    createWorkflowDraftForConnector(selectedConnector, selectedConnectorConnectionName);
+  }
+
+  function workflowDraftCommand(connectionSlug: string): string {
+    const slug = connectionSlug.trim();
+    return slug ? `/workflows new ${slug}-workflow ${slug}` : "";
+  }
+
+  function connectionDraftCommand(connection: WorkflowConnection): string {
+    return workflowDraftCommand(connection.slug);
+  }
+
+  function connectorDraftCommand(connector: WorkflowConnector, plannedConnectionName?: string): string {
+    const existingConnection = plannedConnectionName
+      ? connectionsForConnector(connector.connector_slug).find((connection) => connection.slug === plannedConnectionName)
+      : connectionsForConnector(connector.connector_slug)[0];
+    return workflowDraftCommand(plannedConnectionName || existingConnection?.slug || connectorConnectionHint(connector));
   }
 
   function connectorConnectionHint(connector: WorkflowConnector): string {
     return connector.suggested_connection_slug || connector.connector_slug;
   }
 
-  function connectorConnectCommand(connector: WorkflowConnector): string {
-    return connector.connect_command || `/connect ${connector.connector_slug} ${connectorConnectionHint(connector)}`;
+  function connectorConnectCommand(
+    connector: WorkflowConnector,
+    connectionName = connectorConnectionHint(connector)
+  ): string {
+    const name = connectionName.trim();
+    if (name === connectorConnectionHint(connector) && connector.connect_command) return connector.connect_command;
+    return `/connect ${connector.connector_slug} ${name}`;
+  }
+
+  function connectionSlugValid(value: string): boolean {
+    return /^[a-z0-9-]+$/.test(value.trim());
+  }
+
+  function updateSelectedConnectorConnectionName(value: string) {
+    selectedConnectorConnectionName = value;
+    if (!selectedConnector || !connectorTriggerSupported(selectedConnector) || !connectionSlugValid(value)) {
+      return;
+    }
+    updateCurrentWorkflow((item) => ({
+      ...item,
+      trigger: { type: "connection", connection_slug: value.trim(), pattern: defaultPattern(item) }
+    }));
+  }
+
+  async function copyWorkflowCommand(command: string) {
+    if (!command.trim()) return;
+    try {
+      await navigator.clipboard.writeText(command.trim());
+      saveNotice = `Copied ${command}.`;
+    } catch (err) {
+      saveNotice = "Clipboard unavailable. Select and copy the command manually.";
+    }
+  }
+
+  async function copySelectedConnectorCommand() {
+    const command = selectedConnectorCommand.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    await copyWorkflowCommand(command);
+  }
+
+  async function copySelectedConnectorDraftCommand() {
+    const command = selectedConnectorDraftCommand.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    await copyWorkflowCommand(command);
+  }
+
+  async function runSelectedConnectorCommand() {
+    const command = selectedConnectorCommand.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    if (!command || connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
+    connectorCommandRunning = true;
+    try {
+      const started = await onRunWorkflowCommand(command);
+      saveNotice = started === false ? `Could not start ${command}.` : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      connectorCommandRunning = false;
+    }
+  }
+
+  async function runConnectorSetupCommand(connector: WorkflowConnector) {
+    const connectionName = connectorConnectionHint(connector);
+    const command = connectorConnectCommand(connector, connectionName);
+    if (connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
+    selectedConnectorSlug = connector.connector_slug;
+    selectedConnectorConnectionName = connectionName;
+    connectorCommandRunningFor = connector.connector_slug;
+    try {
+      const started = await onRunWorkflowCommand(command);
+      saveNotice = started === false
+        ? `Could not start ${command}.`
+        : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      connectorCommandRunningFor = null;
+    }
+  }
+
+  function connectionMonitorSupported(connection: WorkflowConnection): boolean {
+    if (connection.monitor_command !== undefined) return Boolean(connection.monitor_command);
+    return connectionTriggerSupported(connection);
+  }
+
+  function connectionMonitorCommand(connection: WorkflowConnection): string {
+    return connection.monitor_command || `/monitor ${connection.slug}`;
+  }
+
+  function connectionConnectCommand(connection: WorkflowConnection): string {
+    return connection.connect_command || `/connect ${connection.connector_slug} ${connection.slug}`;
+  }
+
+  function connectorCommandRunnerBusy(): boolean {
+    return connectorCommandRunning
+      || connectorCommandRunningFor !== null
+      || connectionCommandRunningFor !== null
+      || monitorCommandRunningFor !== null
+      || monitorTaskCommandRunningFor !== null
+      || togglingWorkflowSlug !== null;
+  }
+
+  async function runConnectionConnectCommand(connection: WorkflowConnection) {
+    const command = connectionConnectCommand(connection);
+    if (connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
+    connectionCommandRunningFor = connection.slug;
+    try {
+      const started = await onRunWorkflowCommand(command);
+      saveNotice = started === false
+        ? `Could not start ${command}.`
+        : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      connectionCommandRunningFor = null;
+    }
+  }
+
+  async function runConnectionMonitorCommand(connection: WorkflowConnection) {
+    const command = connectionMonitorCommand(connection);
+    if (!connectionMonitorSupported(connection) || connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
+    monitorCommandRunningFor = connection.slug;
+    try {
+      const started = await onRunWorkflowCommand(command);
+      saveNotice = started === false
+        ? `Could not start ${command}.`
+        : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      monitorCommandRunningFor = null;
+    }
+  }
+
+  function monitorTaskIgnored(task: WorkflowMonitorTask): boolean {
+    return task.ignored === true;
+  }
+
+  function monitorBindingLabel(binding: WorkflowBinding): string {
+    return binding.description?.trim() || binding.slug;
+  }
+
+  function monitorBindingStatus(binding: WorkflowBinding): string {
+    if (binding.status?.trim()) return binding.status;
+    return binding.enabled ? "enabled" : "paused";
+  }
+
+  function monitorBindingToggleLabel(binding: WorkflowBinding): string {
+    return `${binding.enabled ? "Pause" : "Resume"} ${binding.slug}`;
+  }
+
+  async function toggleMonitorBinding(binding: WorkflowBinding) {
+    if (togglingWorkflowSlug) return;
+    const enabled = !binding.enabled;
+    togglingWorkflowSlug = binding.slug;
+    error = null;
+    saveNotice = `${enabled ? "Resuming" : "Pausing"} ${binding.slug}...`;
+    try {
+      const next = await toggleWorkflow(binding.slug, enabled);
+      applyWorkflowSnapshot(next);
+      saveNotice = `${enabled ? "Resumed" : "Paused"} ${binding.slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not toggle ${binding.slug}: ${message}`;
+    } finally {
+      togglingWorkflowSlug = null;
+    }
+  }
+
+  function monitorTaskActions(task: WorkflowMonitorTask): WorkflowMonitorTaskAction[] {
+    return task.actions ?? [];
+  }
+
+  function monitorTaskIgnoreReasons(task: WorkflowMonitorTask): string[] {
+    return task.possible_ignore_reasons ?? [];
+  }
+
+  function monitorTaskShowCommand(task: WorkflowMonitorTask): string {
+    return `/tasks show ${task.task_id}`;
+  }
+
+  function monitorTaskIgnoreCommand(task: WorkflowMonitorTask, reason?: string): string {
+    const trimmed = reason?.trim();
+    return trimmed ? `/tasks ignore ${task.task_id} ${trimmed}` : `/tasks ignore ${task.task_id}`;
+  }
+
+  function monitorTaskActionPrompt(task: WorkflowMonitorTask, action: WorkflowMonitorTaskAction): string {
+    return [
+      `Act on monitored task ${task.task_id}: ${task.subject}`,
+      "",
+      "Task description:",
+      task.description,
+      "",
+      `Selected action: ${action.name}`,
+      "",
+      action.prompt,
+      "",
+      `When the action is fully handled, update task ${task.task_id} with TaskUpdate status=completed. If you need more context, inspect the connector or ask the user.`
+    ].join("\n");
+  }
+
+  async function runMonitorTaskCommand(
+    task: WorkflowMonitorTask,
+    command: string,
+    startedMessage: string
+  ) {
+    if (!command.trim() || connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
+    monitorTaskCommandRunningFor = task.task_id;
+    try {
+      const started = await onRunWorkflowCommand(command);
+      saveNotice = started === false ? `Could not start ${task.task_id}.` : startedMessage;
+    } catch (err) {
+      saveNotice = `Could not start ${task.task_id}.`;
+    } finally {
+      monitorTaskCommandRunningFor = null;
+    }
+  }
+
+  async function runMonitorTaskShowCommand(task: WorkflowMonitorTask) {
+    await runMonitorTaskCommand(task, monitorTaskShowCommand(task), `Opened ${task.task_id} in an agent session.`);
+  }
+
+  async function runMonitorTaskIgnoreCommand(task: WorkflowMonitorTask, reason?: string) {
+    await runMonitorTaskCommand(task, monitorTaskIgnoreCommand(task, reason), `Started ignore flow for ${task.task_id}.`);
+  }
+
+  async function runMonitorTaskAction(task: WorkflowMonitorTask, action: WorkflowMonitorTaskAction) {
+    await runMonitorTaskCommand(
+      task,
+      monitorTaskActionPrompt(task, action),
+      `Started ${action.name} for ${task.task_id}.`
+    );
   }
 
   function connectorBySlug(slug: string | null | undefined): WorkflowConnector | undefined {
@@ -448,6 +971,17 @@
   function connectorTriggerSupported(connector: WorkflowConnector | undefined): boolean {
     if (!connector) return false;
     return connector.can_trigger_workflow ?? connector.can_subscribe;
+  }
+
+  function connectorActionSlugs(connector: WorkflowConnector | undefined, query: string): string[] {
+    const actions = connector?.action_slugs ?? [];
+    const terms = searchTerms(query);
+    const matching = terms.length === 0 ? [] : actions.filter((action) => matchesSearchTerms(terms, action.toLowerCase()));
+    return (matching.length > 0 ? matching : actions).slice(0, 3);
+  }
+
+  function connectorHiddenActionCount(connector: WorkflowConnector | undefined, visibleActions: string[]): number {
+    return Math.max(0, (connector?.action_slugs.length ?? 0) - visibleActions.length);
   }
 
   function connectionTriggerSupported(connection: WorkflowConnection): boolean {
@@ -472,34 +1006,149 @@
     return connectionTriggerSupported(connection) ? label : `${label} - no trigger`;
   }
 
-  function matchesConnectorQuery(query: string, parts: Array<string | null | undefined>): boolean {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return true;
-    return parts.some((part) => (part ?? "").toLowerCase().includes(needle));
+  function searchTerms(query: string): string[] {
+    return query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   }
 
-  function filterConnections(items: WorkflowConnection[], catalog: WorkflowConnector[], query: string): WorkflowConnection[] {
-    return items.filter((connection) => {
-      const connector = catalog.find((item) => item.connector_slug === connection.connector_slug);
-      return matchesConnectorQuery(query, [
-        connection.slug,
-        connection.description,
-        connection.connector_slug,
-        connector?.description,
-        connector?.skill
-      ]);
+  function buildSearchText(parts: Array<string | null | undefined>): string {
+    return parts
+      .map((part) => (part ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function matchesSearchTerms(terms: string[], searchText: string): boolean {
+    return terms.length === 0 || terms.every((term) => searchText.includes(term));
+  }
+
+  function indexConnectors(items: WorkflowConnector[], existingConnections: WorkflowConnection[]): ConnectorSearchRow[] {
+    return items.map((connector) => {
+      const connectorConnections = existingConnections.filter(
+        (connection) => connection.connector_slug === connector.connector_slug
+      );
+      return {
+        connector,
+        searchText: buildSearchText([
+          connector.connector_slug,
+          connector.description,
+          connector.skill,
+          connectorRuntimeHints(connector).join(" "),
+          connector.connect_command,
+          connector.suggested_connection_slug,
+          connectorCapabilitySearchText(connector),
+          connectorTriggerSupported(connector) ? `${connectorDraftCommand(connector)} draft workflow new` : undefined,
+          connectorConnections.map((connection) => `${connection.slug} ${connection.description}`).join(" "),
+          "connect setup",
+          connector.action_slugs.join(" ")
+        ])
+      };
     });
   }
 
-  function filterConnectors(items: WorkflowConnector[], query: string): WorkflowConnector[] {
-    return items.filter((connector) =>
-      matchesConnectorQuery(query, [
-        connector.connector_slug,
-        connector.description,
-        connector.skill,
-        connector.action_slugs.join(" ")
+  function connectorCapabilitySearchText(connector: WorkflowConnector): string {
+    const terms = [];
+    if (connector.requires_auth) terms.push("auth");
+    if (connector.can_subscribe) terms.push("events", "subscribe");
+    if (connector.can_proxy_agent) terms.push("proxy", "agent proxy");
+    if (connector.action_slugs.length > 0) terms.push("actions", "has-actions");
+    if (connectorTriggerSupported(connector)) {
+      terms.push("trigger", "trigger-ready");
+    } else {
+      terms.push("no trigger", "no-trigger", "setup-only");
+    }
+    return terms.join(" ");
+  }
+
+  function connectorRuntimeHints(connector: WorkflowConnector | undefined): string[] {
+    return connector?.runtime_hints ?? [];
+  }
+
+  function connectorPresetActive(preset: ConnectorFilterPreset): boolean {
+    return connectorQuery.trim().toLowerCase() === preset.query;
+  }
+
+  function indexConnections(items: WorkflowConnection[], catalog: ConnectorSearchRow[]): ConnectionSearchRow[] {
+    const catalogBySlug = new Map(catalog.map((row) => [row.connector.connector_slug, row.connector]));
+    return items.map((connection) => {
+      const connector = catalogBySlug.get(connection.connector_slug);
+      return {
+        connection,
+        searchText: buildSearchText([
+          connection.slug,
+          connection.description,
+          connection.connector_slug,
+          connection.state,
+          connection.connect_command,
+          connection.monitor_command,
+          connectionTriggerSupported(connection) ? `${connectionDraftCommand(connection)} draft workflow new` : undefined,
+          "connect repair reconnect",
+          connection.has_consumer ? "consumer active active" : "consumer idle idle",
+          connectionMonitorSupported(connection) ? "monitor monitorable" : undefined,
+          connectionTriggerSupported(connection) ? "trigger trigger-ready" : "no trigger no-trigger setup-only",
+          connector?.description,
+          connector?.skill,
+          connectorRuntimeHints(connector).join(" "),
+          connector && connector.action_slugs.length > 0 ? "actions has-actions" : undefined,
+          connector?.action_slugs.join(" ")
+        ])
+      };
+    });
+  }
+
+  function indexMonitorBindings(items: WorkflowBinding[]): MonitorBindingSearchRow[] {
+    return items.map((binding) => ({
+      binding,
+      searchText: buildSearchText([
+        "monitor workflow connection monitor",
+        binding.slug,
+        binding.description,
+        binding.connection_slug,
+        binding.connector_slug,
+        binding.status,
+        binding.enabled ? "enabled active" : "paused disabled",
+        binding.action_type,
+        binding.monitor_memory_path
       ])
-    );
+    }));
+  }
+
+  function indexMonitorTasks(items: WorkflowMonitorTask[]): MonitorTaskSearchRow[] {
+    return items.map((task) => ({
+      task,
+      searchText: buildSearchText([
+        "monitor task",
+        task.task_id,
+        task.subject,
+        task.description,
+        task.status,
+        task.monitor_connection,
+        task.monitor_connector,
+        task.monitor_memory_path,
+        monitorTaskActions(task).map((action) => `${action.name} ${action.prompt}`).join(" "),
+        monitorTaskIgnoreReasons(task).join(" ")
+      ])
+    }));
+  }
+
+  function filterMonitorBindings(rows: MonitorBindingSearchRow[], query: string): WorkflowBinding[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.binding);
+  }
+
+  function filterConnections(rows: ConnectionSearchRow[], query: string): WorkflowConnection[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connection);
+  }
+
+  function filterMonitorTasks(rows: MonitorTaskSearchRow[], query: string): WorkflowMonitorTask[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.task);
+  }
+
+  function filterConnectors(rows: ConnectorSearchRow[], query: string): WorkflowConnector[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connector);
   }
 
   function updateNode(id: string, patch: Partial<EditablePipelineNode>) {
@@ -784,11 +1433,46 @@
       <span class="pf-pipe-save-note">{saveNotice}</span>
     </div>
     <div class="pf-pipe-top-right">
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="New workflow"
+        onclick={() => createWorkflowDraft()}
+      >
+        <Icon name="plus" size={12} />New
+      </button>
       {#each providerOptions as provider (provider.id)}
         <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={() => addAgent(provider.id)}>
           <Icon name="plus" size={12} />{provider.short}
         </button>
       {/each}
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label={workflow?.enabled ? "Pause workflow" : "Resume workflow"}
+        aria-busy={togglingWorkflowSlug === workflow?.slug}
+        disabled={!workflow || workflowDirty || savingWorkflowSlug !== null || togglingWorkflowSlug !== null}
+        title={workflowDirty ? "Save local edits before toggling" : workflow?.enabled ? "Pause workflow" : "Resume workflow"}
+        onclick={toggleCurrentWorkflowEnabled}
+      >
+        <Icon name={workflow?.enabled ? "pause2" : "play"} size={12} />{workflow?.enabled ? "Pause" : "Resume"}
+      </button>
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="Save workflow"
+        aria-busy={savingWorkflowSlug === workflow?.slug}
+        disabled={!workflow || !workflowDirty || savingWorkflowSlug !== null}
+        onclick={saveCurrentWorkflow}
+      >
+        <Icon name="check" size={12} />{savingWorkflowSlug === workflow?.slug ? "Saving" : workflowDirty ? "Save" : "Saved"}
+      </button>
       <button
         type="button"
         class="sc-btn"
@@ -1016,6 +1700,30 @@
                   />
                 </span>
               </label>
+              <div class="pf-connector-filters" aria-label="Connector filters">
+                {#each connectorFilterPresets as preset (preset.label)}
+                  <button
+                    type="button"
+                    aria-pressed={connectorPresetActive(preset)}
+                    onclick={() => (connectorQuery = preset.query)}
+                  >
+                    {preset.label}
+                  </button>
+                {/each}
+              </div>
+              <div class="pf-connector-result-summary" aria-label="Connector search results">
+                {filteredConnectors.length}/{connectors.length} connectors; {filteredConnections.length}/{connections.length} connections
+              </div>
+              {#if monitorBindings.length > 0}
+                <div class="pf-connector-result-summary" aria-label="Monitor workflow search results">
+                  {filteredMonitorBindings.length}/{monitorBindings.length} monitors
+                </div>
+              {/if}
+              {#if activeMonitorTasks.length > 0}
+                <div class="pf-connector-result-summary" aria-label="Monitor task search results">
+                  {filteredMonitorTasks.length}/{activeMonitorTasks.length} monitor tasks
+                </div>
+              {/if}
 
               {#if snapshot.connector_error}
                 <div class="pf-connector-empty">Connector runtime unavailable.</div>
@@ -1027,26 +1735,207 @@
                   {#each filteredConnections as connection (connection.slug)}
                     {@const connector = connectorBySlug(connection.connector_slug)}
                     {@const canTrigger = connectionTriggerSupported(connection)}
-                    <button
-                      type="button"
-                      class="pf-connection-row"
-                      data-selected={activeConnectionSlug(workflow) === connection.slug}
-                      data-supported={canTrigger}
-                      aria-label={canTrigger ? `Use ${connection.slug} as workflow trigger` : `${connection.slug} cannot start workflow triggers`}
-                      disabled={!canTrigger}
-                      onclick={() => useConnectionTrigger(connection.slug)}
-                    >
-                      <span class="pf-connector-main">
-                        <strong>{connection.slug}</strong>
-                        <small>{(connector?.description ?? connection.description) || connection.connector_slug}</small>
-                      </span>
-                      <span class="pf-connector-tags">
-                        <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
-                        {#if !canTrigger}<span>no trigger</span>{/if}
-                      </span>
-                    </button>
+                    {@const canMonitor = connectionMonitorSupported(connection)}
+                    {@const connectCommand = connectionConnectCommand(connection)}
+                    {@const monitorCommand = connectionMonitorCommand(connection)}
+                    {@const draftCommand = connectionDraftCommand(connection)}
+                    {@const runtimeHints = connectorRuntimeHints(connector)}
+                    {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
+                    {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
+                    <div class="pf-connection-row-group">
+                      <button
+                        type="button"
+                        class="pf-connection-row"
+                        data-selected={activeConnectionSlug(workflow) === connection.slug}
+                        data-supported={canTrigger}
+                        aria-label={canTrigger ? `Use ${connection.slug} as workflow trigger` : `${connection.slug} cannot start workflow triggers`}
+                        disabled={!canTrigger}
+                        onclick={() => useConnectionTrigger(connection.slug)}
+                      >
+                        <span class="pf-connector-main">
+                          <strong>{connection.slug}</strong>
+                          <small>{(connector?.description ?? connection.description) || connection.connector_slug}</small>
+                        </span>
+                        <span class="pf-connector-tags">
+                          <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
+                          <span>connect</span>
+                          {#if canMonitor}<span>monitor</span>{/if}
+                          {#if !canTrigger}<span>no trigger</span>{/if}
+                          {#each runtimeHints as hint}
+                            <span class="pf-connector-runtime">{hint}</span>
+                          {/each}
+                          {#each actionSlugs as action}
+                            <span class="pf-connector-action">{action}</span>
+                          {/each}
+                          {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-connect-btn"
+                        aria-label={`Run ${connectCommand}`}
+                        title={connectCommand}
+                        aria-busy={connectionCommandRunningFor === connection.slug}
+                        disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                        onclick={() => runConnectionConnectCommand(connection)}
+                      >
+                        <Icon name="wrench" size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-draft-btn"
+                        aria-label={`Create workflow draft for ${connection.slug}`}
+                        title={draftCommand}
+                        disabled={!canTrigger}
+                        onclick={() => createWorkflowDraftForConnection(connection)}
+                      >
+                        <Icon name="plus" size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-monitor-btn"
+                        aria-label={`Run ${monitorCommand}`}
+                        title={monitorCommand}
+                        aria-busy={monitorCommandRunningFor === connection.slug}
+                        disabled={!canMonitor || connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                        onclick={() => runConnectionMonitorCommand(connection)}
+                      >
+                        <Icon name="bot" size={12} />
+                      </button>
+                    </div>
                   {/each}
                 </div>
+
+                {#if monitorBindings.length > 0 || snapshot.workflow_binding_error}
+                  <div class="pf-monitor-workflows" aria-label="Monitor workflows">
+                    <div class="pf-monitor-tasks-head">
+                      <span><Icon name="bot" size={12} />Connection monitors</span>
+                      <small>{filteredMonitorBindings.length}/{monitorBindings.length}</small>
+                    </div>
+                    {#if snapshot.workflow_binding_error}
+                      <div class="pf-connector-empty">Monitor workflows unavailable.</div>
+                    {:else if filteredMonitorBindings.length === 0}
+                      <div class="pf-connector-empty">No matching monitor workflows.</div>
+                    {/if}
+                    {#each filteredMonitorBindings as binding (binding.slug)}
+                      <div class="pf-monitor-workflow-row" data-enabled={binding.enabled}>
+                        <div class="pf-monitor-workflow-main">
+                          <span class="pf-connector-main">
+                            <strong>{monitorBindingLabel(binding)}</strong>
+                            <small>{binding.slug} - {binding.connection_slug}</small>
+                          </span>
+                          <span class="pf-connector-tags">
+                            <span>{monitorBindingStatus(binding)}</span>
+                            {#if binding.connector_slug}<span>{binding.connector_slug}</span>{/if}
+                            <span>{binding.action_type}</span>
+                            {#if binding.monitor_memory_path}<span>memory</span>{/if}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          class="pf-monitor-action-btn"
+                          aria-label={monitorBindingToggleLabel(binding)}
+                          title={monitorBindingToggleLabel(binding)}
+                          aria-busy={togglingWorkflowSlug === binding.slug}
+                          disabled={togglingWorkflowSlug !== null}
+                          onclick={() => toggleMonitorBinding(binding)}
+                        >
+                          <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
+                        </button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+
+                {#if activeMonitorTasks.length > 0 || snapshot.monitor_task_error}
+                  <div class="pf-monitor-tasks" aria-label="Monitor tasks">
+                    <div class="pf-monitor-tasks-head">
+                      <span><Icon name="bot" size={12} />Monitor tasks</span>
+                      <small>{filteredMonitorTasks.length}/{activeMonitorTasks.length}</small>
+                    </div>
+                    {#if snapshot.monitor_task_error}
+                      <div class="pf-connector-empty">Monitor tasks unavailable.</div>
+                    {:else if filteredMonitorTasks.length === 0}
+                      <div class="pf-connector-empty">No matching monitor tasks.</div>
+                    {/if}
+                    {#each filteredMonitorTasks as task (task.task_id)}
+                      {@const actions = monitorTaskActions(task)}
+                      {@const visibleActions = actions.slice(0, 2)}
+                      {@const hiddenActions = Math.max(0, actions.length - visibleActions.length)}
+                      {@const reasons = monitorTaskIgnoreReasons(task)}
+                      {@const visibleReasons = reasons.slice(0, 2)}
+                      {@const hiddenReasons = Math.max(0, reasons.length - visibleReasons.length)}
+                      <div class="pf-monitor-task-row" data-status={task.status}>
+                        <button
+                          type="button"
+                          class="pf-monitor-task-main"
+                          aria-label={`Show ${task.task_id}`}
+                          aria-busy={monitorTaskCommandRunningFor === task.task_id}
+                          disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                          onclick={() => runMonitorTaskShowCommand(task)}
+                        >
+                          <span class="pf-connector-main">
+                            <strong>{task.subject || task.task_id}</strong>
+                            <small>{task.task_id}{task.monitor_connection ? ` - ${task.monitor_connection}` : ""}</small>
+                            {#if task.description}
+                              <span class="pf-monitor-task-detail">{task.description}</span>
+                            {/if}
+                          </span>
+                          <span class="pf-connector-tags">
+                            <span>{task.status || "pending"}</span>
+                            {#if task.monitor_connector}<span>{task.monitor_connector}</span>{/if}
+                            {#if task.monitor_connection}<span>{task.monitor_connection}</span>{/if}
+                            {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
+                          </span>
+                        </button>
+                        <div class="pf-monitor-task-actions">
+                          {#each visibleActions as action (action.name)}
+                            <button
+                              type="button"
+                              class="pf-monitor-action-btn"
+                              aria-label={`Run monitor action ${task.task_id} ${action.name}`}
+                              title={action.prompt}
+                              aria-busy={monitorTaskCommandRunningFor === task.task_id}
+                              disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                              onclick={() => runMonitorTaskAction(task, action)}
+                            >
+                              <Icon name="play" size={11} />{action.name}
+                            </button>
+                          {/each}
+                          {#each visibleReasons as reason (reason)}
+                            <button
+                              type="button"
+                              class="pf-monitor-action-btn"
+                              aria-label={`Ignore ${task.task_id} ${reason}`}
+                              title={monitorTaskIgnoreCommand(task, reason)}
+                              aria-busy={monitorTaskCommandRunningFor === task.task_id}
+                              disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                              onclick={() => runMonitorTaskIgnoreCommand(task, reason)}
+                            >
+                              <Icon name="eyeOff" size={11} />{reason}
+                            </button>
+                          {/each}
+                          {#if hiddenReasons > 0}
+                            <span class="pf-monitor-task-more">+{hiddenReasons} ignores</span>
+                          {/if}
+                          {#if reasons.length === 0}
+                            <button
+                              type="button"
+                              class="pf-monitor-action-btn"
+                              aria-label={`Ignore ${task.task_id}`}
+                              title={monitorTaskIgnoreCommand(task)}
+                              aria-busy={monitorTaskCommandRunningFor === task.task_id}
+                              disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                              onclick={() => runMonitorTaskIgnoreCommand(task)}
+                            >
+                              <Icon name="eyeOff" size={11} />Ignore
+                            </button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
 
                 <div class="pf-connector-catalog" aria-label="Connector catalog">
                   {#if filteredConnectors.length === 0}
@@ -1055,34 +1944,142 @@
                   {#each filteredConnectors as connector (connector.connector_slug)}
                     {@const connectorConnections = connectionsForConnector(connector.connector_slug)}
                     {@const canTrigger = connectorTriggerSupported(connector)}
-                    <button
-                      type="button"
-                      class="pf-connector-row"
-                      data-selected={selectedConnectorSlug === connector.connector_slug}
-                      data-supported={canTrigger}
-                      aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `${connector.connector_slug} cannot start workflow triggers`}
-                      disabled={!canTrigger}
-                      onclick={() => useConnectorTemplate(connector)}
-                    >
-                      <span class="pf-connector-main">
-                        <strong>{connector.connector_slug}</strong>
-                        <small>{connector.description}</small>
-                      </span>
-                      <span class="pf-connector-tags">
-                        {#if connector.requires_auth}<span>auth</span>{/if}
-                        {#if connector.can_subscribe}<span>events</span>{/if}
-                        {#if canTrigger}<span>trigger</span>{:else}<span>no trigger</span>{/if}
-                        {#if connector.can_proxy_agent}<span>proxy</span>{/if}
-                        {#if connectorConnections.length > 0}<span>{connectorConnections.length} conn</span>{/if}
-                      </span>
-                    </button>
+                    {@const connectCommand = connectorConnectCommand(connector)}
+                    {@const draftCommand = connectorDraftCommand(connector)}
+                    {@const runtimeHints = connectorRuntimeHints(connector)}
+                    {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
+                    {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
+                    {@const visibleConnections = connectorConnections.slice(0, 2)}
+                    {@const hiddenConnections = Math.max(0, connectorConnections.length - visibleConnections.length)}
+                    <div class="pf-connector-row-group">
+                      <button
+                        type="button"
+                        class="pf-connector-row"
+                        data-selected={selectedConnectorSlug === connector.connector_slug}
+                        data-supported={canTrigger}
+                        aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `Select ${connector.connector_slug} connector setup`}
+                        onclick={() => useConnectorTemplate(connector)}
+                      >
+                        <span class="pf-connector-main">
+                          <strong>{connector.connector_slug}</strong>
+                          <small>{connector.description}</small>
+                        </span>
+                        <span class="pf-connector-tags">
+                          {#if connector.requires_auth}<span>auth</span>{/if}
+                          {#if connector.can_subscribe}<span>events</span>{/if}
+                          {#if canTrigger}<span>trigger</span>{:else}<span>no trigger</span>{/if}
+                          {#if connector.can_proxy_agent}<span>proxy</span>{/if}
+                          {#each runtimeHints as hint}
+                            <span class="pf-connector-runtime">{hint}</span>
+                          {/each}
+                          {#each actionSlugs as action}
+                            <span class="pf-connector-action">{action}</span>
+                          {/each}
+                          {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
+                          {#each visibleConnections as connection}
+                            <span class="pf-connector-connection">conn:{connection.slug}</span>
+                          {/each}
+                          {#if hiddenConnections > 0}<span>+{hiddenConnections} conn</span>{/if}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-connect-btn"
+                        aria-label={`Run ${connectCommand}`}
+                        title={connectCommand}
+                        aria-busy={connectorCommandRunningFor === connector.connector_slug}
+                        disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                        onclick={() => runConnectorSetupCommand(connector)}
+                      >
+                        <Icon name="plug" size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-draft-btn"
+                        aria-label={`Create workflow draft for ${connector.connector_slug}`}
+                        title={draftCommand}
+                        disabled={!canTrigger}
+                        onclick={() => createWorkflowDraftForConnector(connector)}
+                      >
+                        <Icon name="plus" size={12} />
+                      </button>
+                    </div>
                   {/each}
                 </div>
 
-                {#if selectedConnectorCommand}
-                  <div class="pf-connector-command" aria-label="Selected connector command">
-                    <Icon name="terminal" size={12} />
-                    <code>{selectedConnectorCommand}</code>
+                {#if selectedConnector}
+                  <div class="pf-connector-setup">
+                    <label class="pf-connector-name">
+                      <span>Connection name</span>
+                      <input
+                        aria-label="Connector connection name"
+                        aria-invalid={selectedConnectorConnectionInvalid}
+                        value={selectedConnectorConnectionName}
+                        oninput={(event) => updateSelectedConnectorConnectionName(event.currentTarget.value)}
+                      />
+                    </label>
+                    {#if selectedConnectorConnectionInvalid}
+                      <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
+                    {/if}
+                    <div class="pf-connector-command" aria-label="Selected connector command">
+                      <Icon name="terminal" size={12} />
+                      <code>{selectedConnectorCommand || "Enter a valid connection name."}</code>
+                      <div class="pf-connector-command-actions">
+                        <button
+                          type="button"
+                          class="pf-icon-btn"
+                          aria-label="Copy connector command"
+                          title="Copy connector command"
+                          disabled={!selectedConnectorCommand}
+                          onclick={copySelectedConnectorCommand}
+                        >
+                          <Icon name="copy" size={12} />
+                        </button>
+                        {#if onRunWorkflowCommand}
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Run connector command"
+                            title="Run connector command"
+                            aria-busy={connectorCommandRunning}
+                            disabled={connectorCommandRunnerBusy() || !selectedConnectorCommand}
+                            onclick={runSelectedConnectorCommand}
+                          >
+                            <Icon name="play" size={12} />
+                          </button>
+                        {/if}
+                        {#if connectorTriggerSupported(selectedConnector)}
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Create workflow draft for selected connector"
+                            title="Create workflow draft for selected connector"
+                            disabled={selectedConnectorConnectionInvalid}
+                            onclick={createWorkflowDraftForSelectedConnector}
+                          >
+                            <Icon name="plus" size={12} />
+                          </button>
+                        {/if}
+                      </div>
+                    </div>
+                    {#if connectorTriggerSupported(selectedConnector)}
+                      <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected workflow draft command">
+                        <Icon name="terminal" size={12} />
+                        <code>{selectedConnectorDraftCommand || "Enter a valid connection name."}</code>
+                        <div class="pf-connector-command-actions">
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Copy workflow draft command"
+                            title="Copy workflow draft command"
+                            disabled={!selectedConnectorDraftCommand}
+                            onclick={copySelectedConnectorDraftCommand}
+                          >
+                            <Icon name="copy" size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    {/if}
                   </div>
                 {/if}
               {/if}
@@ -1629,6 +2626,13 @@
     gap: 5px !important;
   }
 
+  .pf-connector-result-summary {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 1.3;
+    padding: 0 1px 1px;
+  }
+
   .pf-connector-searchbox {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -1658,6 +2662,32 @@
     box-shadow: none;
   }
 
+  .pf-connector-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .pf-connector-filters button {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted-foreground);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 5px 8px;
+    cursor: pointer;
+  }
+
+  .pf-connector-filters button:hover,
+  .pf-connector-filters button[aria-pressed="true"] {
+    border-color: color-mix(in oklab, var(--puffer-accent) 34%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 11%, var(--card));
+    color: var(--foreground);
+  }
+
   .pf-connection-list,
   .pf-connector-catalog {
     display: grid;
@@ -1667,6 +2697,157 @@
   .pf-connector-catalog {
     max-height: 164px;
     overflow: auto;
+  }
+
+  .pf-monitor-workflows,
+  .pf-monitor-tasks {
+    display: grid;
+    gap: 5px;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+  }
+
+  .pf-monitor-tasks-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--muted-foreground);
+    font-size: 10.5px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0;
+  }
+
+  .pf-monitor-tasks-head span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .pf-monitor-tasks-head small {
+    color: var(--muted-foreground);
+    font-size: 10.5px;
+  }
+
+  .pf-monitor-workflow-row,
+  .pf-monitor-task-row {
+    display: grid;
+    gap: 5px;
+    border: 1px solid color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--puffer-accent) 5%, var(--card));
+    padding: 5px;
+  }
+
+  .pf-monitor-workflow-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .pf-monitor-workflow-row[data-enabled="false"] {
+    border-color: var(--border);
+    background: var(--card);
+  }
+
+  .pf-monitor-workflow-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+    min-width: 0;
+  }
+
+  .pf-monitor-task-main {
+    all: unset;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+    cursor: pointer;
+  }
+
+  .pf-monitor-task-main:hover:not(:disabled) strong,
+  .pf-monitor-task-main:focus-visible strong {
+    color: var(--puffer-accent);
+  }
+
+  .pf-monitor-task-main:disabled {
+    opacity: 0.64;
+    cursor: default;
+  }
+
+  .pf-monitor-task-detail {
+    color: var(--muted-foreground);
+    font-size: 10.7px;
+    line-height: 1.35;
+    overflow: hidden;
+    display: -webkit-box;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .pf-monitor-task-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .pf-monitor-action-btn {
+    all: unset;
+    box-sizing: border-box;
+    min-height: 24px;
+    max-width: 100%;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--foreground);
+    padding: 3px 7px;
+    font-size: 10.5px;
+    font-weight: 700;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pf-monitor-action-btn:hover:not(:disabled),
+  .pf-monitor-action-btn:focus-visible {
+    border-color: color-mix(in oklab, var(--puffer-accent) 34%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 10%, var(--card));
+  }
+
+  .pf-monitor-action-btn:disabled {
+    opacity: 0.56;
+    cursor: default;
+  }
+
+  .pf-monitor-task-more {
+    align-self: center;
+    color: var(--muted-foreground);
+    font-size: 10.5px;
+    font-weight: 700;
+  }
+
+  .pf-connection-row-group,
+  .pf-connector-row-group {
+    display: grid;
+    align-items: stretch;
+    gap: 5px;
+  }
+
+  .pf-connection-row-group {
+    grid-template-columns: minmax(0, 1fr) 30px 30px 30px;
+  }
+
+  .pf-connector-row-group {
+    grid-template-columns: minmax(0, 1fr) 30px 30px;
   }
 
   .pf-connection-row {
@@ -1680,7 +2861,17 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
+    min-width: 0;
+    overflow: hidden;
     text-align: left;
+  }
+
+  .pf-connection-row-group .pf-icon-btn,
+  .pf-connector-row-group .pf-icon-btn {
+    width: 30px;
+    height: auto;
+    min-height: 100%;
+    border-radius: 8px;
   }
 
   .pf-connection-row:hover,
@@ -1689,14 +2880,12 @@
     background: var(--pf-selected-bg-hover);
   }
 
-  .pf-connection-row:disabled,
-  .pf-connector-row:disabled {
+  .pf-connection-row:disabled {
     cursor: not-allowed;
     opacity: 0.58;
   }
 
-  .pf-connection-row:disabled:hover,
-  .pf-connector-row:disabled:hover {
+  .pf-connection-row:disabled:hover {
     border-color: var(--border);
     background: var(--card);
   }
@@ -1718,6 +2907,8 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .pf-connector-row:hover,
@@ -1728,6 +2919,16 @@
 
   .pf-connector-row[data-selected="true"] {
     box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--puffer-accent) 45%, transparent);
+  }
+
+  .pf-connector-row[data-supported="false"] {
+    color: var(--muted-foreground);
+  }
+
+  .pf-connector-row[data-supported="false"]:hover,
+  .pf-connector-row[data-supported="false"][data-selected="true"] {
+    border-color: color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 6%, var(--card));
   }
 
   .pf-connector-main {
@@ -1758,6 +2959,7 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 4px;
+    min-width: 0;
     color: var(--muted-foreground);
     font-size: 10px;
     font-weight: 700;
@@ -1795,9 +2997,32 @@
     background: var(--card);
   }
 
+  .pf-connector-setup {
+    display: grid;
+    gap: 6px;
+  }
+
+  .pf-connector-name {
+    display: grid !important;
+    grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 7px !important;
+  }
+
+  .pf-connector-name input[aria-invalid="true"] {
+    border-color: var(--pf-run-failed);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--pf-run-failed) 14%, transparent);
+  }
+
+  .pf-connector-validation {
+    color: var(--pf-run-failed);
+    font-size: 10.5px;
+    font-weight: 600;
+  }
+
   .pf-connector-command {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 6px;
     border: 1px solid color-mix(in oklab, var(--puffer-accent) 28%, var(--border));
@@ -1814,6 +3039,39 @@
     white-space: nowrap;
     color: var(--foreground);
     font-size: 11px;
+  }
+
+  .pf-connector-command-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .pf-icon-btn {
+    all: unset;
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--muted-foreground);
+    cursor: pointer;
+  }
+
+  .pf-icon-btn:hover:not(:disabled),
+  .pf-icon-btn:focus-visible {
+    color: var(--foreground);
+    border-color: color-mix(in oklab, var(--puffer-accent) 32%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 10%, var(--card));
+  }
+
+  .pf-icon-btn:disabled {
+    opacity: 0.56;
+    cursor: default;
   }
 
   .pf-editor-runs {

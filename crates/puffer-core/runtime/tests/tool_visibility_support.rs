@@ -335,6 +335,10 @@ fn reference_task_create_prompt() -> String {
             "${teammateTips}",
             "- Include enough detail in the description for another agent to understand and complete the task\n- New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them\n",
         )
+        .replace(
+            "\n## Tips",
+            "\nMonitor triage agents may create workspace-level connector tasks by setting\n`metadata._monitor=true` or `metadata.monitor_connection`. For those tasks,\ninclude `actions` and `possibleIgnoreReasons` so `/tasks` can offer concrete\nuser choices without another triage pass.\n\n## Tips",
+        )
 }
 
 fn reference_task_update_prompt() -> String {

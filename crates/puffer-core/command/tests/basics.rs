@@ -1,6 +1,7 @@
 use super::*;
 use puffer_config::{MascotConfig, UiConfig};
 use puffer_session_store::SessionMetadata;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -58,7 +59,7 @@ fn workflows_command_is_registered_as_local_command() {
     assert_eq!(workflows.kind, CommandKind::Local);
     assert_eq!(
         workflows.argument_hint.as_deref(),
-        Some("[list|connections|connectors|runs] [query]")
+        Some("[list|new|connections|connectors|tasks|runs] [query]")
     );
     assert_eq!(
         find_command(&commands, "pipelines").map(|command| command.name.as_str()),
@@ -123,11 +124,136 @@ fn workflows_command_summarizes_native_workflows() {
 
     let text = &state.transcript.last().unwrap().text;
     assert!(text.contains("Workflow dashboard"));
+    assert!(text.contains("monitor_tasks=0/0"));
     assert!(text.contains("message-triage"));
     assert!(text.contains("trigger=connection:telegram-user"));
     assert!(text.contains("none configured; run /connect"));
+    assert!(text.contains("Monitor tasks"));
     assert!(text.contains("telegram-login"));
     assert!(!text.contains("telegram-bot"));
+}
+
+#[test]
+fn workflows_new_creates_disabled_starter_workflow() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows new Customer-Triage",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("Created disabled workflow draft."));
+    assert!(text.contains("slug: customer-triage"));
+    assert!(text.contains("trigger: subscription:workspace.task.created"));
+    let workflows = puffer_workflow::WorkflowStore::new(&paths.workspace_config_dir)
+        .list()
+        .unwrap();
+    assert_eq!(workflows.len(), 1);
+    assert_eq!(workflows[0].slug, "customer-triage");
+    assert!(!workflows[0].enabled);
+    assert_eq!(workflows[0].pipeline.name, "Customer Triage");
+    assert_eq!(workflows[0].pipeline.nodes[0].id, "codex-task");
+}
+
+#[test]
+fn workflows_tasks_filter_shows_monitor_task_commands() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let task_path = paths
+        .workspace_config_dir
+        .join("runtime")
+        .join("claude_workflow")
+        .join("monitor_tasks.json");
+    std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &task_path,
+        serde_json::to_string_pretty(&json!({
+            "tasks": [
+                {
+                    "task_id": "monitor-1",
+                    "subject": "Reply to Telegram support ping",
+                    "description": "Alice asked whether the deployment is finished.",
+                    "status": "pending",
+                    "metadata": {
+                        "_monitor": true,
+                        "monitor_connection": "telegram-user",
+                        "monitor_connector": "telegram-login",
+                        "actions": [
+                            {
+                                "actionName": "Draft reply",
+                                "actionPrompt": "Draft a concise reply to Alice."
+                            }
+                        ],
+                        "possibleIgnoreReasons": ["duplicate support ping"]
+                    }
+                },
+                {
+                    "task_id": "monitor-2",
+                    "subject": "Ignored reminder",
+                    "description": "Already handled.",
+                    "status": "completed",
+                    "metadata": {
+                        "_monitor": true,
+                        "monitor_connection": "telegram-user",
+                        "monitor_connector": "telegram-login",
+                        "ignored": true
+                    }
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows tasks support ping",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("monitor_tasks=1/2"));
+    assert!(text.contains("showing 1/2 monitor tasks for query=\"support ping\""));
+    assert!(
+        text.contains("- monitor-1 [pending] connection=telegram-user connector=telegram-login")
+    );
+    assert!(text.contains("actions=Draft reply"));
+    assert!(text.contains("show=/tasks show monitor-1"));
+    assert!(text.contains("ignore=/tasks ignore monitor-1 duplicate support ping"));
+    assert!(!text.contains("monitor-2"));
 }
 
 #[test]
@@ -157,9 +283,77 @@ fn workflows_connectors_filter_shows_connect_commands() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("showing 2/12 connectors for query=\"telegram\""));
     assert!(text.contains("telegram-login"));
+    assert!(text.contains("actions=send_message"));
     assert!(text.contains("connect=/connect telegram-login telegram-user"));
     assert!(!text.contains("- email ["));
+}
+
+#[test]
+fn workflows_connectors_filter_matches_action_terms() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows connectors vote poll",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("telegram-login"));
+    assert!(text.contains("vote_poll"));
+    assert!(!text.contains("- slack-login ["));
+}
+
+#[test]
+fn workflows_connectors_filter_presets_use_stable_capability_terms() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows connectors has-actions",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("filters: trigger-ready | no-trigger | draft | has-actions"));
+    assert!(text.contains("showing 7/12 connectors for query=\"has-actions\""));
+    assert!(text.contains("- telegram-login [auth,events,no-trigger,actions]"));
+    assert!(text.contains("actions=send_message,"));
+    assert!(!text.contains("- slack-bot ["));
 }
 
 #[test]
@@ -189,9 +383,44 @@ fn workflows_connectors_catalog_includes_serve_connectors_as_non_triggers() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("showing 1/12 connectors for query=\"discord\""));
     assert!(text.contains("discord-bot"));
     assert!(text.contains("connect=/connect discord-bot discord-bot"));
-    assert!(!text.contains("[auth,trigger]"));
+    assert!(text.contains("[auth,no-trigger]"));
+}
+
+#[test]
+fn workflows_connectors_catalog_includes_github_webhook_preset() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows connectors github",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("showing 1/12 connectors for query=\"github\""));
+    assert!(text.contains("github-webhook"));
+    assert!(text.contains("connect=/connect github-webhook github-webhook"));
+    assert!(text.contains("runtime=serve"));
+    assert!(text.contains("[no-trigger]"));
 }
 
 #[test]

@@ -4,18 +4,82 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
-    connection_workflow_trigger_supported, connector_workflow_trigger_supported,
-    suggested_connection_slug, SubscriberManifestRoots,
+    connection_workflow_trigger_supported, connector_runtime_hints,
+    connector_workflow_trigger_supported, suggested_connection_slug, ActionSpec, ConnectionRecord,
+    SubscriberManifestRoots, WorkflowBindingSpec, WorkflowBindingStatus,
 };
-use puffer_workflow::WorkflowStore;
-use serde_json::{json, Value};
+use puffer_workflow::{RegisterOptions, WorkflowStore};
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+use std::fs;
 
 /// Returns the workflow editor snapshot with connector catalog context.
 pub(crate) fn handle_workflow_list(paths: &ConfigPaths) -> Result<Value> {
     let store = WorkflowStore::new(&paths.workspace_config_dir);
     let mut snapshot = serde_json::to_value(store.snapshot()?)?;
     add_connector_context(paths, &mut snapshot);
+    add_workflow_binding_context(paths, &mut snapshot);
+    add_monitor_task_context(paths, &mut snapshot);
     Ok(snapshot)
+}
+
+/// Saves one workflow definition and returns the refreshed editor snapshot.
+pub(crate) fn handle_workflow_save(paths: &ConfigPaths, params: &Value) -> Result<Value> {
+    let workflow = params
+        .get("workflow")
+        .or_else(|| params.get("definition"))
+        .cloned()
+        .context("missing workflow")?;
+    let store = WorkflowStore::new(&paths.workspace_config_dir);
+    store.register_json(workflow, RegisterOptions::default())?;
+    let mut snapshot = serde_json::to_value(store.snapshot()?)?;
+    add_connector_context(paths, &mut snapshot);
+    add_workflow_binding_context(paths, &mut snapshot);
+    add_monitor_task_context(paths, &mut snapshot);
+    Ok(snapshot)
+}
+
+/// Toggles a native workflow or subscription workflow binding.
+pub(crate) fn handle_workflow_toggle(paths: &ConfigPaths, params: &Value) -> Result<Value> {
+    let slug = params
+        .get("slug")
+        .and_then(Value::as_str)
+        .context("missing slug")?;
+    let enabled = params
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .context("missing enabled")?;
+    let store = WorkflowStore::new(&paths.workspace_config_dir);
+    if let Some(mut workflow) = store.get(slug)? {
+        workflow.enabled = enabled;
+        let workflow = store.upsert(workflow)?;
+        if let Ok(manager) = subscription_manager() {
+            let binding_slug = format!("workflow-{}", workflow.slug);
+            if manager.store().get(&binding_slug).is_some() {
+                manager
+                    .store()
+                    .set_status(&binding_slug, workflow_status(enabled))?;
+                manager.refresh_connection_consumers()?;
+            }
+        }
+        return handle_workflow_list(paths);
+    }
+    let manager = subscription_manager()?;
+    let binding_slug = if manager.store().get(slug).is_some() {
+        slug.to_string()
+    } else {
+        let native_slug = format!("workflow-{slug}");
+        if manager.store().get(&native_slug).is_some() {
+            native_slug
+        } else {
+            anyhow::bail!("workflow `{slug}` not found");
+        }
+    };
+    manager
+        .store()
+        .set_status(&binding_slug, workflow_status(enabled))?;
+    manager.refresh_connection_consumers()?;
+    handle_workflow_list(paths)
 }
 
 /// Returns the persisted runs for one workflow slug.
@@ -65,6 +129,7 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
                         "connector_slug": slug,
                         "description": template.description,
                         "skill": template.skill,
+                        "runtime_hints": connector_runtime_hints(&roots, &template),
                         "requires_auth": template.requires_auth,
                         "can_subscribe": template.can_subscribe,
                         "can_proxy_agent": template.can_proxy_agent,
@@ -86,15 +151,7 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
                         .is_some_and(|template| {
                             connection_workflow_trigger_supported(&roots, &connection, &template)
                         });
-                    json!({
-                        "slug": connection.slug,
-                        "connector_slug": connection.connector_slug,
-                        "description": connection.description,
-                        "state": connection.state,
-                        "has_consumer": connection.has_consumer,
-                        "auth_failure_notified": connection.auth_failure_notified,
-                        "can_trigger_workflow": can_trigger_workflow,
-                    })
+                    connection_snapshot_json(connection, can_trigger_workflow)
                 })
                 .collect::<Vec<_>>();
             (connectors, connections, refresh_error)
@@ -109,10 +166,457 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
     );
 }
 
+fn add_monitor_task_context(paths: &ConfigPaths, snapshot: &mut Value) {
+    let Some(object) = snapshot.as_object_mut() else {
+        return;
+    };
+    match load_monitor_tasks(paths) {
+        Ok(tasks) => {
+            object.insert("monitor_tasks".to_string(), Value::Array(tasks));
+            object.insert("monitor_task_error".to_string(), Value::Null);
+        }
+        Err(error) => {
+            object.insert("monitor_tasks".to_string(), Value::Array(Vec::new()));
+            object.insert(
+                "monitor_task_error".to_string(),
+                Value::String(error.to_string()),
+            );
+        }
+    }
+}
+
+fn add_workflow_binding_context(paths: &ConfigPaths, snapshot: &mut Value) {
+    let Some(object) = snapshot.as_object_mut() else {
+        return;
+    };
+    match subscription_manager() {
+        Ok(manager) => {
+            let bindings = manager
+                .store()
+                .list()
+                .into_iter()
+                .map(|binding| workflow_binding_json(paths, binding))
+                .collect::<Vec<_>>();
+            object.insert("workflow_bindings".to_string(), Value::Array(bindings));
+            object.insert("workflow_binding_error".to_string(), Value::Null);
+        }
+        Err(error) => {
+            object.insert("workflow_bindings".to_string(), Value::Array(Vec::new()));
+            object.insert(
+                "workflow_binding_error".to_string(),
+                Value::String(error.to_string()),
+            );
+        }
+    }
+}
+
+fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> Value {
+    let action_type = workflow_action_type(&binding.action);
+    let monitor = binding.slug.starts_with("monitor-")
+        || (matches!(binding.action, ActionSpec::TriageAgent { .. })
+            && binding.description.to_ascii_lowercase().contains("monitor"));
+    let monitor_memory_path = monitor.then(|| {
+        paths
+            .workspace_config_dir
+            .join("runtime")
+            .join("monitors")
+            .join(format!("{}.md", binding.connection_slug))
+            .display()
+            .to_string()
+    });
+    json!({
+        "slug": binding.slug,
+        "description": binding.description,
+        "connection_slug": binding.connection_slug,
+        "connector_slug": binding.connector_slug,
+        "status": workflow_status_label(binding.status),
+        "enabled": binding.status == WorkflowBindingStatus::Enabled,
+        "action_type": action_type,
+        "monitor": monitor,
+        "monitor_memory_path": monitor_memory_path,
+        "created_at_ms": binding.created_at_ms,
+    })
+}
+
+fn workflow_action_type(action: &ActionSpec) -> &'static str {
+    match action {
+        ActionSpec::SqliteInsert { .. } => "sqlite_insert",
+        ActionSpec::FileAppend { .. } => "file_append",
+        ActionSpec::ForwardMessage { .. } => "forward_message",
+        ActionSpec::RunWorkflow { .. } => "run_workflow",
+        ActionSpec::ConnectorAct { .. } => "connector_act",
+        ActionSpec::ToolCall { .. } => "tool_call",
+        ActionSpec::TriageAgent { .. } => "triage_agent",
+        ActionSpec::Graph { .. } => "graph",
+        ActionSpec::Unknown => "unknown",
+    }
+}
+
+fn workflow_status(enabled: bool) -> WorkflowBindingStatus {
+    if enabled {
+        WorkflowBindingStatus::Enabled
+    } else {
+        WorkflowBindingStatus::Paused
+    }
+}
+
+fn workflow_status_label(status: WorkflowBindingStatus) -> &'static str {
+    match status {
+        WorkflowBindingStatus::Enabled => "enabled",
+        WorkflowBindingStatus::Paused => "paused",
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MonitorTaskStoreSnapshot {
+    #[serde(default)]
+    tasks: Vec<MonitorTaskSnapshotRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MonitorTaskSnapshotRecord {
+    #[serde(alias = "id", alias = "taskId")]
+    task_id: String,
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    metadata: Map<String, Value>,
+    #[serde(default, alias = "startedAtMs")]
+    started_at_ms: Option<u64>,
+    #[serde(default, alias = "updatedAtMs")]
+    updated_at_ms: Option<u64>,
+}
+
+fn load_monitor_tasks(paths: &ConfigPaths) -> Result<Vec<Value>> {
+    let path = monitor_tasks_path(paths);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    let store: MonitorTaskStoreSnapshot = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid monitor task store {}", path.display()))?;
+    Ok(store.tasks.into_iter().map(monitor_task_json).collect())
+}
+
+fn monitor_tasks_path(paths: &ConfigPaths) -> std::path::PathBuf {
+    paths
+        .workspace_config_dir
+        .join("runtime")
+        .join("claude_workflow")
+        .join("monitor_tasks.json")
+}
+
+fn monitor_task_json(task: MonitorTaskSnapshotRecord) -> Value {
+    json!({
+        "task_id": task.task_id,
+        "subject": task.subject,
+        "description": task.description,
+        "status": task.status,
+        "monitor_connection": monitor_metadata_string(
+            &task.metadata,
+            &["monitor_connection", "monitorConnection"],
+            &["connection", "connection_slug", "connectionSlug"]
+        ),
+        "monitor_connector": monitor_metadata_string(
+            &task.metadata,
+            &["monitor_connector", "monitorConnector"],
+            &["connector", "connector_slug", "connectorSlug"]
+        ),
+        "monitor_memory_path": monitor_metadata_string(
+            &task.metadata,
+            &["monitor_memory_path", "monitorMemoryPath"],
+            &["memory_path", "memoryPath"]
+        ),
+        "ignored": monitor_metadata_bool(&task.metadata, "ignored"),
+        "actions": monitor_actions(&task.metadata),
+        "possible_ignore_reasons": monitor_ignore_reasons(&task.metadata),
+        "started_at_ms": task.started_at_ms,
+        "updated_at_ms": task.updated_at_ms,
+    })
+}
+
+fn monitor_metadata_string(
+    metadata: &Map<String, Value>,
+    top_level_keys: &[&str],
+    monitor_keys: &[&str],
+) -> Option<String> {
+    top_level_keys
+        .iter()
+        .find_map(|key| string_value(metadata.get(*key)))
+        .or_else(|| {
+            metadata
+                .get("monitor")
+                .and_then(Value::as_object)
+                .and_then(|monitor| {
+                    monitor_keys
+                        .iter()
+                        .find_map(|key| string_value(monitor.get(*key)))
+                })
+        })
+}
+
+fn monitor_metadata_bool(metadata: &Map<String, Value>, key: &str) -> bool {
+    metadata.get(key).and_then(Value::as_bool).unwrap_or(false)
+        || metadata
+            .get("monitor")
+            .and_then(Value::as_object)
+            .and_then(|monitor| monitor.get(key))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn monitor_actions(metadata: &Map<String, Value>) -> Vec<Value> {
+    metadata_value_array(metadata, "actions")
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(|action| {
+                    let name = string_field(action, &["actionName", "name", "title"])?;
+                    let prompt = string_field(action, &["actionPrompt", "prompt"])?;
+                    Some(json!({
+                        "name": name,
+                        "prompt": prompt,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn monitor_ignore_reasons(metadata: &Map<String, Value>) -> Vec<Value> {
+    metadata_value_array(metadata, "possibleIgnoreReasons")
+        .or_else(|| metadata_value_array(metadata, "possible_ignore_reasons"))
+        .map(|reasons| {
+            reasons
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| Value::String(reason.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn metadata_value_array<'a>(metadata: &'a Map<String, Value>, key: &str) -> Option<&'a Vec<Value>> {
+    metadata
+        .get(key)
+        .or_else(|| {
+            metadata
+                .get("monitor")
+                .and_then(Value::as_object)
+                .and_then(|monitor| monitor.get(key))
+        })
+        .and_then(Value::as_array)
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    keys.iter().find_map(|key| string_value(object.get(*key)))
+}
+
+fn string_value(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn connection_snapshot_json(connection: ConnectionRecord, can_trigger_workflow: bool) -> Value {
+    let monitor_command = can_trigger_workflow.then(|| format!("/monitor {}", connection.slug));
+    let connect_command = format!("/connect {} {}", connection.connector_slug, connection.slug);
+    json!({
+        "slug": connection.slug,
+        "connector_slug": connection.connector_slug,
+        "description": connection.description,
+        "state": connection.state,
+        "has_consumer": connection.has_consumer,
+        "auth_failure_notified": connection.auth_failure_notified,
+        "can_trigger_workflow": can_trigger_workflow,
+        "connect_command": connect_command,
+        "monitor_command": monitor_command,
+    })
+}
+
 fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
     SubscriberManifestRoots::new(
         paths.workspace_config_dir.clone(),
         paths.user_config_dir.clone(),
         paths.builtin_resources_dir.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_ready_connection_snapshot_includes_monitor_command() {
+        let connection =
+            ConnectionRecord::authenticated("telegram-user", "telegram-login", "Personal Telegram");
+
+        let snapshot = connection_snapshot_json(connection, true);
+
+        assert_eq!(
+            snapshot["connect_command"],
+            "/connect telegram-login telegram-user"
+        );
+        assert_eq!(snapshot["monitor_command"], "/monitor telegram-user");
+        assert_eq!(snapshot["can_trigger_workflow"], true);
+    }
+
+    #[test]
+    fn non_trigger_connection_snapshot_omits_monitor_command() {
+        let connection = ConnectionRecord::authenticated("slack-app", "slack-app", "Slack");
+
+        let snapshot = connection_snapshot_json(connection, false);
+
+        assert_eq!(snapshot["connect_command"], "/connect slack-app slack-app");
+        assert!(snapshot["monitor_command"].is_null());
+        assert_eq!(snapshot["can_trigger_workflow"], false);
+    }
+
+    #[test]
+    fn workflow_snapshot_includes_monitor_tasks() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let task_path = monitor_tasks_path(&paths);
+        std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &task_path,
+            serde_json::to_string_pretty(&json!({
+                "tasks": [
+                    {
+                        "task_id": "monitor-1",
+                        "subject": "Answer Telegram support ping",
+                        "description": "Alice asked whether the deployment is finished.",
+                        "status": "pending",
+                        "metadata": {
+                            "_monitor": true,
+                            "monitor_connection": "telegram-user",
+                            "monitor_connector": "telegram-login",
+                            "monitor_memory_path": "/tmp/telegram-user.md",
+                            "actions": [
+                                {
+                                    "actionName": "Draft reply",
+                                    "actionPrompt": "Draft a concise reply to Alice."
+                                }
+                            ],
+                            "possibleIgnoreReasons": ["duplicate support ping"]
+                        },
+                        "started_at_ms": 10,
+                        "updated_at_ms": 20
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = handle_workflow_list(&paths).unwrap();
+        let tasks = snapshot["monitor_tasks"].as_array().unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["task_id"], "monitor-1");
+        assert_eq!(tasks[0]["monitor_connection"], "telegram-user");
+        assert_eq!(tasks[0]["monitor_connector"], "telegram-login");
+        assert_eq!(tasks[0]["monitor_memory_path"], "/tmp/telegram-user.md");
+        assert_eq!(tasks[0]["actions"][0]["name"], "Draft reply");
+        assert_eq!(
+            tasks[0]["actions"][0]["prompt"],
+            "Draft a concise reply to Alice."
+        );
+        assert_eq!(
+            tasks[0]["possible_ignore_reasons"][0],
+            "duplicate support ping"
+        );
+        assert_eq!(snapshot["monitor_task_error"], Value::Null);
+    }
+
+    #[test]
+    fn workflow_binding_json_marks_monitor_bindings() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let binding = WorkflowBindingSpec {
+            slug: "monitor-telegram-user".to_string(),
+            description: "Monitor telegram-user for actionable tasks".to_string(),
+            connection_slug: "telegram-user".to_string(),
+            connector_slug: Some("telegram-login".to_string()),
+            status: WorkflowBindingStatus::Paused,
+            filter: None,
+            classify_prompt: None,
+            classify_model: None,
+            action: ActionSpec::TriageAgent {
+                prompt: "triage events".to_string(),
+                model: None,
+            },
+            created_at_ms: 42,
+        };
+
+        let value = workflow_binding_json(&paths, binding);
+
+        assert_eq!(value["slug"], "monitor-telegram-user");
+        assert_eq!(value["status"], "paused");
+        assert_eq!(value["enabled"], false);
+        assert_eq!(value["action_type"], "triage_agent");
+        assert_eq!(value["monitor"], true);
+        assert!(value["monitor_memory_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("runtime/monitors/telegram-user.md"));
+    }
+
+    #[test]
+    fn workflow_snapshot_tolerates_missing_monitor_task_store() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+
+        let snapshot = handle_workflow_list(&paths).unwrap();
+
+        assert_eq!(snapshot["monitor_tasks"].as_array().unwrap().len(), 0);
+        assert_eq!(snapshot["monitor_task_error"], Value::Null);
+    }
+
+    #[test]
+    fn workflow_save_upserts_definition_and_returns_snapshot() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+
+        let snapshot = handle_workflow_save(
+            &paths,
+            &json!({
+                "workflow": {
+                    "schema": "puffer.workflow.v1",
+                    "slug": "saved-pipeline",
+                    "enabled": true,
+                    "trigger": {"type": "connection", "connection_slug": "telegram-user", "pattern": "hi"},
+                    "pipeline": {
+                        "name": "Saved pipeline",
+                        "nodes": [
+                            {"id": "reply", "type": "puffer", "prompt": "Draft a reply."}
+                        ]
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot["workflows"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["workflows"][0]["slug"], "saved-pipeline");
+        assert_eq!(
+            snapshot["workflows"][0]["pipeline"]["name"],
+            "Saved pipeline"
+        );
+
+        let listed = handle_workflow_list(&paths).unwrap();
+        assert_eq!(listed["workflows"][0]["slug"], "saved-pipeline");
+    }
 }

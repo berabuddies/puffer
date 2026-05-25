@@ -18,6 +18,7 @@ import type {
   SettingsSnapshot,
   MessageActor,
   TimelineItem,
+  WorkflowDefinition,
   WorkflowRun,
   WorkflowSnapshot
 } from "../types";
@@ -324,7 +325,9 @@ function normalizeAskUserQuestions(raw: unknown): AskUserQuestionItem[] {
     .map((item) => ({
       question: typeof item.question === "string" ? item.question : "Question",
       header: typeof item.header === "string" ? item.header : "Question",
+      type: item.type === "input" ? "input" as const : "choice" as const,
       multiSelect: item.multiSelect === true,
+      searchable: item.searchable === true,
       options: Array.isArray(item.options)
         ? item.options
             .map(asRecord)
@@ -1084,6 +1087,18 @@ export async function renameSession(sessionId: string, title: string): Promise<S
 export async function loadWorkflowSnapshot(): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<WorkflowSnapshot>("workflow_list");
+}
+
+/** Persist one workflow definition through the daemon and return the refreshed snapshot. */
+export async function saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_save", { workflow });
+}
+
+/** Toggle a native workflow or subscription workflow binding. */
+export async function toggleWorkflow(slug: string, enabled: boolean): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_toggle", { slug, enabled });
 }
 
 /** Load runs for one workflow slug from the daemon. */

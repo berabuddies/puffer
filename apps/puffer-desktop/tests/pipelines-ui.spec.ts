@@ -71,6 +71,437 @@ test("pipeline connector search selects a connection trigger", async ({ page }) 
   await expect(page.locator(".pf-pipe-graph").getByRole("button", { name: /telegram-user/ })).toBeVisible();
 });
 
+test("pipeline editor saves workflow changes through daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const saveButton = page.getByRole("button", { name: "Save workflow" });
+  await expect(saveButton).toBeDisabled();
+
+  await page.locator(".pf-editor-config").getByLabel("Name").fill("Saved monitor pipeline");
+  await expect(saveButton).toBeEnabled();
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Save to persist");
+
+  await saveButton.click();
+  const request = await daemon.waitForRequest("workflow_save");
+  const workflow = request.params.workflow as {
+    slug?: string;
+    pipeline?: { name?: string; nodes?: Array<{ type?: string }> };
+  };
+  expect(workflow.slug).toBe("agent-review-pipeline");
+  expect(workflow.pipeline?.name).toBe("Saved monitor pipeline");
+  expect(workflow.pipeline?.nodes?.[0]?.type).toBe("codex");
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Saved agent-review-pipeline.");
+  await expect(saveButton).toBeDisabled();
+});
+
+test("pipeline editor creates new workflow drafts before saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByRole("button", { name: "New workflow" }).click();
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Created workflow-draft locally");
+  await expect(page.locator(".pf-editor-config").getByLabel("Name")).toHaveValue("Workflow draft");
+  await expect(page.locator(".pf-editor-config").getByLabel("Slug")).toHaveValue("workflow-draft");
+  await expect(page.locator(".pf-editor-inline").getByRole("checkbox")).not.toBeChecked();
+  await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("telegram-user");
+
+  const saveButton = page.getByRole("button", { name: "Save workflow" });
+  await expect(saveButton).toBeEnabled();
+  await saveButton.click();
+
+  const request = await daemon.waitForRequest("workflow_save", (candidate) => {
+    const workflow = candidate.params.workflow as { slug?: string };
+    return workflow.slug === "workflow-draft";
+  });
+  const workflow = request.params.workflow as {
+    slug?: string;
+    enabled?: boolean;
+    trigger?: { type?: string; connection_slug?: string };
+    pipeline?: { name?: string };
+  };
+  expect(workflow.enabled).toBe(false);
+  expect(workflow.trigger).toMatchObject({ type: "connection", connection_slug: "telegram-user" });
+  expect(workflow.pipeline?.name).toBe("Workflow draft");
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Saved workflow-draft.");
+  await expect(saveButton).toBeDisabled();
+});
+
+test("pipeline editor can pause and resume workflows through daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const pauseButton = page.getByRole("button", { name: "Pause workflow" });
+  await expect(pauseButton).toBeEnabled();
+  await pauseButton.click();
+
+  const pauseRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "agent-review-pipeline" && candidate.params.enabled === false
+  );
+  expect(pauseRequest.params.slug).toBe("agent-review-pipeline");
+  await expect(page.locator(".pf-run-header-state")).toHaveText("disabled");
+
+  const resumeButton = page.getByRole("button", { name: "Resume workflow" });
+  await expect(resumeButton).toBeEnabled();
+  await resumeButton.click();
+
+  const resumeRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "agent-review-pipeline" && candidate.params.enabled === true
+  );
+  expect(resumeRequest.params.enabled).toBe(true);
+  await expect(page.locator(".pf-run-header-state")).toHaveText("enabled");
+});
+
+test("pipeline connector search matches multiple metadata terms", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  await page.getByLabel("Search connectors").fill("personal mtproto");
+  await expect(catalog.getByText("telegram-login")).toBeVisible();
+  await expect(catalog.getByText("slack-app")).not.toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("web actions");
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
+});
+
+test("pipeline connector catalog can create a workflow draft for a connector", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("telegram personal");
+  const draftButton = page.getByRole("button", { name: "Create workflow draft for telegram-login" });
+  await expect(draftButton).toHaveAttribute("title", "/workflows new telegram-user-workflow telegram-user");
+  await draftButton.click();
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Created telegram-user-backed workflow locally");
+  await expect(page.locator(".pf-editor-config").getByLabel("Name", { exact: true })).toHaveValue("Telegram User workflow");
+  await expect(page.locator(".pf-editor-config").getByLabel("Slug")).toHaveValue("telegram-user-workflow");
+  await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("telegram-user");
+
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  const request = await daemon.waitForRequest("workflow_save", (candidate) => {
+    const workflow = candidate.params.workflow as { slug?: string };
+    return workflow.slug === "telegram-user-workflow";
+  });
+  const workflow = request.params.workflow as {
+    enabled?: boolean;
+    trigger?: { type?: string; connection_slug?: string; pattern?: string };
+  };
+  expect(workflow.enabled).toBe(false);
+  expect(workflow.trigger).toMatchObject({
+    type: "connection",
+    connection_slug: "telegram-user",
+    pattern: ".*"
+  });
+});
+
+test("pipeline connector search matches workflow draft commands", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const connections = page.locator('[aria-label="Connections"]');
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await page.getByLabel("Search connectors").fill("draft /workflows new telegram-user");
+  await expect(resultSummary).toHaveText("1/12 connectors; 1/2 connections");
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).toBeVisible();
+  await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create workflow draft for telegram-user" })).toHaveAttribute(
+    "title",
+    "/workflows new telegram-user-workflow telegram-user"
+  );
+
+  await page.getByLabel("Search connectors").fill("draft /workflows new email-workflow email");
+  await expect(resultSummary).toHaveText("1/12 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Plan email workflow trigger" })).toBeVisible();
+});
+
+test("pipeline selected connector exposes a copyable workflow draft command", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          (window as Window & { __copiedWorkflowCommand?: string }).__copiedWorkflowCommand = text;
+        }
+      }
+    });
+  });
+
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("email events");
+  await page.locator('[aria-label="Connector catalog"]').getByRole("button", { name: "Plan email workflow trigger" }).click();
+  await page.getByLabel("Connector connection name").fill("email-personal");
+
+  const draftCommand = page.getByLabel("Selected workflow draft command");
+  await expect(draftCommand).toContainText("/workflows new email-personal-workflow email-personal");
+  await draftCommand.getByRole("button", { name: "Copy workflow draft command" }).click();
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Copied /workflows new email-personal-workflow email-personal.");
+
+  const copied = await page.evaluate(() => (window as Window & { __copiedWorkflowCommand?: string }).__copiedWorkflowCommand);
+  expect(copied).toBe("/workflows new email-personal-workflow email-personal");
+});
+
+test("pipeline selected connector can create a planned workflow draft", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  await page.getByLabel("Search connectors").fill("email events");
+  await catalog.getByRole("button", { name: "Plan email workflow trigger" }).click();
+  await page.getByLabel("Connector connection name").fill("email-personal");
+  await page.getByRole("button", { name: "Create workflow draft for selected connector" }).click();
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Run /connect email email-personal before enabling it");
+  await expect(page.locator(".pf-editor-config").getByLabel("Name", { exact: true })).toHaveValue("Email Personal workflow");
+  await expect(page.locator(".pf-editor-config").getByLabel("Slug")).toHaveValue("email-personal-workflow");
+  await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("email-personal");
+
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  const request = await daemon.waitForRequest("workflow_save", (candidate) => {
+    const workflow = candidate.params.workflow as { slug?: string };
+    return workflow.slug === "email-personal-workflow";
+  });
+  const workflow = request.params.workflow as {
+    enabled?: boolean;
+    trigger?: { type?: string; connection_slug?: string; pattern?: string };
+  };
+  expect(workflow.enabled).toBe(false);
+  expect(workflow.trigger).toMatchObject({
+    type: "connection",
+    connection_slug: "email-personal",
+    pattern: ".*"
+  });
+});
+
+test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const resultSummary = page.getByLabel("Connector search results");
+  const connectorSlugs = [
+    "telegram-login",
+    "telegram-bot",
+    "discord-bot",
+    "lark-app",
+    "lark-login",
+    "matrix-bot",
+    "slack-app",
+    "slack-login",
+    "slack-bot",
+    "email",
+    "github-webhook",
+    "webhook"
+  ];
+
+  await expect(resultSummary).toHaveText("12/12 connectors; 2/2 connections");
+  for (const slug of connectorSlugs) {
+    await expect(catalog).toContainText(slug);
+  }
+
+  await page.getByLabel("Search connectors").fill("workspace local session");
+  await expect(resultSummary).toHaveText("1/12 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Select slack-login connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("serve webhook");
+  await expect(resultSummary).toHaveText("2/12 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Select github-webhook connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select webhook connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select matrix-bot connector setup" })).not.toBeVisible();
+});
+
+test("pipeline connector catalog shows and searches existing connection names", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await page.getByLabel("Search connectors").fill("telegram-user");
+  await expect(resultSummary).toHaveText("1/12 connectors; 1/2 connections");
+  const telegram = catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" });
+  await expect(telegram).toContainText("conn:telegram-user");
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("workspace slack-app");
+  await expect(resultSummary).toHaveText("1/12 connectors; 1/2 connections");
+  const slack = catalog.getByRole("button", { name: "Select slack-app connector setup" });
+  await expect(slack).toContainText("conn:slack-app");
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
+});
+
+test("pipeline connector catalog shows and searches runtime source hints", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const connections = page.locator('[aria-label="Connections"]');
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await page.getByLabel("Search connectors").fill("serve");
+  await expect(resultSummary).toHaveText("5/12 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Select github-webhook connector setup" })).toContainText("serve");
+  await expect(catalog.getByRole("button", { name: "Select webhook connector setup" })).toContainText("serve");
+  await expect(catalog.getByRole("button", { name: "Select discord-bot connector setup" })).toContainText("serve");
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("subscriber telegram");
+  await expect(resultSummary).toHaveText("1/12 connectors; 1/2 connections");
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).toContainText("subscriber");
+  await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).toContainText("subscriber");
+});
+
+test("pipeline connector filter presets apply stable search terms", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const filters = page.getByLabel("Connector filters");
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await filters.getByRole("button", { name: "Trigger", exact: true }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("trigger-ready");
+  await expect(resultSummary).toHaveText("2/12 connectors; 1/2 connections");
+  await expect(filters.getByRole("button", { name: "Trigger", exact: true })).toHaveAttribute("aria-pressed", "true");
+
+  await filters.getByRole("button", { name: "Draft" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("draft");
+  await expect(resultSummary).toHaveText("2/12 connectors; 1/2 connections");
+  await expect(filters.getByRole("button", { name: "Draft" })).toHaveAttribute("aria-pressed", "true");
+
+  await filters.getByRole("button", { name: "Monitor" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("monitor");
+  await expect(resultSummary).toHaveText("0/12 connectors; 1/2 connections");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("telegram-user");
+
+  await filters.getByRole("button", { name: "Tasks" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("monitor task");
+  await expect(resultSummary).toHaveText("0/12 connectors; 0/2 connections");
+  await expect(page.getByLabel("Monitor task search results")).toHaveText("1/1 monitor tasks");
+  await expect(page.getByLabel("Monitor tasks")).toContainText("Reply to Telegram support ping");
+
+  await filters.getByRole("button", { name: "Repair" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("repair");
+  await expect(resultSummary).toHaveText("0/12 connectors; 2/2 connections");
+
+  await filters.getByRole("button", { name: "Active" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("active");
+  await expect(resultSummary).toHaveText("0/12 connectors; 1/2 connections");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("telegram-user");
+
+  await filters.getByRole("button", { name: "Idle" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("idle");
+  await expect(resultSummary).toHaveText("0/12 connectors; 1/2 connections");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("slack-app");
+
+  await filters.getByRole("button", { name: "Actions" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("has-actions");
+  await expect(resultSummary).toHaveText("7/12 connectors; 2/2 connections");
+
+  await filters.getByRole("button", { name: "Serve" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("serve");
+  await expect(resultSummary).toHaveText("5/12 connectors; 0/2 connections");
+
+  await filters.getByRole("button", { name: "All" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("");
+  await expect(resultSummary).toHaveText("12/12 connectors; 2/2 connections");
+});
+
+test("pipeline connector search matches setup-only capability terms", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const connections = page.locator('[aria-label="Connections"]');
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await page.getByLabel("Search connectors").fill("no trigger");
+  await expect(resultSummary).toHaveText("10/12 connectors; 1/2 connections");
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select webhook connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
+  await expect(connections.getByRole("button", { name: "slack-app cannot start workflow triggers" })).toBeVisible();
+  await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).not.toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("setup-only webhook");
+  await expect(resultSummary).toHaveText("2/12 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Select github-webhook connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select webhook connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
+});
+
+test("pipeline connector search shows action matches", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("send message");
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const telegram = catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" });
+  const slack = catalog.getByRole("button", { name: "Select slack-app connector setup" });
+
+  await expect(telegram).toContainText("send_message");
+  await expect(slack).toContainText("send_message");
+
+  await page.getByLabel("Search connectors").fill("vote poll");
+  await expect(telegram).toContainText("vote_poll");
+  await expect(slack).not.toBeVisible();
+});
+
 test("pipeline connector catalog stages a deterministic connect command", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -88,7 +519,183 @@ test("pipeline connector catalog stages a deterministic connect command", async 
   await expect(page.locator(".pf-connector-row", { hasText: "email" })).toHaveAttribute("data-selected", "true");
 });
 
-test("pipeline connector picker disables connections that cannot trigger workflows", async ({ page }) => {
+test("pipeline connector command can start setup from the picker", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("email");
+  await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
+
+  const connectionName = page.getByLabel("Connector connection name");
+  await expect(connectionName).toHaveValue("email");
+  await connectionName.fill("Team Email");
+  await expect(page.getByLabel("Selected connector command")).toContainText("Enter a valid connection name.");
+  await expect(page.getByRole("button", { name: "Run connector command" })).toBeDisabled();
+
+  await connectionName.fill("team-email");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("team-email");
+  await expect(page.locator(".pf-pipe-graph").getByRole("button", { name: /team-email/ })).toBeVisible();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect email team-email");
+  await page.getByRole("button", { name: "Run connector command" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/connect email team-email"
+  );
+  expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline connector catalog can run default setup from a connector row", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("github event webhook");
+  const connector = page
+    .locator('[aria-label="Connector catalog"]')
+    .getByRole("button", { name: "Select github-webhook connector setup" });
+  await expect(connector).toContainText("serve");
+  await expect(connector).toContainText("no trigger");
+
+  const runButton = page.getByRole("button", { name: "Run /connect github-webhook github-webhook" });
+  await expect(runButton).toHaveAttribute("title", "/connect github-webhook github-webhook");
+  await runButton.click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/connect github-webhook github-webhook"
+  );
+  expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline connection picker can start connector task monitors", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("monitor telegram");
+  const monitorButton = page.getByRole("button", { name: "Run /monitor telegram-user" });
+  await expect(monitorButton).toHaveAttribute("title", "/monitor telegram-user");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("monitor");
+  await monitorButton.click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/monitor telegram-user"
+  );
+  expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline monitor workflow panel can pause and resume monitor bindings", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const monitors = page.getByLabel("Monitor workflows");
+  await expect(monitors).toContainText("monitor-telegram-user");
+  await expect(monitors).toContainText("telegram-user");
+  await expect(page.getByLabel("Monitor workflow search results")).toHaveText("1/1 monitors");
+
+  await page.getByLabel("Search connectors").fill("triage telegram");
+  await expect(monitors).toContainText("1/1");
+  await monitors.getByRole("button", { name: "Pause monitor-telegram-user" }).click();
+
+  const pauseRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "monitor-telegram-user" && candidate.params.enabled === false
+  );
+  expect(pauseRequest.params.slug).toBe("monitor-telegram-user");
+  await expect(monitors).toContainText("paused");
+
+  await monitors.getByRole("button", { name: "Resume monitor-telegram-user" }).click();
+  const resumeRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "monitor-telegram-user" && candidate.params.enabled === true
+  );
+  expect(resumeRequest.params.enabled).toBe(true);
+  await expect(monitors).toContainText("enabled");
+});
+
+test("pipeline monitor task panel exposes task actions", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const tasks = page.getByLabel("Monitor tasks");
+  await expect(tasks).toContainText("Reply to Telegram support ping");
+  await expect(tasks).toContainText("telegram-user");
+  await expect(tasks).toContainText("Alice asked whether the deployment is finished.");
+
+  await page.getByLabel("Search connectors").fill("support ping");
+  await expect(tasks).toContainText("1/1");
+  await expect(page.getByLabel("Monitor task search results")).toHaveText("1/1 monitor tasks");
+  await expect(tasks).toContainText("Draft reply");
+  await expect(tasks).toContainText("Open context");
+  await expect(tasks).toContainText("already answered in thread");
+
+  await tasks.getByRole("button", { name: "Run monitor action monitor-1 Draft reply" }).click();
+  const actionRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) =>
+      String(candidate.params.message ?? "").startsWith("Act on monitored task monitor-1:")
+      && String(candidate.params.message ?? "").includes("Draft a concise reply to Alice")
+  );
+  expect(String(actionRequest.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline monitor task panel can start ignore flows", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const tasks = page.getByLabel("Monitor tasks");
+  await page.getByLabel("Search connectors").fill("already answered");
+  await expect(page.getByLabel("Monitor task search results")).toHaveText("1/1 monitor tasks");
+  await expect(tasks.getByRole("button", { name: "Ignore monitor-1 already answered in thread" })).toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("support ping");
+  await tasks.getByRole("button", { name: "Ignore monitor-1 duplicate support ping" }).click();
+  const ignoreRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/tasks ignore monitor-1 duplicate support ping"
+  );
+  expect(String(ignoreRequest.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline connection picker can start connection repair setup", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("repair slack");
+  const repairButton = page.getByRole("button", { name: "Run /connect slack-app slack-app" });
+  await expect(repairButton).toHaveAttribute("title", "/connect slack-app slack-app");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("connect");
+  await repairButton.click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/connect slack-app slack-app"
+  );
+  expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline connector picker keeps non-trigger connections disabled while setup rows stay selectable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -102,11 +709,36 @@ test("pipeline connector picker disables connections that cannot trigger workflo
     .getByRole("button", { name: "slack-app cannot start workflow triggers" });
   const connector = page
     .locator('[aria-label="Connector catalog"]')
-    .getByRole("button", { name: "slack-app cannot start workflow triggers" });
+    .getByRole("button", { name: "Select slack-app connector setup" });
 
   await expect(connection).toBeDisabled();
-  await expect(connector).toBeDisabled();
+  await expect(connector).toBeEnabled();
   await expect(connector).toContainText("no trigger");
+  await connector.click();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect slack-app slack-app");
+  await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
+});
+
+test("pipeline connector catalog stages telegram bot setup", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("telegram bot");
+
+  const connector = page
+    .locator('[aria-label="Connector catalog"]')
+    .getByRole("button", { name: "Select telegram-bot connector setup" });
+
+  await expect(connector).toBeEnabled();
+  await expect(connector).toContainText("events");
+  await expect(connector).toContainText("proxy");
+  await expect(connector).toContainText("no trigger");
+  await expect(connector).toContainText("send_message");
+  await connector.click();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect telegram-bot telegram-bot");
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
@@ -121,11 +753,14 @@ test("pipeline connector catalog can search serve-mode connectors as unavailable
 
   const connector = page
     .locator('[aria-label="Connector catalog"]')
-    .getByRole("button", { name: "discord-bot cannot start workflow triggers" });
+    .getByRole("button", { name: "Select discord-bot connector setup" });
 
-  await expect(connector).toBeDisabled();
+  await expect(connector).toBeEnabled();
   await expect(connector).toContainText("no trigger");
   await expect(connector).toContainText("auth");
+  await connector.click();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect discord-bot discord-bot");
+  await expect(connector).toHaveAttribute("data-selected", "true");
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
