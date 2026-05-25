@@ -204,13 +204,23 @@ fn write_connectors(
         .filter(|connector| include_all || connector_workflow_trigger_supported(roots, connector))
         .filter(|connector| {
             let action_slugs = connector_action_slugs(connector);
+            let suggested_connection = suggested_connection_slug(&connector.slug);
+            let connection_values = context
+                .connections
+                .iter()
+                .filter(|connection| connection.connector_slug == connector.slug)
+                .flat_map(|connection| [connection.slug.as_str(), connection.description.as_str()]);
             matches_query(
                 query,
-                action_slugs.into_iter().chain([
-                    connector.slug.as_str(),
-                    connector.description.as_str(),
-                    connector.skill.as_str(),
-                ]),
+                action_slugs
+                    .into_iter()
+                    .chain([
+                        connector.slug.as_str(),
+                        connector.description.as_str(),
+                        connector.skill.as_str(),
+                        suggested_connection.as_str(),
+                    ])
+                    .chain(connection_values),
             )
         })
         .collect::<Vec<_>>();
@@ -242,13 +252,17 @@ fn write_connectors(
         let action_summary = connector_action_summary(connector, query)
             .map(|summary| format!(" actions={summary}"))
             .unwrap_or_default();
+        let connection_summary = connector_connection_summary(context, connector)
+            .map(|summary| format!(" connections={summary}"))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {} [{}] {}{} connect=/connect {} {}",
+            "- {} [{}] {}{}{} connect=/connect {} {}",
             connector.slug,
             capabilities.join(","),
             connector.description,
             action_summary,
+            connection_summary,
             connector.slug,
             suggested_connection_slug(&connector.slug)
         );
@@ -272,6 +286,31 @@ fn connector_action_summary(connector: &ConnectorTemplate, query: &str) -> Optio
     };
     let visible = visible_source.iter().take(3).copied().collect::<Vec<_>>();
     let hidden = slugs.len().saturating_sub(visible.len());
+    let mut summary = visible.join(",");
+    if hidden > 0 {
+        let _ = write!(summary, ",+{hidden}");
+    }
+    Some(summary)
+}
+
+fn connector_connection_summary(
+    context: &ConnectorContext,
+    connector: &ConnectorTemplate,
+) -> Option<String> {
+    let connections = context
+        .connections
+        .iter()
+        .filter(|connection| connection.connector_slug == connector.slug)
+        .collect::<Vec<_>>();
+    if connections.is_empty() {
+        return None;
+    }
+    let visible = connections
+        .iter()
+        .take(3)
+        .map(|connection| connection.slug.as_str())
+        .collect::<Vec<_>>();
+    let hidden = connections.len().saturating_sub(visible.len());
     let mut summary = visible.join(",");
     if hidden > 0 {
         let _ = write!(summary, ",+{hidden}");
@@ -460,5 +499,57 @@ mod tests {
 
         assert!(out.contains("trigger=unavailable"));
         assert!(!out.contains("monitor=/monitor"));
+    }
+
+    #[test]
+    fn workflow_connectors_show_existing_connection_names() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let context = ConnectorContext {
+            connectors: vec![trigger_template()],
+            connections: vec![ConnectionRecord {
+                slug: "team-demo".to_string(),
+                connector_slug: "demo-chat".to_string(),
+                description: "Team demo channel".to_string(),
+                state: ConnectionState::Authenticated,
+                has_consumer: false,
+                cursor: None,
+                auth_failure_notified: false,
+            }],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "");
+
+        assert!(out.contains("connections=team-demo"));
+        assert!(out.contains("connect=/connect demo-chat demo-chat"));
+    }
+
+    #[test]
+    fn workflow_connectors_filter_matches_existing_connection_names() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut other = trigger_template();
+        other.slug = "other-chat".to_string();
+        other.description = "Other chat".to_string();
+        let context = ConnectorContext {
+            connectors: vec![trigger_template(), other],
+            connections: vec![ConnectionRecord {
+                slug: "team-demo".to_string(),
+                connector_slug: "demo-chat".to_string(),
+                description: "Team demo channel".to_string(),
+                state: ConnectionState::Authenticated,
+                has_consumer: false,
+                cursor: None,
+                auth_failure_notified: false,
+            }],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "team-demo");
+
+        assert!(out.contains("- demo-chat"));
+        assert!(out.contains("connections=team-demo"));
+        assert!(!out.contains("- other-chat"));
     }
 }
