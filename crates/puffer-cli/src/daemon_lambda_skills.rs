@@ -122,6 +122,74 @@ struct LambdaSkillStatsDto {
     actions: Option<usize>,
 }
 
+const SUPPORTED_LAMBDA_CONCRETE_TOOLS: &[&str] = &[
+    "Agent",
+    "AskUserQuestion",
+    "Bash",
+    "BrowserAction",
+    "Config",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "Edit",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitPlanMode",
+    "ExitWorktree",
+    "Glob",
+    "Grep",
+    "HttpRequest",
+    "LSP",
+    "LambdaInternal",
+    "ListMcpResourcesTool",
+    "McpToolCall",
+    "Memory",
+    "NotebookEdit",
+    "PowerShell",
+    "ProcessControl",
+    "Read",
+    "ReadMcpResourceTool",
+    "SendMessage",
+    "SendUserMessage",
+    "Skill",
+    "SlackAction",
+    "Sleep",
+    "StructuredOutput",
+    "SubscriberInstall",
+    "SubscriberList",
+    "SubscriberScaffold",
+    "SubscriptionCreate",
+    "SubscriptionDelete",
+    "SubscriptionList",
+    "SubscriptionPause",
+    "TaskCreate",
+    "TaskFlow",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "TaskUpdate",
+    "TeamCreate",
+    "TeamDelete",
+    "TodoWrite",
+    "ToolSearch",
+    "WebFetch",
+    "WebSearch",
+    "WorkflowRegister",
+    "Write",
+    "WriteStdin",
+    "create_goal",
+    "get_goal",
+    "list_dir",
+    "move_path",
+    "read_file",
+    "remove_path",
+    "replace_in_file",
+    "search_text",
+    "update_goal",
+    "write_file",
+];
+
 fn default_lambda_skill_user_invocable() -> bool {
     true
 }
@@ -528,6 +596,9 @@ fn lambda_desktop_readiness(
         if let Err(error) = puffer_core::validate_lambda_host_catalogue_runtime(&raw) {
             return lambda_desktop_not_ready(format!("{error:#}"));
         }
+        if let Err(error) = validate_host_catalogue_concrete_tools(&raw) {
+            return lambda_desktop_not_ready(format!("{error:#}"));
+        }
         return lambda_desktop_ready("host catalogue");
     }
     lambda_desktop_not_ready("missing precompiled host catalogue")
@@ -841,7 +912,7 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
         match validate_host_catalogue_for_import(&host_path) {
             Ok(()) => {}
             Err(error) => invalid_host.push(format!(
-                "{} ({error})",
+                "{} ({error:#})",
                 display_relative_to(&root, &host_path)
             )),
         }
@@ -880,19 +951,42 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
 
 fn validate_host_catalogue_for_import(path: &Path) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    validate_host_catalogue_concrete_tools(&raw)
+        .with_context(|| format!("parse {}", path.display()))
+}
+
+fn validate_host_catalogue_concrete_tools(raw: &str) -> Result<()> {
     let parsed: HostCatalogueForInference =
-        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+        serde_json::from_str(raw).context("parse host catalogue")?;
     for (index, tool) in parsed.tools.into_iter().enumerate() {
+        let name = tool.name.unwrap_or_else(|| format!("tool#{index}"));
         if tool
             .concrete_tools
             .iter()
             .all(|concrete| concrete.trim().is_empty())
         {
-            let name = tool.name.unwrap_or_else(|| format!("tool#{index}"));
             anyhow::bail!("host tool {name} lacks concreteTools bindings");
+        }
+        let unsupported = tool
+            .concrete_tools
+            .iter()
+            .map(|concrete| concrete.trim())
+            .filter(|concrete| !concrete.is_empty())
+            .filter(|concrete| !lambda_concrete_tool_is_supported(concrete))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !unsupported.is_empty() {
+            anyhow::bail!(
+                "host tool {name} binds unsupported concrete tool {}",
+                unsupported.join(", ")
+            );
         }
     }
     Ok(())
+}
+
+fn lambda_concrete_tool_is_supported(tool: &str) -> bool {
+    SUPPORTED_LAMBDA_CONCRETE_TOOLS.contains(&tool)
 }
 
 fn display_relative_to(root: &Path, path: &Path) -> String {

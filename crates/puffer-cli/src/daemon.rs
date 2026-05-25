@@ -4477,7 +4477,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "Read": {"file_path": "README.md"}}, "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "WebSearch"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "WebSearch": {"query": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4557,7 +4557,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "Read": {"file_path": "README.md"}}, "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "WebSearch"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "WebSearch": {"query": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4586,7 +4586,7 @@ mod tests {
             "out/host.json"
         );
         assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
-        assert_eq!(saved["libraries"][0]["allowedTools"][1], "Read");
+        assert_eq!(saved["libraries"][0]["allowedTools"][1], "WebSearch");
         assert!(saved["warnings"].as_array().unwrap().is_empty());
         assert_eq!(saved["skills"][0]["name"], "gh-fix-ci");
         assert_eq!(saved["skills"][0]["enabled"], true);
@@ -4604,7 +4604,7 @@ mod tests {
         let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
         assert!(manifest.contains("host_catalogue_subpath: out/host.json"));
         assert!(manifest.contains("- Bash"));
-        assert!(manifest.contains("- Read"));
+        assert!(manifest.contains("- WebSearch"));
     }
 
     #[test]
@@ -5101,6 +5101,58 @@ mod tests {
         .expect_err("raw host catalogue should reject import");
 
         assert!(error.to_string().contains("lacks concreteTools bindings"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_rejects_unsupported_concrete_tool() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/touchdesigner");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool run_td(code: Str) -> Str {\n    effects: [net_w]\n  }\n}\nskill touchdesigner {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: touchdesigner\ndescription: TD\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_w"],
+              "domains": [],
+              "tools": [
+                {"name": "run_td", "params": [{"name": "code", "ty": "str"}], "result": "str", "effects": ["net_w"], "concreteTools": ["td_execute_python"], "concreteInputContracts": {"td_execute_python": {"script": {"$arg": "code"}}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect_err("unsupported concrete tool should reject import");
+
+        assert!(error
+            .to_string()
+            .contains("binds unsupported concrete tool td_execute_python"));
     }
 
     #[test]
