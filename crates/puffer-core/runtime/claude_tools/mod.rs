@@ -760,6 +760,7 @@ pub fn execute_workflow_tool(
             workflow::send_user_message::execute_send_user_message(state, cwd, input)
         }
         "Slack" => workflow::slack::execute_slack(state, cwd, input),
+        "SlackAction" => workflow::slack_action::execute_slack_action(state, cwd, input),
         "StructuredOutput" => workflow::structured_output::execute_structured_output(
             state,
             cwd,

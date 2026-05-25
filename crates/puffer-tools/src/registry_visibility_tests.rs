@@ -168,6 +168,7 @@ fn workspace_builtin_tool_resources_are_registerable() {
     );
     assert!(registry.definition("BrowserAction").is_some());
     assert!(registry.definition("HttpRequest").is_some());
+    assert!(registry.definition("SlackAction").is_some());
     assert!(registry.definition("TaskFlow").is_some());
     assert!(registry.definition("Sleep").is_some());
     assert!(!registered.contains("Browser"));
