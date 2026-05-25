@@ -158,7 +158,7 @@ function buildBenchmarkVerdict(testCase, status, expectationResults, evidenceInd
   return {
     version: 1,
     decision: "admit",
-    title: `${testCase.app} violates checkout expectation`,
+    title: `${testCase.app} violates benchmark expectation`,
     severity: "P1",
     area: "guiflow-smoke",
     shard: testCase.app,
@@ -166,11 +166,17 @@ function buildBenchmarkVerdict(testCase, status, expectationResults, evidenceInd
     primary_cause: predicate ? { id: predicate.id, type: "predicate", quote_hash: predicate.sha256 } : null,
     citations,
     expected: testCase.expected_behavior ?? testCase.requirement ?? "",
-    actual: expectationResults.map((item) => `${item.selector}: observed ${JSON.stringify(item.observed)}`).join("; "),
+    actual: expectationResults.map(formatExpectationObservation).join("; "),
     impact: "The benchmark user flow completes but the visible business result is stale or incorrect.",
     repro: buildReproSteps(testCase),
     notes: `Benchmark case ${testCase.id}`
   };
+}
+
+function formatExpectationObservation(item) {
+  const target = item.selector ?? item.type ?? "expectation";
+  const expected = item.value ?? item.min ?? item.max ?? "";
+  return `${target} expected ${JSON.stringify(expected)} observed ${JSON.stringify(truncate(item.observed, 240))}`;
 }
 
 function resolveServer(server) {
@@ -286,6 +292,19 @@ async function checkExpectation(page, expectation) {
     const observed = await page.locator("body").innerText({ timeout: 3000 });
     return { ...expectation, observed: truncate(observed), passed: observed.includes(String(expectation.value)) };
   }
+  if (expectation.type === "notPageTextIncludes") {
+    const observed = await page.locator("body").innerText({ timeout: 3000 });
+    return { ...expectation, observed: truncate(observed), passed: !observed.includes(String(expectation.value)) };
+  }
+  if (expectation.type === "urlEquals" || expectation.type === "urlNotEquals") {
+    const observed = page.url();
+    const expected = String(expectation.value);
+    return {
+      ...expectation,
+      observed,
+      passed: expectation.type === "urlEquals" ? observed === expected : observed !== expected
+    };
+  }
   if (expectation.type === "pageTextOccurrenceAtMost") {
     const observed = await page.locator("body").innerText({ timeout: 3000 });
     const count = occurrenceCount(observed, String(expectation.value));
@@ -321,7 +340,8 @@ function locatorForAction(page, action) {
   if (action.selector) return nthLocator(page.locator(action.selector), action);
   if (action.label) return page.getByLabel(String(action.label)).first();
   if (action.role) return page.getByRole(String(action.role), { name: action.name }).first();
-  throw new Error(`Action is missing selector, label, or role: ${JSON.stringify(action)}`);
+  if (action.text) return page.getByText(String(action.text)).first();
+  throw new Error(`Action is missing selector, label, role, or text: ${JSON.stringify(action)}`);
 }
 
 function nthLocator(locator, spec) {
