@@ -667,10 +667,25 @@
         connector.skill,
         connector.connect_command,
         connector.suggested_connection_slug,
+        connectorCapabilitySearchText(connector),
         "connect setup",
         connector.action_slugs.join(" ")
       ])
     }));
+  }
+
+  function connectorCapabilitySearchText(connector: WorkflowConnector): string {
+    const terms = [];
+    if (connector.requires_auth) terms.push("auth");
+    if (connector.can_subscribe) terms.push("events", "subscribe");
+    if (connector.can_proxy_agent) terms.push("proxy", "agent proxy");
+    if (connector.action_slugs.length > 0) terms.push("actions");
+    if (connectorTriggerSupported(connector)) {
+      terms.push("trigger", "trigger-ready");
+    } else {
+      terms.push("no trigger", "no-trigger", "setup-only");
+    }
+    return terms.join(" ");
   }
 
   function indexConnections(items: WorkflowConnection[], catalog: ConnectorSearchRow[]): ConnectionSearchRow[] {
@@ -686,6 +701,7 @@
           connection.connect_command,
           connection.monitor_command,
           "connect repair reconnect",
+          connectionTriggerSupported(connection) ? "trigger trigger-ready" : "no trigger no-trigger setup-only",
           connector?.description,
           connector?.skill,
           connector?.action_slugs.join(" ")
