@@ -17,11 +17,13 @@ const guiflowRoot = path.resolve(String(args.root ?? path.join(repoRoot, "..", "
 const suitePath = path.resolve(String(args.suite ?? path.join(guiflowRoot, "benchmarks", "smoke_suite.json")));
 const outDir = path.resolve(repoRoot, String(args.out ?? "apps/puffer-desktop/tests/fuzz/.runs/guiflow-smoke"));
 const maxCases = args["max-cases"] === undefined ? null : Number(args["max-cases"]);
+const caseIdFilter = String(args["case-id"] ?? "");
+const assertGold = args["no-gold-assert"] !== "true";
 
 const suite = JSON.parse(fs.readFileSync(suitePath, "utf8"));
 fs.mkdirSync(outDir, { recursive: true });
 const results = [];
-for (const testCase of selectedCases(suite.cases ?? [], maxCases)) {
+for (const testCase of selectedCases(suite.cases ?? [], { maxCases, caseId: caseIdFilter })) {
   results.push(await runCase(testCase));
 }
 const summary = summarize(results);
@@ -38,7 +40,7 @@ fs.writeFileSync(path.join(outDir, "guiflow-smoke-report.json"), `${JSON.stringi
 fs.writeFileSync(path.join(outDir, "guiflow-smoke-report.md"), formatMarkdown(report));
 process.stdout.write(`GUIFLOW_SMOKE_OK ${relative(path.join(outDir, "guiflow-smoke-report.json"))}\n`);
 process.stdout.write(`Buggy admitted: ${summary.buggyAdmitted}, Fixed admitted: ${summary.fixedAdmitted}\n`);
-if (summary.buggyAdmitted < 1 || summary.fixedAdmitted !== 0) process.exitCode = 2;
+if (assertGold && (summary.buggyAdmitted < 1 || summary.fixedAdmitted !== 0)) process.exitCode = 2;
 
 async function runCase(testCase) {
   const caseDir = path.join(outDir, testCase.id);
@@ -403,9 +405,11 @@ function relative(filePath) {
   return path.relative(repoRoot, filePath).replaceAll(path.sep, "/");
 }
 
-function selectedCases(cases, limit) {
-  if (limit === null || Number.isNaN(limit) || limit <= 0) return cases;
-  return cases.slice(0, limit);
+function selectedCases(cases, { maxCases, caseId }) {
+  const filtered = caseId ? cases.filter((item) => item.id === caseId) : cases;
+  if (caseId && filtered.length === 0) throw new Error(`Unknown benchmark case: ${caseId}`);
+  if (maxCases === null || Number.isNaN(maxCases) || maxCases <= 0) return filtered;
+  return filtered.slice(0, maxCases);
 }
 
 function buildReproSteps(testCase) {
