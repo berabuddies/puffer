@@ -2363,6 +2363,27 @@
     tweaks = { ...tweaks, screen: "workspace" };
   }
 
+  async function runPipelineConnectCommand(command: string): Promise<boolean> {
+    const trimmed = command.trim();
+    if (!trimmed) return false;
+    try {
+      if (!selectedSession) {
+        const providerId = settingsSnapshot?.config.defaultProvider ?? undefined;
+        const created = await createSession(defaultWorkspaceCwd || undefined, providerId);
+        await openCreatedSession(created, providerId);
+      }
+      const started = await submitMessage(trimmed);
+      if (started && selectedSession) {
+        openAgentSessionId = selectedSession.id;
+        tweaks = { ...tweaks, screen: "workspace" };
+      }
+      return started;
+    } catch (error) {
+      statusMessage = `Connector setup failed: ${errorText(error)}`;
+      return false;
+    }
+  }
+
   function sessionFallbackFromCreated(
     created: CreatedSessionResult,
     requestedProviderId?: string
@@ -3432,7 +3453,7 @@
               />
             {/if}
           {:else if tweaks.screen === "pipelines"}
-            <Pipelines />
+            <Pipelines onRunConnectCommand={runPipelineConnectCommand} />
           {:else if tweaks.screen === "deployments"}
             <Deployments />
           {:else if tweaks.screen === "settings"}

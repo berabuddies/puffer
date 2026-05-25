@@ -126,6 +126,24 @@ test("pipeline connector catalog stages a deterministic connect command", async 
   await expect(page.locator(".pf-connector-row", { hasText: "email" })).toHaveAttribute("data-selected", "true");
 });
 
+test("pipeline connector command can start setup from the picker", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("email");
+  await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
+  await page.getByRole("button", { name: "Run connector command" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/connect email email"
+  );
+  expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
 test("pipeline connector picker keeps non-trigger connections disabled while setup rows stay selectable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -58,6 +58,12 @@
     searchText: string;
   };
 
+  type Props = {
+    onRunConnectCommand?: (command: string) => boolean | Promise<boolean>;
+  };
+
+  let { onRunConnectCommand }: Props = $props();
+
   const providerOptions: ProviderMeta[] = [
     {
       id: "codex",
@@ -110,6 +116,7 @@
   let stepIdx = $state<number | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let connectorCommandRunning = $state(false);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
   let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
@@ -450,6 +457,31 @@
 
   function connectorConnectCommand(connector: WorkflowConnector): string {
     return connector.connect_command || `/connect ${connector.connector_slug} ${connectorConnectionHint(connector)}`;
+  }
+
+  async function copySelectedConnectorCommand() {
+    const command = selectedConnectorCommand.trim();
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      saveNotice = `Copied ${command}.`;
+    } catch (err) {
+      saveNotice = "Clipboard unavailable. Select and copy the command manually.";
+    }
+  }
+
+  async function runSelectedConnectorCommand() {
+    const command = selectedConnectorCommand.trim();
+    if (!command || connectorCommandRunning || !onRunConnectCommand) return;
+    connectorCommandRunning = true;
+    try {
+      const started = await onRunConnectCommand(command);
+      saveNotice = started === false ? `Could not start ${command}.` : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      connectorCommandRunning = false;
+    }
   }
 
   function connectorBySlug(slug: string | null | undefined): WorkflowConnector | undefined {
@@ -1143,6 +1175,30 @@
                   <div class="pf-connector-command" aria-label="Selected connector command">
                     <Icon name="terminal" size={12} />
                     <code>{selectedConnectorCommand}</code>
+                    <div class="pf-connector-command-actions">
+                      <button
+                        type="button"
+                        class="pf-icon-btn"
+                        aria-label="Copy connector command"
+                        title="Copy connector command"
+                        onclick={copySelectedConnectorCommand}
+                      >
+                        <Icon name="copy" size={12} />
+                      </button>
+                      {#if onRunConnectCommand}
+                        <button
+                          type="button"
+                          class="pf-icon-btn"
+                          aria-label="Run connector command"
+                          title="Run connector command"
+                          aria-busy={connectorCommandRunning}
+                          disabled={connectorCommandRunning}
+                          onclick={runSelectedConnectorCommand}
+                        >
+                          <Icon name="play" size={12} />
+                        </button>
+                      {/if}
+                    </div>
                   </div>
                 {/if}
               {/if}
@@ -1865,7 +1921,7 @@
 
   .pf-connector-command {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 6px;
     border: 1px solid color-mix(in oklab, var(--puffer-accent) 28%, var(--border));
@@ -1882,6 +1938,39 @@
     white-space: nowrap;
     color: var(--foreground);
     font-size: 11px;
+  }
+
+  .pf-connector-command-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .pf-icon-btn {
+    all: unset;
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--muted-foreground);
+    cursor: pointer;
+  }
+
+  .pf-icon-btn:hover:not(:disabled),
+  .pf-icon-btn:focus-visible {
+    color: var(--foreground);
+    border-color: color-mix(in oklab, var(--puffer-accent) 32%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 10%, var(--card));
+  }
+
+  .pf-icon-btn:disabled {
+    opacity: 0.56;
+    cursor: default;
   }
 
   .pf-editor-runs {
