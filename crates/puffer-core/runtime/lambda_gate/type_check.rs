@@ -110,6 +110,12 @@ fn refinement_matches(
     if expr.is_empty() {
         return true;
     }
+    let implication_parts = split_top_level(expr, "==>");
+    if implication_parts.len() > 1 {
+        let consequent = implication_parts[1..].join("==>");
+        return !refinement_matches(value, param_name, all_args, implication_parts[0], facts)
+            || refinement_matches(value, param_name, all_args, &consequent, facts);
+    }
     let and_parts = split_top_level(expr, "&&");
     if and_parts.len() > 1 {
         return and_parts
@@ -238,6 +244,13 @@ fn unsupported_refinements_in_expr(expr: &str) -> Vec<String> {
     if record_field_type_list(expr) {
         return Vec::new();
     }
+    let implication_parts = split_top_level(expr, "==>");
+    if implication_parts.len() > 1 {
+        return implication_parts
+            .iter()
+            .flat_map(|part| unsupported_refinements_in_expr(part))
+            .collect();
+    }
     let and_parts = split_top_level(expr, "&&");
     if and_parts.len() > 1 {
         return and_parts
@@ -278,6 +291,13 @@ fn predicate_names_in_expr(expr: &str) -> Vec<String> {
     if record_field_type_list(expr) {
         return Vec::new();
     }
+    let implication_parts = split_top_level(expr, "==>");
+    if implication_parts.len() > 1 {
+        return implication_parts
+            .iter()
+            .flat_map(|part| predicate_names_in_expr(part))
+            .collect();
+    }
     let and_parts = split_top_level(expr, "&&");
     if and_parts.len() > 1 {
         return and_parts
@@ -305,6 +325,13 @@ fn fact_refinement_shapes_in_expr(expr: &str) -> Vec<(String, usize)> {
     let expr = strip_outer_parens(expr.trim());
     if expr.is_empty() || record_field_type_list(expr) {
         return Vec::new();
+    }
+    let implication_parts = split_top_level(expr, "==>");
+    if implication_parts.len() > 1 {
+        return implication_parts
+            .into_iter()
+            .flat_map(fact_refinement_shapes_in_expr)
+            .collect();
     }
     let and_parts = split_top_level(expr, "&&");
     if and_parts.len() > 1 {
@@ -509,6 +536,9 @@ fn operand_value(
     if let Some(value) = all_args.get(raw) {
         return cmp_value_from_json(value);
     }
+    if let Some(value) = current.as_object().and_then(|object| object.get(raw)) {
+        return cmp_value_from_json(value);
+    }
     if left_side && is_identifier(raw) {
         return cmp_value_from_json(current);
     }
@@ -520,6 +550,11 @@ fn operand_value(
         .and_then(|value| value.strip_suffix('"'))
     {
         return Some(CmpValue::String(unquoted.to_string()));
+    }
+    match raw {
+        "true" => return Some(CmpValue::Bool(true)),
+        "false" => return Some(CmpValue::Bool(false)),
+        _ => {}
     }
     is_identifier(raw).then(|| CmpValue::Symbol(raw.to_string()))
 }
@@ -799,12 +834,24 @@ mod tests {
 
     #[test]
     fn enum_symbol_refinements_match_json_strings() {
-        let args = object(json!({"cred": "secret", "mode": "private"}));
+        let args = object(json!({"cred": "secret", "cred_obj": {"sec": "secret"}, "mode": "private", "wait": true}));
         assert!(lambda_arg_matches_type(
             args.get("cred").unwrap(),
             "cred",
             &args,
             "TrelloCred{sec = secret}",
+        ));
+        assert!(lambda_arg_matches_type(
+            args.get("cred_obj").unwrap(),
+            "cred_obj",
+            &args,
+            "SecretValue{sec = secret}",
+        ));
+        assert!(lambda_arg_matches_type(
+            args.get("wait").unwrap(),
+            "wait",
+            &args,
+            "bool{w = true}",
         ));
         assert!(lambda_arg_matches_type(
             args.get("mode").unwrap(),
@@ -908,6 +955,7 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(unsupported_refinements_in_type("int{n > 0 && n <= 10}").is_empty());
+        assert!(unsupported_refinements_in_type("Request{uses_budget_tokens(r) ==> budget_tokens < max_tokens}").is_empty());
         assert!(unsupported_refinements_in_type("Result<unit{authed(s)}, Err>").is_empty());
         assert!(unsupported_refinements_in_type(
             "{layout: LayoutName, style: StyleName, aspect: AspectName}"

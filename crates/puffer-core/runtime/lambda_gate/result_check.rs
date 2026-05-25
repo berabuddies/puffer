@@ -69,6 +69,12 @@ fn refinement_matches(value: &Value, name: &str, scope: &Map<String, Value>, exp
     if let Some(record) = record_fields(expr) {
         return record_matches(value, scope, record);
     }
+    let implication_parts = split_expr_top_level(expr, "==>");
+    if implication_parts.len() > 1 {
+        let consequent = implication_parts[1..].join("==>");
+        return !refinement_matches(value, name, scope, implication_parts[0])
+            || refinement_matches(value, name, scope, &consequent);
+    }
     let and_parts = split_expr_top_level(expr, "&&");
     if and_parts.len() > 1 {
         return and_parts
@@ -330,6 +336,9 @@ fn operand_value(
     if let Some(value) = scope.get(raw) {
         return cmp_value_from_json(value);
     }
+    if let Some(value) = current.as_object().and_then(|object| object.get(raw)) {
+        return cmp_value_from_json(value);
+    }
     if left_side && is_identifier(raw) {
         return cmp_value_from_json(current);
     }
@@ -341,6 +350,11 @@ fn operand_value(
         .and_then(|value| value.strip_suffix('"'))
     {
         return Some(CmpValue::String(unquoted.to_string()));
+    }
+    match raw {
+        "true" => return Some(CmpValue::Bool(true)),
+        "false" => return Some(CmpValue::Bool(false)),
+        _ => {}
     }
     is_identifier(raw).then(|| CmpValue::Symbol(raw.to_string()))
 }
@@ -361,9 +375,17 @@ fn compare_values(left: &CmpValue, right: &CmpValue, op: &str) -> Option<bool> {
         (CmpValue::Number(left), CmpValue::Number(right), "<=") => Some(left <= right),
         (CmpValue::Number(left), CmpValue::Number(right), ">") => Some(left > right),
         (CmpValue::Number(left), CmpValue::Number(right), "<") => Some(left < right),
-        (_, _, "=" | "==") => Some(left == right),
-        (_, _, "!=") => Some(left != right),
+        (_, _, "=" | "==") => Some(cmp_values_equal(left, right)),
+        (_, _, "!=") => Some(!cmp_values_equal(left, right)),
         _ => None,
+    }
+}
+
+fn cmp_values_equal(left: &CmpValue, right: &CmpValue) -> bool {
+    match (left, right) {
+        (CmpValue::String(left), CmpValue::Symbol(right))
+        | (CmpValue::Symbol(left), CmpValue::String(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -463,6 +485,29 @@ mod tests {
             &json!({"host": "127.0.0.1", "port": 80}),
             &args,
             ty,
+            &BTreeSet::new()
+        ));
+    }
+
+    #[test]
+    fn enforces_object_field_comparisons_and_implications() {
+        let args = Map::new();
+        assert!(lambda_result_matches_type_with_facts(
+            &json!({"sec": "secret"}),
+            &args,
+            "SecretValue{sec = secret}",
+            &BTreeSet::new()
+        ));
+        assert!(lambda_result_matches_type_with_facts(
+            &json!({"uses_budget_tokens": true, "budget_tokens": 1024, "max_tokens": 2048}),
+            &args,
+            "Request{uses_budget_tokens(r) ==> budget_tokens < max_tokens}",
+            &BTreeSet::new()
+        ));
+        assert!(!lambda_result_matches_type_with_facts(
+            &json!({"uses_budget_tokens": true, "budget_tokens": 4096, "max_tokens": 2048}),
+            &args,
+            "Request{uses_budget_tokens(r) ==> budget_tokens < max_tokens}",
             &BTreeSet::new()
         ));
     }
