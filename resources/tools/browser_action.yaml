@@ -26,7 +26,9 @@ input_schema:
         - reload
         - back
         - forward
+        - waitNetworkIdle
         - snapshot
+        - domInspect
         - consoleLogs
         - screenshot
         - click
@@ -61,6 +63,9 @@ input_schema:
       description: URL for open or navigate actions.
     page:
       description: Browser page handle or tab id for actions that read an existing page.
+    query:
+      type: string
+      description: CSS selector for domInspect.
     clear:
       type: boolean
       description: Whether consoleLogs should clear the buffered console entries after reading them.
@@ -121,6 +126,16 @@ input_schema:
       minimum: 0
       maximum: 100
       description: JPEG screenshot quality. Requires screenshotFormat=jpeg.
+    idleMs:
+      type: integer
+      minimum: 1
+      maximum: 10000
+      description: Quiet network window for waitNetworkIdle. Defaults to 500.
+    timeoutMs:
+      type: integer
+      minimum: 1
+      maximum: 120000
+      description: Maximum wait for waitNetworkIdle. Defaults to 30000.
   required:
     - action
   additionalProperties: false

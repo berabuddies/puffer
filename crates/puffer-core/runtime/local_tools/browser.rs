@@ -1,13 +1,13 @@
 //! Runtime-local Browser tool client for the desktop daemon.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use puffer_config::ConfigPaths;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 #[cfg(test)]
 use std::cell::RefCell;
 use std::path::Path;
-use tungstenite::{connect, Message};
+use tungstenite::{Message, connect};
 use url::Url;
 use uuid::Uuid;
 
@@ -99,6 +99,8 @@ struct BrowserToolInput {
     url: Option<String>,
     #[serde(default)]
     page: Option<Value>,
+    #[serde(default)]
+    query: Option<String>,
     #[serde(default, rename = "ref")]
     ref_id: Option<String>,
     #[serde(default)]
@@ -129,6 +131,10 @@ struct BrowserToolInput {
     screenshot_format: Option<String>,
     #[serde(default, rename = "screenshotQuality")]
     screenshot_quality: Option<u32>,
+    #[serde(default, rename = "idleMs")]
+    idle_ms: Option<u32>,
+    #[serde(default, rename = "timeoutMs")]
+    timeout_ms: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -418,6 +424,7 @@ mod tests {
                 label: None,
                 url: None,
                 page: None,
+                query: None,
                 ref_id: None,
                 value: None,
                 text: None,
@@ -433,6 +440,8 @@ mod tests {
                 annotate: None,
                 screenshot_format: None,
                 screenshot_quality: None,
+                idle_ms: None,
+                timeout_ms: None,
             };
             normalize_session_id(&mut params, &current);
             assert_eq!(params.session_id.as_deref(), Some(current_string.as_str()));
@@ -450,6 +459,7 @@ mod tests {
             label: None,
             url: None,
             page: None,
+            query: None,
             ref_id: None,
             value: None,
             text: None,
@@ -465,6 +475,8 @@ mod tests {
             annotate: None,
             screenshot_format: None,
             screenshot_quality: None,
+            idle_ms: None,
+            timeout_ms: None,
         };
         normalize_session_id(&mut params, &current);
         assert_eq!(params.session_id.as_deref(), Some(explicit));
@@ -484,7 +496,10 @@ mod tests {
             "files": ["/tmp/upload.txt"],
             "annotate": true,
             "screenshotFormat": "jpeg",
-            "screenshotQuality": 70
+            "screenshotQuality": 70,
+            "query": "button",
+            "idleMs": 500,
+            "timeoutMs": 30000
         }))
         .unwrap();
 
@@ -525,6 +540,15 @@ mod tests {
         assert_eq!(
             roundtrip.get("screenshotQuality").and_then(Value::as_u64),
             Some(70)
+        );
+        assert_eq!(
+            roundtrip.get("query").and_then(Value::as_str),
+            Some("button")
+        );
+        assert_eq!(roundtrip.get("idleMs").and_then(Value::as_u64), Some(500));
+        assert_eq!(
+            roundtrip.get("timeoutMs").and_then(Value::as_u64),
+            Some(30000)
         );
     }
 

@@ -14,6 +14,8 @@ pub enum BrowserActionSet {
 enum BrowserIntentAction {
     List,
     Snapshot,
+    DomInspect,
+    WaitNetworkIdle,
     ConsoleLogs,
     Screenshot,
     Open,
@@ -47,9 +49,12 @@ enum BrowserIntentAction {
 impl BrowserIntentAction {
     fn action_set(self) -> BrowserActionSet {
         match self {
-            Self::List | Self::Snapshot | Self::ConsoleLogs | Self::Screenshot => {
-                BrowserActionSet::Inspect
-            }
+            Self::List
+            | Self::Snapshot
+            | Self::DomInspect
+            | Self::WaitNetworkIdle
+            | Self::ConsoleLogs
+            | Self::Screenshot => BrowserActionSet::Inspect,
             Self::Open
             | Self::New
             | Self::Focus
@@ -106,6 +111,8 @@ fn browser_intent_action(action: &str) -> Option<BrowserIntentAction> {
     match normalized_token(action).as_str() {
         "list" => Some(BrowserIntentAction::List),
         "snapshot" => Some(BrowserIntentAction::Snapshot),
+        "dominspect" | "inspectdom" => Some(BrowserIntentAction::DomInspect),
+        "waitnetworkidle" | "networkidle" => Some(BrowserIntentAction::WaitNetworkIdle),
         "consolelogs" | "console" => Some(BrowserIntentAction::ConsoleLogs),
         "screenshot" => Some(BrowserIntentAction::Screenshot),
         "open" => Some(BrowserIntentAction::Open),
@@ -150,6 +157,14 @@ mod tests {
     fn action_set_mapping_covers_model_visible_and_shell_only_actions() {
         assert_eq!(
             browser_action_set_for_action("snapshot"),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_action("domInspect"),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_action("waitNetworkIdle"),
             Some(BrowserActionSet::Inspect)
         );
         assert_eq!(
