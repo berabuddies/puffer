@@ -69,7 +69,7 @@ impl LambdaToolSig {
         self.context_req.as_ref()
     }
 
-    fn validate_args(&self, args: &Value) -> Option<String> {
+    fn validate_args(&self, args: &Value, facts: &BTreeSet<String>) -> Option<String> {
         let Some(object) = args.as_object() else {
             return Some(format!(
                 "formal args for {} must be a JSON object",
@@ -83,7 +83,13 @@ impl LambdaToolSig {
                     self.name, param.name
                 ));
             };
-            if !type_check::lambda_arg_matches_type(value, &param.name, object, &param.ty) {
+            if !type_check::lambda_arg_matches_type_with_facts(
+                value,
+                &param.name,
+                object,
+                &param.ty,
+                facts,
+            ) {
                 return Some(format!(
                     "formal arg {} for {} does not match {}",
                     param.name, self.name, param.ty
@@ -159,6 +165,12 @@ impl LambdaToolSig {
             }
         }
         Ok(())
+    }
+
+    fn result_predicate_facts(&self) -> impl Iterator<Item = LambdaFact> + '_ {
+        type_check::predicate_names_in_type(&self.result)
+            .into_iter()
+            .map(|pred| LambdaFact::new(pred, Vec::<String>::new()))
     }
 
     fn validate_concrete_input(
@@ -362,7 +374,8 @@ impl LambdaGateState {
         let Some(sig) = self.host.lookup_tool(tool) else {
             return LambdaGateVerdict::reject(format!("unknown tool: {tool}"));
         };
-        if let Some(reason) = sig.validate_args(args) {
+        let predicates = self.available_predicates();
+        if let Some(reason) = sig.validate_args(args, &predicates) {
             return LambdaGateVerdict::reject(reason);
         }
         LambdaGateVerdict::Accept
@@ -410,9 +423,16 @@ impl LambdaGateState {
                 for fact in &sig.registers {
                     self.facts.insert(fact.clone());
                 }
+                for fact in sig.result_predicate_facts() {
+                    self.facts.insert(fact);
+                }
             }
         }
         verdict
+    }
+
+    fn available_predicates(&self) -> BTreeSet<String> {
+        self.facts.iter().map(|fact| fact.pred.clone()).collect()
     }
 
     /// Builds trace metadata for a committed host call.
@@ -906,25 +926,23 @@ mod tests {
     }
 
     #[test]
-    fn host_catalogue_runtime_validation_rejects_unsupported_refinement() {
+    fn host_catalogue_runtime_validation_rejects_malformed_refinement() {
         let error = validate_host_catalogue_runtime(
-            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule(id)}"}]}]}"#,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule id}"}]}]}"#,
         )
-        .expect_err("unsupported runtime refinement must fail");
+        .expect_err("malformed runtime refinement must fail");
 
-        assert!(
-            format!("{error:#}").contains("unsupported runtime refinement host_custom_rule(id)")
-        );
+        assert!(format!("{error:#}").contains("unsupported runtime refinement host_custom_rule id"));
     }
 
     #[test]
-    fn host_catalogue_runtime_validation_rejects_unsupported_result_refinement() {
+    fn host_catalogue_runtime_validation_rejects_malformed_result_refinement() {
         let error = validate_host_catalogue_runtime(
-            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_parse","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"parse"}},"result":"Paper{host_custom_rule(p)}"}]}"#,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_parse","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"parse"}},"result":"Paper{host_custom_rule p}"}]}"#,
         )
-        .expect_err("unsupported result refinement must fail");
+        .expect_err("malformed result refinement must fail");
 
-        assert!(format!("{error:#}").contains("unsupported runtime refinement host_custom_rule(p)"));
+        assert!(format!("{error:#}").contains("unsupported runtime refinement host_custom_rule p"));
     }
 
     #[test]

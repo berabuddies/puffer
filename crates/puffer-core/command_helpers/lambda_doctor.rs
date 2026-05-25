@@ -410,14 +410,14 @@ mod tests {
     }
 
     #[test]
-    fn render_lambda_status_blocks_unsupported_refinement_predicates() {
+    fn render_lambda_status_blocks_malformed_refinement_predicates() {
         let temp = tempfile::tempdir().unwrap();
         let source_path = temp.path().join("skill.lskill");
         let host_path = temp.path().join("host.json");
         std::fs::write(&source_path, "skill source").unwrap();
         std::fs::write(
             &host_path,
-            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule(id)}"}]}]}"#,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule id}"}]}]}"#,
         )
         .unwrap();
         let resources = LoadedResources {
@@ -454,11 +454,11 @@ mod tests {
         let warnings = lambda_skill_doctor_warnings(&resources);
 
         assert!(status.contains("not gate-ready"));
-        assert!(status.contains("unsupported runtime refinement host_custom_rule(id)"));
+        assert!(status.contains("unsupported runtime refinement host_custom_rule id"));
         assert!(status.contains("model invocation blocked; allowed tools ToolSearch"));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0]
             .detail
-            .contains("unsupported runtime refinement host_custom_rule(id)"));
+            .contains("unsupported runtime refinement host_custom_rule id"));
     }
 }

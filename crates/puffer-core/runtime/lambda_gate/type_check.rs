@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 
 /// Returns whether one JSON formal argument satisfies a Lambda Skill type.
 pub(super) fn lambda_arg_matches_type(
@@ -7,21 +8,43 @@ pub(super) fn lambda_arg_matches_type(
     all_args: &Map<String, Value>,
     ty: &str,
 ) -> bool {
+    lambda_arg_matches_type_with_facts(value, param_name, all_args, ty, &BTreeSet::new())
+}
+
+/// Returns whether one JSON formal argument satisfies a type with gate facts.
+pub(super) fn lambda_arg_matches_type_with_facts(
+    value: &Value,
+    param_name: &str,
+    all_args: &Map<String, Value>,
+    ty: &str,
+    available_predicates: &BTreeSet<String>,
+) -> bool {
     let (base, refinement) = split_refinement(ty);
-    if !base_matches(value, base, param_name, all_args) {
+    if !base_matches(value, base, param_name, all_args, available_predicates) {
         return false;
     }
     refinement
-        .map(|expr| refinement_matches(value, param_name, all_args, expr))
+        .map(|expr| refinement_matches(value, param_name, all_args, expr, available_predicates))
         .unwrap_or(true)
 }
 
 /// Returns refinements in this type that the runtime cannot evaluate.
 pub(super) fn unsupported_refinements_in_type(ty: &str) -> Vec<String> {
-    let (_, refinement) = split_refinement(ty);
-    refinement
-        .map(unsupported_refinements_in_expr)
-        .unwrap_or_default()
+    refinement_segments(ty)
+        .into_iter()
+        .flat_map(unsupported_refinements_in_expr)
+        .collect()
+}
+
+/// Returns predicate names mentioned by all refinements in this type.
+pub(super) fn predicate_names_in_type(ty: &str) -> Vec<String> {
+    let mut names = refinement_segments(ty)
+        .into_iter()
+        .flat_map(predicate_names_in_expr)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn split_refinement(ty: &str) -> (&str, Option<&str>) {
@@ -38,13 +61,20 @@ fn base_matches(
     base: &str,
     param_name: &str,
     all_args: &Map<String, Value>,
+    available_predicates: &BTreeSet<String>,
 ) -> bool {
     let lowered = base.trim().to_ascii_lowercase();
     if let Some(inner) = lowered.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         return value.as_array().is_some_and(|items| {
-            items
-                .iter()
-                .all(|item| lambda_arg_matches_type(item, param_name, all_args, inner))
+            items.iter().all(|item| {
+                lambda_arg_matches_type_with_facts(
+                    item,
+                    param_name,
+                    all_args,
+                    inner,
+                    available_predicates,
+                )
+            })
         });
     }
     match lowered.as_str() {
@@ -63,6 +93,7 @@ fn refinement_matches(
     param_name: &str,
     all_args: &Map<String, Value>,
     expr: &str,
+    available_predicates: &BTreeSet<String>,
 ) -> bool {
     let expr = strip_outer_parens(expr.trim());
     if expr.is_empty() {
@@ -70,15 +101,20 @@ fn refinement_matches(
     }
     let and_parts = split_top_level(expr, "&&");
     if and_parts.len() > 1 {
-        return and_parts
-            .iter()
-            .all(|part| refinement_matches(value, param_name, all_args, part));
+        return and_parts.iter().all(|part| {
+            refinement_matches(value, param_name, all_args, part, available_predicates)
+        });
+    }
+    if let Some(inner) = negated_expr(expr) {
+        return semantic_refinement_matches(value, param_name, all_args, inner)
+            .map(|result| !result)
+            .unwrap_or(false);
     }
     let or_parts = split_top_level(expr, "||");
     if or_parts.len() > 1 {
-        return or_parts
-            .iter()
-            .any(|part| refinement_matches(value, param_name, all_args, part));
+        return or_parts.iter().any(|part| {
+            refinement_matches(value, param_name, all_args, part, available_predicates)
+        });
     }
     if let Some(result) = compare_expr(value, param_name, all_args, expr) {
         return result;
@@ -89,12 +125,54 @@ fn refinement_matches(
     if let Some(result) = string_predicate(value, expr) {
         return result;
     }
+    if let Some(name) = predicate_call_name(expr) {
+        return available_predicates.contains(name);
+    }
+    if let Some(name) = predicate_atom_name(expr) {
+        return available_predicates.contains(name);
+    }
     false
+}
+
+fn semantic_refinement_matches(
+    value: &Value,
+    param_name: &str,
+    all_args: &Map<String, Value>,
+    expr: &str,
+) -> Option<bool> {
+    let expr = strip_outer_parens(expr.trim());
+    if expr.is_empty() {
+        return Some(true);
+    }
+    let and_parts = split_top_level(expr, "&&");
+    if and_parts.len() > 1 {
+        return and_parts.iter().try_fold(true, |acc, part| {
+            semantic_refinement_matches(value, param_name, all_args, part)
+                .map(|result| acc && result)
+        });
+    }
+    let or_parts = split_top_level(expr, "||");
+    if or_parts.len() > 1 {
+        return or_parts.iter().try_fold(false, |acc, part| {
+            semantic_refinement_matches(value, param_name, all_args, part)
+                .map(|result| acc || result)
+        });
+    }
+    if let Some(inner) = negated_expr(expr) {
+        return semantic_refinement_matches(value, param_name, all_args, inner)
+            .map(|result| !result);
+    }
+    compare_expr(value, param_name, all_args, expr)
+        .or_else(|| runtime_predicate(value, expr))
+        .or_else(|| string_predicate(value, expr))
 }
 
 fn unsupported_refinements_in_expr(expr: &str) -> Vec<String> {
     let expr = strip_outer_parens(expr.trim());
     if expr.is_empty() {
+        return Vec::new();
+    }
+    if record_field_type_list(expr) {
         return Vec::new();
     }
     let and_parts = split_top_level(expr, "&&");
@@ -104,6 +182,13 @@ fn unsupported_refinements_in_expr(expr: &str) -> Vec<String> {
             .flat_map(|part| unsupported_refinements_in_expr(part))
             .collect();
     }
+    if negated_expr(expr).is_some() {
+        return if semantic_refinement_shape(expr) {
+            Vec::new()
+        } else {
+            vec![expr.to_string()]
+        };
+    }
     let or_parts = split_top_level(expr, "||");
     if or_parts.len() > 1 {
         return or_parts
@@ -111,10 +196,75 @@ fn unsupported_refinements_in_expr(expr: &str) -> Vec<String> {
             .flat_map(|part| unsupported_refinements_in_expr(part))
             .collect();
     }
-    if compare_expr_shape(expr) || runtime_predicate_shape(expr) || string_predicate_shape(expr) {
+    if compare_expr_shape(expr)
+        || runtime_predicate_shape(expr)
+        || string_predicate_shape(expr)
+        || predicate_call_name(expr).is_some()
+        || predicate_atom_name(expr).is_some()
+    {
         return Vec::new();
     }
     vec![expr.to_string()]
+}
+
+fn predicate_names_in_expr(expr: &str) -> Vec<String> {
+    let expr = strip_outer_parens(expr.trim());
+    if expr.is_empty() {
+        return Vec::new();
+    }
+    if record_field_type_list(expr) {
+        return Vec::new();
+    }
+    let and_parts = split_top_level(expr, "&&");
+    if and_parts.len() > 1 {
+        return and_parts
+            .iter()
+            .flat_map(|part| predicate_names_in_expr(part))
+            .collect();
+    }
+    if let Some(inner) = negated_expr(expr) {
+        return predicate_names_in_expr(inner);
+    }
+    let or_parts = split_top_level(expr, "||");
+    if or_parts.len() > 1 {
+        return or_parts
+            .iter()
+            .flat_map(|part| predicate_names_in_expr(part))
+            .collect();
+    }
+    predicate_call_name(expr)
+        .or_else(|| predicate_atom_name(expr))
+        .map(|name| vec![name.to_string()])
+        .unwrap_or_default()
+}
+
+fn refinement_segments(ty: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (index, ch) in ty.char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    start = Some(index + ch.len_utf8());
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth == 0 {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start_index) = start.take() {
+                        segments.push(ty[start_index..index].trim());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    segments
 }
 
 fn strip_outer_parens(mut expr: &str) -> &str {
@@ -129,6 +279,42 @@ fn strip_outer_parens(mut expr: &str) -> &str {
         }
         expr = inner;
     }
+}
+
+fn negated_expr(expr: &str) -> Option<&str> {
+    let inner = expr.trim().strip_prefix('!')?.trim();
+    (!inner.is_empty()).then_some(strip_outer_parens(inner))
+}
+
+fn record_field_type_list(expr: &str) -> bool {
+    split_top_level(expr, ",").into_iter().all(|field| {
+        field
+            .split_once(':')
+            .is_some_and(|(name, ty)| is_identifier(name.trim()) && !ty.trim().is_empty())
+    })
+}
+
+fn semantic_refinement_shape(expr: &str) -> bool {
+    let expr = strip_outer_parens(expr.trim());
+    if expr.is_empty() {
+        return true;
+    }
+    let and_parts = split_top_level(expr, "&&");
+    if and_parts.len() > 1 {
+        return and_parts
+            .into_iter()
+            .all(|part| semantic_refinement_shape(part));
+    }
+    if let Some(inner) = negated_expr(expr) {
+        return semantic_refinement_shape(inner);
+    }
+    let or_parts = split_top_level(expr, "||");
+    if or_parts.len() > 1 {
+        return or_parts
+            .into_iter()
+            .all(|part| semantic_refinement_shape(part));
+    }
+    compare_expr_shape(expr) || runtime_predicate_shape(expr) || string_predicate_shape(expr)
 }
 
 fn split_top_level<'a>(expr: &'a str, op: &str) -> Vec<&'a str> {
@@ -268,30 +454,72 @@ fn string_predicate(value: &Value, expr: &str) -> Option<bool> {
     let text = value.as_str()?;
     let (name, _) = expr.split_once('(')?;
     let pred = name.trim();
-    let suffixes = pred.strip_prefix("ends_with_")?;
-    Some(suffixes.split("_or_").any(|suffix| {
-        let suffix = suffix.trim_start_matches('.');
-        text.ends_with(&format!(".{suffix}")) || text.ends_with(suffix)
-    }))
+    if let Some(suffixes) = pred.strip_prefix("ends_with_") {
+        return Some(suffixes.split("_or_").any(|suffix| {
+            let suffix = suffix.trim_start_matches('.');
+            text.ends_with(&format!(".{suffix}")) || text.ends_with(suffix)
+        }));
+    }
+    if let Some(prefixes) = pred.strip_prefix("starts_with_") {
+        return Some(
+            prefixes
+                .split("_or_")
+                .any(|prefix| text.starts_with(prefix)),
+        );
+    }
+    if let Some(needles) = pred.strip_prefix("contains_") {
+        return Some(needles.split("_or_").any(|needle| text.contains(needle)));
+    }
+    None
 }
 
 fn string_predicate_shape(expr: &str) -> bool {
-    expr.split_once('(')
-        .is_some_and(|(name, _)| name.trim().starts_with("ends_with_"))
+    expr.split_once('(').is_some_and(|(name, _)| {
+        let name = name.trim();
+        name.starts_with("ends_with_")
+            || name.starts_with("starts_with_")
+            || name.starts_with("contains_")
+    })
 }
 
 fn runtime_predicate(value: &Value, expr: &str) -> Option<bool> {
     let (name, _) = expr.split_once('(')?;
     match name.trim() {
         "valid_arxiv_id" => value.as_str().map(valid_arxiv_id_list),
+        "valid_address" => value.as_str().map(valid_evm_address),
+        "valid_uri" | "valid_url" => value.as_str().map(valid_url),
+        "emergency_number" => value.as_str().map(emergency_number),
         "parsed_ok" => Some(parsed_paper_value(value)),
         _ => None,
     }
 }
 
 fn runtime_predicate_shape(expr: &str) -> bool {
-    expr.split_once('(')
-        .is_some_and(|(name, _)| matches!(name.trim(), "valid_arxiv_id" | "parsed_ok"))
+    expr.split_once('(').is_some_and(|(name, _)| {
+        matches!(
+            name.trim(),
+            "valid_arxiv_id"
+                | "valid_address"
+                | "valid_uri"
+                | "valid_url"
+                | "emergency_number"
+                | "parsed_ok"
+        )
+    })
+}
+
+fn predicate_call_name(expr: &str) -> Option<&str> {
+    let (name, rest) = expr.split_once('(')?;
+    let name = name.trim();
+    if !is_identifier(name) {
+        return None;
+    }
+    let args = rest.strip_suffix(')')?;
+    balanced_parens(args).then_some(name)
+}
+
+fn predicate_atom_name(expr: &str) -> Option<&str> {
+    is_identifier(expr).then_some(expr.trim())
 }
 
 fn valid_arxiv_id_list(text: &str) -> bool {
@@ -336,6 +564,28 @@ fn valid_old_arxiv_id(id: &str) -> bool {
             .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '.'))
         && number.len() == 7
         && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn valid_evm_address(text: &str) -> bool {
+    text.len() == 42 && text.starts_with("0x") && text[2..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn valid_url(text: &str) -> bool {
+    url::Url::parse(text)
+        .ok()
+        .is_some_and(|url| url.host_str().is_some())
+}
+
+fn emergency_number(text: &str) -> bool {
+    let digits = text
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    matches!(
+        digits.as_str(),
+        "000" | "110" | "112" | "118" | "119" | "911" | "999"
+    ) || digits.ends_with("911")
+        || digits.ends_with("112")
 }
 
 fn parsed_paper_value(value: &Value) -> bool {
@@ -432,6 +682,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_string_refinements_must_hold() {
+        let args = object(json!({"path": "reports/final.md"}));
+        assert!(lambda_arg_matches_type(
+            args.get("path").unwrap(),
+            "path",
+            &args,
+            "str{starts_with_reports(p)}",
+        ));
+        assert!(lambda_arg_matches_type(
+            args.get("path").unwrap(),
+            "path",
+            &args,
+            "str{contains_final(p)}",
+        ));
+        assert!(lambda_arg_matches_type(
+            args.get("path").unwrap(),
+            "path",
+            &args,
+            "str{ends_with_pdf_or_md(p)}",
+        ));
+    }
+
+    #[test]
     fn arxiv_id_refinements_must_hold() {
         let args = object(json!({"id": "2402.03300"}));
         assert!(lambda_arg_matches_type(
@@ -519,15 +792,90 @@ mod tests {
     }
 
     #[test]
+    fn host_predicate_facts_guard_custom_refinements() {
+        let args = object(json!({"plan": "move files"}));
+        let mut facts = BTreeSet::new();
+        assert!(!lambda_arg_matches_type_with_facts(
+            args.get("plan").unwrap(),
+            "plan",
+            &args,
+            "Plan{plan_approved(p)}",
+            &facts,
+        ));
+        facts.insert("plan_approved".to_string());
+        assert!(lambda_arg_matches_type_with_facts(
+            args.get("plan").unwrap(),
+            "plan",
+            &args,
+            "Plan{plan_approved(p)}",
+            &facts,
+        ));
+        assert!(lambda_arg_matches_type_with_facts(
+            args.get("plan").unwrap(),
+            "plan",
+            &args,
+            "Plan{plan_approved}",
+            &facts,
+        ));
+    }
+
+    #[test]
+    fn negated_refinements_only_use_semantic_predicates() {
+        let args = object(json!({"to": "+14155552671"}));
+        assert!(lambda_arg_matches_type(
+            args.get("to").unwrap(),
+            "to",
+            &args,
+            "PhoneRecipient{!(emergency_number(r))}",
+        ));
+        let args = object(json!({"to": "911"}));
+        assert!(!lambda_arg_matches_type(
+            args.get("to").unwrap(),
+            "to",
+            &args,
+            "PhoneRecipient{!(emergency_number(r))}",
+        ));
+        let args = object(json!({"value": "anything"}));
+        assert!(!lambda_arg_matches_type(
+            args.get("value").unwrap(),
+            "value",
+            &args,
+            "str{!(unknown_fact(v))}",
+        ));
+    }
+
+    #[test]
     fn unsupported_refinements_are_reported_for_readiness() {
         assert_eq!(
             unsupported_refinements_in_type("str{(valid_arxiv_id(id) && ends_with_pdf(path))}"),
             Vec::<String>::new()
         );
         assert!(unsupported_refinements_in_type("int{n > 0 && n <= 10}").is_empty());
+        assert!(unsupported_refinements_in_type("Result<unit{authed(s)}, Err>").is_empty());
+        assert!(unsupported_refinements_in_type(
+            "{layout: LayoutName, style: StyleName, aspect: AspectName}"
+        )
+        .is_empty());
+        assert!(unsupported_refinements_in_type(
+            "PhoneRecipient{(!(emergency_number(r)) && lawful_phone_use(r))}"
+        )
+        .is_empty());
         assert_eq!(
-            unsupported_refinements_in_type("str{host_custom_rule(x)}"),
-            vec!["host_custom_rule(x)".to_string()]
+            unsupported_refinements_in_type("str{!(unknown_fact(v))}"),
+            vec!["!(unknown_fact(v))".to_string()]
+        );
+        assert!(unsupported_refinements_in_type("Plan{plan_approved}").is_empty());
+        assert_eq!(
+            predicate_names_in_type("Result<unit{authed(s)}, Err{safe(e) && phase1_done}>"),
+            vec![
+                "authed".to_string(),
+                "phase1_done".to_string(),
+                "safe".to_string()
+            ]
+        );
+        assert_eq!(
+            unsupported_refinements_in_type("str{host_custom_rule x}"),
+            vec!["host_custom_rule x".to_string()]
         );
     }
 }
