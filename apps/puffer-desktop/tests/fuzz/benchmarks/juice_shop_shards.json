@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "name": "juice-shop-native-challenge-score",
+  "source": "https://github.com/juice-shop/juice-shop",
+  "score_endpoint": "/api/Challenges",
+  "default_base_url": "http://127.0.0.1:13000",
+  "ui_tree": "juice-shop / area / challenge-shard",
+  "shards": [
+    {
+      "id": "access-files-confidential-document",
+      "area": "files",
+      "title": "Access confidential document through exposed FTP files",
+      "goal": "Solve a native Juice Shop challenge by navigating through the exposed file surface.",
+      "target_challenges": ["directoryListingChallenge"],
+      "allowed_paths": ["/ftp", "/ftp/acquisitions.md"],
+      "offline_actions": [
+        { "type": "goto", "path": "/ftp/acquisitions.md" },
+        { "type": "wait", "ms": 500 }
+      ]
+    },
+    {
+      "id": "access-control-score-board",
+      "area": "access-control",
+      "title": "Discover the hidden score board",
+      "goal": "Reach the score board without using internal APIs.",
+      "target_challenges": ["scoreBoardChallenge"],
+      "allowed_paths": ["/", "/#/score-board", "/assets/public/images/padding/1px.png"],
+      "offline_actions": [
+        { "type": "goto", "path": "/#/score-board" },
+        { "type": "wait", "ms": 1000 }
+      ]
+    },
+    {
+      "id": "access-control-admin-section",
+      "area": "access-control",
+      "title": "Reach the administration section",
+      "goal": "Exercise hidden route discovery and admin-section access control.",
+      "target_challenges": ["adminSectionChallenge"],
+      "allowed_paths": ["/", "/#/administration", "/assets/public/images/padding/19px.png"],
+      "offline_actions": [
+        { "type": "goto", "path": "/assets/public/images/padding/19px.png" },
+        { "type": "wait", "ms": 1000 }
+      ]
+    },
+    {
+      "id": "xss-dom-search",
+      "area": "search",
+      "title": "DOM XSS through product search",
+      "goal": "Exercise the search UI with a DOM XSS payload.",
+      "target_challenges": ["localXssChallenge"],
+      "allowed_paths": ["/", "/#/search"],
+      "offline_actions": [
+        { "type": "goto", "path": "/#/search?q=%3Ciframe%20src%3D%22javascript%3Aalert%28%60xss%60%29%22%3E" },
+        { "type": "wait", "ms": 1000 }
+      ]
+    },
+    {
+      "id": "auth-admin-login",
+      "area": "auth",
+      "title": "Login as administrator with weak credentials",
+      "goal": "Exercise the login flow and solve the native admin login challenge.",
+      "target_challenges": ["loginAdminChallenge", "weakPasswordChallenge"],
+      "allowed_paths": ["/", "/#/login"],
+      "offline_actions": [
+        { "type": "request", "method": "POST", "path": "/rest/user/login", "json": { "email": "admin@juice-sh.op", "password": "admin123" } },
+        { "type": "wait", "ms": 1000 }
+      ]
+    },
+    {
+      "id": "auth-empty-registration",
+      "area": "auth",
+      "title": "Submit empty registration credentials",
+      "goal": "Exercise registration validation and native empty-registration scoring.",
+      "target_challenges": ["emptyUserRegistration"],
+      "allowed_paths": ["/#/register", "/api/Users"],
+      "offline_actions": [
+        { "type": "request", "method": "POST", "path": "/api/Users", "json": { "email": "", "password": "", "passwordRepeat": "", "securityQuestion": { "id": 1, "question": "Your eldest siblings middle name?", "createdAt": "", "updatedAt": "" }, "securityAnswer": "" } },
+        { "type": "wait", "ms": 500 }
+      ]
+    },
+    {
+      "id": "feedback-zero-stars",
+      "area": "feedback",
+      "title": "Submit zero-star feedback",
+      "goal": "Exercise feedback form validation and native zero-star scoring.",
+      "target_challenges": ["zeroStarsChallenge"],
+      "allowed_paths": ["/#/contact", "/api/Feedbacks"],
+      "offline_actions": [
+        { "type": "submitFeedback", "comment": "puffer fuzz zero star feedback", "rating": 0 },
+        { "type": "wait", "ms": 500 }
+      ]
+    },
+    {
+      "id": "metrics-exposure",
+      "area": "observability",
+      "title": "Expose Prometheus metrics",
+      "goal": "Exercise observability exposure through the public metrics endpoint.",
+      "target_challenges": ["exposedMetricsChallenge"],
+      "allowed_paths": ["/metrics"],
+      "offline_actions": [
+        { "type": "goto", "path": "/metrics" },
+        { "type": "wait", "ms": 500 }
+      ]
+    }
+  ]
+}

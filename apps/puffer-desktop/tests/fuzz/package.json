@@ -21,7 +21,10 @@
     "bug-list": "node bin/puffer-fuzz.mjs bug-list",
     "verify-plan": "node bin/puffer-fuzz-verify-plan.mjs",
     "guiflow-smoke": "node bin/puffer-guiflow-smoke.mjs",
+    "juice-shop-runner": "node bin/puffer-juice-shop-runner.mjs",
+    "juice-shop-aggregate": "node bin/puffer-juice-shop-aggregate.mjs",
     "openrouter-explorer": "node bin/puffer-openrouter-explorer.mjs",
+    "openrouter-juice-shop-explorer": "node bin/puffer-openrouter-juice-shop-explorer.mjs",
     "openrouter-aggregate": "node bin/puffer-openrouter-aggregate.mjs",
     "openrouter-triage": "node bin/puffer-openrouter-triage.mjs",
     "openrouter-reviewer": "node bin/puffer-openrouter-reviewer.mjs"
