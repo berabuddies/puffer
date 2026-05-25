@@ -27,6 +27,7 @@ enum PredicateKind {
     Provider,
     Rating,
     ScriptPath,
+    Uri,
     Url,
     YoutubeUrl,
 }
@@ -47,17 +48,24 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
         PredicateKind::ApiJson => api_json(value),
         PredicateKind::ArxivId => value.as_str().is_some_and(valid_arxiv_id_list),
         PredicateKind::AudioPath => value.as_str().is_some_and(|text| {
-            extension_in(text, &["aac", "aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav"])
+            extension_in(
+                text,
+                &["aac", "aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav"],
+            )
         }),
         PredicateKind::EmergencyNumber => value.as_str().is_some_and(emergency_number),
         PredicateKind::EvmAddress => value.as_str().is_some_and(valid_evm_address),
         PredicateKind::FilePath => value.as_str().is_some_and(path_like),
-        PredicateKind::Format => value.as_str().is_some_and(|text| format_matches(name, text)),
+        PredicateKind::Format => value
+            .as_str()
+            .is_some_and(|text| format_matches(name, text)),
         PredicateKind::Fps => json_integer(value).is_some_and(|fps| (1..=60).contains(&fps)),
         PredicateKind::Identifier => value.as_str().is_some_and(identifier_like),
         PredicateKind::Iso8601WithTz => value.as_str().is_some_and(iso8601_with_tz),
         PredicateKind::JsonField => value.as_str().is_some_and(json_field_path),
-        PredicateKind::Lat => json_number(value).is_some_and(|number| (-90.0..=90.0).contains(&number)),
+        PredicateKind::Lat => {
+            json_number(value).is_some_and(|number| (-90.0..=90.0).contains(&number))
+        }
         PredicateKind::Lng => {
             json_number(value).is_some_and(|number| (-180.0..=180.0).contains(&number))
         }
@@ -66,11 +74,20 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
         PredicateKind::MeetUrl => value.as_str().is_some_and(meet_url),
         PredicateKind::ParsedPaper => parsed_paper_value(value),
         PredicateKind::Path => value.as_str().is_some_and(path_like),
-        PredicateKind::Port => json_integer(value).is_some_and(|port| (1024..=65535).contains(&port)),
+        PredicateKind::Port => {
+            json_integer(value).is_some_and(|port| (1024..=65535).contains(&port))
+        }
         PredicateKind::PositiveText => value.as_str().is_some_and(positive_text),
-        PredicateKind::Provider => value.as_str().is_some_and(|text| provider_matches(name, text)),
-        PredicateKind::Rating => json_number(value).is_some_and(|number| (0.0..=5.0).contains(&number)),
-        PredicateKind::ScriptPath => value.as_str().is_some_and(|text| extension_in(text, &["py"])),
+        PredicateKind::Provider => value
+            .as_str()
+            .is_some_and(|text| provider_matches(name, text)),
+        PredicateKind::Rating => {
+            json_number(value).is_some_and(|number| (0.0..=5.0).contains(&number))
+        }
+        PredicateKind::ScriptPath => value
+            .as_str()
+            .is_some_and(|text| extension_in(text, &["py"])),
+        PredicateKind::Uri => value.as_str().is_some_and(valid_uri),
         PredicateKind::Url => value.as_str().is_some_and(valid_url),
         PredicateKind::YoutubeUrl => value.as_str().is_some_and(youtube_url),
     })
@@ -143,7 +160,8 @@ fn predicate_kind(name: &str) -> Option<PredicateKind> {
         | "valid_template"
         | "valid_token_id"
         | "valid_tunein_action" => PredicateKind::Identifier,
-        "is_url" | "valid_uri" | "valid_url" => PredicateKind::Url,
+        "valid_uri" => PredicateKind::Uri,
+        "is_url" | "valid_url" => PredicateKind::Url,
         "is_youtube" | "is_youtube_url" => PredicateKind::YoutubeUrl,
         "iso8601_with_tz" => PredicateKind::Iso8601WithTz,
         "json_format" | "pretty_format" | "valid_format" => PredicateKind::Format,
@@ -236,6 +254,55 @@ fn valid_url(text: &str) -> bool {
     url::Url::parse(text)
         .ok()
         .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+}
+
+fn valid_uri(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || has_control(text) {
+        return false;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return match value {
+            Value::Array(items) => !items.is_empty() && items.iter().all(valid_uri_value),
+            other => valid_uri_value(&other),
+        };
+    }
+    valid_uri_text(text)
+}
+
+fn valid_uri_value(value: &Value) -> bool {
+    value.as_str().is_some_and(valid_uri_text)
+}
+
+fn valid_uri_text(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || has_control(text) {
+        return false;
+    }
+    if spotify_uri(text) || spotify_bare_id(text) {
+        return true;
+    }
+    valid_url(text)
+}
+
+fn spotify_uri(text: &str) -> bool {
+    let mut parts = text.split(':');
+    matches!(parts.next(), Some("spotify"))
+        && matches!(
+            parts.next(),
+            Some("track" | "album" | "artist" | "playlist" | "show" | "episode")
+        )
+        && parts
+            .next()
+            .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        && parts.next().is_none()
+}
+
+fn spotify_bare_id(text: &str) -> bool {
+    matches!(text.len(), 22 | 32)
+        && text
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
 fn youtube_url(text: &str) -> bool {
@@ -378,16 +445,22 @@ fn iso8601_with_tz(text: &str) -> bool {
 }
 
 fn json_number(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+    value.as_f64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<f64>().ok())
+    })
 }
 
 fn json_integer(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse::<i64>().ok()))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<i64>().ok())
+        })
 }
 
 fn has_control(text: &str) -> bool {
@@ -418,8 +491,32 @@ mod tests {
     #[test]
     fn checks_common_semantic_predicates() {
         assert_eq!(matches(&json!("openai/puffer"), "is_repo(r)"), Some(true));
-        assert_eq!(matches(&json!("https://youtu.be/abc"), "is_youtube(u)"), Some(true));
-        assert_eq!(matches(&json!("ftp://example.com"), "is_url(u)"), Some(false));
+        assert_eq!(
+            matches(&json!("https://youtu.be/abc"), "is_youtube(u)"),
+            Some(true)
+        );
+        assert_eq!(
+            matches(&json!("ftp://example.com"), "is_url(u)"),
+            Some(false)
+        );
+        assert_eq!(
+            matches(
+                &json!("spotify:track:0DiWol3AO6WpXZgp0goxAV"),
+                "valid_uri(u)"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            matches(
+                &json!(r#"["spotify:track:0DiWol3AO6WpXZgp0goxAV"]"#),
+                "valid_uri(u)"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            matches(&json!("spotify:track:0DiWol3AO6WpXZgp0goxAV"), "is_url(u)"),
+            Some(false)
+        );
         assert_eq!(matches(&json!(91.0), "valid_lat(lat)"), Some(false));
         assert_eq!(matches(&json!(1500), "ephemeral_port(p)"), Some(true));
     }
