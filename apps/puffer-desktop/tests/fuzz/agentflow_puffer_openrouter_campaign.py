@@ -46,6 +46,7 @@ SHARD_LIMIT = os.environ.get("PUFFER_OPENROUTER_SHARD_LIMIT", "2")
 CONCURRENCY = int(os.environ.get("PUFFER_OPENROUTER_CONCURRENCY", "2"))
 PLANNER_MODEL = os.environ.get("PUFFER_OPENROUTER_PLANNER_MODEL", "gpt-5.4")
 PLANNER_EFFORT = os.environ.get("PUFFER_OPENROUTER_PLANNER_EFFORT", "high")
+PRESELECT_DIR = "apps/puffer-desktop/tests/fuzz/.runs/openrouter-scheduler-preselect"
 
 
 def scheduled_areas():
@@ -56,6 +57,23 @@ def scheduled_areas():
         for item in os.environ.get("PUFFER_OPENROUTER_AREAS", "").split(",")
         if item.strip()
     ]
+    evolution_json = f"{PRESELECT_DIR}/evolved-schedule.json"
+    evolution_md = f"{PRESELECT_DIR}/evolved-schedule.md"
+    subprocess.run(
+        [
+            "node",
+            "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs",
+            "evolve-tree",
+            "--out",
+            evolution_md,
+            "--json-out",
+            evolution_json,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
     command = [
         "node",
         "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs",
@@ -66,6 +84,8 @@ def scheduled_areas():
         NAMESPACE,
         "--format",
         "json",
+        "--evolution",
+        evolution_json,
     ]
     if requested:
         command.extend(["--shards", ",".join(requested)])
@@ -124,6 +144,7 @@ Read only these files:
 - apps/puffer-desktop/tests/fuzz/README.md
 - apps/puffer-desktop/tests/fuzz/agent_guide.md
 - apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md
+- apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.md
 - apps/puffer-desktop/tests/fuzz/playwright_adapter.md
 - apps/puffer-desktop/tests/fuzz/BUGS.md
 
@@ -254,6 +275,9 @@ echo OPENROUTER_REPLAY_STATUS "$replay_status"
 if [[ -s "$out_dir/bounded-replay-report.json" ]]; then
   node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
   node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/findings.md"
+  if [[ -s "$out_dir/verdict-gate.json" ]] && jq -e '.disposition == "candidate"' "$out_dir/verdict-gate.json" >/dev/null; then
+    node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-reviewer.mjs --verdict "$out_dir/verdict.json" --gate "$out_dir/verdict-gate.json" --replay "$out_dir/bounded-replay-report.json" --out "$out_dir/reviewer.json" || true
+  fi
 else
   echo OPENROUTER_REPLAY_REPORT_MISSING {{ item.namespace }}
 fi
@@ -282,7 +306,8 @@ with Graph(
             + "mkdir -p apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight\n"
             "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate\n"
             "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.json\n"
-            "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit ${PUFFER_OPENROUTER_SHARD_LIMIT:-2} --namespace ${PUFFER_OPENROUTER_NAMESPACE:-openrouter-small} --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.json\n"
+            "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-tree --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.json\n"
+            "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit ${PUFFER_OPENROUTER_SHARD_LIMIT:-2} --namespace ${PUFFER_OPENROUTER_NAMESPACE:-openrouter-small} --evolution apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.json --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.json\n"
             "echo OPENROUTER_PREFLIGHT_OK\n"
         ),
         timeout_seconds=120,

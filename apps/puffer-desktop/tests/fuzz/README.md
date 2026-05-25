@@ -88,6 +88,23 @@ into each shard run directory. Explorer and triage prompts then read the same
 gold-standard acceptance/rejection checklist, so validation feedback can reduce
 false positives before increasing shard count.
 
+Generate an evolution plan from replay feedback before selecting the next shard
+batch:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-tree \
+  --out apps/puffer-desktop/tests/fuzz/.runs/manual/evolved-schedule.md \
+  --json-out apps/puffer-desktop/tests/fuzz/.runs/manual/evolved-schedule.json
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule \
+  --limit 4 \
+  --namespace manual-evolved \
+  --evolution apps/puffer-desktop/tests/fuzz/.runs/manual/evolved-schedule.json
+```
+
+The evolution plan is deterministic and does not mutate source shard files. It
+records hot-shard split recommendations, cold-shard demotion weights, and
+starvation-floor forced shards.
+
 Generate deterministic fuzz cases for one area:
 
 ```sh
@@ -208,12 +225,30 @@ The OpenRouter campaign uses the same UI-tree scheduler and `BUG_LIST_APPEND`
 handoff. Codex plans the shard boundaries and report expectations, the
 OpenRouter-backed Explorer uses function tools to construct the assigned GUI
 trigger sequence, the harness replays that generated case, and an
-OpenRouter-backed triage step writes the shard finding report. It defaults to
-two shards and two-way concurrency. The triage step has a deterministic replay
-gate: it suppresses `BUG_LIST_APPEND` when bounded replay does not report a new
-candidate, product candidate, stable failure, or actionable failure. Increase
-`PUFFER_OPENROUTER_SHARD_LIMIT` and `PUFFER_OPENROUTER_CONCURRENCY` only after
-the small run shows acceptable instruction-following and false-positive rates.
+OpenRouter-backed triage step writes the shard finding report. Preflight also
+writes an evolution plan and passes it back into scheduling. Triage now emits a
+strict `verdict.json`; the citation gate writes `verdict-gate.json` and only
+admitted verdicts can produce a `BUG_LIST_APPEND` block. Candidate verdicts can
+be reviewed with `puffer-openrouter-reviewer.mjs`; the reviewer writes
+`reviewer.json` but does not edit ledgers. It defaults to two shards and two-way
+concurrency. Increase `PUFFER_OPENROUTER_SHARD_LIMIT` and
+`PUFFER_OPENROUTER_CONCURRENCY` only after the small run shows acceptable
+instruction-following and false-positive rates.
+
+Maintain candidate findings from the main-agent process only:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs candidate-list \
+  --append \
+  --verdict apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict.json \
+  --gate apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict-gate.json \
+  --evidence apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs candidate-list \
+  --set-status \
+  --id PUF-CAND-0001 \
+  --status soft-bug \
+  --note "reviewer admitted"
+```
 
 ## Recommended Workflow
 
