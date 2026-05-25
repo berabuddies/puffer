@@ -349,7 +349,7 @@ fn workflows_connectors_filter_presets_use_stable_capability_terms() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("filters: trigger-ready | no-trigger | has-actions"));
+    assert!(text.contains("filters: trigger-ready | no-trigger | draft | has-actions"));
     assert!(text.contains("showing 7/11 connectors for query=\"has-actions\""));
     assert!(text.contains("- telegram-login [auth,events,no-trigger,actions]"));
     assert!(text.contains("actions=send_message,"));
