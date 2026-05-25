@@ -43,8 +43,16 @@ function readShard(dir) {
   const reportJson = path.join(dir, "bounded-replay-report.json");
   const reportMd = path.join(dir, "bounded-replay-report.md");
   const findingsMd = path.join(dir, "findings.md");
+  const verdictJson = path.join(dir, "verdict.json");
+  const gateJson = path.join(dir, "verdict-gate.json");
   const data = fs.existsSync(reportJson)
     ? JSON.parse(fs.readFileSync(reportJson, "utf8"))
+    : null;
+  const verdict = fs.existsSync(verdictJson)
+    ? JSON.parse(fs.readFileSync(verdictJson, "utf8"))
+    : null;
+  const gate = fs.existsSync(gateJson)
+    ? JSON.parse(fs.readFileSync(gateJson, "utf8"))
     : null;
   const findingsText = fs.existsSync(findingsMd)
     ? fs.readFileSync(findingsMd, "utf8")
@@ -56,9 +64,13 @@ function readShard(dir) {
     reportJson: relative(reportJson),
     reportMd: relative(reportMd),
     findingsMd: relative(findingsMd),
+    verdictJson: relative(verdictJson),
+    gateJson: relative(gateJson),
     missingReplay: data === null,
     summary,
     findings: data?.findings ?? [],
+    verdict,
+    gate,
     bugListAppendBlocks: extractBugListAppendBlocks(findingsText),
     finalReportPresent: findingsText.trim().length > 0
   };
@@ -93,6 +105,11 @@ function summarize(shards) {
     missingReplayReports: 0,
     finalReportsPresent: 0,
     bugListAppendBlocks: 0,
+    verdictReportsPresent: 0,
+    admittedVerdicts: 0,
+    candidateVerdicts: 0,
+    dismissedVerdicts: 0,
+    gateFailedVerdicts: 0,
     totalReplayCases: 0,
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
@@ -107,6 +124,11 @@ function summarize(shards) {
       summary.completedReplayReports += 1;
     }
     if (shard.finalReportPresent) summary.finalReportsPresent += 1;
+    if (shard.verdict) summary.verdictReportsPresent += 1;
+    if (shard.gate?.disposition === "admitted") summary.admittedVerdicts += 1;
+    if (shard.gate?.disposition === "candidate") summary.candidateVerdicts += 1;
+    if (shard.gate?.disposition === "dismissed") summary.dismissedVerdicts += 1;
+    if (shard.gate?.disposition === "gate_failed") summary.gateFailedVerdicts += 1;
     summary.bugListAppendBlocks += shard.bugListAppendBlocks.length;
     summary.totalReplayCases += Number(shard.summary.total ?? 0);
     summary.newCandidateFindings += Number(shard.summary.newCandidateFindings ?? 0);
@@ -151,6 +173,11 @@ function formatMarkdown(payload) {
     `- Missing replay reports: ${payload.summary.missingReplayReports}`,
     `- Final reports present: ${payload.summary.finalReportsPresent}`,
     `- BUG_LIST_APPEND blocks: ${payload.summary.bugListAppendBlocks}`,
+    `- Verdict reports present: ${payload.summary.verdictReportsPresent}`,
+    `- Admitted verdicts: ${payload.summary.admittedVerdicts}`,
+    `- Candidate verdicts: ${payload.summary.candidateVerdicts}`,
+    `- Dismissed verdicts: ${payload.summary.dismissedVerdicts}`,
+    `- Gate-failed verdicts: ${payload.summary.gateFailedVerdicts}`,
     `- Replay cases: ${payload.summary.totalReplayCases}`,
     `- New candidate findings: ${payload.summary.newCandidateFindings}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings}`,
@@ -170,12 +197,17 @@ function formatMarkdown(payload) {
     lines.push(`- Directory: ${shard.dir}`);
     lines.push(`- Bounded replay: ${shard.missingReplay ? "missing" : shard.reportJson}`);
     lines.push(`- Findings report: ${shard.finalReportPresent ? shard.findingsMd : "missing"}`);
+    lines.push(`- Verdict: ${shard.verdict ? shard.verdictJson : "missing"}`);
+    lines.push(`- Citation gate: ${shard.gate ? `${shard.gateJson} (${shard.gate.disposition})` : "missing"}`);
     lines.push(`- Replay cases: ${shard.summary.total ?? 0}`);
     lines.push(`- New candidates: ${shard.summary.newCandidateFindings ?? 0}`);
     lines.push(`- Known duplicates: ${shard.summary.knownDuplicateFindings ?? 0}`);
     lines.push(`- Non-passing failures: ${shard.summary.nonPassingFailures ?? shard.summary.actionableFailures ?? 0}`);
     lines.push(`- Actionable product failures: ${shard.summary.actionableFailures ?? 0}`);
     lines.push(`- BUG_LIST_APPEND blocks: ${shard.bugListAppendBlocks.length}`);
+    if (shard.gate?.failureReasons?.length) {
+      lines.push(`- Gate failures: ${shard.gate.failureReasons.join("; ")}`);
+    }
     lines.push("");
   }
   lines.push("## BUG_LIST_APPEND Blocks", "");

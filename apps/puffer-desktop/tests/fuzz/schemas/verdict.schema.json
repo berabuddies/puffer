@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferUiuxVerdict",
+  "type": "object",
+  "required": [
+    "version",
+    "decision",
+    "title",
+    "severity",
+    "area",
+    "shard",
+    "source_run",
+    "primary_cause",
+    "citations",
+    "expected",
+    "actual",
+    "impact",
+    "repro",
+    "notes"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "decision": { "enum": ["admit", "candidate", "dismiss"] },
+    "title": { "type": "string" },
+    "severity": { "enum": ["P0", "P1", "P2", "P3"] },
+    "area": { "type": "string" },
+    "shard": { "type": "string" },
+    "source_run": { "type": "string" },
+    "primary_cause": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/citation" }
+      ]
+    },
+    "citations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/citation" }
+    },
+    "expected": { "type": "string" },
+    "actual": { "type": "string" },
+    "impact": { "type": "string" },
+    "repro": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "notes": { "type": "string" }
+  },
+  "$defs": {
+    "citation": {
+      "type": "object",
+      "required": ["id", "type", "quote_hash"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "enum": [
+            "action",
+            "network",
+            "storage",
+            "url",
+            "console",
+            "accessibility",
+            "predicate"
+          ]
+        },
+        "quote_hash": { "type": "string" }
+      }
+    }
+  }
+}

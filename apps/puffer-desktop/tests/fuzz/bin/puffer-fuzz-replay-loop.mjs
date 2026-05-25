@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/pro
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { buildReplayEvidenceIndex } from "../lib/evidence-index.mjs";
 import { aggregateTarpit, detectTarpit } from "../lib/tarpit.mjs";
 import { aggregateTemporal, buildIntentLedger, evaluateTemporalReplay } from "../lib/temporal-invariants.mjs";
 
@@ -246,6 +247,7 @@ async function main() {
     findings,
     results
   };
+  Object.assign(payload, buildReplayEvidenceIndex(payload));
   await writeFile(runtimeCoveragePath, `${JSON.stringify(runtimeCoverage, null, 2)}\n`);
   await writeFile(jsonOut, `${JSON.stringify(payload, null, 2)}\n`);
   await writeFile(out, formatMarkdown(payload));
@@ -644,6 +646,7 @@ function formatMarkdown(payload) {
     `- Escape suggested: ${payload.summary.runtimeCoverage?.escapeSuggestedCount ?? 0}`,
     `- Temporal invariant observations: ${payload.summary.temporal?.observed ?? 0}`,
     `- Temporal invariant failures: ${payload.summary.temporal?.failed ?? 0}`,
+    `- Evidence entries: ${payload.evidence_index?.length ?? 0}`,
     "",
     "## Classification",
     ""
@@ -672,6 +675,17 @@ function formatMarkdown(payload) {
     lines.push("- None");
   } else {
     for (const [route, count] of allRouteCounts) lines.push(`- ${route}: ${count}`);
+  }
+  lines.push(
+    "",
+    "## Evidence Index",
+    ""
+  );
+  for (const entry of (payload.evidence_index ?? []).slice(0, 40)) {
+    lines.push(`- ${entry.id}: ${entry.type}; sha256=${entry.sha256}; span=${entry.byte_span?.join("-")}`);
+  }
+  if ((payload.evidence_index ?? []).length > 40) {
+    lines.push(`- ... ${payload.evidence_index.length - 40} more entries omitted from Markdown`);
   }
   lines.push(
     "",
