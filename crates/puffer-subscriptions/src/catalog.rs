@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 mod schemas;
+mod webhooks;
 
 use schemas::*;
 
@@ -99,7 +100,7 @@ impl ConnectorTemplate {
 
 /// Returns the built-in connector templates required by the workflow spec.
 pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
-    vec![
+    let mut templates = vec![
         telegram_login_template(),
         telegram_bot_template(),
         discord_bot_template(),
@@ -110,22 +111,9 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         slack_login_template(),
         slack_bot_template(),
         email_template(),
-        alertmanager_webhook_template(),
-        asana_webhook_template(),
-        datadog_webhook_template(),
-        newrelic_webhook_template(),
-        github_webhook_template(),
-        grafana_webhook_template(),
-        gitlab_webhook_template(),
-        jira_webhook_template(),
-        linear_webhook_template(),
-        pagerduty_webhook_template(),
-        sentry_webhook_template(),
-        shopify_webhook_template(),
-        stripe_webhook_template(),
-        trello_webhook_template(),
-        webhook_template(),
-    ]
+    ];
+    templates.extend(webhooks::builtin_webhook_templates());
+    templates
 }
 
 /// Looks up a built-in connector template by slug.
@@ -148,21 +136,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "slack-login" => "slack-login".to_string(),
         "telegram-bot" => "telegram-bot".to_string(),
         "slack-bot" => "slack-bot".to_string(),
-        "alertmanager-webhook" => "alertmanager-webhook".to_string(),
-        "asana-webhook" => "asana-webhook".to_string(),
-        "datadog-webhook" => "datadog-webhook".to_string(),
-        "newrelic-webhook" => "newrelic-webhook".to_string(),
-        "github-webhook" => "github-webhook".to_string(),
-        "grafana-webhook" => "grafana-webhook".to_string(),
-        "gitlab-webhook" => "gitlab-webhook".to_string(),
-        "jira-webhook" => "jira-webhook".to_string(),
-        "linear-webhook" => "linear-webhook".to_string(),
-        "pagerduty-webhook" => "pagerduty-webhook".to_string(),
-        "sentry-webhook" => "sentry-webhook".to_string(),
-        "shopify-webhook" => "shopify-webhook".to_string(),
-        "stripe-webhook" => "stripe-webhook".to_string(),
-        "trello-webhook" => "trello-webhook".to_string(),
-        "webhook" => "webhook".to_string(),
+        slug if webhooks::is_builtin_webhook_slug(slug) => slug.to_string(),
         _ => connector_slug.to_string(),
     }
 }
@@ -329,255 +303,6 @@ fn email_template() -> ConnectorTemplate {
         subscriber: None,
         output_schema: message_output_schema(),
         actions: send_message_actions(),
-    }
-}
-
-fn webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "webhook".to_string(),
-        description: "HTTP webhook connector configured through puffer serve".to_string(),
-        skill: "webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: true,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: message_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn alertmanager_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "alertmanager-webhook".to_string(),
-        description: "Prometheus Alertmanager webhook preset backed by puffer serve".to_string(),
-        skill: "alertmanager-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: alertmanager_alert_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn asana_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "asana-webhook".to_string(),
-        description: "Asana task, project, and story webhook preset backed by puffer serve"
-            .to_string(),
-        skill: "asana-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: asana_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn datadog_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "datadog-webhook".to_string(),
-        description: "Datadog monitor and event webhook preset backed by puffer serve".to_string(),
-        skill: "datadog-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: datadog_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn newrelic_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "newrelic-webhook".to_string(),
-        description: "New Relic issue and alert webhook preset backed by puffer serve".to_string(),
-        skill: "newrelic-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: newrelic_issue_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn github_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "github-webhook".to_string(),
-        description: "GitHub event webhook preset backed by puffer serve".to_string(),
-        skill: "github-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: github_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn grafana_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "grafana-webhook".to_string(),
-        description: "Grafana Alerting webhook preset backed by puffer serve".to_string(),
-        skill: "grafana-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: grafana_alert_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn gitlab_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "gitlab-webhook".to_string(),
-        description:
-            "GitLab issue, merge request, comment, and push webhook preset backed by puffer serve"
-                .to_string(),
-        skill: "gitlab-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: gitlab_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn jira_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "jira-webhook".to_string(),
-        description: "Jira issue and comment webhook preset backed by puffer serve".to_string(),
-        skill: "jira-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: jira_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn linear_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "linear-webhook".to_string(),
-        description: "Linear issue and project webhook preset backed by puffer serve".to_string(),
-        skill: "linear-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: linear_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn stripe_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "stripe-webhook".to_string(),
-        description: "Stripe invoice, payment, and billing webhook preset backed by puffer serve"
-            .to_string(),
-        skill: "stripe-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: stripe_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn pagerduty_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "pagerduty-webhook".to_string(),
-        description: "PagerDuty incident and service webhook preset backed by puffer serve"
-            .to_string(),
-        skill: "pagerduty-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: pagerduty_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn sentry_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "sentry-webhook".to_string(),
-        description: "Sentry issue, event, and alert webhook preset backed by puffer serve"
-            .to_string(),
-        skill: "sentry-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: sentry_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn shopify_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "shopify-webhook".to_string(),
-        description:
-            "Shopify order, product, customer, and inventory webhook preset backed by puffer serve"
-                .to_string(),
-        skill: "shopify-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: shopify_event_output_schema(),
-        actions: BTreeMap::new(),
-    }
-}
-
-fn trello_webhook_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "trello-webhook".to_string(),
-        description: "Trello board, card, list, and comment webhook preset backed by puffer serve"
-            .to_string(),
-        skill: "trello-webhook".to_string(),
-        binary: "puffer connector webhook".to_string(),
-        command: Vec::new(),
-        requires_auth: false,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: trello_event_output_schema(),
-        actions: BTreeMap::new(),
     }
 }
 

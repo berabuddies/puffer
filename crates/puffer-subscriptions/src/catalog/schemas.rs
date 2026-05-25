@@ -425,6 +425,27 @@ pub(super) fn pagerduty_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Opsgenie alert webhook output schema.
+pub(super) fn opsgenie_alert_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "opsgenie_alert"},
+            "action": {"type": "string"},
+            "alert_id": {"type": "string"},
+            "alias": {"type": "string"},
+            "tiny_id": {"type": "string"},
+            "message": {"type": "string"},
+            "priority": {"type": "string"},
+            "entity": {"type": "string"},
+            "source": {"type": "string"},
+            "integration": {"type": "string"}
+        },
+        "required": ["action", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Sentry webhook event output schema.
 pub(super) fn sentry_event_output_schema() -> Value {
     serde_json::json!({

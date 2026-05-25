@@ -236,6 +236,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "asana-webhook"
             | "datadog-webhook"
             | "newrelic-webhook"
+            | "opsgenie-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"
@@ -501,6 +502,17 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "new relic alert").expect("slug");
 
         assert_eq!(slug, "newrelic-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_opsgenie_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "opsgenie alert action").expect("slug");
+
+        assert_eq!(slug, "opsgenie-webhook");
     }
 
     #[test]
