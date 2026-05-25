@@ -78,6 +78,9 @@ input_schema:
     text:
       type: string
       description: Text for type, insertText, or fill actions.
+    question:
+      type: string
+      description: Optional caller question preserved for screenshot-style verified skill contracts.
     key:
       type: string
       description: Keyboard key for press, keydown, or keyup.

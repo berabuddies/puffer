@@ -1,13 +1,13 @@
 //! Runtime-local Browser tool client for the desktop daemon.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 #[cfg(test)]
 use std::cell::RefCell;
 use std::path::Path;
-use tungstenite::{Message, connect};
+use tungstenite::{connect, Message};
 use url::Url;
 use uuid::Uuid;
 
@@ -107,6 +107,8 @@ struct BrowserToolInput {
     value: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
     #[serde(default)]
     key: Option<String>,
     #[serde(default)]
@@ -428,6 +430,7 @@ mod tests {
                 ref_id: None,
                 value: None,
                 text: None,
+                question: None,
                 key: None,
                 script: None,
                 direction: None,
@@ -463,6 +466,7 @@ mod tests {
             ref_id: None,
             value: None,
             text: None,
+            question: None,
             key: None,
             script: None,
             direction: None,
@@ -498,6 +502,7 @@ mod tests {
             "screenshotFormat": "jpeg",
             "screenshotQuality": 70,
             "query": "button",
+            "question": "What changed visually?",
             "idleMs": 500,
             "timeoutMs": 30000
         }))
@@ -544,6 +549,10 @@ mod tests {
         assert_eq!(
             roundtrip.get("query").and_then(Value::as_str),
             Some("button")
+        );
+        assert_eq!(
+            roundtrip.get("question").and_then(Value::as_str),
+            Some("What changed visually?")
         );
         assert_eq!(roundtrip.get("idleMs").and_then(Value::as_u64), Some(500));
         assert_eq!(
