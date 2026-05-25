@@ -65,13 +65,27 @@ try {
   for (let index = 0; index < (plan.actions ?? []).length; index += 1) {
     const action = plan.actions[index];
     const before = await compactDom(page).catch((caught) => ({ error: String(caught?.message ?? caught) }));
-    const actionResult = await performAction(page, baseUrl, action);
+    let actionResult = null;
+    let actionError = "";
+    try {
+      actionResult = await performAction(page, baseUrl, action);
+    } catch (caught) {
+      actionError = String(caught?.stack ?? caught?.message ?? caught);
+      if (action.required === true) throw caught;
+    }
     const after = await compactDom(page).catch((caught) => ({ error: String(caught?.message ?? caught) }));
     records.push({
       type: action.type === "request" ? "network" : "action",
-      value: JSON.stringify({ shardId, step: index + 1, action, result: actionResult, before, after }),
+      value: JSON.stringify({ shardId, step: index + 1, action, result: actionResult, error: actionError, before, after }),
       metadata: { shardId, step: index + 1, actionType: action.type }
     });
+    if (actionError) {
+      records.push({
+        type: "console",
+        value: JSON.stringify({ shardId, step: index + 1, actionType: action.type, actionError }),
+        metadata: { shardId, step: index + 1, actionType: action.type }
+      });
+    }
   }
   for (const item of consoleErrors) {
     records.push({ type: "console", value: JSON.stringify({ shardId, text: item }), metadata: { shardId } });

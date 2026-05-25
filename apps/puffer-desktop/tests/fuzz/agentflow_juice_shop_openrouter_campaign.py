@@ -161,7 +161,7 @@ with Graph(
     plan = shell(
         task_id="plan",
         script=PLAN_SCRIPT,
-        timeout_seconds=int(os.environ.get("PUFFER_OPENROUTER_PLAN_NODE_TIMEOUT_SECONDS", "180")),
+        timeout_seconds=int(os.environ.get("PUFFER_OPENROUTER_PLAN_NODE_TIMEOUT_SECONDS", "260")),
         success_criteria=[{"kind": "output_contains", "value": "JUICE_PLAN"}],
     )
 
