@@ -5,6 +5,7 @@ use serde_json::Value;
 use super::{header_value, number_or_string, pointer_string, snippet, string_field};
 
 mod asana;
+mod grafana;
 mod pagerduty;
 mod sentry;
 mod shopify;
@@ -18,6 +19,24 @@ pub(super) fn asana_payload_is_heartbeat(headers: &HeaderMap, payload: &Value) -
 /// Converts an Asana webhook payload into an inbound Puffer message.
 pub(super) fn asana_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     asana::asana_inbound(headers, payload)
+}
+
+/// Converts a known provider webhook payload into an inbound Puffer message.
+pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    asana_inbound(headers, payload)
+        .or_else(|| jira_inbound(headers, payload))
+        .or_else(|| grafana_inbound(headers, payload))
+        .or_else(|| pagerduty_inbound(headers, payload))
+        .or_else(|| sentry_inbound(headers, payload))
+        .or_else(|| shopify_inbound(headers, payload))
+        .or_else(|| stripe_inbound(headers, payload))
+        .or_else(|| trello_inbound(headers, payload))
+        .or_else(|| gitlab_inbound(headers, payload))
+}
+
+/// Converts a Grafana Alerting webhook payload into an inbound Puffer message.
+pub(super) fn grafana_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    grafana::grafana_inbound(headers, payload)
 }
 
 /// Converts a Trello webhook payload into an inbound Puffer message.

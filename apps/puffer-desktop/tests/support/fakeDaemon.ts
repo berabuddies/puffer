@@ -501,6 +501,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "grafana-webhook",
+        description: "Grafana Alerting webhook preset backed by puffer serve",
+        skill: "grafana-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "grafana-webhook",
+        connect_command: "/connect grafana-webhook grafana-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "gitlab-webhook",
         description: "GitLab issue, merge request, comment, and push webhook preset backed by puffer serve",
         skill: "gitlab-webhook",

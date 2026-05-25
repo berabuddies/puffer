@@ -234,6 +234,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "matrix-bot"
             | "asana-webhook"
             | "github-webhook"
+            | "grafana-webhook"
             | "gitlab-webhook"
             | "jira-webhook"
             | "linear-webhook"
@@ -456,6 +457,16 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "linear issue").expect("slug");
 
         assert_eq!(slug, "linear-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_grafana_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "grafana alert").expect("slug");
+
+        assert_eq!(slug, "grafana-webhook");
     }
 
     #[test]

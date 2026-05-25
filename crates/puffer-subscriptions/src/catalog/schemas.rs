@@ -285,6 +285,26 @@ pub(super) fn jira_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Grafana Alerting webhook output schema.
+pub(super) fn grafana_alert_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "grafana_alert"},
+            "receiver": {"type": "string"},
+            "status": {"type": "string"},
+            "state": {"type": "string"},
+            "alert_count": {"type": "integer"},
+            "group_key": {"type": "string"},
+            "labels": {"type": "object"},
+            "message": {"type": "string"},
+            "external_url": {"type": "string"}
+        },
+        "required": ["status", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Linear webhook event output schema.
 pub(super) fn linear_event_output_schema() -> Value {
     serde_json::json!({

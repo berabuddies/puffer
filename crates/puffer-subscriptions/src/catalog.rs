@@ -112,6 +112,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         email_template(),
         asana_webhook_template(),
         github_webhook_template(),
+        grafana_webhook_template(),
         gitlab_webhook_template(),
         jira_webhook_template(),
         linear_webhook_template(),
@@ -146,6 +147,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "slack-bot" => "slack-bot".to_string(),
         "asana-webhook" => "asana-webhook".to_string(),
         "github-webhook" => "github-webhook".to_string(),
+        "grafana-webhook" => "grafana-webhook".to_string(),
         "gitlab-webhook" => "gitlab-webhook".to_string(),
         "jira-webhook" => "jira-webhook".to_string(),
         "linear-webhook" => "linear-webhook".to_string(),
@@ -369,6 +371,22 @@ fn github_webhook_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: github_event_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn grafana_webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "grafana-webhook".to_string(),
+        description: "Grafana Alerting webhook preset backed by puffer serve".to_string(),
+        skill: "grafana-webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: grafana_alert_output_schema(),
         actions: BTreeMap::new(),
     }
 }

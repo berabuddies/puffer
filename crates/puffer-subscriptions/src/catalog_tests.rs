@@ -19,6 +19,7 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"email".to_string()));
     assert!(slugs.contains(&"asana-webhook".to_string()));
     assert!(slugs.contains(&"github-webhook".to_string()));
+    assert!(slugs.contains(&"grafana-webhook".to_string()));
     assert!(slugs.contains(&"gitlab-webhook".to_string()));
     assert!(slugs.contains(&"jira-webhook".to_string()));
     assert!(slugs.contains(&"linear-webhook".to_string()));
@@ -42,6 +43,10 @@ fn suggested_connection_slugs_match_connect_defaults() {
     assert_eq!(
         suggested_connection_slug("github-webhook"),
         "github-webhook"
+    );
+    assert_eq!(
+        suggested_connection_slug("grafana-webhook"),
+        "grafana-webhook"
     );
     assert_eq!(
         suggested_connection_slug("gitlab-webhook"),
@@ -140,6 +145,7 @@ fn serve_mode_connectors_do_not_claim_workflow_runtime_capabilities() {
         "matrix-bot",
         "asana-webhook",
         "github-webhook",
+        "grafana-webhook",
         "gitlab-webhook",
         "jira-webhook",
         "linear-webhook",

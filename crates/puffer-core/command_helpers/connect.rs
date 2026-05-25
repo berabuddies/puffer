@@ -30,14 +30,16 @@ pub fn execute_connect_flow(
         "matrix-bot" => {
             serve_config::connect_matrix_bot(state, resources, &target.connection_name)?
         }
-        "asana-webhook" | "github-webhook" | "gitlab-webhook" | "jira-webhook"
-        | "linear-webhook" | "pagerduty-webhook" | "sentry-webhook" | "shopify-webhook"
-        | "stripe-webhook" | "trello-webhook" => serve_config::connect_webhook_preset(
-            state,
-            resources,
-            &target.connector_slug,
-            &target.connection_name,
-        )?,
+        "asana-webhook" | "github-webhook" | "grafana-webhook" | "gitlab-webhook"
+        | "jira-webhook" | "linear-webhook" | "pagerduty-webhook" | "sentry-webhook"
+        | "shopify-webhook" | "stripe-webhook" | "trello-webhook" => {
+            serve_config::connect_webhook_preset(
+                state,
+                resources,
+                &target.connector_slug,
+                &target.connection_name,
+            )?
+        }
         "webhook" => serve_config::connect_webhook(state, resources, &target.connection_name)?,
         _ => connect_generic(state, resources, &target)?,
     };
@@ -799,6 +801,8 @@ mod tests {
             "Should this webhook require bearer-token auth?" => "No bearer token",
             "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
             "What URL path should GitHub post webhook events to?" => "/github",
+            "What bind address should the Grafana webhook listen on?" => "127.0.0.1:9596",
+            "What URL path should Grafana post webhook events to?" => "grafana",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
             "What bind address should the PagerDuty webhook listen on?" => "127.0.0.1:9796",

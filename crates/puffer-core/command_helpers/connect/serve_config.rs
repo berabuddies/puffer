@@ -218,6 +218,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/github",
             method: "GitHub event webhook",
         },
+        "grafana-webhook" => WebhookPreset {
+            product: "Grafana",
+            default_path: "/grafana",
+            method: "Grafana Alerting webhook",
+        },
         "gitlab-webhook" => WebhookPreset {
             product: "GitLab",
             default_path: "/gitlab",
@@ -420,6 +425,8 @@ mod tests {
             "What URL path should Asana post webhook events to?" => "asana",
             "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
             "What URL path should GitHub post webhook events to?" => "/github",
+            "What bind address should the Grafana webhook listen on?" => "127.0.0.1:9596",
+            "What URL path should Grafana post webhook events to?" => "grafana",
             "What bind address should the GitLab webhook listen on?" => "127.0.0.1:9494",
             "What URL path should GitLab post webhook events to?" => "gitlab",
             "What bind address should the Jira webhook listen on?" => "127.0.0.1:9595",
@@ -608,6 +615,28 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9494\""));
         assert!(raw.contains("path = \"/gitlab\""));
         assert!(raw.contains("welcome_message = \"GitLab webhook ready.\""));
+    }
+
+    #[test]
+    fn grafana_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_webhook_preset(&mut state, &resources, "grafana-webhook", "grafana-alerts"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: grafana-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"grafana-alerts\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9596\""));
+        assert!(raw.contains("path = \"/grafana\""));
+        assert!(raw.contains("welcome_message = \"Grafana webhook ready.\""));
     }
 
     #[test]
