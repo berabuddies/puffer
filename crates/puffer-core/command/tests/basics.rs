@@ -157,6 +157,7 @@ fn workflows_connectors_filter_shows_connect_commands() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("showing 2/11 connectors for query=\"telegram\""));
     assert!(text.contains("telegram-login"));
     assert!(text.contains("actions=send_message"));
     assert!(text.contains("connect=/connect telegram-login telegram-user"));
@@ -222,9 +223,10 @@ fn workflows_connectors_catalog_includes_serve_connectors_as_non_triggers() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("showing 1/11 connectors for query=\"discord\""));
     assert!(text.contains("discord-bot"));
     assert!(text.contains("connect=/connect discord-bot discord-bot"));
-    assert!(!text.contains("[auth,trigger]"));
+    assert!(text.contains("[auth,no-trigger]"));
 }
 
 #[test]

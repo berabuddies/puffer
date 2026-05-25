@@ -154,6 +154,13 @@ fn write_connections(
             )
         })
         .collect::<Vec<_>>();
+    write_result_summary(
+        out,
+        connections.len(),
+        context.connections.len(),
+        "connections",
+        query,
+    );
     if connections.is_empty() && context.connections.is_empty() {
         out.push_str("- none configured; run /connect <connector-slug> <connection-name>\n");
         return;
@@ -203,19 +210,29 @@ fn write_connectors(
     query: &str,
 ) {
     out.push_str("\nConnectors\n");
-    let connectors = context
+    let candidates = context
         .connectors
         .iter()
         .filter(|connector| include_all || connector_workflow_trigger_supported(roots, connector))
+        .collect::<Vec<_>>();
+    let connectors = candidates
+        .iter()
+        .copied()
         .filter(|connector| {
             let action_slugs = connector_action_slugs(connector);
             let suggested_connection = suggested_connection_slug(&connector.slug);
             let connect_command = connector_connect_command(connector);
+            let trigger_supported = connector_workflow_trigger_supported(roots, connector);
             let connection_values = context
                 .connections
                 .iter()
                 .filter(|connection| connection.connector_slug == connector.slug)
                 .flat_map(|connection| [connection.slug.as_str(), connection.description.as_str()]);
+            let trigger_terms = if trigger_supported {
+                ["trigger", "", ""]
+            } else {
+                ["no-trigger", "no trigger", "setup-only"]
+            };
             matches_query(
                 query,
                 action_slugs
@@ -229,10 +246,22 @@ fn write_connectors(
                         "connect",
                         "setup",
                     ])
+                    .chain(trigger_terms.into_iter().filter(|term| !term.is_empty()))
                     .chain(connection_values),
             )
         })
         .collect::<Vec<_>>();
+    write_result_summary(
+        out,
+        connectors.len(),
+        candidates.len(),
+        if include_all {
+            "connectors"
+        } else {
+            "trigger-ready connectors"
+        },
+        query,
+    );
     if connectors.is_empty() && context.connectors.is_empty() {
         out.push_str("- none available\n");
         return;
@@ -252,8 +281,11 @@ fn write_connectors(
         if connector.can_proxy_agent {
             capabilities.push("proxy");
         }
-        if connector_workflow_trigger_supported(roots, connector) {
+        let trigger_supported = connector_workflow_trigger_supported(roots, connector);
+        if trigger_supported {
             capabilities.push("trigger");
+        } else if include_all {
+            capabilities.push("no-trigger");
         }
         if !connector.actions.is_empty() {
             capabilities.push("actions");
@@ -275,6 +307,15 @@ fn write_connectors(
             connection_summary,
             connect_command
         );
+    }
+}
+
+fn write_result_summary(out: &mut String, shown: usize, total: usize, label: &str, query: &str) {
+    let query = query.trim();
+    if query.is_empty() {
+        let _ = writeln!(out, "showing {shown}/{total} {label}");
+    } else {
+        let _ = writeln!(out, "showing {shown}/{total} {label} for query={query:?}");
     }
 }
 
@@ -545,7 +586,44 @@ mod tests {
 
         write_connections(&mut out, &context, &roots, "repair demo-chat");
 
+        assert!(out.contains("showing 1/1 connections for query=\"repair demo-chat\""));
         assert!(out.contains("repair=/connect demo-chat demo-main"));
+    }
+
+    #[test]
+    fn workflow_connections_report_filtered_result_counts() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let context = ConnectorContext {
+            connectors: vec![trigger_template()],
+            connections: vec![
+                ConnectionRecord {
+                    slug: "demo-main".to_string(),
+                    connector_slug: "demo-chat".to_string(),
+                    description: "Demo main channel".to_string(),
+                    state: ConnectionState::Authenticated,
+                    has_consumer: false,
+                    cursor: None,
+                    auth_failure_notified: false,
+                },
+                ConnectionRecord {
+                    slug: "demo-archive".to_string(),
+                    connector_slug: "demo-chat".to_string(),
+                    description: "Demo archive channel".to_string(),
+                    state: ConnectionState::Authenticated,
+                    has_consumer: false,
+                    cursor: None,
+                    auth_failure_notified: false,
+                },
+            ],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connections(&mut out, &context, &roots, "archive");
+
+        assert!(out.contains("showing 1/2 connections for query=\"archive\""));
+        assert!(out.contains("- demo-archive"));
+        assert!(!out.contains("- demo-main"));
     }
 
     #[test]
@@ -568,6 +646,7 @@ mod tests {
 
         write_connectors(&mut out, &context, &roots, true, "");
 
+        assert!(out.contains("showing 1/1 connectors"));
         assert!(out.contains("connections=team-demo"));
         assert!(out.contains("connect=/connect demo-chat demo-chat"));
     }
@@ -595,6 +674,7 @@ mod tests {
 
         write_connectors(&mut out, &context, &roots, true, "team-demo");
 
+        assert!(out.contains("showing 1/2 connectors for query=\"team-demo\""));
         assert!(out.contains("- demo-chat"));
         assert!(out.contains("connections=team-demo"));
         assert!(!out.contains("- other-chat"));
@@ -618,5 +698,27 @@ mod tests {
         assert!(out.contains("- demo-chat"));
         assert!(out.contains("connect=/connect demo-chat demo-chat"));
         assert!(!out.contains("- other-chat"));
+    }
+
+    #[test]
+    fn workflow_connectors_label_and_filter_setup_only_connectors() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut setup_only = trigger_template();
+        setup_only.slug = "setup-chat".to_string();
+        setup_only.description = "Setup only chat".to_string();
+        setup_only.can_subscribe = false;
+        setup_only.command.clear();
+        let context = ConnectorContext {
+            connectors: vec![trigger_template(), setup_only],
+            connections: Vec::new(),
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "no trigger");
+
+        assert!(out.contains("showing 1/2 connectors for query=\"no trigger\""));
+        assert!(out.contains("- setup-chat [no-trigger]"));
+        assert!(!out.contains("- demo-chat"));
     }
 }
