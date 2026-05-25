@@ -44,15 +44,22 @@
     Plus,
     ChevronDown,
     Sparkles,
-    CheckSquare
+    Pencil,
+    Trash2
   } from "lucide-svelte";
 
   import { currentRoute, navigate } from "../../router.svelte";
   import { currentUser } from "../../data/user";
   import { contacts } from "../../data/contacts";
-  import { workTasks, lifeTasks } from "../../data/tasks";
   import { apps } from "../../data/apps";
-  import { createSessionFromText } from "../../lib/chat.svelte";
+  import {
+    workSessions,
+    lifeSessions,
+    createSessionInGroup,
+    renameSession,
+    type SessionGroup
+  } from "../../lib/sessionStore.svelte";
+  import type { SessionListItem } from "../../lib/agentClient";
 
   // See IconBlock.svelte — lucide-svelte v1 ships legacy class typings; use
   // a permissive alias so the nav table can mix any lucide icon.
@@ -81,31 +88,73 @@
     { label: "Connected Apps", icon: LayoutGrid, href: "/apps", activePrefixes: ["/apps"] }
   ];
 
-  interface SpaceItem {
-    slug: string;
-    label: string;
-  }
-
-  // Static space contents matching the mock. Per-page agents may later move
-  // these to data/ if Spaces become real persisted records.
-  const workItems: SpaceItem[] = [{ slug: "calendar", label: "Add google meeting" }];
-  const lifeItems: SpaceItem[] = [{ slug: "restaurant", label: "Book restaurant" }];
-
+  // Session rows under the Work / Life groups are driven by sessionStore;
+  // group membership lives in localStorage (no backend support yet).
   let workExpanded = $state(true);
   let lifeExpanded = $state(true);
 
+  /** Id of the row currently being inline-renamed, or null. */
+  let editingId = $state<string | null>(null);
+  /** Live value of the rename input — bound to the visible <input>. */
+  let editingValue = $state("");
+  /** Element ref so we can autoselect on focus enter. */
+  let editingInputEl = $state<HTMLInputElement | null>(null);
+
+  function beginRename(session: SessionListItem, event: MouseEvent): void {
+    event.stopPropagation();
+    editingId = session.sessionId;
+    editingValue = session.title || session.displayName || "";
+    void tick().then(() => {
+      editingInputEl?.focus();
+      editingInputEl?.select();
+    });
+  }
+
+  function commitRename(session: SessionListItem): void {
+    // Guard against Escape → onblur races: once editingId is cleared the
+    // input is being torn down and the onblur callback should no-op.
+    if (editingId !== session.sessionId) return;
+    const next = editingValue.trim();
+    const before = (session.title || session.displayName || "").trim();
+    if (!next || next === before) {
+      cancelRename();
+      return;
+    }
+    const id = session.sessionId;
+    editingId = null;
+    editingValue = "";
+    void renameSession(id, next);
+  }
+
+  function cancelRename(): void {
+    editingId = null;
+    editingValue = "";
+  }
+
+  function onRenameKey(event: KeyboardEvent, session: SessionListItem): void {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitRename(session);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRename();
+    }
+  }
+
+  function sessionLabel(session: SessionListItem): string {
+    return session.title || session.displayName || "New chat";
+  }
+
   /* ───── Search dropdown ─────
-   * Substring search across contacts / tasks / apps. The dropdown is
-   * absolutely positioned beneath the .search-pill so it visually anchors
-   * to the input without affecting the rail's flex layout. The list shows
-   * at most MAX_RESULTS rows so the panel never grows unbounded inside
-   * the rail.
+   * Substring search across contacts / apps (the Tasks corpus is gone
+   * since the scripted demos were removed; sessions live in the rail
+   * directly so they don't need to be in this dropdown).
    */
   const MAX_RESULTS = 5;
   const FOCUS_LOSS_DELAY_MS = 800;
 
-  type ResultKind = "Contact" | "Task" | "App";
-  type ResultIcon = "user" | "checkSquare" | "layoutGrid";
+  type ResultKind = "Contact" | "App";
+  type ResultIcon = "user" | "layoutGrid";
 
   interface SearchResult {
     id: string;
@@ -136,23 +185,6 @@
           icon: "user",
           href: `/contact/${c.id}`
         });
-      }
-    }
-
-    for (const group of [workTasks, lifeTasks]) {
-      for (const t of group.tasks) {
-        if (t.title.toLowerCase().includes(q)) {
-          // Tasks navigate to a matching agent slug when their primary action
-          // includes one; otherwise just open the Agent route by id-as-slug.
-          const target = t.primaryAction?.navigateTo ?? `/agent/${t.id}`;
-          out.push({
-            id: `task-${t.id}`,
-            label: t.title,
-            kind: "Task",
-            icon: "checkSquare",
-            href: target
-          });
-        }
       }
     }
 
@@ -245,8 +277,8 @@
     });
   }
 
-  function isAgentActive(slug: string): boolean {
-    return currentRoute.path === `/agent/${slug}`;
+  function isAgentActive(sessionId: string): boolean {
+    return currentRoute.path === `/agent/${sessionId}`;
   }
 
   function go(path: string): void {
@@ -254,17 +286,18 @@
   }
 
   /**
-   * Mint a fresh empty chat session and jump to it. Wired to the per-group
-   * "+" buttons next to Work / Life — the group is purely a UI label here
-   * (the chat store doesn't yet track which space a session belongs to)
-   * but matches the user's mental model of "+ in this section starts a
-   * new thread". We pass an empty string so the session is created with
-   * no seed user turn; the user types in the Composer to drive it.
+   * Mint a fresh empty puffer session, remember which group it belongs
+   * to, and navigate into it. The session row appears in the sidebar
+   * immediately via the local optimistic insert inside the store.
    */
-  function startNewChat(): void {
-    void createSessionFromText("").then((sessionId) => {
-      navigate(`/agent/${sessionId}`);
-    });
+  function startNewChatInGroup(group: SessionGroup): void {
+    void createSessionInGroup(group)
+      .then((sessionId) => {
+        navigate(`/agent/${sessionId}`);
+      })
+      .catch(() => {
+        // Toast already surfaced inside the store.
+      });
   }
 </script>
 
@@ -350,8 +383,6 @@
               <span class="search-dropdown__icon" aria-hidden="true">
                 {#if r.icon === "user"}
                   <User size={14} strokeWidth={1.75} />
-                {:else if r.icon === "checkSquare"}
-                  <CheckSquare size={14} strokeWidth={1.75} />
                 {:else}
                   <LayoutGrid size={14} strokeWidth={1.75} />
                 {/if}
@@ -365,8 +396,8 @@
     {/if}
   </div>
 
-  <!-- 3. Rail scroll: nav + spaces -->
-  <div class="rail-scroll">
+  <!-- 3a. Rail nav: pinned top block holding the primary nav rows. -->
+  <div class="rail-nav">
     <nav class="nav-stack" aria-label="App sections">
       {#each navEntries as entry (entry.href)}
         {@const active = isNavActive(entry)}
@@ -387,16 +418,67 @@
         </button>
       {/each}
     </nav>
+  </div>
 
+  <!-- 3b. Rail scroll: only the Spaces list scrolls; nav + bottom rows stay pinned. -->
+  <div class="rail-scroll">
     {#if !collapsed}
       <div class="spaces">
         <p class="text-eyebrow spaces__eyebrow">Tasks</p>
+
+        {#snippet sessionRow(session: SessionListItem)}
+          {@const active = isAgentActive(session.sessionId)}
+          {@const editing = editingId === session.sessionId}
+          <div class="session-row" class:session-row--active={active}>
+            {#if editing}
+              <input
+                bind:this={editingInputEl}
+                bind:value={editingValue}
+                class="session-row__input"
+                type="text"
+                aria-label="Rename session"
+                onkeydown={(e) => onRenameKey(e, session)}
+                onblur={() => commitRename(session)}
+              />
+            {:else}
+              <button
+                class="session-row__label-btn"
+                type="button"
+                onclick={() => go(`/agent/${session.sessionId}`)}
+                aria-current={active ? "page" : undefined}
+                title={sessionLabel(session)}
+              >
+                <span class="session-row__label">{sessionLabel(session)}</span>
+              </button>
+              <div class="session-row__actions" aria-hidden={!active && undefined}>
+                <button
+                  class="session-row__icon-btn"
+                  type="button"
+                  aria-label="Rename session"
+                  title="Rename"
+                  onclick={(e) => beginRename(session, e)}
+                >
+                  <Pencil size={12} strokeWidth={1.75} aria-hidden="true" />
+                </button>
+                <button
+                  class="session-row__icon-btn session-row__icon-btn--disabled"
+                  type="button"
+                  aria-label="Delete session"
+                  title="Coming soon — requires backend support"
+                  disabled
+                >
+                  <Trash2 size={12} strokeWidth={1.75} aria-hidden="true" />
+                </button>
+              </div>
+            {/if}
+          </div>
+        {/snippet}
 
         <!-- Work group.
              The header is two SIBLING buttons (not nested) — HTML forbids
              button-in-button, and Svelte 5 + WebKit silently swallows the
              inner click. The label button toggles expand; the trailing
-             "+" mints a fresh chat thread (createSessionFromText('')) and
+             "+" mints a fresh puffer session under the Work group and
              navigates straight to /agent/<sessionId>. -->
         <div class="space-group">
           <div class="space-header-row">
@@ -413,7 +495,7 @@
               type="button"
               aria-label="New chat in Work"
               title="New chat in Work"
-              onclick={startNewChat}
+              onclick={() => startNewChatInGroup("work")}
             >
               <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
             </button>
@@ -421,23 +503,11 @@
 
           {#if workExpanded}
             <div class="space-items">
-              {#each workItems as item (item.slug)}
-                {@const active = isAgentActive(item.slug)}
-                <button
-                  class="nav-row nav-row--sub"
-                  class:nav-row--active={active}
-                  type="button"
-                  onclick={() => go(`/agent/${item.slug}`)}
-                  aria-current={active ? "page" : undefined}
-                >
-                  <span class="nav-row__label">{item.label}</span>
-                </button>
+              {#each workSessions() as session (session.sessionId)}
+                {@render sessionRow(session)}
               {:else}
-                <p class="space-items__add">+ Add</p>
+                <p class="space-items__add">No sessions yet</p>
               {/each}
-              {#if workItems.length === 0}
-                <p class="space-items__add">+ Add</p>
-              {/if}
             </div>
           {/if}
         </div>
@@ -458,7 +528,7 @@
               type="button"
               aria-label="New chat in Life"
               title="New chat in Life"
-              onclick={startNewChat}
+              onclick={() => startNewChatInGroup("life")}
             >
               <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
             </button>
@@ -466,21 +536,11 @@
 
           {#if lifeExpanded}
             <div class="space-items">
-              {#each lifeItems as item (item.slug)}
-                {@const active = isAgentActive(item.slug)}
-                <button
-                  class="nav-row nav-row--sub"
-                  class:nav-row--active={active}
-                  type="button"
-                  onclick={() => go(`/agent/${item.slug}`)}
-                  aria-current={active ? "page" : undefined}
-                >
-                  <span class="nav-row__label">{item.label}</span>
-                </button>
+              {#each lifeSessions() as session (session.sessionId)}
+                {@render sessionRow(session)}
+              {:else}
+                <p class="space-items__add">No sessions yet</p>
               {/each}
-              {#if lifeItems.length === 0}
-                <p class="space-items__add">+ Add</p>
-              {/if}
             </div>
           {/if}
         </div>
@@ -692,11 +752,29 @@
     background: rgba(0, 0, 0, 0.04);
   }
 
-  /* ───── 3. Rail scroll ───── */
-  .rail-scroll {
-    flex: 1;
-    min-height: 0;
+  /* ───── 3a. Rail nav (pinned) ─────
+   * Holds the primary nav rows. Stays fixed at the top of the rail so the
+   * Home / Contact / Wallet / Apps row never scrolls away with the session
+   * list below. */
+  .rail-nav {
+    flex-shrink: 0;
     padding: 0 12px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+  .sidebar--collapsed .rail-nav {
+    align-items: center;
+  }
+
+  /* ───── 3b. Rail scroll (Spaces only) ─────
+   * Confines vertical scrolling to the Spaces section so the bottom user /
+   * credits rows stay pinned. In collapsed mode the Spaces tree is hidden
+   * entirely, so this block degrades to an empty flex spacer. */
+  .rail-scroll {
+    flex: 1 1 0;
+    min-height: 0;
+    padding: var(--space-4) 12px 0;
     overflow-y: auto;
     overflow-x: hidden;
     display: flex;
@@ -704,7 +782,7 @@
     gap: var(--space-4);
   }
   .sidebar--collapsed .rail-scroll {
-    padding: 0 12px;
+    padding: var(--space-4) 12px 0;
     align-items: center;
   }
 
@@ -748,10 +826,6 @@
     padding: 0;
     justify-content: center;
     gap: 0;
-  }
-  .nav-row--sub {
-    /* Sub-items align under the icon column of the parent nav rows. */
-    padding-left: 36px;
   }
   .nav-row__label {
     min-width: 0;
@@ -850,6 +924,110 @@
     padding: 7px 10px 7px 36px;
     color: var(--color-text-muted);
     font-size: var(--font-size-body);
+  }
+
+  /* ───── Session rows ─────
+   * Each row holds a flex-1 label button and a trailing icon group that
+   * stays hidden until the row is hovered (or active). Layout mirrors
+   * `.nav-row` so vertical rhythm matches the rest of the rail.
+   */
+  .session-row {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: var(--height-nav-row);
+    padding: 0 6px 0 36px;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--color-text-primary);
+    transition: background-color 120ms ease;
+    gap: 2px;
+  }
+  .session-row:hover {
+    background: rgba(0, 0, 0, 0.03);
+  }
+  .session-row--active {
+    background: var(--color-selected-fill);
+  }
+
+  .session-row__label-btn {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    height: var(--height-nav-row);
+    padding: 0 4px 0 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    line-height: var(--line-height-body);
+    font-weight: var(--font-weight-medium);
+    text-align: left;
+    cursor: pointer;
+  }
+  .session-row__label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-row__input {
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    margin: 0 4px;
+    padding: 0 6px;
+    border: 1px solid var(--color-input-border);
+    border-radius: 4px;
+    background: var(--color-surface-app);
+    color: var(--color-text-primary);
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    line-height: var(--line-height-body);
+    outline: 0;
+  }
+  .session-row__input:focus {
+    border-color: var(--color-action-cream-border);
+  }
+
+  .session-row__actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  .session-row:hover .session-row__actions,
+  .session-row:focus-within .session-row__actions {
+    opacity: 1;
+  }
+
+  .session-row__icon-btn {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background-color 120ms ease, color 120ms ease;
+  }
+  .session-row__icon-btn:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--color-text-primary);
+  }
+  .session-row__icon-btn--disabled,
+  .session-row__icon-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 
   /* ───── 4. Rail upgrade ───── */

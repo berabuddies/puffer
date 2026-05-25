@@ -61,6 +61,170 @@ test("home composer → create_session → run_agent_turn → streamed assistant
   await expect(page.locator(".typing")).toHaveCount(0);
 });
 
+// Regression: a desktop restart kept the session list (server-backed metadata)
+// but opened sessions blank because the V2 chat store only carried live deltas
+// and never replayed the persisted timeline. ensureSession() now calls
+// load_session_detail and prepends user_message/assistant_message items.
+test("existing session with historical timeline renders past messages on /agent/<id> open", async ({
+  page
+}) => {
+  const baseTime = Date.now();
+  const sessionId = "session-history-1";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Restart survivor",
+        title: "Restart survivor",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 3,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "hist-user-1",
+            text: "remind me what we were doing",
+            createdAtMs: baseTime - 45_000
+          },
+          {
+            kind: "assistant_message",
+            id: "hist-assistant-1",
+            text: "we were drafting the launch checklist",
+            createdAtMs: baseTime - 40_000
+          },
+          // A kind V2 doesn't render yet — must be skipped silently, not crash.
+          {
+            kind: "system_message",
+            id: "hist-system-1",
+            text: "session renamed",
+            createdAtMs: baseTime - 39_000
+          }
+        ]
+      }
+    ]
+  });
+  await bootOnboarded(page, daemon);
+
+  // Navigate directly to /agent/<seededSessionId>; mimics what happens after
+  // a webview reload when the sidebar restores the active session.
+  await page.goto(`/#/agent/${sessionId}`);
+  await daemon.waitForRequest(
+    "load_session_detail",
+    (req) => req.params.sessionId === sessionId
+  );
+
+  // User bubble renders inside `.bubble`; assistant text inside
+  // `.assistant-bubble__text` (Agent.svelte:99-117).
+  const userBubble = page.locator(".bubble", { hasText: "remind me what we were doing" });
+  const assistantBubble = page.locator(".assistant-bubble__text", {
+    hasText: "we were drafting the launch checklist"
+  });
+  await expect(userBubble).toBeVisible();
+  await expect(assistantBubble).toBeVisible();
+
+  // system_message was in the timeline; it must not have surfaced as a bubble.
+  await expect(page.getByText("session renamed")).toHaveCount(0);
+});
+
+// Hydration UX: while load_session_detail is in flight the thread shows a
+// "Loading conversation…" affordance; once the response lands the loader is
+// removed and historical bubbles render.
+test("shows a loading indicator while load_session_detail is in flight, then resolves to messages", async ({
+  page
+}) => {
+  const baseTime = Date.now();
+  const sessionId = "session-loading-1";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Slow loader",
+        title: "Slow loader",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "hist-assistant-late",
+            text: "loaded after delay",
+            createdAtMs: baseTime - 10_000
+          }
+        ]
+      }
+    ]
+  });
+  await bootOnboarded(page, daemon);
+
+  daemon.delayResponse(
+    "load_session_detail",
+    (req) => req.params.sessionId === sessionId,
+    800
+  );
+
+  await page.goto(`/#/agent/${sessionId}`);
+
+  const loader = page.getByTestId("hydration-loading");
+  await expect(loader).toBeVisible({ timeout: 200 });
+  await expect(loader).toContainText("Loading conversation…");
+
+  const resolved = page.locator(".assistant-bubble__text", { hasText: "loaded after delay" });
+  await expect(resolved).toBeVisible();
+  await expect(loader).toHaveCount(0);
+});
+
+// Hydration error UX: when load_session_detail rejects the thread shows an
+// inline failure card + a Retry button. Clicking Retry re-runs the call and,
+// once it succeeds, historical bubbles render.
+test("shows error state with retry when load_session_detail fails", async ({ page }) => {
+  const baseTime = Date.now();
+  const sessionId = "session-error-1";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId,
+        displayName: "Error first",
+        title: "Error first",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "hist-after-retry",
+            text: "history after retry",
+            createdAtMs: baseTime - 10_000
+          }
+        ]
+      }
+    ]
+  });
+  await bootOnboarded(page, daemon);
+
+  // First call fails synchronously; retry will then hit the normal path.
+  daemon.failNext("load_session_detail", "transient backend hiccup");
+
+  await page.goto(`/#/agent/${sessionId}`);
+
+  const errorPanel = page.getByTestId("hydration-error");
+  await expect(errorPanel).toBeVisible();
+  await expect(errorPanel).toContainText("Failed to load history");
+
+  const retry = errorPanel.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+
+  await retry.click();
+  const resolved = page.locator(".assistant-bubble__text", { hasText: "history after retry" });
+  await expect(resolved).toBeVisible();
+  await expect(errorPanel).toHaveCount(0);
+});
+
 // Regression for the Sidebar "+ new chat" Promise-stringification bug:
 // startNewChat used to template-literal the Promise into the URL, producing
 // `/agent/[object Promise]`. The async-then refactor must navigate to the

@@ -36,9 +36,11 @@
   the window.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { Snippet } from "svelte";
 
   import Sidebar from "./Sidebar.svelte";
+  import { loadSessions } from "../../lib/sessionStore.svelte";
 
   interface Props {
     children: Snippet;
@@ -50,6 +52,14 @@
   let { children, fullbleed = false }: Props = $props();
 
   let collapsed = $state(false);
+
+  // Kick the session list once when the shell mounts — onboarding routes
+  // render bare (no Shell), so by the time we get here the user is on a
+  // real product page and the sidebar needs its data. Errors surface as
+  // toast inside the store.
+  onMount(() => {
+    void loadSessions();
+  });
 </script>
 
 <div class="shell">
