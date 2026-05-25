@@ -320,6 +320,24 @@ pub(super) fn stripe_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Shopify webhook event output schema.
+pub(super) fn shopify_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "shopify_event"},
+            "topic": {"type": "string"},
+            "shop": {"type": "string"},
+            "subject_type": {"type": "string"},
+            "subject_id": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["topic", "shop", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Trello webhook event output schema.
 pub(super) fn trello_event_output_schema() -> Value {
     serde_json::json!({

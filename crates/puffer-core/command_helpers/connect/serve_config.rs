@@ -233,6 +233,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/linear",
             method: "Linear event webhook",
         },
+        "shopify-webhook" => WebhookPreset {
+            product: "Shopify",
+            default_path: "/shopify",
+            method: "Shopify event webhook",
+        },
         "stripe-webhook" => WebhookPreset {
             product: "Stripe",
             default_path: "/stripe",
@@ -411,6 +416,8 @@ mod tests {
             "What URL path should Jira post webhook events to?" => "jira",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
+            "What bind address should the Shopify webhook listen on?" => "127.0.0.1:9999",
+            "What URL path should Shopify post webhook events to?" => "shopify",
             "What bind address should the Stripe webhook listen on?" => "127.0.0.1:9696",
             "What URL path should Stripe post webhook events to?" => "stripe",
             "What bind address should the Trello webhook listen on?" => "127.0.0.1:9898",
@@ -653,6 +660,28 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9696\""));
         assert!(raw.contains("path = \"/stripe\""));
         assert!(raw.contains("welcome_message = \"Stripe webhook ready.\""));
+    }
+
+    #[test]
+    fn shopify_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_webhook_preset(&mut state, &resources, "shopify-webhook", "shopify-webhook"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: shopify-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"shopify-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9999\""));
+        assert!(raw.contains("path = \"/shopify\""));
+        assert!(raw.contains("welcome_message = \"Shopify webhook ready.\""));
     }
 
     #[test]
