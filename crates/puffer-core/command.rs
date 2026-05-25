@@ -4,14 +4,14 @@ use crate::command_helpers::{
     handle_agents_command, handle_branch_command, handle_config_command, handle_copy_command,
     handle_effort_command, handle_export_command, handle_fast_command, handle_genskill_command,
     handle_goal_command, handle_hooks_command, handle_ide_command, handle_keybindings_command,
-    handle_mcp_command, handle_memory_command, handle_model_command, handle_permissions_command,
-    handle_plan_command, handle_plugin_command, handle_recap_command, handle_reflect_command,
-    handle_remote_control_command, handle_remote_env_command, handle_resume_command,
-    handle_sandbox_command, handle_session_command, handle_tag_command, handle_tasks_command,
-    handle_telegram_command, handle_terminal_setup_command, handle_workflows_command, list_skills,
-    persist_user_settings, record_command_checkpoint, reload_config_from_disk,
-    remove_provider_credentials, render_login_guidance, rewind_transcript, run_doctor,
-    run_provider_login_flow, supports_auth_mode,
+    handle_mcp_command, handle_memory_command, handle_model_command, handle_monitor_command,
+    handle_permissions_command, handle_plan_command, handle_plugin_command, handle_recap_command,
+    handle_reflect_command, handle_remote_control_command, handle_remote_env_command,
+    handle_resume_command, handle_sandbox_command, handle_session_command, handle_tag_command,
+    handle_tasks_command, handle_telegram_command, handle_terminal_setup_command,
+    handle_workflows_command, list_skills, persist_user_settings, record_command_checkpoint,
+    reload_config_from_disk, remove_provider_credentials, render_login_guidance, rewind_transcript,
+    run_doctor, run_provider_login_flow, supports_auth_mode,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_status_summary, render_usage_summary,
@@ -452,9 +452,15 @@ fn execute_local_command(
             emit_system(state, session_store, message.to_string())
         }
         "model" => handle_model_command(state, providers, auth_store, session_store, args),
+        "monitor" => match handle_monitor_command(state, resources, providers, auth_store, args) {
+            Ok(message) => emit_system(state, session_store, message),
+            Err(error) => emit_system(state, session_store, format!("/monitor failed: {error}")),
+        },
         "permissions" => handle_permissions_command(state, resources, session_store, args),
         "hooks" => handle_hooks_command(state, resources, session_store, args),
-        "tasks" => handle_tasks_command(state, session_store, args),
+        "tasks" => {
+            handle_tasks_command(state, resources, providers, auth_store, session_store, args)
+        }
         "workflows" => match handle_workflows_command(state, args) {
             Ok(message) => emit_system(state, session_store, message),
             Err(error) => emit_system(state, session_store, format!("/workflows failed: {error}")),

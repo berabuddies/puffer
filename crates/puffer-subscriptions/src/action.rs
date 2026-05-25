@@ -794,6 +794,57 @@ mod tests {
         assert_eq!(calls[0].1["text"], "hello");
     }
 
+    struct RecordingTriageRunner {
+        calls: StdMutex<Vec<(String, Option<String>, serde_json::Value)>>,
+    }
+
+    impl WorkflowActionRunner for RecordingTriageRunner {
+        fn run_workflow(&self, slug: &str, _trigger: serde_json::Value) -> Result<String> {
+            Ok(format!("unused {slug}"))
+        }
+
+        fn triage_agent(
+            &self,
+            prompt: &str,
+            model: Option<&str>,
+            trigger: serde_json::Value,
+        ) -> Result<String> {
+            self.calls.lock().unwrap().push((
+                prompt.to_string(),
+                model.map(ToOwned::to_owned),
+                trigger,
+            ));
+            Ok("triaged".to_string())
+        }
+    }
+
+    #[test]
+    fn triage_agent_dispatches_rendered_prompt_and_connection_trigger() {
+        let dispatcher = BuiltinActionDispatcher::new();
+        let runner = Arc::new(RecordingTriageRunner {
+            calls: StdMutex::new(Vec::new()),
+        });
+        dispatcher.set_workflow_runner(runner.clone());
+        let action = ActionSpec::TriageAgent {
+            prompt: "Review {{text}} from {{payload.sender.name}}".into(),
+            model: Some("fast-monitor".into()),
+        };
+        let result = dispatcher.dispatch(
+            &action,
+            &envelope("deploy?", json!({"sender": {"name": "Alice"}})),
+        );
+
+        assert!(result.success, "{}", result.summary);
+        assert_eq!(result.summary, "triaged");
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "Review deploy? from Alice");
+        assert_eq!(calls[0].1.as_deref(), Some("fast-monitor"));
+        assert_eq!(calls[0].2["type"], "connection");
+        assert_eq!(calls[0].2["connection_id"], "telegram-user");
+        assert_eq!(calls[0].2["text"], "deploy?");
+    }
+
     struct RecordingConnectorExecutor {
         calls: StdMutex<Vec<(String, String, serde_json::Value)>>,
     }

@@ -138,6 +138,9 @@ pub(crate) fn render_task_overlay(
 }
 
 fn should_include_task_entry(command: &str) -> bool {
+    if !command.starts_with("/tasks") {
+        return true;
+    }
     matches!(
         command,
         "/tasks show"
@@ -147,9 +150,16 @@ fn should_include_task_entry(command: &str) -> bool {
             | "/tasks worktrees"
             | "/tasks path"
     ) || command.starts_with("/tasks show ")
+        || command.starts_with("/tasks ignore ")
 }
 
 fn task_entry_selector(command: &str) -> String {
+    if let Some(rest) = command.strip_prefix("Act on monitored task ") {
+        return rest
+            .split_once(':')
+            .map(|(task_id, _)| task_id.trim().to_string())
+            .unwrap_or_else(|| "action".to_string());
+    }
     match command {
         "/tasks show" => "dashboard".to_string(),
         "/tasks todos" => "todos".to_string(),
@@ -240,6 +250,7 @@ fn accent_border_style() -> Style {
 mod tests {
     use super::*;
     use puffer_config::PufferConfig;
+    use puffer_resources::LoadedResources;
     use puffer_session_store::SessionMetadata;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -299,5 +310,54 @@ mod tests {
         };
         let preview = task_preview_text(&state, &entry);
         assert!(preview.contains("Task dashboard"));
+    }
+
+    #[test]
+    fn task_overlay_includes_monitor_action_prompts() {
+        let (_tempdir, mut state) = sample_state();
+        let cwd = state.cwd.clone();
+        puffer_core::execute_workflow_tool(
+            &mut state,
+            &LoadedResources::default(),
+            &cwd,
+            "TaskCreate",
+            serde_json::json!({
+                "subject": "Answer Slack thread",
+                "description": "A teammate asked for release status in #ship.",
+                "actions": [
+                    {
+                        "actionName": "Draft update",
+                        "actionPrompt": "Draft a release status update for the Slack thread."
+                    }
+                ],
+                "possibleIgnoreReasons": ["already answered"],
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "slack-team",
+                    "monitor_connector": "slack",
+                    "monitor_memory_path": "/tmp/puffer-monitor-memory.md"
+                }
+            }),
+            None,
+        )
+        .unwrap();
+
+        let overlay = open_task_overlay(&state).unwrap();
+        let OverlayState::CommandPicker { entries, .. } = overlay else {
+            panic!("expected command picker");
+        };
+        assert!(entries.iter().any(|entry| {
+            entry.selector == "monitor-1"
+                && entry.command.as_deref().is_some_and(|command| {
+                    command.starts_with("Act on monitored task monitor-1:")
+                        && command.contains("Draft a release status update")
+                })
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry
+                .command
+                .as_deref()
+                .is_some_and(|command| command == "/tasks ignore monitor-1 already answered")
+        }));
     }
 }

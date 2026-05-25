@@ -117,6 +117,7 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let connectorCommandRunning = $state(false);
+  let monitorCommandRunningFor = $state<string | null>(null);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
   let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
@@ -481,6 +482,30 @@
       saveNotice = `Could not start ${command}.`;
     } finally {
       connectorCommandRunning = false;
+    }
+  }
+
+  function connectionMonitorSupported(connection: WorkflowConnection): boolean {
+    return connectionTriggerSupported(connection);
+  }
+
+  function connectionMonitorCommand(connection: WorkflowConnection): string {
+    return `/monitor ${connection.slug}`;
+  }
+
+  async function runConnectionMonitorCommand(connection: WorkflowConnection) {
+    const command = connectionMonitorCommand(connection);
+    if (!connectionMonitorSupported(connection) || monitorCommandRunningFor || !onRunConnectCommand) return;
+    monitorCommandRunningFor = connection.slug;
+    try {
+      const started = await onRunConnectCommand(command);
+      saveNotice = started === false
+        ? `Could not start ${command}.`
+        : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      monitorCommandRunningFor = null;
     }
   }
 
@@ -1108,30 +1133,44 @@
                   {#each filteredConnections as connection (connection.slug)}
                     {@const connector = connectorBySlug(connection.connector_slug)}
                     {@const canTrigger = connectionTriggerSupported(connection)}
+                    {@const canMonitor = connectionMonitorSupported(connection)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
-                    <button
-                      type="button"
-                      class="pf-connection-row"
-                      data-selected={activeConnectionSlug(workflow) === connection.slug}
-                      data-supported={canTrigger}
-                      aria-label={canTrigger ? `Use ${connection.slug} as workflow trigger` : `${connection.slug} cannot start workflow triggers`}
-                      disabled={!canTrigger}
-                      onclick={() => useConnectionTrigger(connection.slug)}
-                    >
-                      <span class="pf-connector-main">
-                        <strong>{connection.slug}</strong>
-                        <small>{(connector?.description ?? connection.description) || connection.connector_slug}</small>
-                      </span>
-                      <span class="pf-connector-tags">
-                        <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
-                        {#if !canTrigger}<span>no trigger</span>{/if}
-                        {#each actionSlugs as action}
-                          <span class="pf-connector-action">{action}</span>
-                        {/each}
-                        {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
-                      </span>
-                    </button>
+                    <div class="pf-connection-row-group">
+                      <button
+                        type="button"
+                        class="pf-connection-row"
+                        data-selected={activeConnectionSlug(workflow) === connection.slug}
+                        data-supported={canTrigger}
+                        aria-label={canTrigger ? `Use ${connection.slug} as workflow trigger` : `${connection.slug} cannot start workflow triggers`}
+                        disabled={!canTrigger}
+                        onclick={() => useConnectionTrigger(connection.slug)}
+                      >
+                        <span class="pf-connector-main">
+                          <strong>{connection.slug}</strong>
+                          <small>{(connector?.description ?? connection.description) || connection.connector_slug}</small>
+                        </span>
+                        <span class="pf-connector-tags">
+                          <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
+                          {#if !canTrigger}<span>no trigger</span>{/if}
+                          {#each actionSlugs as action}
+                            <span class="pf-connector-action">{action}</span>
+                          {/each}
+                          {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-monitor-btn"
+                        aria-label={`Monitor ${connection.slug} connector tasks`}
+                        title="Monitor connector tasks"
+                        aria-busy={monitorCommandRunningFor === connection.slug}
+                        disabled={!canMonitor || monitorCommandRunningFor !== null || !onRunConnectCommand}
+                        onclick={() => runConnectionMonitorCommand(connection)}
+                      >
+                        <Icon name="bot" size={12} />
+                      </button>
+                    </div>
                   {/each}
                 </div>
 
@@ -1785,6 +1824,13 @@
     overflow: auto;
   }
 
+  .pf-connection-row-group {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 30px;
+    align-items: stretch;
+    gap: 5px;
+  }
+
   .pf-connection-row {
     border: 1px solid var(--border);
     background: var(--card);
@@ -1797,6 +1843,13 @@
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     text-align: left;
+  }
+
+  .pf-connection-row-group .pf-icon-btn {
+    width: 30px;
+    height: auto;
+    min-height: 100%;
+    border-radius: 8px;
   }
 
   .pf-connection-row:hover,

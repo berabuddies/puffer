@@ -11,6 +11,7 @@ mod ecosystem;
 mod genskill;
 mod goal;
 mod model;
+mod monitor;
 mod plugins;
 pub(crate) mod prompt;
 mod recap;
@@ -55,6 +56,7 @@ pub(crate) use goal::handle_goal_command;
 pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
 };
+pub(crate) use monitor::handle_monitor_command;
 pub use plugins::PluginActionEntry;
 pub(crate) use plugins::{
     handle_plugin_command, reload_plugins_summary, render_plugin_actions, render_plugin_summary,

@@ -1,8 +1,8 @@
 use super::store::{
-    agents_path, append_agent_message, ensure_safe_identifier, load_store, next_task_id, now_ms,
-    save_store, tasks_path, team_lead_agent_id, terminate_process, wait_for_process_exit,
-    AgentStore, StoredTask, TaskCreateInput, TaskIdInput, TaskOutputInput, TaskStopInput,
-    TaskStore, TaskUpdateInput,
+    agents_path, append_agent_message, ensure_safe_identifier, load_store, monitor_tasks_path,
+    next_monitor_task_id, next_task_id, now_ms, save_store, tasks_path, team_lead_agent_id,
+    terminate_process, wait_for_process_exit, AgentStore, StoredTask, TaskCreateInput, TaskIdInput,
+    TaskOutputInput, TaskStopInput, TaskStore, TaskUpdateInput,
 };
 use super::task_runtime::{
     read_runtime_agent_output, read_task_output, refresh_stored_task, runtime_agent_output_path,
@@ -12,7 +12,7 @@ use super::task_runtime::{
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -25,10 +25,30 @@ pub(super) fn execute_task_create(
 ) -> Result<String> {
     let parsed: TaskCreateInput =
         serde_json::from_value(input).context("invalid TaskCreate input")?;
-    let tp = tasks_path(state.session.cwd.as_path(), &state.session.id);
+    validate_task_create_actions(&parsed)?;
+    let mut metadata = parsed.metadata.unwrap_or_default();
+    if !parsed.actions.is_empty() {
+        metadata.insert("actions".to_string(), json!(parsed.actions));
+    }
+    if !parsed.possible_ignore_reasons.is_empty() {
+        metadata.insert(
+            "possibleIgnoreReasons".to_string(),
+            json!(parsed.possible_ignore_reasons),
+        );
+    }
+    let monitor_task = is_monitor_task_metadata(&metadata);
+    let tp = if monitor_task {
+        monitor_tasks_path(state.session.cwd.as_path())
+    } else {
+        tasks_path(state.session.cwd.as_path(), &state.session.id)
+    };
     let mut store = load_store::<TaskStore>(&tp)?;
     let task = StoredTask {
-        task_id: next_task_id(&store.tasks),
+        task_id: if monitor_task {
+            next_monitor_task_id(&store.tasks)
+        } else {
+            next_task_id(&store.tasks)
+        },
         subject: parsed.subject,
         description: parsed.description,
         active_form: parsed.active_form.unwrap_or_else(|| "Working".to_string()),
@@ -36,7 +56,7 @@ pub(super) fn execute_task_create(
         owner: None,
         blocks: Vec::new(),
         blocked_by: Vec::new(),
-        metadata: parsed.metadata.unwrap_or_default(),
+        metadata,
         output: None,
         task_type: Some("task".to_string()),
         command: None,
@@ -59,11 +79,14 @@ pub(super) fn execute_task_create(
 /// Executes the live `TaskGet` workflow tool.
 pub(super) fn execute_task_get(state: &mut AppState, _cwd: &Path, input: Value) -> Result<String> {
     let parsed: TaskIdInput = serde_json::from_value(input).context("invalid TaskGet input")?;
-    let task = refresh_stored_task(
+    let mut task = refresh_stored_task(
         state.session.cwd.as_path(),
         &state.session.id,
         &parsed.task_id,
     )?;
+    if task.is_none() {
+        task = load_monitor_task(state.session.cwd.as_path(), &parsed.task_id)?;
+    }
     Ok(serde_json::to_string_pretty(&json!({
         "task": task.map(|task| {
             json!({
@@ -88,6 +111,8 @@ pub(super) fn execute_task_list(
     let sid = &state.session.id;
     let tp = tasks_path(store_cwd, sid);
     let mut store = load_store::<TaskStore>(&tp)?;
+    let monitor_tp = monitor_tasks_path(store_cwd);
+    let mut monitor_store = load_store::<TaskStore>(&monitor_tp)?;
     let mut changed = false;
     for task in &mut store.tasks {
         let previous = task.clone();
@@ -99,6 +124,18 @@ pub(super) fn execute_task_list(
     if changed {
         save_store(&tp, &store)?;
     }
+    let mut monitor_changed = false;
+    for task in &mut monitor_store.tasks {
+        let previous = task.clone();
+        if task.output.is_none() {
+            task.output = read_task_output(task);
+            monitor_changed |= task.output.is_some();
+        }
+        monitor_changed |= *task != previous;
+    }
+    if monitor_changed {
+        save_store(&monitor_tp, &monitor_store)?;
+    }
     let resolved = store
         .tasks
         .iter()
@@ -108,6 +145,7 @@ pub(super) fn execute_task_list(
     let tasks = store
         .tasks
         .iter()
+        .chain(monitor_store.tasks.iter())
         .filter(|task| {
             !task
                 .metadata
@@ -141,7 +179,8 @@ pub(super) fn execute_task_update(
 ) -> Result<String> {
     let parsed: TaskUpdateInput =
         serde_json::from_value(input).context("invalid TaskUpdate input")?;
-    let tp = tasks_path(state.session.cwd.as_path(), &state.session.id);
+    let store_cwd = state.session.cwd.clone();
+    let tp = task_update_store_path(&store_cwd, &state.session.id, &parsed.task_id)?;
     let mut store = load_store::<TaskStore>(&tp)?;
     let Some(index) = store
         .tasks
@@ -267,6 +306,63 @@ pub(super) fn execute_task_update(
         "updatedFields": updated_fields,
         "statusChange": status_change,
     }))?)
+}
+
+fn validate_task_create_actions(parsed: &TaskCreateInput) -> Result<()> {
+    for action in &parsed.actions {
+        if action.action_name.trim().is_empty() {
+            bail!("TaskCreate actionName cannot be empty");
+        }
+        if action.action_prompt.trim().is_empty() {
+            bail!("TaskCreate actionPrompt cannot be empty");
+        }
+    }
+    for reason in &parsed.possible_ignore_reasons {
+        if reason.trim().is_empty() {
+            bail!("TaskCreate possibleIgnoreReasons cannot contain empty values");
+        }
+    }
+    Ok(())
+}
+
+fn is_monitor_task_metadata(metadata: &Map<String, Value>) -> bool {
+    metadata
+        .get("_monitor")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || metadata.contains_key("monitor_connection")
+        || metadata.contains_key("monitorConnection")
+}
+
+fn load_monitor_task(cwd: &Path, task_id: &str) -> Result<Option<StoredTask>> {
+    let store = load_store::<TaskStore>(&monitor_tasks_path(cwd))?;
+    Ok(store.tasks.into_iter().find(|task| task.task_id == task_id))
+}
+
+fn task_update_store_path(
+    cwd: &Path,
+    session_id: &uuid::Uuid,
+    task_id: &str,
+) -> Result<std::path::PathBuf> {
+    let session_path = tasks_path(cwd, session_id);
+    let session_store = load_store::<TaskStore>(&session_path)?;
+    if session_store
+        .tasks
+        .iter()
+        .any(|task| task.task_id == task_id)
+    {
+        return Ok(session_path);
+    }
+    let monitor_path = monitor_tasks_path(cwd);
+    let monitor_store = load_store::<TaskStore>(&monitor_path)?;
+    if monitor_store
+        .tasks
+        .iter()
+        .any(|task| task.task_id == task_id)
+    {
+        return Ok(monitor_path);
+    }
+    Ok(session_path)
 }
 
 /// Executes the live `TaskStop` workflow tool.
