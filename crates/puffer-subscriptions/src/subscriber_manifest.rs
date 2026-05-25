@@ -126,6 +126,7 @@ fn serve_configured_connector(slug: &str) -> bool {
             | "matrix-bot"
             | "alertmanager-webhook"
             | "asana-webhook"
+            | "datadog-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"

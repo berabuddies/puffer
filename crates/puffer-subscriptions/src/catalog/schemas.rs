@@ -305,6 +305,28 @@ pub(super) fn alertmanager_alert_output_schema() -> Value {
     })
 }
 
+/// Returns the Datadog webhook event output schema.
+pub(super) fn datadog_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "datadog_event"},
+            "title": {"type": "string"},
+            "transition": {"type": "string"},
+            "status": {"type": "string"},
+            "event_type": {"type": "string"},
+            "alert_id": {"type": "string"},
+            "alert_cycle_key": {"type": "string"},
+            "hostname": {"type": "string"},
+            "tags": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["title", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Grafana Alerting webhook output schema.
 pub(super) fn grafana_alert_output_schema() -> Value {
     serde_json::json!({

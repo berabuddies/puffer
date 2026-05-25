@@ -234,6 +234,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "matrix-bot"
             | "alertmanager-webhook"
             | "asana-webhook"
+            | "datadog-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"
@@ -479,6 +480,16 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "grafana alert").expect("slug");
 
         assert_eq!(slug, "grafana-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_datadog_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "datadog monitor").expect("slug");
+
+        assert_eq!(slug, "datadog-webhook");
     }
 
     #[test]
