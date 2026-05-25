@@ -9,6 +9,8 @@
     WorkflowConnection,
     WorkflowConnector,
     WorkflowDefinition,
+    WorkflowMonitorTask,
+    WorkflowMonitorTaskAction,
     WorkflowPipelineNode,
     WorkflowRun,
     WorkflowRunNode,
@@ -58,16 +60,21 @@
     searchText: string;
   };
 
+  type MonitorTaskSearchRow = {
+    task: WorkflowMonitorTask;
+    searchText: string;
+  };
+
   type ConnectorFilterPreset = {
     label: string;
     query: string;
   };
 
   type Props = {
-    onRunConnectCommand?: (command: string) => boolean | Promise<boolean>;
+    onRunWorkflowCommand?: (command: string) => boolean | Promise<boolean>;
   };
 
-  let { onRunConnectCommand }: Props = $props();
+  let { onRunWorkflowCommand }: Props = $props();
 
   const providerOptions: ProviderMeta[] = [
     {
@@ -123,7 +130,9 @@
     runs: [],
     connectors: [],
     connections: [],
-    connector_error: null
+    connector_error: null,
+    monitor_tasks: [],
+    monitor_task_error: null
   });
   let editorWorkflows = $state<EditableWorkflow[]>([starterWorkflow()]);
   let workflowSlug = $state("agent-review-pipeline");
@@ -139,6 +148,7 @@
   let connectorCommandRunningFor = $state<string | null>(null);
   let connectionCommandRunningFor = $state<string | null>(null);
   let monitorCommandRunningFor = $state<string | null>(null);
+  let monitorTaskCommandRunningFor = $state<string | null>(null);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
   let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
@@ -146,10 +156,14 @@
   let workflows = $derived(editorWorkflows);
   let connectors = $derived(snapshot.connectors ?? []);
   let connections = $derived(snapshot.connections ?? []);
+  let monitorTasks = $derived(snapshot.monitor_tasks ?? []);
+  let activeMonitorTasks = $derived(monitorTasks.filter((task) => !monitorTaskIgnored(task)));
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
   let connectorSearchRows = $derived(indexConnectors(connectors, connections));
   let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
+  let monitorTaskSearchRows = $derived(indexMonitorTasks(activeMonitorTasks));
   let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQuery));
+  let filteredMonitorTasks = $derived(filterMonitorTasks(monitorTaskSearchRows, connectorQuery));
   let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQuery));
   let workflow = $derived(
     workflows.find((item) => item.slug === workflowSlug) ?? workflows[0] ?? null
@@ -329,7 +343,9 @@
         runs: [...next.runs].sort((a, b) => b.idx - a.idx),
         connectors: next.connectors ?? [],
         connections: next.connections ?? [],
-        connector_error: next.connector_error ?? null
+        connector_error: next.connector_error ?? null,
+        monitor_tasks: next.monitor_tasks ?? [],
+        monitor_task_error: next.monitor_task_error ?? null
       };
       editorWorkflows = merged;
       if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
@@ -534,10 +550,10 @@
       saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
       return;
     }
-    if (!command || connectorCommandRunnerBusy() || !onRunConnectCommand) return;
+    if (!command || connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
     connectorCommandRunning = true;
     try {
-      const started = await onRunConnectCommand(command);
+      const started = await onRunWorkflowCommand(command);
       saveNotice = started === false ? `Could not start ${command}.` : `Started ${command} in an agent session.`;
     } catch (err) {
       saveNotice = `Could not start ${command}.`;
@@ -549,12 +565,12 @@
   async function runConnectorSetupCommand(connector: WorkflowConnector) {
     const connectionName = connectorConnectionHint(connector);
     const command = connectorConnectCommand(connector, connectionName);
-    if (connectorCommandRunnerBusy() || !onRunConnectCommand) return;
+    if (connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
     selectedConnectorSlug = connector.connector_slug;
     selectedConnectorConnectionName = connectionName;
     connectorCommandRunningFor = connector.connector_slug;
     try {
-      const started = await onRunConnectCommand(command);
+      const started = await onRunWorkflowCommand(command);
       saveNotice = started === false
         ? `Could not start ${command}.`
         : `Started ${command} in an agent session.`;
@@ -582,15 +598,16 @@
     return connectorCommandRunning
       || connectorCommandRunningFor !== null
       || connectionCommandRunningFor !== null
-      || monitorCommandRunningFor !== null;
+      || monitorCommandRunningFor !== null
+      || monitorTaskCommandRunningFor !== null;
   }
 
   async function runConnectionConnectCommand(connection: WorkflowConnection) {
     const command = connectionConnectCommand(connection);
-    if (connectorCommandRunnerBusy() || !onRunConnectCommand) return;
+    if (connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
     connectionCommandRunningFor = connection.slug;
     try {
-      const started = await onRunConnectCommand(command);
+      const started = await onRunWorkflowCommand(command);
       saveNotice = started === false
         ? `Could not start ${command}.`
         : `Started ${command} in an agent session.`;
@@ -603,10 +620,10 @@
 
   async function runConnectionMonitorCommand(connection: WorkflowConnection) {
     const command = connectionMonitorCommand(connection);
-    if (!connectionMonitorSupported(connection) || connectorCommandRunnerBusy() || !onRunConnectCommand) return;
+    if (!connectionMonitorSupported(connection) || connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
     monitorCommandRunningFor = connection.slug;
     try {
-      const started = await onRunConnectCommand(command);
+      const started = await onRunWorkflowCommand(command);
       saveNotice = started === false
         ? `Could not start ${command}.`
         : `Started ${command} in an agent session.`;
@@ -615,6 +632,75 @@
     } finally {
       monitorCommandRunningFor = null;
     }
+  }
+
+  function monitorTaskIgnored(task: WorkflowMonitorTask): boolean {
+    return task.ignored === true;
+  }
+
+  function monitorTaskActions(task: WorkflowMonitorTask): WorkflowMonitorTaskAction[] {
+    return task.actions ?? [];
+  }
+
+  function monitorTaskIgnoreReasons(task: WorkflowMonitorTask): string[] {
+    return task.possible_ignore_reasons ?? [];
+  }
+
+  function monitorTaskShowCommand(task: WorkflowMonitorTask): string {
+    return `/tasks show ${task.task_id}`;
+  }
+
+  function monitorTaskIgnoreCommand(task: WorkflowMonitorTask, reason?: string): string {
+    const trimmed = reason?.trim();
+    return trimmed ? `/tasks ignore ${task.task_id} ${trimmed}` : `/tasks ignore ${task.task_id}`;
+  }
+
+  function monitorTaskActionPrompt(task: WorkflowMonitorTask, action: WorkflowMonitorTaskAction): string {
+    return [
+      `Act on monitored task ${task.task_id}: ${task.subject}`,
+      "",
+      "Task description:",
+      task.description,
+      "",
+      `Selected action: ${action.name}`,
+      "",
+      action.prompt,
+      "",
+      `When the action is fully handled, update task ${task.task_id} with TaskUpdate status=completed. If you need more context, inspect the connector or ask the user.`
+    ].join("\n");
+  }
+
+  async function runMonitorTaskCommand(
+    task: WorkflowMonitorTask,
+    command: string,
+    startedMessage: string
+  ) {
+    if (!command.trim() || connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
+    monitorTaskCommandRunningFor = task.task_id;
+    try {
+      const started = await onRunWorkflowCommand(command);
+      saveNotice = started === false ? `Could not start ${task.task_id}.` : startedMessage;
+    } catch (err) {
+      saveNotice = `Could not start ${task.task_id}.`;
+    } finally {
+      monitorTaskCommandRunningFor = null;
+    }
+  }
+
+  async function runMonitorTaskShowCommand(task: WorkflowMonitorTask) {
+    await runMonitorTaskCommand(task, monitorTaskShowCommand(task), `Opened ${task.task_id} in an agent session.`);
+  }
+
+  async function runMonitorTaskIgnoreCommand(task: WorkflowMonitorTask, reason?: string) {
+    await runMonitorTaskCommand(task, monitorTaskIgnoreCommand(task, reason), `Started ignore flow for ${task.task_id}.`);
+  }
+
+  async function runMonitorTaskAction(task: WorkflowMonitorTask, action: WorkflowMonitorTaskAction) {
+    await runMonitorTaskCommand(
+      task,
+      monitorTaskActionPrompt(task, action),
+      `Started ${action.name} for ${task.task_id}.`
+    );
   }
 
   function connectorBySlug(slug: string | null | undefined): WorkflowConnector | undefined {
@@ -748,9 +834,32 @@
     });
   }
 
+  function indexMonitorTasks(items: WorkflowMonitorTask[]): MonitorTaskSearchRow[] {
+    return items.map((task) => ({
+      task,
+      searchText: buildSearchText([
+        "monitor task",
+        task.task_id,
+        task.subject,
+        task.description,
+        task.status,
+        task.monitor_connection,
+        task.monitor_connector,
+        task.monitor_memory_path,
+        monitorTaskActions(task).map((action) => `${action.name} ${action.prompt}`).join(" "),
+        monitorTaskIgnoreReasons(task).join(" ")
+      ])
+    }));
+  }
+
   function filterConnections(rows: ConnectionSearchRow[], query: string): WorkflowConnection[] {
     const terms = searchTerms(query);
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connection);
+  }
+
+  function filterMonitorTasks(rows: MonitorTaskSearchRow[], query: string): WorkflowMonitorTask[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.task);
   }
 
   function filterConnectors(rows: ConnectorSearchRow[], query: string): WorkflowConnector[] {
@@ -1337,7 +1446,7 @@
                         aria-label={`Run ${connectCommand}`}
                         title={connectCommand}
                         aria-busy={connectionCommandRunningFor === connection.slug}
-                        disabled={connectorCommandRunnerBusy() || !onRunConnectCommand}
+                        disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
                         onclick={() => runConnectionConnectCommand(connection)}
                       >
                         <Icon name="wrench" size={12} />
@@ -1348,7 +1457,7 @@
                         aria-label={`Run ${monitorCommand}`}
                         title={monitorCommand}
                         aria-busy={monitorCommandRunningFor === connection.slug}
-                        disabled={!canMonitor || connectorCommandRunnerBusy() || !onRunConnectCommand}
+                        disabled={!canMonitor || connectorCommandRunnerBusy() || !onRunWorkflowCommand}
                         onclick={() => runConnectionMonitorCommand(connection)}
                       >
                         <Icon name="bot" size={12} />
@@ -1356,6 +1465,74 @@
                     </div>
                   {/each}
                 </div>
+
+                {#if activeMonitorTasks.length > 0 || snapshot.monitor_task_error}
+                  <div class="pf-monitor-tasks" aria-label="Monitor tasks">
+                    <div class="pf-monitor-tasks-head">
+                      <span><Icon name="bot" size={12} />Monitor tasks</span>
+                      <small>{filteredMonitorTasks.length}/{activeMonitorTasks.length}</small>
+                    </div>
+                    {#if snapshot.monitor_task_error}
+                      <div class="pf-connector-empty">Monitor tasks unavailable.</div>
+                    {:else if filteredMonitorTasks.length === 0}
+                      <div class="pf-connector-empty">No matching monitor tasks.</div>
+                    {/if}
+                    {#each filteredMonitorTasks as task (task.task_id)}
+                      {@const actions = monitorTaskActions(task)}
+                      {@const visibleActions = actions.slice(0, 2)}
+                      {@const hiddenActions = Math.max(0, actions.length - visibleActions.length)}
+                      {@const reasons = monitorTaskIgnoreReasons(task)}
+                      {@const defaultReason = reasons[0]}
+                      <div class="pf-monitor-task-row" data-status={task.status}>
+                        <button
+                          type="button"
+                          class="pf-monitor-task-main"
+                          aria-label={`Show ${task.task_id}`}
+                          aria-busy={monitorTaskCommandRunningFor === task.task_id}
+                          disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                          onclick={() => runMonitorTaskShowCommand(task)}
+                        >
+                          <span class="pf-connector-main">
+                            <strong>{task.subject || task.task_id}</strong>
+                            <small>{task.task_id}{task.monitor_connection ? ` - ${task.monitor_connection}` : ""}</small>
+                          </span>
+                          <span class="pf-connector-tags">
+                            <span>{task.status || "pending"}</span>
+                            {#if task.monitor_connector}<span>{task.monitor_connector}</span>{/if}
+                            {#if task.monitor_connection}<span>{task.monitor_connection}</span>{/if}
+                            {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
+                          </span>
+                        </button>
+                        <div class="pf-monitor-task-actions">
+                          {#each visibleActions as action (action.name)}
+                            <button
+                              type="button"
+                              class="pf-monitor-action-btn"
+                              aria-label={`Run monitor action ${task.task_id} ${action.name}`}
+                              title={action.prompt}
+                              aria-busy={monitorTaskCommandRunningFor === task.task_id}
+                              disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                              onclick={() => runMonitorTaskAction(task, action)}
+                            >
+                              <Icon name="play" size={11} />{action.name}
+                            </button>
+                          {/each}
+                          <button
+                            type="button"
+                            class="pf-monitor-action-btn"
+                            aria-label={`Ignore ${task.task_id}`}
+                            title={defaultReason ? monitorTaskIgnoreCommand(task, defaultReason) : monitorTaskIgnoreCommand(task)}
+                            aria-busy={monitorTaskCommandRunningFor === task.task_id}
+                            disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
+                            onclick={() => runMonitorTaskIgnoreCommand(task, defaultReason)}
+                          >
+                            <Icon name="eyeOff" size={11} />Ignore
+                          </button>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
 
                 <div class="pf-connector-catalog" aria-label="Connector catalog">
                   {#if filteredConnectors.length === 0}
@@ -1407,7 +1584,7 @@
                         aria-label={`Run ${connectCommand}`}
                         title={connectCommand}
                         aria-busy={connectorCommandRunningFor === connector.connector_slug}
-                        disabled={connectorCommandRunnerBusy() || !onRunConnectCommand}
+                        disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
                         onclick={() => runConnectorSetupCommand(connector)}
                       >
                         <Icon name="plug" size={12} />
@@ -1444,7 +1621,7 @@
                         >
                           <Icon name="copy" size={12} />
                         </button>
-                        {#if onRunConnectCommand}
+                        {#if onRunWorkflowCommand}
                           <button
                             type="button"
                             class="pf-icon-btn"
@@ -2076,6 +2253,104 @@
   .pf-connector-catalog {
     max-height: 164px;
     overflow: auto;
+  }
+
+  .pf-monitor-tasks {
+    display: grid;
+    gap: 5px;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+  }
+
+  .pf-monitor-tasks-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--muted-foreground);
+    font-size: 10.5px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0;
+  }
+
+  .pf-monitor-tasks-head span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .pf-monitor-tasks-head small {
+    color: var(--muted-foreground);
+    font-size: 10.5px;
+  }
+
+  .pf-monitor-task-row {
+    display: grid;
+    gap: 5px;
+    border: 1px solid color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--puffer-accent) 5%, var(--card));
+    padding: 5px;
+  }
+
+  .pf-monitor-task-main {
+    all: unset;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+    cursor: pointer;
+  }
+
+  .pf-monitor-task-main:hover:not(:disabled) strong,
+  .pf-monitor-task-main:focus-visible strong {
+    color: var(--puffer-accent);
+  }
+
+  .pf-monitor-task-main:disabled {
+    opacity: 0.64;
+    cursor: default;
+  }
+
+  .pf-monitor-task-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .pf-monitor-action-btn {
+    all: unset;
+    box-sizing: border-box;
+    min-height: 24px;
+    max-width: 100%;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--foreground);
+    padding: 3px 7px;
+    font-size: 10.5px;
+    font-weight: 700;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pf-monitor-action-btn:hover:not(:disabled),
+  .pf-monitor-action-btn:focus-visible {
+    border-color: color-mix(in oklab, var(--puffer-accent) 34%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 10%, var(--card));
+  }
+
+  .pf-monitor-action-btn:disabled {
+    opacity: 0.56;
+    cursor: default;
   }
 
   .pf-connection-row-group,

@@ -53,6 +53,8 @@ type WorkflowSnapshotFixture = {
   connectors?: JsonRecord[];
   connections?: JsonRecord[];
   connector_error?: string | null;
+  monitor_tasks?: JsonRecord[];
+  monitor_task_error?: string | null;
 };
 
 type SessionDetailOverrides = {
@@ -508,7 +510,29 @@ export class FakeDaemon {
         monitor_command: "/monitor telegram-user"
       }
     ],
-    connector_error: null
+    connector_error: null,
+    monitor_tasks: [
+      {
+        task_id: "monitor-1",
+        subject: "Reply to Telegram support ping",
+        description: "Alice asked whether the deployment is finished.",
+        status: "pending",
+        monitor_connection: "telegram-user",
+        monitor_connector: "telegram-login",
+        monitor_memory_path: "/tmp/telegram-user.md",
+        ignored: false,
+        actions: [
+          {
+            name: "Draft reply",
+            prompt: "Draft a concise reply to Alice with the deployment status."
+          }
+        ],
+        possible_ignore_reasons: ["duplicate support ping"],
+        started_at_ms: now - 15_000,
+        updated_at_ms: now - 5_000
+      }
+    ],
+    monitor_task_error: null
   };
   private nextTab = 2;
   private nextPty = 1;
@@ -644,7 +668,9 @@ export class FakeDaemon {
       runs: snapshot.runs.map((run) => ({ ...run })),
       connectors: snapshot.connectors?.map((connector) => ({ ...connector })),
       connections: snapshot.connections?.map((connection) => ({ ...connection })),
-      connector_error: snapshot.connector_error ?? null
+      connector_error: snapshot.connector_error ?? null,
+      monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
+      monitor_task_error: snapshot.monitor_task_error ?? null
     };
   }
 
@@ -973,7 +999,9 @@ export class FakeDaemon {
           runs: this.workflowSnapshot.runs.map((run) => ({ ...run })),
           connectors: this.workflowSnapshot.connectors?.map((connector) => ({ ...connector })) ?? [],
           connections: this.workflowSnapshot.connections?.map((connection) => ({ ...connection })) ?? [],
-          connector_error: this.workflowSnapshot.connector_error ?? null
+          connector_error: this.workflowSnapshot.connector_error ?? null,
+          monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
+          monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
         };
       case "list_dir":
         return this.listDir(request.params);

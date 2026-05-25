@@ -418,12 +418,34 @@ export type WorkflowConnection = {
   monitor_command?: string | null;
 };
 
+export type WorkflowMonitorTaskAction = {
+  name: string;
+  prompt: string;
+};
+
+export type WorkflowMonitorTask = {
+  task_id: string;
+  subject: string;
+  description: string;
+  status: string;
+  monitor_connection?: string | null;
+  monitor_connector?: string | null;
+  monitor_memory_path?: string | null;
+  ignored?: boolean;
+  actions?: WorkflowMonitorTaskAction[];
+  possible_ignore_reasons?: string[];
+  started_at_ms?: number | null;
+  updated_at_ms?: number | null;
+};
+
 export type WorkflowSnapshot = {
   workflows: WorkflowDefinition[];
   runs: WorkflowRun[];
   connectors?: WorkflowConnector[];
   connections?: WorkflowConnection[];
   connector_error?: string | null;
+  monitor_tasks?: WorkflowMonitorTask[];
+  monitor_task_error?: string | null;
 };
 
 export type ExternalCredential = {

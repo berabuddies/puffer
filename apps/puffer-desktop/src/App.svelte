@@ -2363,7 +2363,7 @@
     tweaks = { ...tweaks, screen: "workspace" };
   }
 
-  async function runPipelineConnectCommand(command: string): Promise<boolean> {
+  async function runPipelineWorkflowCommand(command: string): Promise<boolean> {
     const trimmed = command.trim();
     if (!trimmed) return false;
     try {
@@ -2379,7 +2379,7 @@
       }
       return started;
     } catch (error) {
-      statusMessage = `Connector setup failed: ${errorText(error)}`;
+      statusMessage = `Workflow command failed: ${errorText(error)}`;
       return false;
     }
   }
@@ -3453,7 +3453,7 @@
               />
             {/if}
           {:else if tweaks.screen === "pipelines"}
-            <Pipelines onRunConnectCommand={runPipelineConnectCommand} />
+            <Pipelines onRunWorkflowCommand={runPipelineWorkflowCommand} />
           {:else if tweaks.screen === "deployments"}
             <Deployments />
           {:else if tweaks.screen === "settings"}

@@ -357,6 +357,47 @@ test("pipeline connection picker can start connector task monitors", async ({ pa
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
+test("pipeline monitor task panel exposes task actions", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const tasks = page.getByLabel("Monitor tasks");
+  await expect(tasks).toContainText("Reply to Telegram support ping");
+  await expect(tasks).toContainText("telegram-user");
+
+  await page.getByLabel("Search connectors").fill("support ping");
+  await expect(tasks).toContainText("1/1");
+  await expect(tasks).toContainText("Draft reply");
+
+  await tasks.getByRole("button", { name: "Run monitor action monitor-1 Draft reply" }).click();
+  const actionRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) =>
+      String(candidate.params.message ?? "").startsWith("Act on monitored task monitor-1:")
+      && String(candidate.params.message ?? "").includes("Draft a concise reply to Alice")
+  );
+  expect(String(actionRequest.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline monitor task panel can start ignore flows", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const tasks = page.getByLabel("Monitor tasks");
+  await tasks.getByRole("button", { name: "Ignore monitor-1" }).click();
+  const ignoreRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/tasks ignore monitor-1 duplicate support ping"
+  );
+  expect(String(ignoreRequest.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
 test("pipeline connection picker can start connection repair setup", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
