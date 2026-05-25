@@ -16,11 +16,12 @@ const args = parseArgs(process.argv.slice(2));
 const guiflowRoot = path.resolve(String(args.root ?? path.join(repoRoot, "..", "guiflow-paper")));
 const suitePath = path.resolve(String(args.suite ?? path.join(guiflowRoot, "benchmarks", "smoke_suite.json")));
 const outDir = path.resolve(repoRoot, String(args.out ?? "apps/puffer-desktop/tests/fuzz/.runs/guiflow-smoke"));
+const maxCases = args["max-cases"] === undefined ? null : Number(args["max-cases"]);
 
 const suite = JSON.parse(fs.readFileSync(suitePath, "utf8"));
 fs.mkdirSync(outDir, { recursive: true });
 const results = [];
-for (const testCase of suite.cases ?? []) {
+for (const testCase of selectedCases(suite.cases ?? [], maxCases)) {
   results.push(await runCase(testCase));
 }
 const summary = summarize(results);
@@ -165,7 +166,7 @@ function buildBenchmarkVerdict(testCase, status, expectationResults, evidenceInd
     expected: testCase.expected_behavior ?? testCase.requirement ?? "",
     actual: expectationResults.map((item) => `${item.selector}: observed ${JSON.stringify(item.observed)}`).join("; "),
     impact: "The benchmark user flow completes but the visible business result is stale or incorrect.",
-    repro: (testCase.actions ?? []).map((action) => `${action.type} ${action.selector ?? action.role ?? action.text ?? ""} ${action.value ?? ""}`.trim()),
+    repro: buildReproSteps(testCase),
     notes: `Benchmark case ${testCase.id}`
   };
 }
@@ -173,11 +174,12 @@ function buildBenchmarkVerdict(testCase, status, expectationResults, evidenceInd
 function resolveServer(server) {
   if (!server) return null;
   const cwd = String(server.cwd ?? "");
-  const marker = "benchmarks/smoke_apps/";
-  const markerIndex = cwd.indexOf(marker);
+  const markers = ["benchmarks/smoke_apps/", "data/WebTestBench/"];
+  const marker = markers.find((item) => cwd.includes(item));
+  const markerIndex = marker ? cwd.indexOf(marker) : -1;
   return {
     ...server,
-    cwd: markerIndex >= 0 ? path.join(guiflowRoot, cwd.slice(markerIndex)) : cwd
+    cwd: markerIndex >= 0 && marker ? path.join(guiflowRoot, cwd.slice(markerIndex)) : cwd
   };
 }
 
@@ -185,19 +187,33 @@ function startServer(server) {
   if (!server) return null;
   return spawn(server.command, server.args ?? [], {
     cwd: server.cwd,
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
 }
 
 async function stopServer(child) {
-  child.kill("SIGTERM");
+  let exited = false;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
   await new Promise((resolve) => {
     const timer = setTimeout(resolve, 1000);
     child.once("exit", () => {
+      exited = true;
       clearTimeout(timer);
       resolve();
     });
   });
+  if (!exited) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }
 }
 
 async function waitForUrl(page, url, timeoutMs = 15_000) {
@@ -230,25 +246,93 @@ async function compactDom(page) {
 }
 
 async function perform(page, action) {
+  const repeat = Number(action.repeat ?? 1);
+  for (let index = 0; index < repeat; index += 1) {
+    await performOnce(page, action);
+    if (action.afterEachMs) {
+      await page.waitForTimeout(Number(action.afterEachMs));
+    }
+  }
+}
+
+async function performOnce(page, action) {
+  if (action.type === "goto") {
+    await page.goto(String(action.url), { waitUntil: "domcontentloaded", timeout: Number(action.timeout ?? 5000) });
+    return;
+  }
+  if (action.type === "wait") {
+    await page.waitForTimeout(Number(action.ms ?? 1000));
+    return;
+  }
   if (action.type === "fill") {
-    await page.locator(action.selector).first().fill(String(action.value), { timeout: 5000 });
+    await locatorForAction(page, action).fill(String(action.value), { timeout: Number(action.timeout ?? 5000) });
     return;
   }
   if (action.type === "click") {
-    await page.locator(action.selector).first().click({ timeout: 5000 });
+    await locatorForAction(page, action).click({ timeout: Number(action.timeout ?? 5000) });
     return;
   }
-  throw new Error(`Unsupported smoke action: ${action.type}`);
+  throw new Error(`Unsupported benchmark action: ${action.type}`);
 }
 
 async function checkExpectation(page, expectation) {
-  if (expectation.type !== "textIncludes") throw new Error(`Unsupported smoke expectation: ${expectation.type}`);
-  const observed = await page.locator(expectation.selector).first().innerText({ timeout: 3000 });
-  return {
-    ...expectation,
-    observed,
-    passed: observed.includes(String(expectation.value))
-  };
+  if (expectation.type === "textIncludes") {
+    const observed = await nthLocator(page.locator(expectation.selector), expectation).innerText({ timeout: 3000 });
+    return { ...expectation, observed, passed: observed.includes(String(expectation.value)) };
+  }
+  if (expectation.type === "pageTextIncludes") {
+    const observed = await page.locator("body").innerText({ timeout: 3000 });
+    return { ...expectation, observed: truncate(observed), passed: observed.includes(String(expectation.value)) };
+  }
+  if (expectation.type === "pageTextOccurrenceAtMost") {
+    const observed = await page.locator("body").innerText({ timeout: 3000 });
+    const count = occurrenceCount(observed, String(expectation.value));
+    return { ...expectation, observed: count, passed: count <= Number(expectation.max) };
+  }
+  if (expectation.type === "pageTextOccurrenceAtLeast") {
+    const observed = await page.locator("body").innerText({ timeout: 3000 });
+    const count = occurrenceCount(observed, String(expectation.value));
+    return { ...expectation, observed: count, passed: count >= Number(expectation.min) };
+  }
+  if (expectation.type === "attributeIncludes" || expectation.type === "attributeNotIncludes") {
+    const observed = await nthLocator(page.locator(expectation.selector), expectation)
+      .getAttribute(String(expectation.attribute), { timeout: 3000 });
+    const includes = String(observed ?? "").includes(String(expectation.value));
+    return {
+      ...expectation,
+      observed,
+      passed: expectation.type === "attributeIncludes" ? includes : !includes
+    };
+  }
+  if (expectation.type === "disabled") {
+    const observed = await nthLocator(page.locator(expectation.selector), expectation).isDisabled({ timeout: 3000 });
+    return { ...expectation, observed, passed: observed === Boolean(expectation.value) };
+  }
+  if (expectation.type === "locatorCountAtLeast") {
+    const observed = await page.locator(expectation.selector).count();
+    return { ...expectation, observed, passed: observed >= Number(expectation.value) };
+  }
+  throw new Error(`Unsupported benchmark expectation: ${expectation.type}`);
+}
+
+function locatorForAction(page, action) {
+  if (action.selector) return nthLocator(page.locator(action.selector), action);
+  if (action.label) return page.getByLabel(String(action.label)).first();
+  if (action.role) return page.getByRole(String(action.role), { name: action.name }).first();
+  throw new Error(`Action is missing selector, label, or role: ${JSON.stringify(action)}`);
+}
+
+function nthLocator(locator, spec) {
+  return spec.nth === undefined ? locator.first() : locator.nth(Number(spec.nth));
+}
+
+function occurrenceCount(text, needle) {
+  if (!needle) return 0;
+  return text.split(needle).length - 1;
+}
+
+function truncate(text, limit = 2000) {
+  return String(text).replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
 function summarize(results) {
@@ -317,4 +401,20 @@ function parseArgs(argv) {
 
 function relative(filePath) {
   return path.relative(repoRoot, filePath).replaceAll(path.sep, "/");
+}
+
+function selectedCases(cases, limit) {
+  if (limit === null || Number.isNaN(limit) || limit <= 0) return cases;
+  return cases.slice(0, limit);
+}
+
+function buildReproSteps(testCase) {
+  const steps = [`goto ${testCase.url}`];
+  for (const action of testCase.actions ?? []) {
+    steps.push(`${action.type} ${action.selector ?? action.label ?? action.role ?? action.text ?? ""} ${action.value ?? ""}`.trim());
+  }
+  if ((testCase.actions ?? []).length === 0) {
+    steps.push("evaluate benchmark expectations");
+  }
+  return steps;
 }
