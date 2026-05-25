@@ -345,3 +345,95 @@ fn lambda_gate_commits_facts_only_after_successful_concrete_tool() {
         )));
     assert!(failed.output.metadata.get("lambda_skill").is_none());
 }
+
+#[test]
+fn lambda_host_call_bridges_internal_skill_step() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["proc"],"domains":["Ticket"],"tools":[{"name":"parse_context","params":[{"name":"ticket","ty":"str"}],"result":"Ticket","effects":["proc"],"registers":[{"pred":"parsed","args":["ticket"]}],"concreteTools":["LambdaInternal"],"concreteInputContracts":{"LambdaInternal":{"step":"support-ticket-triage.parse_context","args":{"ticket":{"$arg":"ticket"}},"result":{"$template":"parsed ${ticket}"}}}}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool(
+                "LambdaHostCall",
+                "Admit Lambda host call",
+                "runtime:lambda_host_call",
+            ),
+            loaded_tool(
+                "LambdaInternal",
+                "Record Lambda internal step",
+                "runtime:workflow:lambda_internal",
+            ),
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+    let concrete_input = json!({
+        "step": "support-ticket-triage.parse_context",
+        "args": {"ticket": "refund request"},
+        "result": "parsed refund request",
+    });
+
+    let admitted = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "parse_context",
+            "args": {"ticket": "refund request"},
+            "tool": "LambdaInternal",
+            "input": concrete_input,
+        }),
+    )
+    .unwrap();
+    assert!(admitted.success);
+
+    let completed = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaInternal",
+        json!({
+            "step": "support-ticket-triage.parse_context",
+            "args": {"ticket": "refund request"},
+            "result": "parsed refund request",
+        }),
+    )
+    .unwrap();
+
+    assert!(completed.success);
+    assert_eq!(completed.output.stdout, "parsed refund request");
+    assert!(state.pending_lambda_host_call.is_none());
+    let gate = state.lambda_gate.as_ref().expect("gate remains installed");
+    assert!(gate
+        .facts()
+        .contains(&crate::runtime::lambda_gate::LambdaFact::new(
+            "parsed",
+            vec!["\"refund request\"".to_string()],
+        )));
+}

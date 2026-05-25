@@ -13,6 +13,7 @@ pub mod exit_plan_mode;
 pub mod exit_worktree;
 pub mod goal;
 pub mod lark;
+pub mod lambda_internal;
 pub mod lsp;
 mod lsp_live;
 mod lsp_live_diagnostics;
