@@ -468,10 +468,91 @@
         kind: "agent";
         item: MessageTimelineItem | null;
         children: ActivityChild[];
+        gates: MessageTimelineItem[];
         approvals: PermissionTimelineItem[];
         questions: UserQuestionTimelineItem[];
       };
   type ActivityChild = ToolTimelineItem | DiffTimelineItem | MessageTimelineItem;
+  type GateDisplay = {
+    state: "success" | "error";
+    label: string;
+    detail: string;
+  };
+
+  function isVerifiedSkillGateItem(item: TimelineItem): item is MessageTimelineItem {
+    if (item.kind !== "system") return false;
+    return (
+      item.title === "Verified Skill Gate" ||
+      item.meta.includes("verified skill") ||
+      item.body.trim().startsWith("Verified Skill Gate ")
+    );
+  }
+
+  function normalizedGateKey(value: string | null | undefined): string {
+    return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function gateField(item: MessageTimelineItem, name: string): string | null {
+    const target = normalizedGateKey(name);
+    for (const line of item.body.split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      const key = normalizedGateKey(line.slice(0, idx));
+      if (key === target) {
+        const value = line.slice(idx + 1).trim();
+        return value || null;
+      }
+    }
+    return null;
+  }
+
+  function firstGateMetaEvent(item: MessageTimelineItem): string | null {
+    return item.meta.find((value) => normalizedGateKey(value) !== "verifiedskill") ?? null;
+  }
+
+  function compactGateText(item: MessageTimelineItem): string {
+    return item.body
+      .replace(/^Verified Skill Gate\s*/i, "")
+      .replace(/\s+/g, " ")
+      .replace(/\.$/, "")
+      .trim();
+  }
+
+  function verifiedSkillGateDisplay(item: MessageTimelineItem): GateDisplay {
+    const event = normalizedGateKey(gateField(item, "event") ?? firstGateMetaEvent(item));
+    const hostTool = gateField(item, "host_tool") ?? gateField(item, "hosttool");
+    const concreteTool = gateField(item, "concrete_tool") ?? gateField(item, "concretetool");
+    const reason = gateField(item, "reason");
+    const retryTool = gateField(item, "retry_tool") ?? gateField(item, "retrytool");
+    const compact = compactGateText(item);
+    if (event.includes("reject") || item.status === "error") {
+      const retry = retryTool ? ` Retry with ${retryTool}.` : "";
+      return {
+        state: "error",
+        label: "Gate rejected",
+        detail: reason ? `${reason}.${retry}` : compact || "Call did not satisfy the Verified Skill gate."
+      };
+    }
+    if (event.includes("commit")) {
+      return {
+        state: "success",
+        label: "Gate committed",
+        detail: hostTool || concreteTool ? [hostTool ?? "host call", concreteTool].filter(Boolean).join(" -> ") : compact
+      };
+    }
+    if (event.includes("admit")) {
+      return {
+        state: "success",
+        label: "Gate admitted",
+        detail: hostTool || concreteTool ? [hostTool ?? "host call", concreteTool].filter(Boolean).join(" -> ") : compact
+      };
+    }
+    return {
+      state: "success",
+      label: "Gate checked",
+      detail: compact
+    };
+  }
 
   function isActivityMessage(child: ActivityChild): child is MessageTimelineItem {
     return child.kind === "assistant" || child.kind === "command";
@@ -551,6 +632,7 @@
       kind: "agent",
       item: null,
       children: [],
+      gates: [],
       approvals: [],
       questions: []
     });
@@ -580,12 +662,17 @@
         lastUserKey = nextRowKey(timelineItemKeyBase(item), keyCounts);
         rows.push({ key: lastUserKey, kind: "user", item: item as MessageTimelineItem });
       } else if (item.kind === "system") {
-        flushCurrent();
-        rows.push({
-          key: nextRowKey(timelineItemKeyBase(item), keyCounts),
-          kind: "system",
-          item: item as MessageTimelineItem
-        });
+        if (isVerifiedSkillGateItem(item)) {
+          if (!current) current = startAgentRow(item);
+          current.gates.push(item as MessageTimelineItem);
+        } else {
+          flushCurrent();
+          rows.push({
+            key: nextRowKey(timelineItemKeyBase(item), keyCounts),
+            kind: "system",
+            item: item as MessageTimelineItem
+          });
+        }
       } else if (item.kind === "assistant" || item.kind === "command") {
         if (!current) current = startAgentRow(item);
         current.children.push(item as MessageTimelineItem);
@@ -912,6 +999,7 @@
         kind: "agent",
         item: null,
         children: [],
+        gates: [],
         approvals: [...pendingPermissions],
         questions: [...pendingQuestions]
       });
@@ -1617,7 +1705,7 @@
                 <div class="pf-msg-meta">
                   <span class="name">{engineerName}</span>
                 </div>
-                {#if row.children.length || row.approvals.length || row.questions.length}
+                {#if row.children.length || row.gates.length || row.approvals.length || row.questions.length}
                   <div class="agent-tools">
                     {#if row.children.length}
                       {#if shouldCollapseActivity(row, idx)}
@@ -1735,6 +1823,20 @@
                         {/each}
                       {/if}
                     {/if}
+                    {#each row.gates as gateItem (gateItem.id)}
+                      {@const gate = verifiedSkillGateDisplay(gateItem)}
+                      <div class="gate-toast-row">
+                        <div class="gate-toast" data-state={gate.state}>
+                          <span class="gate-toast-icon">
+                            <Icon name={gate.state === "error" ? "x" : "shield"} size={12} />
+                          </span>
+                          <span class="gate-toast-title">{gate.label}</span>
+                          {#if gate.detail}
+                            <span class="gate-toast-detail" title={gate.detail}>{gate.detail}</span>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
                     {#each row.approvals as p (p.id)}
                       <Approval item={p} disabled={!turnCancelable || isPermissionResolving(p)} onResolve={onResolvePermission} />
                     {/each}
@@ -1942,6 +2044,57 @@
     font-family: var(--font-sans);
     font-weight: 600;
     background: color-mix(in oklab, var(--muted) 28%, var(--background));
+  }
+  .gate-toast-row {
+    display: flex;
+    min-width: 0;
+  }
+  .gate-toast {
+    width: 100%;
+    max-width: 100%;
+    min-height: 30px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid color-mix(in oklab, oklch(0.7 0.18 145) 28%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, oklch(0.7 0.18 145) 8%, var(--background));
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: var(--pf-chat-detail-size);
+    line-height: 1.35;
+    box-shadow: 0 1px 0 color-mix(in oklab, var(--foreground) 4%, transparent);
+  }
+  .gate-toast[data-state="error"] {
+    border-color: color-mix(in oklab, var(--destructive, #dc2626) 26%, var(--border));
+    background: color-mix(in oklab, var(--destructive, #dc2626) 7%, var(--background));
+  }
+  .gate-toast-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    color: oklch(0.48 0.17 145);
+    background: color-mix(in oklab, oklch(0.7 0.18 145) 14%, transparent);
+  }
+  .gate-toast[data-state="error"] .gate-toast-icon {
+    color: color-mix(in oklab, var(--destructive, #dc2626) 85%, var(--foreground));
+    background: color-mix(in oklab, var(--destructive, #dc2626) 13%, transparent);
+  }
+  .gate-toast-title {
+    flex: 0 0 auto;
+    font-weight: 650;
+  }
+  .gate-toast-detail {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted-foreground);
   }
   .agent-tools {
     display: flex;

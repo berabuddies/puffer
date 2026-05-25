@@ -1712,16 +1712,14 @@
   function lambdaGateBody(
     ev: Extract<SessionStreamEvent, { type: "lambda-gate" }>
   ): string {
-    const rows = [
-      `event: ${ev.gateEvent}`,
-      ev.hostTool ? `host_tool: ${ev.hostTool}` : null,
-      ev.concreteTool ? `concrete_tool: ${ev.concreteTool}` : null,
-      ev.reason ? `reason: ${ev.reason}` : null,
-      ev.retryTool ? `retry_tool: ${ev.retryTool}` : null,
-      ev.hostArgs !== undefined && ev.hostArgs !== null ? `host_args: ${stableJsonText(ev.hostArgs)}` : null,
-      ev.concreteInput !== undefined && ev.concreteInput !== null ? `concrete_input: ${stableJsonText(ev.concreteInput)}` : null
-    ].filter((row): row is string => row !== null);
-    return rows.join("\n");
+    if (ev.gateEvent === "gate_rejected") {
+      const retry = ev.retryTool ? ` Retry with ${ev.retryTool}.` : "";
+      return `${ev.reason ?? "The Verified Skill gate rejected this call."}${retry}`;
+    }
+    const route = [ev.hostTool ?? "host call", ev.concreteTool ?? ev.toolId]
+      .filter(Boolean)
+      .join(" -> ");
+    return route ? `${route}.` : lambdaGateSummary(ev);
   }
 
   function cacheBackgroundLambdaGateEvent(
