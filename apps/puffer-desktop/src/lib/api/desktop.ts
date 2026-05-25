@@ -324,7 +324,9 @@ function normalizeAskUserQuestions(raw: unknown): AskUserQuestionItem[] {
     .map((item) => ({
       question: typeof item.question === "string" ? item.question : "Question",
       header: typeof item.header === "string" ? item.header : "Question",
+      type: item.type === "input" ? "input" as const : "choice" as const,
       multiSelect: item.multiSelect === true,
+      searchable: item.searchable === true,
       options: Array.isArray(item.options)
         ? item.options
             .map(asRecord)

@@ -3151,6 +3151,90 @@ test("custom-only question requires a typed answer", async ({ page }) => {
   });
 });
 
+test("input user questions render a direct answer field", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-input",
+    requestId: "question-input",
+    questions: [
+      {
+        type: "input",
+        header: "Connection",
+        question: "What exact connection name should Puffer use?",
+        options: []
+      }
+    ]
+  });
+
+  const block = page.locator(".pf-question-block").filter({ hasText: "What exact connection name should Puffer use?" });
+  await expect(block.getByPlaceholder("Type answer")).toBeVisible();
+  await expect(block.locator(".pf-question-other")).toHaveCount(0);
+  const submit = page.getByRole("button", { name: "Send answer" });
+  await expect(submit).toBeDisabled();
+  await block.getByPlaceholder("Type answer").fill("telegram-user");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question-input",
+    requestId: "question-input",
+    answers: { "What exact connection name should Puffer use?": "telegram-user" },
+    annotations: {}
+  });
+});
+
+test("searchable user question choices filter connector options", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-searchable",
+    requestId: "question-searchable",
+    questions: [
+      {
+        type: "choice",
+        header: "Connector",
+        question: "Which connector should Puffer connect?",
+        searchable: true,
+        options: [
+          { label: "telegram-login", description: "Telegram personal account connector" },
+          { label: "email", description: "IMAP and SMTP email connector" },
+          { label: "slack-login", description: "Slack login connector" }
+        ]
+      }
+    ]
+  });
+
+  const block = page.locator(".pf-question-block").filter({ hasText: "Which connector should Puffer connect?" });
+  await expect(block.getByPlaceholder("Search options")).toBeVisible();
+  await expect(block.locator(".pf-question-other")).toHaveCount(0);
+  await block.getByPlaceholder("Search options").fill("telegram");
+  const telegram = block.locator(".pf-question-option").filter({ hasText: "telegram-login" });
+  await expect(telegram).toBeVisible();
+  await expect(block.locator(".pf-question-option").filter({ hasText: "slack-login" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
+
+  await telegram.click();
+  await page.getByRole("button", { name: "Send answer" }).click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question-searchable",
+    requestId: "question-searchable",
+    answers: { "Which connector should Puffer connect?": "telegram-login" },
+    annotations: {}
+  });
+});
+
 test("duplicate question text keeps prompt draft state independent", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

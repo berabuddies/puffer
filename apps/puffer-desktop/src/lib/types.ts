@@ -168,8 +168,10 @@ export type AskUserQuestionOption = {
 export type AskUserQuestionItem = {
   question: string;
   header: string;
+  type?: "choice" | "input";
   options: AskUserQuestionOption[];
   multiSelect?: boolean;
+  searchable?: boolean;
 };
 
 export type UserQuestionTimelineItem = TimelineBase & {
