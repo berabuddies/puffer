@@ -173,6 +173,34 @@ test("pipeline connector catalog shows and searches runtime source hints", async
   await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).toContainText("subscriber");
 });
 
+test("pipeline connector filter presets apply stable search terms", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const filters = page.getByLabel("Connector filters");
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await filters.getByRole("button", { name: "Trigger", exact: true }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("trigger-ready");
+  await expect(resultSummary).toHaveText("2/11 connectors; 1/2 connections");
+  await expect(filters.getByRole("button", { name: "Trigger", exact: true })).toHaveAttribute("aria-pressed", "true");
+
+  await filters.getByRole("button", { name: "Actions" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("has-actions");
+  await expect(resultSummary).toHaveText("7/11 connectors; 2/2 connections");
+
+  await filters.getByRole("button", { name: "Serve" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("serve");
+  await expect(resultSummary).toHaveText("4/11 connectors; 0/2 connections");
+
+  await filters.getByRole("button", { name: "All" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("");
+  await expect(resultSummary).toHaveText("11/11 connectors; 2/2 connections");
+});
+
 test("pipeline connector search matches setup-only capability terms", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

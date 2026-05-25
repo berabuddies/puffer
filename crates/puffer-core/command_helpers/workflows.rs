@@ -7,6 +7,7 @@ use puffer_subscriptions::{
     ConnectorTemplate, SubscriberManifestRoots,
 };
 use puffer_workflow::{TriggerSpec, WorkflowDefinition, WorkflowRun, WorkflowStore};
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 
 /// Renders a terminal-friendly workflow, connection, and connector summary.
@@ -210,6 +211,7 @@ fn write_connectors(
     query: &str,
 ) {
     out.push_str("\nConnectors\n");
+    write_connector_filter_hints(out, include_all);
     let candidates = context
         .connectors
         .iter()
@@ -224,13 +226,18 @@ fn write_connectors(
             let connect_command = connector_connect_command(connector);
             let trigger_supported = connector_workflow_trigger_supported(roots, connector);
             let runtime_hints = connector_runtime_hints(roots, connector);
+            let action_capability = if connector.actions.is_empty() {
+                ""
+            } else {
+                "has-actions"
+            };
             let connection_values = context
                 .connections
                 .iter()
                 .filter(|connection| connection.connector_slug == connector.slug)
                 .flat_map(|connection| [connection.slug.as_str(), connection.description.as_str()]);
             let trigger_terms = if trigger_supported {
-                ["trigger", "", ""]
+                ["trigger", "trigger-ready", ""]
             } else {
                 ["no-trigger", "no trigger", "setup-only"]
             };
@@ -246,7 +253,9 @@ fn write_connectors(
                         connect_command.as_str(),
                         "connect",
                         "setup",
+                        action_capability,
                     ])
+                    .filter(|term| !term.is_empty())
                     .chain(runtime_hints.iter().map(String::as_str))
                     .chain(trigger_terms.into_iter().filter(|term| !term.is_empty()))
                     .chain(connection_values),
@@ -314,6 +323,18 @@ fn write_connectors(
     }
 }
 
+fn write_connector_filter_hints(out: &mut String, include_all: bool) {
+    if include_all {
+        out.push_str(
+            "filters: trigger-ready | no-trigger | has-actions | serve | subscriber | internal-tool | command\n",
+        );
+    } else {
+        out.push_str(
+            "filters: /workflows connectors trigger-ready | no-trigger | has-actions | serve | subscriber | internal-tool\n",
+        );
+    }
+}
+
 fn write_result_summary(out: &mut String, shown: usize, total: usize, label: &str, query: &str) {
     let query = query.trim();
     if query.is_empty() {
@@ -324,7 +345,19 @@ fn write_result_summary(out: &mut String, shown: usize, total: usize, label: &st
 }
 
 fn connector_action_slugs(connector: &ConnectorTemplate) -> Vec<&str> {
-    connector.actions.keys().map(String::as_str).collect()
+    let mut slugs = connector
+        .actions
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    slugs.sort_by(
+        |left, right| match (*left == "send_message", *right == "send_message") {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => left.cmp(right),
+        },
+    );
+    slugs
 }
 
 fn connection_connect_command(connection: &ConnectionRecord) -> String {
@@ -722,8 +755,31 @@ mod tests {
         write_connectors(&mut out, &context, &roots, true, "no trigger");
 
         assert!(out.contains("showing 1/2 connectors for query=\"no trigger\""));
+        assert!(out.contains("filters: trigger-ready | no-trigger | has-actions | serve"));
         assert!(out.contains("- setup-chat [no-trigger]"));
         assert!(!out.contains("- demo-chat"));
+    }
+
+    #[test]
+    fn workflow_connectors_filter_matches_trigger_ready_without_setup_only_rows() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut setup_only = trigger_template();
+        setup_only.slug = "setup-chat".to_string();
+        setup_only.description = "Setup only chat".to_string();
+        setup_only.can_subscribe = false;
+        setup_only.command.clear();
+        let context = ConnectorContext {
+            connectors: vec![trigger_template(), setup_only],
+            connections: Vec::new(),
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "trigger-ready");
+
+        assert!(out.contains("showing 1/2 connectors for query=\"trigger-ready\""));
+        assert!(out.contains("- demo-chat [events,trigger]"));
+        assert!(!out.contains("- setup-chat"));
     }
 
     #[test]

@@ -58,6 +58,11 @@
     searchText: string;
   };
 
+  type ConnectorFilterPreset = {
+    label: string;
+    query: string;
+  };
+
   type Props = {
     onRunConnectCommand?: (command: string) => boolean | Promise<boolean>;
   };
@@ -99,6 +104,15 @@
   const NODE_H = 76;
   const PAD_L = 18;
   const PAD_T = 22;
+  const connectorFilterPresets: ConnectorFilterPreset[] = [
+    { label: "All", query: "" },
+    { label: "Trigger", query: "trigger-ready" },
+    { label: "Actions", query: "has-actions" },
+    { label: "Serve", query: "serve" },
+    { label: "Subscriber", query: "subscriber" },
+    { label: "Internal", query: "internal-tool" },
+    { label: "No trigger", query: "no-trigger" }
+  ];
 
   let snapshot = $state<WorkflowSnapshot>({
     workflows: [],
@@ -686,7 +700,7 @@
     if (connector.requires_auth) terms.push("auth");
     if (connector.can_subscribe) terms.push("events", "subscribe");
     if (connector.can_proxy_agent) terms.push("proxy", "agent proxy");
-    if (connector.action_slugs.length > 0) terms.push("actions");
+    if (connector.action_slugs.length > 0) terms.push("actions", "has-actions");
     if (connectorTriggerSupported(connector)) {
       terms.push("trigger", "trigger-ready");
     } else {
@@ -697,6 +711,10 @@
 
   function connectorRuntimeHints(connector: WorkflowConnector | undefined): string[] {
     return connector?.runtime_hints ?? [];
+  }
+
+  function connectorPresetActive(preset: ConnectorFilterPreset): boolean {
+    return connectorQuery.trim().toLowerCase() === preset.query;
   }
 
   function indexConnections(items: WorkflowConnection[], catalog: ConnectorSearchRow[]): ConnectionSearchRow[] {
@@ -716,6 +734,7 @@
           connector?.description,
           connector?.skill,
           connectorRuntimeHints(connector).join(" "),
+          connector && connector.action_slugs.length > 0 ? "actions has-actions" : undefined,
           connector?.action_slugs.join(" ")
         ])
       };
@@ -1246,6 +1265,17 @@
                   />
                 </span>
               </label>
+              <div class="pf-connector-filters" aria-label="Connector filters">
+                {#each connectorFilterPresets as preset (preset.label)}
+                  <button
+                    type="button"
+                    aria-pressed={connectorPresetActive(preset)}
+                    onclick={() => (connectorQuery = preset.query)}
+                  >
+                    {preset.label}
+                  </button>
+                {/each}
+              </div>
               <div class="pf-connector-result-summary" aria-label="Connector search results">
                 {filteredConnectors.length}/{connectors.length} connectors; {filteredConnections.length}/{connections.length} connections
               </div>
@@ -2002,6 +2032,32 @@
   .pf-connector-searchbox input:focus {
     border: 0;
     box-shadow: none;
+  }
+
+  .pf-connector-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .pf-connector-filters button {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted-foreground);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 5px 8px;
+    cursor: pointer;
+  }
+
+  .pf-connector-filters button:hover,
+  .pf-connector-filters button[aria-pressed="true"] {
+    border-color: color-mix(in oklab, var(--puffer-accent) 34%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 11%, var(--card));
+    color: var(--foreground);
   }
 
   .pf-connection-list,
