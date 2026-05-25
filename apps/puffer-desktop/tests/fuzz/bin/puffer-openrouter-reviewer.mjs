@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { REVIEWER_DECISIONS } from "../lib/admission-gate.mjs";
+import { REVIEWER_DECISIONS, parseStrictJsonObject } from "../lib/admission-gate.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(fuzzRoot, "..", "..", "..", "..");
@@ -144,7 +144,7 @@ function citedEvidence(verdict, evidenceIndex) {
 
 function parseReviewOrDismiss(content) {
   try {
-    const parsed = JSON.parse(extractJsonObject(content ?? ""));
+    const parsed = parseStrictJsonObject(content ?? "", "reviewer response");
     const decision = REVIEWER_DECISIONS.has(parsed.decision) ? parsed.decision : "dismiss";
     return {
       version: 1,
@@ -169,15 +169,6 @@ function parseReviewOrDismiss(content) {
 function writeReview(review) {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, `${JSON.stringify(review, null, 2)}\n`);
-}
-
-function extractJsonObject(content) {
-  const fenced = String(content).match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const text = fenced ? fenced[1] : String(content);
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end < start) return text;
-  return text.slice(start, end + 1);
 }
 
 function clamp(value, min, max) {
