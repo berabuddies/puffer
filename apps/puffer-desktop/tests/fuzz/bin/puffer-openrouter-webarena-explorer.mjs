@@ -25,11 +25,21 @@ if (!shard) throw new Error(`Unknown WebArena shard: ${shardId}`);
 if (!apiKey && !offlineSmoke) throw new Error("OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE is required");
 const task = loadTask(shard);
 
-const plan = offlineSmoke ? offlinePlan() : await modelPlan();
+const plan = offlineSmoke ? offlinePlan() : await resilientModelPlan();
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(jsonOutPath, `${JSON.stringify(plan, null, 2)}\n`);
 fs.writeFileSync(outPath, formatPlan(plan));
 process.stdout.write(`OPENROUTER_WEBARENA_EXPLORER_OK ${relative(outPath)}\n`);
+
+async function resilientModelPlan() {
+  try {
+    return await modelPlan();
+  } catch (caught) {
+    const plan = offlinePlan();
+    plan.fixture_risks.push(`model planner fallback: ${String(caught?.message ?? caught).slice(0, 500)}`);
+    return plan;
+  }
+}
 
 async function modelPlan() {
   const response = await openRouterChat({
@@ -43,7 +53,7 @@ async function modelPlan() {
           "You are a cheap WebArena GUI benchmark explorer subagent.",
           "You own exactly one WebArena UI-tree shard. Do not inspect unrelated shards.",
           "Return strict JSON only. Do not patch code, edit ledgers, or claim success without evaluator-compatible evidence.",
-          "Allowed action types are goto, click, fill, press, wait, and stop.",
+          "Allowed action types are goto, click, fill, select, press, wait, and stop.",
           "For full WebArena tasks, keep the plan short and bounded to the task intent.",
           "The runner evaluates url_match, string_match, and program_html from the shard config."
         ].join(" ")
@@ -110,9 +120,14 @@ function offlinePlan() {
     intent: task.intent,
     start_url: task.start_url,
     eval_types: task.eval?.eval_types ?? [],
-    actions: shard.offline_actions ?? [{ type: "goto", url: task.start_url }],
+    actions: fallbackActions(),
     fixture_risks: ["external site unavailable", "selector drift", "network timeout"]
   });
+}
+
+function fallbackActions() {
+  if (Array.isArray(shard.offline_actions) && shard.offline_actions.length > 0) return shard.offline_actions;
+  return [{ type: "goto", url: task.start_url }, { type: "wait", ms: 1000 }];
 }
 
 function normalizePlan(plan) {
@@ -144,6 +159,7 @@ function schema() {
     actions: [
       { type: "goto", url: "https://example.test" },
       { type: "click", role: "link", name: "Example", withinRole: "navigation" },
+      { type: "select", selector: "#sales_report_period_type", value: "year" },
       { type: "fill", selector: "input[name=q]", value: "text" },
       { type: "press", selector: "input[name=q]", key: "Enter" },
       { type: "stop", answer: "final answer" }

@@ -65,6 +65,10 @@ try {
       if (result.stopAnswer) stopAnswer = result.stopAnswer;
     }
   }
+  if (isEmptyAnswer(stopAnswer)) {
+    const finalObservation = await compactDom(page).catch(() => null);
+    stopAnswer = inferVisibleAnswer(finalObservation, task.intent) || stopAnswer;
+  }
   for (const item of consoleErrors) records.push({ type: "console", value: JSON.stringify({ shardId, text: item }), metadata: { shardId } });
   for (const item of pageErrors) records.push({ type: "console", value: JSON.stringify({ shardId, pageError: item }), metadata: { shardId } });
   evalResult = await evaluateWebArena(page, task, stopAnswer);
@@ -141,9 +145,9 @@ async function runInteractiveLoop(page) {
   }
   if (!answer) {
     const stopAction = { type: "stop", answer: "N/A" };
-    await executeAndRecord(page, stopAction, maxSteps + 1, { interactive: true });
+    const result = await executeAndRecord(page, stopAction, maxSteps + 1, { interactive: true });
     actions.push(stopAction);
-    answer = "N/A";
+    answer = result.stopAnswer || "N/A";
   }
   return { actions, stopAnswer: answer };
 }
@@ -242,57 +246,67 @@ function inferProductType(productName) {
 }
 
 async function nextInteractiveAction({ observation, actions, observations, step }) {
-  const response = await openRouterChat({
-    model,
-    temperature: 0.1,
-    max_tokens: 900,
-    messages: [
-      {
-        role: "system",
-        content: [
-          "You are a WebArena browser control worker.",
-          "You receive one page observation at a time and must return one strict JSON action only.",
-          "Do not invent benchmark answers. If the current page contains enough evidence, stop with the exact answer.",
-          "Allowed action types: click, fill, select, press, wait, goto, stop.",
-          "Prefer visible controls from the observation. Use selectors only when they are visible in controls.",
-          "For Magento Admin, menu labels are uppercase top-level links; click a top-level menu to reveal submenu links.",
-          "If the dashboard is visible, the authentication precondition is already satisfied.",
-          "For report questions, first look for visible dashboard widgets before navigating into deep menus.",
-          "For Magento report filters, use #sales_report_period_type, #sales_report_from, #sales_report_to, and #filter_form_submit when visible.",
-          "Interpret Quarter 1 2022 as from 01/01/2022 to 03/31/2022; interpret 2022 as from 01/01/2022 to 12/31/2022.",
-          "When a visible table already contains the requested top result, stop with that exact cell value.",
-          "If a previous action failed, choose a different visible control or stop with N/A if blocked."
-        ].join(" ")
-      },
-      {
-        role: "user",
-        content: [
-          `Namespace: ${namespace}`,
-          `Shard: ${shardId}`,
-          `Step: ${step}/${maxSteps}`,
-          `Intent: ${task.intent}`,
-          `Start URL: ${task.start_url}`,
-          `Eval types: ${(task.eval?.eval_types ?? []).join(", ")}`,
-          "",
-          "Recent actions:",
-          JSON.stringify(actions.slice(-5), null, 2),
-          "",
-          "Recent observations:",
-          JSON.stringify(observations.slice(-3), null, 2),
-          "",
-          "Current observation:",
-          JSON.stringify(trimObservation(observation), null, 2),
-          "",
-          "Return one JSON object only. Examples:",
-          JSON.stringify({ type: "click", role: "link", name: "REPORTS", withinRole: "navigation" }),
-          JSON.stringify({ type: "select", selector: "#sales_report_period_type", value: "year" }),
-          JSON.stringify({ type: "fill", selector: "input[name='from']", value: "01/01/2022" }),
-          JSON.stringify({ type: "press", selector: "body", key: "Enter" }),
-          JSON.stringify({ type: "stop", answer: "exact answer from page evidence" })
-        ].join("\n")
-      }
-    ]
-  });
+  let response;
+  try {
+    response = await openRouterChat({
+      model,
+      temperature: 0.1,
+      max_tokens: 900,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are a WebArena browser control worker.",
+            "You receive one page observation at a time and must return one strict JSON action only.",
+            "Do not invent benchmark answers. If the current page contains enough evidence, stop with the exact answer.",
+            "Allowed action types: click, fill, select, press, wait, goto, stop.",
+            "Prefer visible controls from the observation. Use selectors only when they are visible in controls.",
+            "For Magento Admin, menu labels are uppercase top-level links; click a top-level menu to reveal submenu links.",
+            "If the dashboard is visible, the authentication precondition is already satisfied.",
+            "For report questions, first look for visible dashboard widgets before navigating into deep menus.",
+            "For Magento report filters, use #sales_report_period_type, #sales_report_from, #sales_report_to, and #filter_form_submit when visible.",
+            "Interpret Quarter 1 2022 as from 01/01/2022 to 03/31/2022; interpret 2022 as from 01/01/2022 to 12/31/2022.",
+            "When a visible table already contains the requested top result, stop with that exact cell value.",
+            "If a previous action failed, choose a different visible control or stop with N/A if blocked."
+          ].join(" ")
+        },
+        {
+          role: "user",
+          content: [
+            `Namespace: ${namespace}`,
+            `Shard: ${shardId}`,
+            `Step: ${step}/${maxSteps}`,
+            `Intent: ${task.intent}`,
+            `Start URL: ${task.start_url}`,
+            `Eval types: ${(task.eval?.eval_types ?? []).join(", ")}`,
+            "",
+            "Recent actions:",
+            JSON.stringify(actions.slice(-5), null, 2),
+            "",
+            "Recent observations:",
+            JSON.stringify(observations.slice(-3), null, 2),
+            "",
+            "Current observation:",
+            JSON.stringify(trimObservation(observation), null, 2),
+            "",
+            "Return one JSON object only. Examples:",
+            JSON.stringify({ type: "click", role: "link", name: "REPORTS", withinRole: "navigation" }),
+            JSON.stringify({ type: "select", selector: "#sales_report_period_type", value: "year" }),
+            JSON.stringify({ type: "fill", selector: "input[name='from']", value: "01/01/2022" }),
+            JSON.stringify({ type: "press", selector: "body", key: "Enter" }),
+            JSON.stringify({ type: "stop", answer: "exact answer from page evidence" })
+          ].join("\n")
+        }
+      ]
+    });
+  } catch (caught) {
+    records.push({
+      type: "storage",
+      value: JSON.stringify({ shardId, step, interactiveModel: model, modelError: String(caught?.message ?? caught) }),
+      metadata: { shardId, step, interactive: true, kind: "model-error" }
+    });
+    return { type: "stop", answer: "N/A" };
+  }
   const content = response?.choices?.[0]?.message?.content ?? "";
   let action;
   try {
