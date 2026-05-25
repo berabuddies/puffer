@@ -7,6 +7,8 @@ enum PredicateKind {
     ApiJson,
     ArxivId,
     AudioPath,
+    BackendMode,
+    Codec,
     EmergencyNumber,
     EvmAddress,
     FilePath,
@@ -15,6 +17,7 @@ enum PredicateKind {
     Identifier,
     Iso8601WithTz,
     JsonField,
+    KnownApp,
     Lat,
     Lng,
     LocalOrigin,
@@ -22,12 +25,15 @@ enum PredicateKind {
     MeetUrl,
     ParsedPaper,
     Path,
+    PlanPath,
     Port,
     PositiveText,
+    PrecisionMode,
     Provider,
     Rating,
     ScriptPath,
     Uri,
+    UsageProvider,
     Url,
     YoutubeUrl,
 }
@@ -53,6 +59,8 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
                 &["aac", "aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav"],
             )
         }),
+        PredicateKind::BackendMode => value.as_str().is_some_and(accelerate_backend),
+        PredicateKind::Codec => value.as_str().is_some_and(touchdesigner_codec),
         PredicateKind::EmergencyNumber => value.as_str().is_some_and(emergency_number),
         PredicateKind::EvmAddress => value.as_str().is_some_and(valid_evm_address),
         PredicateKind::FilePath => value.as_str().is_some_and(path_like),
@@ -63,6 +71,7 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
         PredicateKind::Identifier => value.as_str().is_some_and(identifier_like),
         PredicateKind::Iso8601WithTz => value.as_str().is_some_and(iso8601_with_tz),
         PredicateKind::JsonField => value.as_str().is_some_and(json_field_path),
+        PredicateKind::KnownApp => value.as_str().is_some_and(known_deep_link_app),
         PredicateKind::Lat => {
             json_number(value).is_some_and(|number| (-90.0..=90.0).contains(&number))
         }
@@ -74,10 +83,12 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
         PredicateKind::MeetUrl => value.as_str().is_some_and(meet_url),
         PredicateKind::ParsedPaper => parsed_paper_value(value),
         PredicateKind::Path => value.as_str().is_some_and(path_like),
+        PredicateKind::PlanPath => value.as_str().is_some_and(plan_path),
         PredicateKind::Port => {
             json_integer(value).is_some_and(|port| (1024..=65535).contains(&port))
         }
         PredicateKind::PositiveText => value.as_str().is_some_and(positive_text),
+        PredicateKind::PrecisionMode => value.as_str().is_some_and(accelerate_precision),
         PredicateKind::Provider => value
             .as_str()
             .is_some_and(|text| provider_matches(name, text)),
@@ -88,6 +99,7 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
             .as_str()
             .is_some_and(|text| extension_in(text, &["py"])),
         PredicateKind::Uri => value.as_str().is_some_and(valid_uri),
+        PredicateKind::UsageProvider => value.as_str().is_some_and(model_usage_provider),
         PredicateKind::Url => value.as_str().is_some_and(valid_url),
         PredicateKind::YoutubeUrl => value.as_str().is_some_and(youtube_url),
     })
@@ -97,6 +109,7 @@ fn predicate_kind(name: &str) -> Option<PredicateKind> {
     Some(match name {
         "api_format" => PredicateKind::ApiJson,
         "is_abs_path" => PredicateKind::AbsolutePath,
+        "codec_license_ok" => PredicateKind::Codec,
         "claude_history_path" => PredicateKind::Path,
         "dest_codex_home" => PredicateKind::Path,
         "emergency_number" => PredicateKind::EmergencyNumber,
@@ -106,6 +119,7 @@ fn predicate_kind(name: &str) -> Option<PredicateKind> {
         }
         "fps_in_range" => PredicateKind::Fps,
         "is_audio" => PredicateKind::AudioPath,
+        "known_app" => PredicateKind::KnownApp,
         "is_folder"
         | "output_dir_ready"
         | "output_excalidraw_path"
@@ -168,16 +182,20 @@ fn predicate_kind(name: &str) -> Option<PredicateKind> {
         "loopback_only" => PredicateKind::LoopbackHost,
         "meet_url_valid" => PredicateKind::MeetUrl,
         "origin_local" => PredicateKind::LocalOrigin,
+        "plan_path" => PredicateKind::PlanPath,
         "is_pyscript" | "is_script" => PredicateKind::ScriptPath,
         "parsed_ok" => return Some(PredicateKind::ParsedPaper),
         "provider_bland" | "provider_twilio" | "provider_vapi" => PredicateKind::Provider,
         "real_prose" => PredicateKind::PositiveText,
         "valid_address" => PredicateKind::EvmAddress,
         "valid_arxiv_id" => PredicateKind::ArxivId,
+        "valid_backend" => PredicateKind::BackendMode,
         "valid_date" | "valid_interval" => PredicateKind::PositiveText,
         "valid_items_path" | "valid_json_id" => PredicateKind::JsonField,
         "valid_lat" => PredicateKind::Lat,
         "valid_lng" => PredicateKind::Lng,
+        "valid_precision" => PredicateKind::PrecisionMode,
+        "valid_provider" => PredicateKind::UsageProvider,
         "valid_rating" => PredicateKind::Rating,
         _ => return None,
     })
@@ -283,6 +301,67 @@ fn valid_uri_text(text: &str) -> bool {
         return true;
     }
     valid_url(text)
+}
+
+fn known_deep_link_app(text: &str) -> bool {
+    matches!(
+        normalized_token(text).as_str(),
+        "codex"
+            | "cursor"
+            | "vscode"
+            | "visualstudiocode"
+            | "visualstudio"
+            | "vscodeinsiders"
+            | "visualstudiocodeinsiders"
+            | "slack"
+    )
+}
+
+fn model_usage_provider(text: &str) -> bool {
+    matches!(normalized_token(text).as_str(), "codex" | "claude")
+}
+
+fn accelerate_precision(text: &str) -> bool {
+    matches!(
+        normalized_token(text).as_str(),
+        "no" | "none" | "fp16" | "bf16" | "fp8"
+    )
+}
+
+fn accelerate_backend(text: &str) -> bool {
+    matches!(
+        normalized_token(text).as_str(),
+        "cpu"
+            | "singlecpu"
+            | "singlegpu"
+            | "multigpu"
+            | "ddp"
+            | "deepspeed"
+            | "fsdp"
+            | "megatronlm"
+            | "tpu"
+            | "xla"
+    )
+}
+
+fn touchdesigner_codec(text: &str) -> bool {
+    matches!(normalized_token(text).as_str(), "prores" | "mjpa")
+}
+
+fn plan_path(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || has_control(text) || text.contains("..") || !text.ends_with(".md") {
+        return false;
+    }
+    text.starts_with(".hermes/plans/") || text.contains("/.hermes/plans/")
+}
+
+fn normalized_token(text: &str) -> String {
+    text.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn spotify_uri(text: &str) -> bool {
@@ -516,6 +595,18 @@ mod tests {
         assert_eq!(
             matches(&json!("spotify:track:0DiWol3AO6WpXZgp0goxAV"), "is_url(u)"),
             Some(false)
+        );
+        assert_eq!(matches(&json!("VS Code"), "known_app(a)"), Some(true));
+        assert_eq!(matches(&json!("claude"), "valid_provider(p)"), Some(true));
+        assert_eq!(matches(&json!("bf16"), "valid_precision(m)"), Some(true));
+        assert_eq!(matches(&json!("FSDP"), "valid_backend(b)"), Some(true));
+        assert_eq!(matches(&json!("h264"), "codec_license_ok(c)"), Some(false));
+        assert_eq!(
+            matches(
+                &json!(".hermes/plans/2026-05-25_120000-work.md"),
+                "plan_path(p)"
+            ),
+            Some(true)
         );
         assert_eq!(matches(&json!(91.0), "valid_lat(lat)"), Some(false));
         assert_eq!(matches(&json!(1500), "ephemeral_port(p)"), Some(true));
