@@ -111,6 +111,179 @@ fn model_invoked_plain_skill_cannot_escape_active_lambda_gate() {
 }
 
 #[test]
+fn lambda_host_call_can_load_bound_verified_skill() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let parent_host_path = cwd.join("paper-host.json");
+    let child_host_path = cwd.join("arxiv-host.json");
+    fs::write(
+        &parent_host_path,
+        r#"{"effects":["proc"],"domains":[],"tools":[{"name":"load_arxiv_skill","concreteTools":["Skill"],"concreteInputContracts":{"Skill":{"skill":"arxiv","args":""}},"params":[],"effects":["proc"],"registers":[{"pred":"arxiv_loaded","args":[]}]}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        &child_host_path,
+        r#"{"effects":["proc"],"domains":[],"tools":[{"name":"lookup","concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"query"}}},"params":[{"name":"query","ty":"str"}],"effects":["proc"]}]}"#,
+    )
+    .unwrap();
+    let mut skill_tool = loaded_tool("Skill", "Load a skill", "runtime:skill");
+    skill_tool.value.approval_policy = Some("auto".to_string());
+    skill_tool.value.sandbox_policy = Some("read-only".to_string());
+    let mut lambda_host_call = loaded_tool(
+        "LambdaHostCall",
+        "Admit Lambda host call",
+        "runtime:lambda_host_call",
+    );
+    lambda_host_call.value.approval_policy = Some("auto".to_string());
+    lambda_host_call.value.sandbox_policy = Some("read-only".to_string());
+    let tool_search = loaded_tool("ToolSearch", "Search tools", "runtime:tool_search");
+    let resources = LoadedResources {
+        tools: vec![skill_tool, lambda_host_call, tool_search],
+        skills: vec![
+            LoadedItem {
+                value: SkillSpec {
+                    name: "paper".to_string(),
+                    description: "Write research papers".to_string(),
+                    content: "Use load_arxiv_skill before arXiv lookup.".to_string(),
+                    allowed_tools: vec!["Skill".to_string()],
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some("skills/paper/skill.lskill".to_string()),
+                        generated_path: Some("skills/paper/out/GENERATED.SKILL.md".to_string()),
+                        host_catalogue_path: Some(parent_host_path.display().to_string()),
+                        compiler_path: None,
+                        host_tool_bindings: Default::default(),
+                        tools: Some(1),
+                        actions: Some(1),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: "skills/paper/skill.lskill".into(),
+                    kind: SourceKind::Workspace,
+                },
+            },
+            LoadedItem {
+                value: SkillSpec {
+                    name: "arxiv".to_string(),
+                    description: "Search arXiv".to_string(),
+                    content: "Use lookup for paper search.".to_string(),
+                    allowed_tools: vec!["ToolSearch".to_string()],
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some("skills/arxiv/skill.lskill".to_string()),
+                        generated_path: Some("skills/arxiv/out/GENERATED.SKILL.md".to_string()),
+                        host_catalogue_path: Some(child_host_path.display().to_string()),
+                        compiler_path: None,
+                        host_tool_bindings: Default::default(),
+                        tools: Some(1),
+                        actions: Some(1),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: "skills/arxiv/skill.lskill".into(),
+                    kind: SourceKind::Workspace,
+                },
+            },
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let loaded_parent = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Skill",
+        json!({"skill": "paper"}),
+    )
+    .unwrap();
+    assert!(loaded_parent.success);
+
+    let admitted = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "load_arxiv_skill",
+            "args": {},
+            "tool": "Skill",
+            "input": {"skill": "arxiv", "args": ""},
+        }),
+    )
+    .unwrap();
+    assert!(admitted.success, "{:?}", admitted.output);
+    assert!(state.pending_lambda_host_call.is_some());
+
+    let loaded_child = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Skill",
+        json!({"skill": "arxiv", "args": ""}),
+    )
+    .unwrap();
+    assert!(loaded_child.success);
+    assert!(loaded_child.output.stdout.contains("<command-name>arxiv</command-name>"));
+    assert!(state.pending_lambda_host_call.is_none());
+
+    let child_gate_admit = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "lookup",
+            "args": {"query": "lambda skills"},
+            "tool": "ToolSearch",
+            "input": {"query": "lambda skills"},
+        }),
+    )
+    .unwrap();
+    assert!(child_gate_admit.success);
+}
+
+#[test]
 fn lambda_bridge_preserves_concrete_tool_approval_prompt() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();

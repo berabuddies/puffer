@@ -182,6 +182,16 @@ pub(super) fn execute_tool_call(
     };
     let hook_input = input.clone();
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
+    let lambda_skill_target_snapshot = if tool_id == "Skill"
+        && state
+            .pending_lambda_host_call
+            .as_ref()
+            .is_some_and(|pending| pending.concrete_tool() == "Skill")
+    {
+        Some((state.lambda_gate.clone(), state.pending_lambda_host_call.clone()))
+    } else {
+        None
+    };
     let mut result = if definition.handler == "runtime:agent" {
         let output =
             execute_agent_tool(state, resources, providers, auth_store, cwd, input.clone())?;
@@ -203,11 +213,22 @@ pub(super) fn execute_tool_call(
         )?
     };
     if result.success {
+        let post_skill_gate = lambda_skill_target_snapshot
+            .as_ref()
+            .map(|_| (state.lambda_gate.clone(), state.pending_lambda_host_call.clone()));
+        if let Some((saved_gate, saved_pending)) = lambda_skill_target_snapshot {
+            state.lambda_gate = saved_gate;
+            state.pending_lambda_host_call = saved_pending;
+        }
         let lambda_metadata =
             match commit_successful_lambda_skill_gate_call(state, tool_id, &result.output) {
                 Ok(metadata) => metadata,
                 Err(denied) => return Ok(denied),
             };
+        if let Some((next_gate, next_pending)) = post_skill_gate {
+            state.lambda_gate = next_gate;
+            state.pending_lambda_host_call = next_pending;
+        }
         if let Some(metadata) = lambda_metadata {
             merge_tool_metadata(&mut result.output.metadata, metadata);
         }

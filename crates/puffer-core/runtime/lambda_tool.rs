@@ -140,13 +140,6 @@ pub(super) fn prepare_lambda_host_call(
             Some("LambdaHostCall cannot target itself".to_string()),
         );
     }
-    if parsed.tool == SKILL_TOOL_ID {
-        return blocked_runtime_tool(
-            tool_id,
-            ToolPermissionBehavior::Deny,
-            Some("LambdaHostCall cannot target the Skill loader".to_string()),
-        );
-    }
     let Some(definition) = registry.definition(&parsed.tool) else {
         return blocked_runtime_tool(
             tool_id,
