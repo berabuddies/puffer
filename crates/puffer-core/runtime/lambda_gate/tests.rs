@@ -511,6 +511,89 @@ fn host_catalogue_runtime_validation_accepts_internal_lambda_step() {
 }
 
 #[test]
+fn host_catalogue_runtime_validation_rejects_impossible_concrete_effects() {
+    let web_error = validate_host_catalogue_runtime(
+        r#"{
+            "effects": [],
+            "domains": [],
+            "tools": [{
+                "name": "search_and_write",
+                "effects": ["net_r", "fs_w"],
+                "concreteTools": ["WebSearch"],
+                "concreteInputContracts": {
+                    "WebSearch": {
+                        "query": "example"
+                    }
+                }
+            }]
+        }"#,
+    )
+    .expect_err("WebSearch cannot satisfy filesystem write effects");
+
+    assert!(format!("{web_error:#}").contains("binds WebSearch despite unsupported effects [fs_w]"));
+
+    let read_error = validate_host_catalogue_runtime(
+        r#"{
+            "effects": [],
+            "domains": [],
+            "tools": [{
+                "name": "read_and_fetch",
+                "effects": ["fs_r", "net_r"],
+                "concreteTools": ["Read"],
+                "concreteInputContracts": {
+                    "Read": {
+                        "file_path": "/tmp/input.txt"
+                    }
+                }
+            }]
+        }"#,
+    )
+    .expect_err("Read cannot satisfy network read effects");
+
+    assert!(format!("{read_error:#}").contains("binds Read despite unsupported effects [net_r]"));
+}
+
+#[test]
+fn host_catalogue_runtime_validation_accepts_supported_concrete_effects() {
+    validate_host_catalogue_runtime(
+        r#"{
+            "effects": [],
+            "domains": [],
+            "tools": [{
+                "name": "fetch",
+                "effects": ["net_r", "proc"],
+                "concreteTools": ["WebFetch"],
+                "concreteInputContracts": {
+                    "WebFetch": {
+                        "url": "https://example.com",
+                        "prompt": "Read the page"
+                    }
+                }
+            }, {
+                "name": "read",
+                "effects": ["fs_r", "proc"],
+                "concreteTools": ["Read"],
+                "concreteInputContracts": {
+                    "Read": {
+                        "file_path": "/tmp/input.txt"
+                    }
+                }
+            }, {
+                "name": "search",
+                "effects": ["net_r", "proc"],
+                "concreteTools": ["WebSearch"],
+                "concreteInputContracts": {
+                    "WebSearch": {
+                        "query": "example"
+                    }
+                }
+            }]
+        }"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn proof_params_can_be_checked_without_concrete_binding() {
     let host = LambdaHostEnv::from_json_str(
         r#"{"effects":[],"domains":[],"tools":[

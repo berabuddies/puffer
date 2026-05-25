@@ -229,6 +229,16 @@ impl LambdaToolSig {
             }
         }
         for concrete_tool in &self.concrete_tools {
+            if let Some(unsupported_effects) =
+                unsupported_effects_for_concrete_tool(concrete_tool, &self.effects)
+            {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} binds {} despite unsupported effects [{}]",
+                    self.name,
+                    concrete_tool,
+                    unsupported_effects.join(", ")
+                ));
+            }
             let Some(contract) = self.concrete_input_contracts.get(concrete_tool) else {
                 return Err(anyhow!(
                     "Lambda Skill host tool {} lacks a concrete input contract for {}",
@@ -313,6 +323,27 @@ impl LambdaToolSig {
             "concrete input for {} does not match the precompiled {} contract",
             self.name, concrete_tool
         ))
+    }
+}
+
+fn unsupported_effects_for_concrete_tool(
+    concrete_tool: &str,
+    effects: &BTreeSet<String>,
+) -> Option<Vec<String>> {
+    let allowed_effects = match concrete_tool {
+        "Read" => &["fs_r", "proc"][..],
+        "WebFetch" | "WebSearch" => &["net_r", "proc"][..],
+        _ => return None,
+    };
+    let unsupported = effects
+        .iter()
+        .filter(|effect| !allowed_effects.contains(&effect.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unsupported.is_empty() {
+        None
+    } else {
+        Some(unsupported)
     }
 }
 
