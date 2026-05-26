@@ -70,16 +70,11 @@ fn parse_or_ask_target(
     } else {
         catalog::resolve_connector_slug(state, resources, &connector_slug)?
     };
-    if connection_name.is_empty() || !extra.is_empty() {
-        if !extra.is_empty() {
-            connection_name.clear();
-        }
-        connection_name = ask_input(
-            state,
-            resources,
-            "Connection",
-            "What exact connection name should Puffer use?",
-        )?;
+    if !extra.is_empty() {
+        bail!("Usage: /connect <connector-slug> <connection-name>");
+    }
+    if connection_name.is_empty() {
+        connection_name = puffer_subscriptions::suggested_connection_slug(&connector_slug);
     }
 
     Ok(ConnectTarget {
@@ -859,7 +854,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_target_asks_for_missing_values_with_input_questions() {
+    fn parse_target_uses_default_connection_name_for_connector_only() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let target = parse_or_ask_target(&mut state, &resources, "email").expect("target");
+
+        assert_eq!(target.connector_slug, "email");
+        assert_eq!(target.connection_name, "email");
+    }
+
+    #[test]
+    fn parse_target_asks_for_connector_and_uses_default_connection_name() {
         let mut state = temp_state();
         let resources = LoadedResources::default();
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -872,13 +878,8 @@ mod tests {
                     .expect("question text")
                     .to_string();
                 request_log.lock().unwrap().push(request.questions.clone());
-                let answer = if question.contains("connector") {
-                    "telegram-login"
-                } else {
-                    "telegram-user"
-                };
                 UserQuestionPromptResponse {
-                    answers: Map::from_iter([(question, json!(answer))]),
+                    answers: Map::from_iter([(question, json!("telegram-login"))]),
                     annotations: Map::new(),
                 }
             },
@@ -889,7 +890,7 @@ mod tests {
         assert_eq!(target.connector_slug, "telegram-login");
         assert_eq!(target.connection_name, "telegram-user");
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 1);
         assert_eq!(requests[0][0]["type"], "choice");
         assert_eq!(requests[0][0]["searchable"], true);
         assert!(requests[0][0]["options"]
@@ -897,7 +898,6 @@ mod tests {
             .is_some_and(|options| options
                 .iter()
                 .any(|option| option["label"] == "telegram-login")));
-        assert_eq!(requests[1][0]["type"], "input");
     }
 
     #[test]

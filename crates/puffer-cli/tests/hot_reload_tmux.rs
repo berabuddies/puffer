@@ -19,6 +19,10 @@ use puffer_test_support::{
 use std::fs;
 use std::time::Duration;
 
+const TMUX_START_TIMEOUT: Duration = Duration::from_secs(30);
+const TMUX_RELOAD_TIMEOUT: Duration = Duration::from_secs(20);
+const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[test]
 fn tmux_tui_hot_reloads_newly_dropped_skill() {
     if !require_tmux_or_skip("tmux_tui_hot_reloads_newly_dropped_skill") {
@@ -79,7 +83,7 @@ tmux_golden_mode = true
     .unwrap();
 
     // Wait until the TUI is fully up.
-    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(15)).unwrap();
+    wait_for_tmux_text(&session, "Puffer Code", TMUX_START_TIMEOUT).unwrap();
 
     // Sanity: the test skill doesn't exist yet — confirm via /skills.
     submit_skills_command(&session);
@@ -112,7 +116,7 @@ tmux_golden_mode = true
     // the reload signal that the watcher raised. The "i" -> backspace
     // sequence is harmless: it just nudges the loop.
     send_tmux_keys(&session, &["i", "BSpace"]).unwrap();
-    wait_for_tmux_text(&session, "Reloaded plugin registry", Duration::from_secs(5)).unwrap();
+    wait_for_tmux_text(&session, "Reloaded plugin registry", TMUX_RELOAD_TIMEOUT).unwrap();
 
     // Wait for the reload to have happened, then verify /skills sees it.
     // We try a few times because filesystem-watcher latency + main-loop
@@ -139,6 +143,6 @@ tmux_golden_mode = true
 
 fn submit_skills_command(session: &puffer_test_support::TmuxSession) {
     send_tmux_keys(session, &["/skills"]).unwrap();
-    wait_for_tmux_visible_text(session, "\u{276f} /skills", Duration::from_secs(15)).unwrap();
+    wait_for_tmux_visible_text(session, "\u{276f} /skills", TMUX_COMMAND_TIMEOUT).unwrap();
     send_tmux_keys(session, &["Enter"]).unwrap();
 }

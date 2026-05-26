@@ -417,9 +417,9 @@ fn handle_prompt_submit_routes_connect_through_user_question_worker() {
         ),
     ));
 
-    let mut opened_connection_question = false;
+    let mut completed = false;
     for _ in 0..100 {
-        let completed = poll_pending_submit(
+        let step_completed = poll_pending_submit(
             &mut state,
             &mut auth_store,
             &auth_path,
@@ -428,31 +428,9 @@ fn handle_prompt_submit_routes_connect_through_user_question_worker() {
         )
         .unwrap();
         if let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay {
-            opened_connection_question = overlay.title().contains("exact connection name");
-            break;
+            assert!(!overlay.title().contains("exact connection name"));
         }
-        if completed {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(opened_connection_question);
-    assert!(respond_to_user_question(
-        &mut tui,
-        user_question_answer("What exact connection name should Puffer use?", "work-main"),
-    ));
-
-    let mut completed = false;
-    for _ in 0..100 {
-        if poll_pending_submit(
-            &mut state,
-            &mut auth_store,
-            &auth_path,
-            &session_store,
-            &mut tui,
-        )
-        .unwrap()
-        {
+        if step_completed {
             completed = true;
             break;
         }
