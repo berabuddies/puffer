@@ -309,6 +309,28 @@ pub(super) fn azuredevops_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Figma webhook event output schema.
+pub(super) fn figma_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "figma_event"},
+            "event": {"type": "string"},
+            "file_key": {"type": "string"},
+            "file_name": {"type": "string"},
+            "actor": {"type": "string"},
+            "comment_id": {"type": "string"},
+            "version_id": {"type": "string"},
+            "node_id": {"type": "string"},
+            "status": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["event", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Jira webhook event output schema.
 pub(super) fn jira_event_output_schema() -> Value {
     serde_json::json!({

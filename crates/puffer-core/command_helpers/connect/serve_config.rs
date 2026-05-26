@@ -243,6 +243,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/bitbucket",
             method: "Bitbucket repository webhook",
         },
+        "figma-webhook" => WebhookPreset {
+            product: "Figma",
+            default_path: "/figma",
+            method: "Figma webhook",
+        },
         "github-webhook" => WebhookPreset {
             product: "GitHub",
             default_path: "/github",

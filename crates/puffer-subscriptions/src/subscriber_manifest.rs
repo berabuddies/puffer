@@ -131,6 +131,7 @@ fn serve_configured_connector(slug: &str) -> bool {
             | "opsgenie-webhook"
             | "azure-devops-webhook"
             | "bitbucket-webhook"
+            | "figma-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"

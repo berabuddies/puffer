@@ -239,6 +239,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "opsgenie-webhook"
             | "azure-devops-webhook"
             | "bitbucket-webhook"
+            | "figma-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"
@@ -442,6 +443,17 @@ mod tests {
             resolve_connector_slug(&mut state, &resources, "azure devops work item").expect("slug");
 
         assert_eq!(slug, "azure-devops-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_figma_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "figma comment dev mode").expect("slug");
+
+        assert_eq!(slug, "figma-webhook");
     }
 
     #[test]

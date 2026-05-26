@@ -49,6 +49,12 @@ pub(super) fn builtin_webhook_templates() -> Vec<ConnectorTemplate> {
             bitbucket_event_output_schema(),
         ),
         webhook_preset_template(
+            "figma-webhook",
+            "Figma file, comment, library, and Dev Mode webhook preset backed by puffer serve",
+            "figma-webhook",
+            figma_event_output_schema(),
+        ),
+        webhook_preset_template(
             "github-webhook",
             "GitHub event webhook preset backed by puffer serve",
             "github-webhook",
@@ -123,6 +129,7 @@ pub(super) fn is_builtin_webhook_slug(slug: &str) -> bool {
             | "opsgenie-webhook"
             | "azure-devops-webhook"
             | "bitbucket-webhook"
+            | "figma-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"

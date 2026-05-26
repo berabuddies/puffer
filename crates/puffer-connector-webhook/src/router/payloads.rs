@@ -9,6 +9,7 @@ mod asana;
 mod azuredevops;
 mod bitbucket;
 mod datadog;
+mod figma;
 mod grafana;
 mod newrelic;
 mod opsgenie;
@@ -32,6 +33,7 @@ pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<I
     asana_inbound(headers, payload)
         .or_else(|| azuredevops::azuredevops_inbound(headers, payload))
         .or_else(|| bitbucket_inbound(headers, payload))
+        .or_else(|| figma::figma_inbound(headers, payload))
         .or_else(|| jira_inbound(headers, payload))
         .or_else(|| grafana_inbound(headers, payload))
         .or_else(|| alertmanager_inbound(headers, payload))

@@ -24,6 +24,7 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"opsgenie-webhook".to_string()));
     assert!(slugs.contains(&"azure-devops-webhook".to_string()));
     assert!(slugs.contains(&"bitbucket-webhook".to_string()));
+    assert!(slugs.contains(&"figma-webhook".to_string()));
     assert!(slugs.contains(&"github-webhook".to_string()));
     assert!(slugs.contains(&"grafana-webhook".to_string()));
     assert!(slugs.contains(&"gitlab-webhook".to_string()));
@@ -70,6 +71,7 @@ fn suggested_connection_slugs_match_connect_defaults() {
         suggested_connection_slug("bitbucket-webhook"),
         "bitbucket-webhook"
     );
+    assert_eq!(suggested_connection_slug("figma-webhook"), "figma-webhook");
     assert_eq!(
         suggested_connection_slug("github-webhook"),
         "github-webhook"
@@ -180,6 +182,7 @@ fn serve_mode_connectors_do_not_claim_workflow_runtime_capabilities() {
         "opsgenie-webhook",
         "azure-devops-webhook",
         "bitbucket-webhook",
+        "figma-webhook",
         "github-webhook",
         "grafana-webhook",
         "gitlab-webhook",

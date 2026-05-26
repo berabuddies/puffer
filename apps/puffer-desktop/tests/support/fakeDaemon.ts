@@ -566,6 +566,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "figma-webhook",
+        description: "Figma file, comment, library, and Dev Mode webhook preset backed by puffer serve",
+        skill: "figma-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "figma-webhook",
+        connect_command: "/connect figma-webhook figma-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "github-webhook",
         description: "GitHub event webhook preset backed by puffer serve",
         skill: "github-webhook",
