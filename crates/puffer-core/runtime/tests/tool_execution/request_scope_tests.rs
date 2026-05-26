@@ -185,6 +185,65 @@ fn lambda_gate_rejects_direct_concrete_tool_without_host_bridge() {
 }
 
 #[test]
+fn active_lambda_gate_allows_tools_outside_verified_scope_for_exploration() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    fs::write(cwd.join("note.txt"), "hello").unwrap();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"query"}}},"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+    gate.set_request_tool_filter(
+        super::super::build_request_tool_filter(&[
+            "ToolSearch".to_string(),
+            "LambdaHostCall".to_string(),
+            "LambdaInternal".to_string(),
+        ])
+        .unwrap()
+        .unwrap(),
+    );
+    state.lambda_gate = Some(gate);
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool("Glob", "Find files", "runtime:claude_glob"),
+            loaded_tool(
+                "ToolSearch",
+                "Search available tools",
+                "runtime:tool_search",
+            ),
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Glob",
+        json!({"pattern": "*.txt"}),
+    )
+    .unwrap();
+
+    assert!(result.success, "{}", result.output.stdout);
+    assert!(result.output.stdout.contains("note.txt"));
+    assert!(state.lambda_gate.is_some());
+    assert!(state.pending_lambda_host_call.is_none());
+}
+
+#[test]
 fn lambda_gate_does_not_commit_facts_for_direct_concrete_tool() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
@@ -567,7 +626,7 @@ fn model_invoked_verified_lambda_skill_installs_gate_and_tool_scope() {
     let host_path = cwd.join("verified-host.json");
     fs::write(
         &host_path,
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"query"}}},"params":[{"name":"query","ty":"str"}],"effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch","Bash"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"query"}},"Bash":{"command":{"$template":"printf ${json:query}"}}},"params":[{"name":"query","ty":"str"}],"effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
     )
     .unwrap();
     let mut skill_tool = loaded_tool("Skill", "Load a skill", "runtime:skill");
@@ -664,7 +723,6 @@ fn model_invoked_verified_lambda_skill_installs_gate_and_tool_scope() {
             "host_tool": "formal_search",
             "args": {"query": "issues"},
             "tool": "Bash",
-            "input": {"command": "printf hi"},
         }),
     )
     .unwrap();

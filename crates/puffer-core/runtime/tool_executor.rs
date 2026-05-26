@@ -11,8 +11,8 @@ use super::filesystem_access::{ensure_filesystem_path_access, runtime_filesystem
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
 use super::lambda_gate::merge_tool_metadata;
 use super::lambda_tool::{
-    commit_successful_lambda_skill_gate_call, prepare_lambda_host_call,
-    reject_lambda_skill_gate_preflight, LAMBDA_HOST_CALL_TOOL_ID,
+    commit_successful_lambda_skill_gate_call, lambda_skill_gate_scopes_tool_call,
+    prepare_lambda_host_call, reject_lambda_skill_gate_preflight, LAMBDA_HOST_CALL_TOOL_ID,
 };
 use super::local_tools::{
     enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
@@ -74,7 +74,9 @@ pub(super) fn execute_tool_call(
     tool_id: &str,
     input: Value,
 ) -> Result<ToolExecutionResult> {
-    let effective_tool_filter = active_tool_filter(state, tool_filter, tool_id);
+    let gate_scopes_tool =
+        lambda_skill_gate_scopes_tool_call(state, registry, cwd, tool_id, &input);
+    let effective_tool_filter = active_tool_filter(state, tool_filter, gate_scopes_tool, tool_id);
     let structured_output = match backend {
         ToolExecutionBackend::Anthropic {
             structured_output, ..
@@ -99,7 +101,8 @@ pub(super) fn execute_tool_call(
             input,
         ));
     }
-    if let Some(denied) = reject_lambda_skill_gate_preflight(state, tool_id, &input) {
+    if let Some(denied) = reject_lambda_skill_gate_preflight(state, registry, cwd, tool_id, &input)
+    {
         return Ok(denied);
     }
     let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
@@ -188,7 +191,10 @@ pub(super) fn execute_tool_call(
             .as_ref()
             .is_some_and(|pending| pending.concrete_tool() == "Skill")
     {
-        Some((state.lambda_gate.clone(), state.pending_lambda_host_call.clone()))
+        Some((
+            state.lambda_gate.clone(),
+            state.pending_lambda_host_call.clone(),
+        ))
     } else {
         None
     };
@@ -213,9 +219,12 @@ pub(super) fn execute_tool_call(
         )?
     };
     if result.success {
-        let post_skill_gate = lambda_skill_target_snapshot
-            .as_ref()
-            .map(|_| (state.lambda_gate.clone(), state.pending_lambda_host_call.clone()));
+        let post_skill_gate = lambda_skill_target_snapshot.as_ref().map(|_| {
+            (
+                state.lambda_gate.clone(),
+                state.pending_lambda_host_call.clone(),
+            )
+        });
         if let Some((saved_gate, saved_pending)) = lambda_skill_target_snapshot {
             state.lambda_gate = saved_gate;
             state.pending_lambda_host_call = saved_pending;
@@ -249,12 +258,16 @@ pub(super) fn execute_tool_call(
 fn active_tool_filter(
     state: &AppState,
     tool_filter: Option<&RequestToolFilter>,
+    gate_scopes_tool: bool,
     tool_id: &str,
 ) -> Option<RequestToolFilter> {
     if let Some(tool_filter) = tool_filter {
         return Some(tool_filter.clone());
     }
     if tool_id == "Skill" {
+        return None;
+    }
+    if !gate_scopes_tool {
         return None;
     }
     state
@@ -319,7 +332,8 @@ pub(super) fn resolve_tool_permission(
     input: &Value,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<PermissionOutcome> {
-    let effective_tool_filter = active_tool_filter(state, tool_filter, tool_id);
+    let gate_scopes_tool = lambda_skill_gate_scopes_tool_call(state, registry, cwd, tool_id, input);
+    let effective_tool_filter = active_tool_filter(state, tool_filter, gate_scopes_tool, tool_id);
     let definition = match registry.definition(tool_id) {
         Some(d) => d.clone(),
         None => {

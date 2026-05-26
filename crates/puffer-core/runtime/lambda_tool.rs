@@ -14,6 +14,8 @@ const SKILL_TOOL_ID: &str = "Skill";
 /// Rejects concrete tool calls that do not match the active Lambda Skill gate.
 pub(super) fn reject_lambda_skill_gate_preflight(
     state: &AppState,
+    registry: &ToolRegistry,
+    cwd: &Path,
     tool_id: &str,
     input: &Value,
 ) -> Option<ToolExecutionResult> {
@@ -34,13 +36,58 @@ pub(super) fn reject_lambda_skill_gate_preflight(
     if tool_id == SKILL_TOOL_ID {
         return None;
     }
-    if state.lambda_gate.is_some() {
-        return Some(lambda_skill_bridge_required_denial(
-            tool_id,
-            "active Lambda Skill requires LambdaHostCall before concrete tool calls".to_string(),
-        ));
+    if let Some(gate) = state.lambda_gate.as_ref() {
+        let Some(filter) = gate.request_tool_filter() else {
+            return Some(lambda_skill_bridge_required_denial(
+                tool_id,
+                "active Lambda Skill requires LambdaHostCall before concrete tool calls"
+                    .to_string(),
+            ));
+        };
+        let Some(definition) = registry.definition(tool_id) else {
+            return None;
+        };
+        match filter.allows_call(definition, cwd, input) {
+            Ok(true) => {
+                return Some(lambda_skill_bridge_required_denial(
+                    tool_id,
+                    "active Lambda Skill requires LambdaHostCall before concrete tool calls"
+                        .to_string(),
+                ));
+            }
+            Ok(false) => return None,
+            Err(error) => {
+                return Some(lambda_skill_bridge_required_denial(
+                    tool_id,
+                    format!("active Lambda Skill tool-scope check failed: {error}"),
+                ));
+            }
+        }
     }
     None
+}
+
+/// Returns true when an active Lambda gate should scope this concrete call.
+pub(super) fn lambda_skill_gate_scopes_tool_call(
+    state: &AppState,
+    registry: &ToolRegistry,
+    cwd: &Path,
+    tool_id: &str,
+    input: &Value,
+) -> bool {
+    if state.pending_lambda_host_call.is_some() || tool_id == SKILL_TOOL_ID {
+        return true;
+    }
+    let Some(gate) = state.lambda_gate.as_ref() else {
+        return false;
+    };
+    let Some(filter) = gate.request_tool_filter() else {
+        return true;
+    };
+    let Some(definition) = registry.definition(tool_id) else {
+        return false;
+    };
+    filter.allows_call(definition, cwd, input).unwrap_or(true)
 }
 
 /// Commits the Lambda Skill gate transition after the concrete tool succeeds.
