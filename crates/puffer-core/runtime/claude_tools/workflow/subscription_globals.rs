@@ -6,7 +6,7 @@
 //! children, and the router task. Storing it in a `OnceLock` avoids
 //! threading another argument through `execute_workflow_tool`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use puffer_subscriptions::SubscriptionManager;
 use std::sync::{Arc, OnceLock};
 

@@ -1,8 +1,8 @@
 use crate::workspace_paths;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
@@ -424,8 +424,10 @@ mod tests {
 
         let error =
             execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("outside the current working directories"));
+        assert!(
+            error
+                .to_string()
+                .contains("outside the current working directories")
+        );
     }
 }

@@ -37,9 +37,11 @@ fn execute_lsp_uses_real_stdio_session_for_hover() {
 
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["operation"], "hover");
-    assert!(parsed["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("fn main()")));
+    assert!(
+        parsed["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("fn main()"))
+    );
 }
 
 #[test]
@@ -62,9 +64,11 @@ fn execute_lsp_rejects_file_outside_workspace() {
     .unwrap();
 
     let parsed: Value = serde_json::from_str(&output).unwrap();
-    assert!(parsed["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("escapes workspace")));
+    assert!(
+        parsed["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("escapes workspace"))
+    );
 }
 
 #[test]
@@ -108,12 +112,16 @@ fn execute_lsp_runs_call_hierarchy_and_workspace_symbol_requests() {
 
     let outgoing_json: Value = serde_json::from_str(&outgoing).unwrap();
     let workspace_json: Value = serde_json::from_str(&workspace).unwrap();
-    assert!(outgoing_json["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("helper")));
-    assert!(workspace_json["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("workspace_symbol")));
+    assert!(
+        outgoing_json["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("helper"))
+    );
+    assert!(
+        workspace_json["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("workspace_symbol"))
+    );
 }
 
 #[test]
@@ -226,15 +234,21 @@ fn execute_lsp_works_on_real_python_workspace_with_pyright() {
     let definition_json: Value = serde_json::from_str(&definition).unwrap();
     let hover_json: Value = serde_json::from_str(&hover).unwrap();
     let document_json: Value = serde_json::from_str(&document).unwrap();
-    assert!(definition_json["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("helper.py")));
-    assert!(hover_json["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("add")));
-    assert!(document_json["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("add")));
+    assert!(
+        definition_json["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("helper.py"))
+    );
+    assert!(
+        hover_json["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("add"))
+    );
+    assert!(
+        document_json["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("add"))
+    );
 }
 
 #[test]
@@ -337,9 +351,11 @@ fn execute_lsp_reports_persisted_diagnostics() {
     std::env::remove_var("PUFFER_LSP_MOCK_DIAGNOSTICS");
 
     let diagnostics_json: Value = serde_json::from_str(&diagnostics).unwrap();
-    assert!(diagnostics_json["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("opened diagnostic")));
+    assert!(
+        diagnostics_json["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("opened diagnostic"))
+    );
 }
 
 #[test]
@@ -362,12 +378,16 @@ fn execute_lsp_reports_missing_server_install_guidance() {
     .unwrap();
 
     let parsed: Value = serde_json::from_str(&output).unwrap();
-    assert!(parsed["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("npm install -g pyright")));
-    assert!(parsed["result"]
-        .as_str()
-        .is_some_and(|value| value.contains("No LSP server is installed")));
+    assert!(
+        parsed["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("npm install -g pyright"))
+    );
+    assert!(
+        parsed["result"]
+            .as_str()
+            .is_some_and(|value| value.contains("No LSP server is installed"))
+    );
 }
 
 #[test]

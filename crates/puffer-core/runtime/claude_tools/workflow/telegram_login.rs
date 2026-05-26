@@ -22,12 +22,12 @@
 //! error is returned so the agent can ask the user to install it.
 
 use crate::AppState;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{Manifest, StateSpec, SubscriberCommand, TelegramPeerKind};
 use puffer_subscriptions::ConnectionRecord;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

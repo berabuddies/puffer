@@ -1,14 +1,14 @@
+use crate::AppState;
 use crate::permissions::FilesystemPermissionPolicy;
 use crate::runner_adapter;
 use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::state::ClaudeReadState;
-use crate::AppState;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use puffer_provider_openai::OpenAIRequestConfig;
 use puffer_resources::LoadedResources;
 use puffer_runner_api::{
-    check_read_freshness, NullChunkSink, ReadStateSnapshot, ReadStateUpdate, StalenessRejection,
-    ToolRequest as RunnerToolRequest, ToolRunner,
+    NullChunkSink, ReadStateSnapshot, ReadStateUpdate, StalenessRejection,
+    ToolRequest as RunnerToolRequest, ToolRunner, check_read_freshness,
 };
 use puffer_tools::{ToolDefinition, ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;

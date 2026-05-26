@@ -1,7 +1,7 @@
 use crate::AppState;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -97,11 +97,7 @@ fn message_text(value: &Value) -> Option<String> {
             }
         }
     }
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn reply(text: String, events: usize) -> Value {

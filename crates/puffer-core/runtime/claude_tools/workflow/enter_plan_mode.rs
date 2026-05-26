@@ -1,9 +1,9 @@
-use crate::plan_mode::enter_plan_mode;
 use crate::AppState;
-use anyhow::bail;
+use crate::plan_mode::enter_plan_mode;
 use anyhow::Result;
-use serde_json::json;
+use anyhow::bail;
 use serde_json::Value;
+use serde_json::json;
 use std::path::Path;
 
 /// Executes the Claude-compatible `EnterPlanMode` tool scaffold.
@@ -26,9 +26,9 @@ pub fn execute_enter_plan_mode(state: &mut AppState, cwd: &Path, input: Value) -
 #[cfg(test)]
 mod tests {
     use super::execute_enter_plan_mode;
-    use crate::plans::plan_file_path;
     use crate::AppState;
-    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+    use crate::plans::plan_file_path;
+    use puffer_config::{ConfigPaths, PufferConfig, ensure_workspace_dirs};
     use puffer_session_store::SessionStore;
     use serde_json::Value;
     use tempfile::tempdir;

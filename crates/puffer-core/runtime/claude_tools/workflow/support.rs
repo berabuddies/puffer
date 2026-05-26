@@ -1,27 +1,27 @@
-use super::ask_user_question_types::{validate_ask_user_questions, AskUserQuestionInput};
+use super::ask_user_question_types::{AskUserQuestionInput, validate_ask_user_questions};
 use super::store::{
-    agents_path, append_agent_message, claude_task_dir, detect_powershell_binary,
+    AgentInput, AgentStore, ClaudeTeamFile, ClaudeTeamMember, ConfigInput, EnterWorktreeInput,
+    ExitWorktreeInput, MessageStore, PendingShutdownRequest, PowerShellInput, SendMessageInput,
+    ShutdownRequestStore, StoredAgent, StoredMessage, StoredTask, StoredTeam, StoredTodo,
+    StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore, TodoWriteInput,
+    WorktreeStore, agents_path, append_agent_message, claude_task_dir, detect_powershell_binary,
     ensure_safe_identifier, find_team_for_session, git_ahead_count, git_dirty, git_head_commit,
     git_toplevel, is_git_repo, load_store, messages_path, next_task_id, now_ms,
     register_team_member, remove_claude_team_artifacts, resolve_recipients, save_store,
     shutdown_requests_path, task_output_path, tasks_path, team_lead_agent_id, teams_path,
-    todos_path, workflow_root, worktrees_path, write_claude_team_file, AgentInput, AgentStore,
-    ClaudeTeamFile, ClaudeTeamMember, ConfigInput, EnterWorktreeInput, ExitWorktreeInput,
-    MessageStore, PendingShutdownRequest, PowerShellInput, SendMessageInput, ShutdownRequestStore,
-    StoredAgent, StoredMessage, StoredTask, StoredTeam, StoredTodo, StoredWorktree, TaskStore,
-    TeamCreateInput, TeamStore, TodoStore, TodoWriteInput, WorktreeStore,
+    todos_path, workflow_root, worktrees_path, write_claude_team_file,
 };
 use super::task_runtime::{terminal_task_status, validate_todos, wait_for_child_output};
+use crate::AppState;
 use crate::config_settings::{
     config_setting_path, config_setting_scope, get_config_value, normalize_config_key,
     persist_config_setting, scope_label, set_config_value,
 };
-use crate::runtime::permission_prompt::{prompt_for_user_question, UserQuestionPromptRequest};
-use crate::AppState;
-use anyhow::{anyhow, bail, Context, Result};
-use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use crate::runtime::permission_prompt::{UserQuestionPromptRequest, prompt_for_user_question};
+use anyhow::{Context, Result, anyhow, bail};
+use puffer_config::{ConfigPaths, ensure_workspace_dirs};
 use puffer_session_store::MessageActor;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -214,7 +214,7 @@ pub(super) fn execute_send_message(
         // Try in-process delivery via teammate registry.
         {
             use crate::runtime::teammate_loop::{
-                teammate_registry, IncomingMessage, TeammateMessage,
+                IncomingMessage, TeammateMessage, teammate_registry,
             };
             let registry = teammate_registry().lock().unwrap();
             if let Some(tx) = registry.get(recipient) {

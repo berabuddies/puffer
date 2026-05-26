@@ -1,7 +1,7 @@
 use super::super::lsp_live_diagnostics::StoredDiagnostic;
 use super::{LocationSummary, LspExecutionResult, LspSession};
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use url::Url;

@@ -1,10 +1,10 @@
 use crate::AppState;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use reqwest::Method;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;

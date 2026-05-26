@@ -1,9 +1,9 @@
 use crate::AppState;
-use anyhow::{anyhow, bail, Context, Result};
-use puffer_tools::mcp_qualify::{qualify_tools, McpToolKey};
+use anyhow::{Context, Result, anyhow, bail};
 use puffer_runner_api::{ChunkSink, McpResult, NullChunkSink, RunnerError, ToolRunner};
+use puffer_tools::mcp_qualify::{McpToolKey, qualify_tools};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -316,11 +316,7 @@ mod tests {
             Err(RunnerError::Unsupported("not used".to_string()))
         }
 
-        fn read_mcp_resource(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<McpResourceContent, RunnerError> {
+        fn read_mcp_resource(&self, _: &str, _: &str) -> Result<McpResourceContent, RunnerError> {
             Err(RunnerError::Unsupported("not used".to_string()))
         }
 

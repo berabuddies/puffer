@@ -1,8 +1,8 @@
+use crate::AppState;
 use crate::plan_mode::exit_plan_mode;
 use crate::plans::{plan_file_path, read_plan_text};
-use crate::AppState;
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use serde_json::Value;
 use std::path::Path;
 
@@ -28,11 +28,11 @@ pub fn execute_exit_plan_mode(state: &mut AppState, cwd: &Path, input: Value) ->
 #[cfg(test)]
 mod tests {
     use super::execute_exit_plan_mode;
-    use crate::plans::{persist_plan_output, plan_file_path};
     use crate::AppState;
-    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+    use crate::plans::{persist_plan_output, plan_file_path};
+    use puffer_config::{ConfigPaths, PufferConfig, ensure_workspace_dirs};
     use puffer_session_store::SessionStore;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tempfile::tempdir;
 
     fn state() -> AppState {

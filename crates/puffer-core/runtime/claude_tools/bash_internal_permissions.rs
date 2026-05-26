@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use puffer_tools::internal_permissions::{
-    InternalToolExecutionEnvelope, InternalToolExecutionRequest, InternalToolExecutionResponse,
-    InternalToolPermissionEnvelope, InternalToolPermissionRequest, InternalToolPermissionResponse,
     INTERNAL_PERMISSION_ADDR_ENV, INTERNAL_PERMISSION_PROTOCOL_VERSION,
-    INTERNAL_PERMISSION_REQUIRED_ENV, INTERNAL_PERMISSION_TOKEN_ENV,
+    INTERNAL_PERMISSION_REQUIRED_ENV, INTERNAL_PERMISSION_TOKEN_ENV, InternalToolExecutionEnvelope,
+    InternalToolExecutionRequest, InternalToolExecutionResponse, InternalToolPermissionEnvelope,
+    InternalToolPermissionRequest, InternalToolPermissionResponse,
 };
 use serde_json::Value;
 use std::io::{ErrorKind, Read as IoRead, Write as IoWrite};
@@ -129,7 +129,7 @@ fn poll_internal_permission_request(
     loop {
         match pending.stream.read(&mut chunk) {
             Ok(0) if pending.buffer.is_empty() => {
-                return Ok(PendingInternalPermissionOutcome::Remove)
+                return Ok(PendingInternalPermissionOutcome::Remove);
             }
             Ok(0) => {
                 let response = InternalToolBrokerResponse::Permission(
@@ -274,15 +274,18 @@ mod tests {
         let broker = InternalPermissionBroker::start(true).unwrap();
         let envs = broker.envs();
 
-        assert!(envs
-            .iter()
-            .any(|(key, value)| *key == INTERNAL_PERMISSION_ADDR_ENV && !value.is_empty()));
-        assert!(envs
-            .iter()
-            .any(|(key, value)| *key == INTERNAL_PERMISSION_TOKEN_ENV && !value.is_empty()));
-        assert!(envs
-            .iter()
-            .any(|(key, value)| *key == INTERNAL_PERMISSION_REQUIRED_ENV && value == "1"));
+        assert!(
+            envs.iter()
+                .any(|(key, value)| *key == INTERNAL_PERMISSION_ADDR_ENV && !value.is_empty())
+        );
+        assert!(
+            envs.iter()
+                .any(|(key, value)| *key == INTERNAL_PERMISSION_TOKEN_ENV && !value.is_empty())
+        );
+        assert!(
+            envs.iter()
+                .any(|(key, value)| *key == INTERNAL_PERMISSION_REQUIRED_ENV && value == "1")
+        );
     }
 
     #[test]

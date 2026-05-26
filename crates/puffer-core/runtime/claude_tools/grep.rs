@@ -1,8 +1,8 @@
 use crate::workspace_paths;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -743,9 +743,11 @@ mod tests {
 
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["mode"], "count");
-        assert!(parsed["content"]
-            .as_str()
-            .is_some_and(|text| text.contains(&extra.join("note.txt").display().to_string())));
+        assert!(
+            parsed["content"]
+                .as_str()
+                .is_some_and(|text| text.contains(&extra.join("note.txt").display().to_string()))
+        );
     }
 
     #[test]

@@ -7,10 +7,10 @@
 //! `manifest.toml` wins.
 
 use crate::AppState;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use puffer_subscriber_runtime::Manifest;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 use super::subscription_globals;

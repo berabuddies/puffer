@@ -1,7 +1,7 @@
 use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -487,7 +487,7 @@ fn remove_redundant_lambda_skill_manifests(
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(error).with_context(|| format!("remove {}", source_path.display()))
+                    return Err(error).with_context(|| format!("remove {}", source_path.display()));
                 }
             }
         }

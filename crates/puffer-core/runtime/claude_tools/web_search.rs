@@ -1,16 +1,16 @@
 use super::retry_http_send;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use puffer_provider_openai::{
-    build_tool_responses_request, extract_responses_text, parse_responses_response,
     OpenAIRequestConfig, OpenAIResponsesTool, OpenAIResponsesToolChoice,
-    OpenAIResponsesToolChoiceMode, OpenAIResponsesToolRequest,
+    OpenAIResponsesToolChoiceMode, OpenAIResponsesToolRequest, build_tool_responses_request,
+    extract_responses_text, parse_responses_response,
 };
 use puffer_transport_anthropic::{
-    build_messages_request, AnthropicMessage, AnthropicModelRequest, AnthropicRequestConfig,
+    AnthropicMessage, AnthropicModelRequest, AnthropicRequestConfig, build_messages_request,
 };
 use reqwest::blocking::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Deserialize)]

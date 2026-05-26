@@ -1,7 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use puffer_tools::{ToolDefinition, ToolRegistry};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::fmt::Write as _;

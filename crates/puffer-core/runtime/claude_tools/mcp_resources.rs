@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -496,9 +496,11 @@ mod tests {
             &mut clients,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("Server \"missing\" not found. Available servers: alpha"));
+        assert!(
+            error
+                .to_string()
+                .contains("Server \"missing\" not found. Available servers: alpha")
+        );
     }
 
     #[test]

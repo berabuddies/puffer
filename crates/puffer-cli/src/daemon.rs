@@ -21,26 +21,26 @@
 
 use anyhow::{Context, Result};
 use axum::{
+    Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use indexmap::IndexMap;
 use puffer_config::{
-    ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
+    ConfigPaths, PufferConfig, ensure_workspace_dirs, load_config, save_user_config,
 };
 use puffer_core::{
-    default_effort_level, enter_plan_mode, execute_user_turn_streaming_with_permissions_and_cancel,
-    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
     AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
     PermissionPromptAction, PermissionPromptRequest, ToolInvocation, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    UserQuestionPromptRequest, UserQuestionPromptResponse, default_effort_level, enter_plan_mode,
+    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
+    supported_effort_levels, with_user_question_prompt_handler,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -49,16 +49,16 @@ use puffer_provider_openai::{
 use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
-use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
+use puffer_resources::{LoadedResources, McpServerSpec, load_resources};
 use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
+    ANTHROPIC_API_BASE_URL, ANTHROPIC_MANUAL_REDIRECT_URL,
     exchange_authorization_code as exchange_anthropic_authorization_code,
-    parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
-    ANTHROPIC_MANUAL_REDIRECT_URL,
+    parse_authorization_input as parse_anthropic_authorization_input,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
@@ -67,7 +67,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use uuid::Uuid;
 
 use crate::auth_credentials::{
@@ -75,7 +75,7 @@ use crate::auth_credentials::{
     to_registry_oauth_credential_openai,
 };
 use crate::auth_provider::{
-    oauth_family_for_provider, oauth_login_bundle_for_provider, OauthFamily,
+    OauthFamily, oauth_family_for_provider, oauth_login_bundle_for_provider,
 };
 use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
@@ -86,9 +86,9 @@ use crate::daemon_lambda_skills::{
 use crate::daemon_pty::PtyRegistry;
 use crate::daemon_turn_routing::persist_explicit_turn_routing;
 use crate::daemon_ui_state::{
+    DesktopFileTab, DesktopFileTabsState, DesktopPinState, DesktopSessionRouting,
     load_file_tabs_state, load_pin_state, load_session_routing_state, set_file_tabs_state,
-    set_pin_state, set_session_routing_state, DesktopFileTab, DesktopFileTabsState,
-    DesktopPinState, DesktopSessionRouting,
+    set_pin_state, set_session_routing_state,
 };
 use crate::desktop_api;
 use crate::desktop_api_types::{
@@ -3390,16 +3390,17 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        browser_permission_payload_json, handle_create_session, handle_import_external_credential,
-        handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
-        handle_login_with_api_key, handle_logout_provider, handle_remove_lambda_skill_library,
+        DaemonState, TurnRequestOptions, apply_daemon_yolo_mode, apply_turn_model_override,
+        apply_turn_request_options, browser_permission_payload_json, handle_create_session,
+        handle_import_external_credential, handle_list_lambda_skill_libraries,
+        handle_list_permissions, handle_list_provider_models, handle_login_with_api_key,
+        handle_logout_provider, handle_remove_lambda_skill_library,
         handle_save_lambda_skill_library, handle_save_permissions, handle_set_lambda_skill_enabled,
         model_descriptor_dto, permission_review_payload_json, requires_explicit_subscription,
-        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
+        resolve_create_session_model_id, run_off_runtime,
     };
     use indexmap::IndexMap;
-    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+    use puffer_config::{ConfigPaths, PufferConfig, ensure_workspace_dirs};
     use puffer_core::{AppState, ModelPreferenceFamily, ToolInvocation};
     use puffer_provider_registry::{
         AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
@@ -3932,9 +3933,11 @@ mod tests {
 
         assert!(auth.get("openai").is_some());
         assert!(auth.get("codex").is_none());
-        assert!(response["auth"]
-            .as_array()
-            .is_some_and(|auth| auth.iter().any(|item| item["providerId"] == "openai")));
+        assert!(
+            response["auth"]
+                .as_array()
+                .is_some_and(|auth| auth.iter().any(|item| item["providerId"] == "openai"))
+        );
     }
 
     #[test]
@@ -3957,9 +3960,11 @@ mod tests {
         )
         .expect_err("invalid source should fail after provider alias lookup");
 
-        assert!(error
-            .to_string()
-            .contains("unknown import source `not-real`"));
+        assert!(
+            error
+                .to_string()
+                .contains("unknown import source `not-real`")
+        );
     }
 
     #[test]
@@ -3992,9 +3997,11 @@ mod tests {
         let auth = AuthStore::load(&auth_path).expect("auth store");
 
         assert!(auth.get("openai").is_none());
-        assert!(response["auth"]
-            .as_array()
-            .is_some_and(|auth| auth.iter().all(|item| item["providerId"] != "openai")));
+        assert!(
+            response["auth"]
+                .as_array()
+                .is_some_and(|auth| auth.iter().all(|item| item["providerId"] != "openai"))
+        );
     }
 
     #[test]
@@ -4288,10 +4295,11 @@ mod tests {
             .collect();
         assert_eq!(option_ids, vec!["low", "medium", "high", "max"]);
         assert_eq!(dto.default_thinking_option_id.as_deref(), Some("high"));
-        assert!(dto
-            .thinking_options
-            .iter()
-            .any(|option| option.id == "high" && option.is_default));
+        assert!(
+            dto.thinking_options
+                .iter()
+                .any(|option| option.id == "high" && option.is_default)
+        );
 
         let mut no_reasoning = provider.models[0].clone();
         no_reasoning.supports_reasoning = false;
@@ -4517,10 +4525,12 @@ mod tests {
 
         assert_eq!(saved["libraries"][0]["id"], "verified");
         assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
-        assert!(saved["libraries"][0]["hostToolBindings"]
-            .as_object()
-            .unwrap()
-            .is_empty());
+        assert!(
+            saved["libraries"][0]["hostToolBindings"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
         let manifest_path = state
             .paths
             .workspace_config_dir
@@ -4532,10 +4542,12 @@ mod tests {
 
         let listed = handle_list_lambda_skill_libraries(&state).expect("list libraries");
         assert_eq!(listed["libraries"][0]["sourceKind"], "workspace");
-        assert!(listed["doctor"]
-            .as_str()
-            .unwrap()
-            .contains("lambda_skills=1"));
+        assert!(
+            listed["doctor"]
+                .as_str()
+                .unwrap()
+                .contains("lambda_skills=1")
+        );
     }
 
     #[test]
@@ -4596,10 +4608,12 @@ mod tests {
         assert_eq!(saved["skills"][0]["enabled"], true);
         assert_eq!(saved["skills"][0]["modelInvocable"], true);
         assert_eq!(saved["skills"][0]["libraryId"], "verified");
-        assert!(saved["doctor"]
-            .as_str()
-            .unwrap()
-            .contains("lambda_skills=1 model_invocable=1 missing_gate_config=0"));
+        assert!(
+            saved["doctor"]
+                .as_str()
+                .unwrap()
+                .contains("lambda_skills=1 model_invocable=1 missing_gate_config=0")
+        );
 
         let manifest_path = state
             .paths
@@ -4668,10 +4682,12 @@ mod tests {
             "out/host.json"
         );
         assert_eq!(listed["libraries"][0]["allowedTools"][0], "Bash");
-        assert!(listed["libraries"][0]["hostToolBindings"]
-            .as_object()
-            .unwrap()
-            .is_empty());
+        assert!(
+            listed["libraries"][0]["hostToolBindings"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(listed["skills"][0]["modelInvocable"], true);
     }
 
@@ -4787,11 +4803,13 @@ mod tests {
         assert_eq!(saved["libraries"].as_array().unwrap().len(), 1);
         assert_eq!(saved["libraries"][0]["id"], "parent");
         assert_eq!(saved["skills"].as_array().unwrap().len(), 1);
-        assert!(!state
-            .paths
-            .workspace_config_dir
-            .join("resources/lambda_skill_libraries/nested.yaml")
-            .exists());
+        assert!(
+            !state
+                .paths
+                .workspace_config_dir
+                .join("resources/lambda_skill_libraries/nested.yaml")
+                .exists()
+        );
     }
 
     #[test]
@@ -4852,11 +4870,13 @@ mod tests {
 
         assert_eq!(saved["libraries"].as_array().unwrap().len(), 1);
         assert_eq!(saved["libraries"][0]["id"], "parent");
-        assert!(!state
-            .paths
-            .workspace_config_dir
-            .join("resources/lambda_skill_libraries/nested.yaml")
-            .exists());
+        assert!(
+            !state
+                .paths
+                .workspace_config_dir
+                .join("resources/lambda_skill_libraries/nested.yaml")
+                .exists()
+        );
     }
 
     #[test]
@@ -4916,11 +4936,13 @@ mod tests {
 
         assert!(removed["libraries"].as_array().unwrap().is_empty());
         assert!(removed["skills"].as_array().unwrap().is_empty());
-        assert!(!state
-            .paths
-            .workspace_config_dir
-            .join("resources/lambda_skill_libraries/verified.yaml")
-            .exists());
+        assert!(
+            !state
+                .paths
+                .workspace_config_dir
+                .join("resources/lambda_skill_libraries/verified.yaml")
+                .exists()
+        );
     }
 
     #[test]
@@ -5002,10 +5024,12 @@ mod tests {
         )
         .expect("enable lambda skill");
 
-        assert!(enabled["libraries"][0]["disabledSkills"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            enabled["libraries"][0]["disabledSkills"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(enabled["skills"][0]["enabled"], true);
         assert_eq!(enabled["skills"][0]["modelInvocable"], true);
     }
@@ -5047,14 +5071,18 @@ mod tests {
         )
         .expect_err("missing host catalogue should reject import");
 
-        assert!(error
-            .to_string()
-            .contains("missing precompiled host catalogues"));
-        assert!(!state
-            .paths
-            .workspace_config_dir
-            .join("resources/lambda_skill_libraries/verified.yaml")
-            .exists());
+        assert!(
+            error
+                .to_string()
+                .contains("missing precompiled host catalogues")
+        );
+        assert!(
+            !state
+                .paths
+                .workspace_config_dir
+                .join("resources/lambda_skill_libraries/verified.yaml")
+                .exists()
+        );
     }
 
     #[test]
@@ -5154,9 +5182,11 @@ mod tests {
         )
         .expect_err("unsupported concrete tool should reject import");
 
-        assert!(error
-            .to_string()
-            .contains("binds unsupported concrete tool td_execute_python"));
+        assert!(
+            error
+                .to_string()
+                .contains("binds unsupported concrete tool td_execute_python")
+        );
     }
 
     #[test]
@@ -5281,15 +5311,19 @@ mod tests {
         assert_eq!(saved["skills"][0]["ready"], false);
         assert_eq!(saved["skills"][0]["modelInvocable"], false);
         assert_eq!(saved["libraries"][0]["allowedTools"][0], "DiscordAction");
-        assert!(saved["skills"][0]["failureReason"]
-            .as_str()
-            .unwrap()
-            .contains("lacks a concrete input contract"));
-        assert!(state
-            .paths
-            .workspace_config_dir
-            .join("resources/lambda_skill_libraries/verified.yaml")
-            .exists());
+        assert!(
+            saved["skills"][0]["failureReason"]
+                .as_str()
+                .unwrap()
+                .contains("lacks a concrete input contract")
+        );
+        assert!(
+            state
+                .paths
+                .workspace_config_dir
+                .join("resources/lambda_skill_libraries/verified.yaml")
+                .exists()
+        );
     }
 
     #[test]
