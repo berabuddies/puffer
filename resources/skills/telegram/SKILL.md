@@ -14,8 +14,8 @@ or repair a Telegram personal-account connection. That flow uses
 AskUserQuestion for method choices and secrets.
 
 Use the internal Telegram CLI when peer lookup, message listing, or message
-search is needed. Run it from Bash as `telegram ...`; do not use or invent a
-user-facing `/telegram` slash command. The CLI dispatches to the Telegram
+search is needed. Run it from Bash as `telegram ...`; do not expose a
+connector-specific slash command for Telegram. The CLI dispatches to the Telegram
 subscriber and does not require a model turn.
 
 Target: $target
