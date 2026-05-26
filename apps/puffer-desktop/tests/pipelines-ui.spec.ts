@@ -603,6 +603,42 @@ test("pipeline connection rows can create append workflow bindings", async ({ pa
   await expect(actions).toContainText("/tmp/telegram-user.log");
 });
 
+test("pipeline connection append rows use search path and pattern", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await page.getByLabel("Search connectors").fill("append telegram-user hi /tmp/hi");
+
+  const appendButton = page.getByRole("button", { name: "Create append workflow for telegram-user" });
+  await expect(appendButton).toHaveAttribute("title", "/workflows append telegram-user /tmp/hi hi");
+  await appendButton.click();
+
+  const request = await daemon.waitForRequest("workflow_binding_create", (candidate) => {
+    return candidate.params.slug === "append-telegram-user-hi";
+  });
+  expect(request.params).toMatchObject({
+    slug: "append-telegram-user-hi",
+    connection_slug: "telegram-user",
+    connector_slug: "telegram-login",
+    pattern: "hi",
+    file_append_path: "/tmp/hi",
+    enabled: true
+  });
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText(
+    "Created append workflow append-telegram-user-hi."
+  );
+  await expect(page.getByLabel("Selected append workflow command")).toContainText(
+    "/workflows append telegram-user /tmp/hi hi"
+  );
+  const actions = page.getByLabel("Workflow actions");
+  await expect(actions).toContainText("append-telegram-user-hi");
+  await expect(actions).toContainText("/tmp/hi");
+  await expect(actions).toContainText("hi");
+});
+
 test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

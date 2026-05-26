@@ -97,6 +97,11 @@
     saveMessage?: string;
   };
 
+  type AppendQueryIntent = {
+    path: string;
+    pattern: string | null;
+  };
+
   type ConnectorFilterPreset = {
     label: string;
     query: string;
@@ -159,6 +164,30 @@
     { label: "Internal", query: "internal-tool" },
     { label: "No trigger", query: "no-trigger" }
   ];
+  const appendQueryStopWords = new Set([
+    "append",
+    "any",
+    "containing",
+    "contains",
+    "event",
+    "events",
+    "file",
+    "into",
+    "match",
+    "matching",
+    "message",
+    "messages",
+    "on",
+    "pipeline",
+    "pipelines",
+    "save",
+    "that",
+    "to",
+    "where",
+    "with",
+    "workflow",
+    "workflows"
+  ]);
 
   let snapshot = $state<WorkflowSnapshot>({
     workflows: [],
@@ -213,6 +242,7 @@
   let activeMonitorTasks = $derived(monitorTasks.filter((task) => !monitorTaskIgnored(task)));
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
   let connectorQueryTerms = $derived(searchTerms(connectorQuery));
+  let connectorQueryRawTokens = $derived(queryTokens(connectorQuery));
   let connectionsByConnector = $derived(groupConnectionsByConnector(connections));
   let connectorSearchRows = $derived(indexConnectors(connectors, connectionsByConnector));
   let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
@@ -825,23 +855,28 @@
       saveNotice = `${connection.slug} cannot start workflow triggers. Choose an event-capable connection.`;
       return;
     }
-    const path = `/tmp/${connection.slug}.log`;
+    const intent = connectionAppendIntent(connection);
+    const path = intent.path;
+    const pattern = intent.pattern;
     const slug = appendBindingSlug(connection.slug, path);
     selectedConnectorSlug = connection.connector_slug;
     selectedConnectorConnectionName = connection.slug;
-    selectedConnectorDraftPattern = "";
+    selectedConnectorDraftPattern = pattern ?? "";
     selectedConnectorAppendPath = path;
     creatingWorkflowBinding = true;
     creatingConnectionAppendFor = connection.slug;
     error = null;
     saveNotice = `Creating ${slug}...`;
     try {
+      const description = pattern
+        ? `Append ${connection.slug} messages matching ${pattern} to ${path}`
+        : `Append ${connection.slug} messages to ${path}`;
       const next = await createWorkflowBinding({
         slug,
-        description: `Append ${connection.slug} messages to ${path}`,
+        description,
         connection_slug: connection.slug,
         connector_slug: connection.connector_slug,
-        pattern: null,
+        pattern,
         file_append_path: path,
         enabled: true
       });
@@ -897,7 +932,78 @@
   }
 
   function connectionAppendCommand(connection: WorkflowConnection): string {
-    return workflowAppendCommand(connection.slug, `/tmp/${connection.slug}.log`);
+    const intent = connectionAppendIntent(connection);
+    return workflowAppendCommand(connection.slug, intent.path, intent.pattern);
+  }
+
+  function connectionAppendIntent(connection: WorkflowConnection): AppendQueryIntent {
+    const fallback = {
+      path: `/tmp/${connection.slug}.log`,
+      pattern: null
+    };
+    if (!connectorQueryNamesConnection(connection)) return fallback;
+    const path = connectorQueryAppendPath();
+    if (!path) return fallback;
+    return {
+      path,
+      pattern: connectorQueryAppendPattern(connection, path)
+    };
+  }
+
+  function connectorQueryNamesConnection(connection: WorkflowConnection): boolean {
+    const needles = new Set([
+      connection.slug.toLowerCase(),
+      connection.connector_slug.toLowerCase()
+    ]);
+    return connectorQueryRawTokens.some((token) => needles.has(token.toLowerCase()));
+  }
+
+  function connectorQueryAppendPath(): string | null {
+    return connectorQueryRawTokens.find((token) => looksLikeAppendPath(token) && appendPathValid(token)) ?? null;
+  }
+
+  function connectorQueryAppendPattern(connection: WorkflowConnection, path: string): string | null {
+    const connectionTerms = new Set([
+      connection.slug.toLowerCase(),
+      connection.connector_slug.toLowerCase()
+    ]);
+    const pattern = connectorQueryRawTokens
+      .filter((token) => {
+        const lower = token.toLowerCase();
+        return token !== path
+          && !appendQueryStopWords.has(lower)
+          && !connectionTerms.has(lower)
+          && !looksLikeAppendPath(token);
+      })
+      .join(" ")
+      .trim();
+    return pattern || null;
+  }
+
+  function queryTokens(query: string): string[] {
+    return query
+      .trim()
+      .split(/\s+/)
+      .map(stripQueryTokenQuotes)
+      .filter(Boolean);
+  }
+
+  function stripQueryTokenQuotes(value: string): string {
+    if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+      return value.slice(1, -1);
+    }
+    if (value.length >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+      return value.slice(1, -1);
+    }
+    return value;
+  }
+
+  function looksLikeAppendPath(value: string): boolean {
+    return value.startsWith("/")
+      || value.startsWith("./")
+      || value.startsWith("../")
+      || value.includes("/")
+      || value.includes(".");
   }
 
   function connectorAppendCommand(
