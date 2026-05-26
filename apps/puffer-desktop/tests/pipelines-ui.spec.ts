@@ -1396,6 +1396,38 @@ test("pipeline connector command can start setup from the picker", async ({ page
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
+test("pipeline connector search preserves custom connection names", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("connect matrix matrix-main");
+  await expect(page.getByLabel("Connector search results")).toHaveText("1/30 connectors; 0/2 connections");
+  const matrix = page
+    .locator('[aria-label="Connector catalog"]')
+    .getByRole("button", { name: "Select matrix-bot connector setup" });
+  await expect(matrix).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run /connect matrix-bot matrix-main" })).toHaveAttribute(
+    "title",
+    "/connect matrix-bot matrix-main"
+  );
+  await matrix.click();
+  await expect(page.getByLabel("Connector connection name")).toHaveValue("matrix-main");
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect matrix-bot matrix-main");
+
+  await page.getByLabel("Search connectors").fill("email team-email");
+  await expect(page.getByLabel("Connector search results")).toHaveText("1/30 connectors; 0/2 connections");
+  await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
+  await expect(page.getByLabel("Connector connection name")).toHaveValue("team-email");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("team-email");
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect email team-email");
+  await expect(page.getByLabel("Selected append workflow command")).toContainText(
+    "/workflows append team-email /tmp/hi --connector email"
+  );
+});
+
 test("pipeline selected connector can run workflow commands", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

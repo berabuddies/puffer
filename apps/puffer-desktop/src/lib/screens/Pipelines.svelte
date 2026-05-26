@@ -188,6 +188,38 @@
     "workflow",
     "workflows"
   ]);
+  const connectorQueryFallbackStopWords = new Set([
+    "action",
+    "actions",
+    "active",
+    "append",
+    "auth",
+    "config",
+    "configure",
+    "connect",
+    "connector",
+    "connectors",
+    "draft",
+    "events",
+    "file",
+    "has-actions",
+    "idle",
+    "internal",
+    "monitor",
+    "no-trigger",
+    "proxy",
+    "repair",
+    "save",
+    "serve",
+    "setup",
+    "subscriber",
+    "task",
+    "tasks",
+    "trigger",
+    "trigger-ready",
+    "workflow",
+    "workflows"
+  ]);
 
   let snapshot = $state<WorkflowSnapshot>({
     workflows: [],
@@ -243,6 +275,10 @@
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
   let connectorQueryTerms = $derived(searchTerms(connectorQuery));
   let connectorQueryRawTokens = $derived(queryTokens(connectorQuery));
+  let connectorQueryPlannedConnectionName = $derived(connectorQueryConnectionName(connectorQueryRawTokens));
+  let connectorQueryFallbackTerms = $derived(
+    connectorQueryConnectorFallbackTerms(connectorQueryRawTokens, connectorQueryPlannedConnectionName)
+  );
   let connectionsByConnector = $derived(groupConnectionsByConnector(connections));
   let connectorSearchRows = $derived(indexConnectors(connectors, connectionsByConnector));
   let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
@@ -253,7 +289,14 @@
   let filteredMonitorBindings = $derived(filterWorkflowBindings(monitorBindingSearchRows, connectorQueryTerms));
   let filteredActionBindings = $derived(filterWorkflowBindings(actionBindingSearchRows, connectorQueryTerms));
   let filteredMonitorTasks = $derived(filterMonitorTasks(monitorTaskSearchRows, connectorQueryTerms));
-  let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQueryTerms));
+  let filteredConnectors = $derived(
+    filterConnectors(
+      connectorSearchRows,
+      connectorQueryTerms,
+      connectorQueryFallbackTerms,
+      connectorQueryPlannedConnectionName
+    )
+  );
   let workflow = $derived(
     workflows.find((item) => item.slug === workflowSlug) ?? workflows[0] ?? null
   );
@@ -731,9 +774,13 @@
     }));
   }
 
-  function useConnectorTemplate(connector: WorkflowConnector) {
-    const existingConnection = connectionsForConnector(connector.connector_slug)[0];
-    const connectionSlug = existingConnection?.slug ?? connectorConnectionHint(connector);
+  function useConnectorTemplate(connector: WorkflowConnector, plannedConnectionName?: string | null) {
+    const connectorConnections = connectionsForConnector(connector.connector_slug);
+    const plannedSlug = plannedConnectionName?.trim();
+    const existingConnection = plannedSlug
+      ? connectorConnections.find((connection) => connection.slug === plannedSlug)
+      : connectorConnections[0];
+    const connectionSlug = plannedSlug || existingConnection?.slug || connectorConnectionHint(connector);
     const command = connectorConnectCommand(connector, connectionSlug);
     selectedConnectorSlug = connector.connector_slug;
     selectedConnectorConnectionName = connectionSlug;
@@ -988,6 +1035,27 @@
       .filter(Boolean);
   }
 
+  function connectorQueryConnectionName(tokens: string[]): string | null {
+    if (tokens.length < 2) return null;
+    const candidate = tokens[tokens.length - 1]?.trim() ?? "";
+    if (
+      !candidate
+      || looksLikeAppendPath(candidate)
+      || !connectionSlugValid(candidate)
+      || connectorQueryFallbackStopWords.has(candidate.toLowerCase())
+    ) return null;
+    return candidate;
+  }
+
+  function connectorQueryConnectorFallbackTerms(tokens: string[], connectionName: string | null): string[] {
+    if (!connectionName || tokens.length < 2) return [];
+    const connectorTerm = tokens
+      .slice(0, -1)
+      .map((token) => token.trim().toLowerCase())
+      .find((token) => token && !connectorQueryFallbackStopWords.has(token));
+    return connectorTerm ? [connectorTerm] : [];
+  }
+
   function stripQueryTokenQuotes(value: string): string {
     if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
       return value.slice(1, -1);
@@ -1174,8 +1242,8 @@
     await runSelectedWorkflowCommand("append", selectedConnectorAppendCommand);
   }
 
-  async function runConnectorSetupCommand(connector: WorkflowConnector) {
-    const connectionName = connectorConnectionHint(connector);
+  async function runConnectorSetupCommand(connector: WorkflowConnector, plannedConnectionName?: string | null) {
+    const connectionName = plannedConnectionName?.trim() || connectorConnectionHint(connector);
     const command = connectorConnectCommand(connector, connectionName);
     if (connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
     selectedConnectorSlug = connector.connector_slug;
@@ -1583,8 +1651,28 @@
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.task);
   }
 
-  function filterConnectors(rows: ConnectorSearchRow[], terms: string[]): WorkflowConnector[] {
-    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connector);
+  function filterConnectors(
+    rows: ConnectorSearchRow[],
+    terms: string[],
+    fallbackTerms: string[] = [],
+    plannedConnectionName: string | null = null
+  ): WorkflowConnector[] {
+    const directMatches = rows.filter((row) => matchesSearchTerms(terms, row.searchText));
+    if (directMatches.length > 0 || !plannedConnectionName || fallbackTerms.length === 0) {
+      return directMatches.map((row) => row.connector);
+    }
+    return rows
+      .filter((row) => matchesSearchTerms(fallbackTerms, row.searchText))
+      .map((row) => row.connector);
+  }
+
+  function connectorPlannedConnectionName(connector: WorkflowConnector): string | null {
+    if (!connectorQueryPlannedConnectionName || connectorQueryFallbackTerms.length === 0) return null;
+    const hasDirectMatches = connectorSearchRows.some((row) => matchesSearchTerms(connectorQueryTerms, row.searchText));
+    if (hasDirectMatches) return null;
+    const row = connectorSearchRows.find((item) => item.connector.connector_slug === connector.connector_slug);
+    if (!row || !matchesSearchTerms(connectorQueryFallbackTerms, row.searchText)) return null;
+    return connectorQueryPlannedConnectionName;
   }
 
   function indexWorkflows(items: EditableWorkflow[]): WorkflowSearchRow[] {
@@ -2546,8 +2634,9 @@
                   {#each filteredConnectors as connector (connector.connector_slug)}
                     {@const connectorConnections = connectionsForConnector(connector.connector_slug)}
                     {@const canTrigger = connectorTriggerSupported(connector)}
-                    {@const connectCommand = connectorConnectCommand(connector)}
-                    {@const draftCommand = connectorDraftCommand(connector)}
+                    {@const plannedConnectionName = connectorPlannedConnectionName(connector)}
+                    {@const connectCommand = connectorConnectCommand(connector, plannedConnectionName ?? undefined)}
+                    {@const draftCommand = connectorDraftCommand(connector, plannedConnectionName ?? undefined)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
                     {@const expandActions = filteredConnectors.length === 1 && connectorQueryTerms.length > 0}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms, expandActions ? null : 3)}
@@ -2561,7 +2650,7 @@
                         data-selected={selectedConnectorSlug === connector.connector_slug}
                         data-supported={canTrigger}
                         aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `Select ${connector.connector_slug} connector setup`}
-                        onclick={() => useConnectorTemplate(connector)}
+                        onclick={() => useConnectorTemplate(connector, plannedConnectionName)}
                       >
                         <span class="pf-connector-main">
                           <strong>{connector.connector_slug}</strong>
@@ -2592,7 +2681,7 @@
                         title={connectCommand}
                         aria-busy={connectorCommandRunningFor === connector.connector_slug}
                         disabled={connectorCommandRunnerBusy() || !onRunWorkflowCommand}
-                        onclick={() => runConnectorSetupCommand(connector)}
+                        onclick={() => runConnectorSetupCommand(connector, plannedConnectionName)}
                       >
                         <Icon name="plug" size={12} />
                       </button>
@@ -2602,7 +2691,7 @@
                         aria-label={`Create workflow draft for ${connector.connector_slug}`}
                         title={draftCommand}
                         disabled={!canTrigger}
-                        onclick={() => createWorkflowDraftForConnector(connector)}
+                        onclick={() => createWorkflowDraftForConnector(connector, plannedConnectionName ?? undefined)}
                       >
                         <Icon name="plus" size={12} />
                       </button>
