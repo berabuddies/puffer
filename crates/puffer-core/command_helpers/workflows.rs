@@ -14,6 +14,7 @@ mod append;
 mod create;
 mod delete;
 mod monitor_tasks;
+mod toggle;
 
 /// Renders a terminal-friendly workflow, connection, and connector summary.
 pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<String> {
@@ -87,10 +88,16 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
         "delete" | "remove" | "rm" => {
             out.push_str(&delete::delete_workflow_binding(&query)?);
         }
+        "pause" | "disable" => {
+            out.push_str(&toggle::pause_workflow_binding(&query)?);
+        }
+        "resume" | "enable" => {
+            out.push_str(&toggle::resume_workflow_binding(&query)?);
+        }
         _ => {
             out.push_str(
-                "Usage: /workflows [list|new|append|delete|actions|connections|connectors|tasks|runs] [query]\n\
-                 Tip: /workflows append <connection-slug> <file-path> [pattern] creates an enabled file append binding; /workflows delete <binding-slug> removes one.",
+                "Usage: /workflows [list|new|append|pause|resume|delete|actions|connections|connectors|tasks|runs] [query]\n\
+                 Tip: /workflows append <connection-slug> <file-path> [pattern] creates an enabled file append binding; /workflows pause|resume|delete <binding-slug> manages one.",
             );
         }
     }
@@ -247,6 +254,7 @@ fn write_workflow_bindings(out: &mut String, context: &ConnectorContext, query: 
         return;
     }
     for binding in bindings {
+        let (toggle_label, toggle_command) = workflow_toggle_command(binding);
         let _ = writeln!(
             out,
             "- {} [{}] connection={} connector={} action={}{} filter={} {}",
@@ -259,13 +267,18 @@ fn write_workflow_bindings(out: &mut String, context: &ConnectorContext, query: 
             workflow_filter_label(binding.filter.as_ref()),
             binding.description
         );
-        let _ = writeln!(out, "  delete={}", workflow_delete_command(&binding.slug));
+        let _ = writeln!(
+            out,
+            "  {toggle_label}={} delete={}",
+            toggle_command,
+            workflow_delete_command(&binding.slug)
+        );
     }
 }
 
 fn write_binding_filter_hints(out: &mut String) {
     out.push_str(
-        "filters: append | file | connection | connector | pattern | enabled | paused | delete\n",
+        "filters: append | file | connection | connector | pattern | enabled | paused | pause | resume | delete\n",
     );
 }
 
@@ -560,6 +573,25 @@ fn workflow_delete_command(binding_slug: &str) -> String {
     format!("/workflows delete {binding_slug}")
 }
 
+fn workflow_pause_command(binding_slug: &str) -> String {
+    format!("/workflows pause {binding_slug}")
+}
+
+fn workflow_resume_command(binding_slug: &str) -> String {
+    format!("/workflows resume {binding_slug}")
+}
+
+fn workflow_toggle_command(binding: &WorkflowBindingSpec) -> (&'static str, String) {
+    match binding.status {
+        puffer_subscriptions::WorkflowBindingStatus::Enabled => {
+            ("pause", workflow_pause_command(&binding.slug))
+        }
+        puffer_subscriptions::WorkflowBindingStatus::Paused => {
+            ("resume", workflow_resume_command(&binding.slug))
+        }
+    }
+}
+
 fn connector_draft_command(context: &ConnectorContext, connector: &ConnectorTemplate) -> String {
     let connection_slug = context
         .connections
@@ -654,6 +686,11 @@ fn connection_search_terms(
 }
 
 fn binding_search_terms(binding: &WorkflowBindingSpec) -> Vec<String> {
+    let (toggle_label, toggle_command) = workflow_toggle_command(binding);
+    let toggle_terms = match binding.status {
+        puffer_subscriptions::WorkflowBindingStatus::Enabled => "pause disable stop",
+        puffer_subscriptions::WorkflowBindingStatus::Paused => "resume enable start unpause",
+    };
     [
         "workflow action binding".to_string(),
         binding.slug.clone(),
@@ -664,6 +701,9 @@ fn binding_search_terms(binding: &WorkflowBindingSpec) -> Vec<String> {
         workflow_action_type(&binding.action).to_string(),
         workflow_action_target(&binding.action),
         workflow_filter_label(binding.filter.as_ref()),
+        toggle_label.to_string(),
+        toggle_command,
+        toggle_terms.to_string(),
         workflow_delete_command(&binding.slug),
         "delete remove cleanup".to_string(),
     ]

@@ -4,41 +4,43 @@ use puffer_subscriptions::{
     ActionSpec, FilterSpec, TaggedFilterSpec, WorkflowBindingSpec, WorkflowBindingStatus,
 };
 
-/// Returns workflow-action delete completion rows for `/workflows delete ...`.
-pub(super) fn workflow_action_delete_rows(input: &str) -> Option<Vec<PopupRow>> {
+/// Returns workflow-action management completion rows for `/workflows ...`.
+pub(super) fn workflow_action_rows(input: &str) -> Option<Vec<PopupRow>> {
     let rest = input
         .strip_prefix('/')?
         .split_once(' ')
         .filter(|(command, _)| is_workflows_command(command))?
         .1
         .trim_start();
-    workflow_action_delete_rows_for_bindings(rest, live_workflow_bindings())
+    workflow_action_rows_for_bindings(rest, live_workflow_bindings())
 }
 
-/// Returns true when workflow-action delete completion should keep the popup open.
-pub(super) fn workflow_action_delete_accepts_input(rest: &str) -> bool {
-    workflow_action_delete_query(rest).is_some()
+/// Returns true when workflow-action management should keep the popup open.
+pub(super) fn workflow_action_accepts_input(rest: &str) -> bool {
+    workflow_action_query(rest).is_some()
 }
 
-fn workflow_action_delete_rows_for_bindings(
+fn workflow_action_rows_for_bindings(
     rest: &str,
     bindings: Vec<WorkflowBindingSpec>,
 ) -> Option<Vec<PopupRow>> {
-    let query = workflow_action_delete_query(rest)?;
+    let (command, query) = workflow_action_query(rest)?;
     let terms = search_terms(query);
     let mut rows = bindings
         .into_iter()
-        .map(workflow_binding_delete_row)
+        .filter(|binding| command.applies_to(binding))
+        .map(|binding| workflow_binding_action_row(command, binding))
         .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
         .collect::<Vec<_>>();
-    rows.sort_by_key(|row| workflow_action_delete_sort_key(row, query.trim()));
+    rows.sort_by_key(|row| workflow_action_sort_key(row, command, query.trim()));
     rows.truncate(MAX_POPUP_ROWS);
     Some(rows.into_iter().map(|row| row.row).collect())
 }
 
-fn workflow_action_delete_query(rest: &str) -> Option<&str> {
+fn workflow_action_query(rest: &str) -> Option<(WorkflowActionCommand, &str)> {
     let (subcommand, query) = split_first_whitespace(rest)?;
-    matches!(subcommand, "delete" | "remove" | "rm").then_some(query.trim_start())
+    let command = WorkflowActionCommand::from_subcommand(subcommand)?;
+    Some((command, query.trim_start()))
 }
 
 fn split_first_whitespace(value: &str) -> Option<(&str, &str)> {
@@ -53,13 +55,67 @@ fn live_workflow_bindings() -> Vec<WorkflowBindingSpec> {
     manager.store().list()
 }
 
-fn workflow_binding_delete_row(binding: WorkflowBindingSpec) -> ConnectorPopupRow {
-    let command = format!("/workflows delete {}", binding.slug);
-    let description = workflow_binding_delete_description(&binding);
-    let search_text = workflow_binding_delete_search_text(&binding, &command, &description);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkflowActionCommand {
+    Pause,
+    Resume,
+    Delete,
+}
+
+impl WorkflowActionCommand {
+    fn from_subcommand(subcommand: &str) -> Option<Self> {
+        match subcommand {
+            "pause" | "disable" => Some(Self::Pause),
+            "resume" | "enable" => Some(Self::Resume),
+            "delete" | "remove" | "rm" => Some(Self::Delete),
+            _ => None,
+        }
+    }
+
+    fn canonical(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Delete => "delete",
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Pause => "Pause",
+            Self::Resume => "Resume",
+            Self::Delete => "Delete",
+        }
+    }
+
+    fn search_terms(self) -> &'static str {
+        match self {
+            Self::Pause => "pause disable stop suspend",
+            Self::Resume => "resume enable start unpause",
+            Self::Delete => "delete remove rm cleanup",
+        }
+    }
+
+    fn applies_to(self, binding: &WorkflowBindingSpec) -> bool {
+        match self {
+            Self::Pause => binding.status == WorkflowBindingStatus::Enabled,
+            Self::Resume => binding.status == WorkflowBindingStatus::Paused,
+            Self::Delete => true,
+        }
+    }
+}
+
+fn workflow_binding_action_row(
+    action_command: WorkflowActionCommand,
+    binding: WorkflowBindingSpec,
+) -> ConnectorPopupRow {
+    let command = format!("/workflows {} {}", action_command.canonical(), binding.slug);
+    let description = workflow_binding_action_description(action_command, &binding);
+    let search_text =
+        workflow_binding_action_search_text(action_command, &binding, &command, &description);
     ConnectorPopupRow {
         row: PopupRow {
-            name: format!("workflows delete {}", binding.slug),
+            name: format!("workflows {} {}", action_command.canonical(), binding.slug),
             description,
             replacement: command,
             append_space: false,
@@ -68,9 +124,13 @@ fn workflow_binding_delete_row(binding: WorkflowBindingSpec) -> ConnectorPopupRo
     }
 }
 
-fn workflow_binding_delete_description(binding: &WorkflowBindingSpec) -> String {
+fn workflow_binding_action_description(
+    action_command: WorkflowActionCommand,
+    binding: &WorkflowBindingSpec,
+) -> String {
     format!(
-        "Delete {} action  connection={}; connector={}; status={}; target={}; filter={}",
+        "{} {} action  connection={}; connector={}; status={}; target={}; filter={}",
+        action_command.verb(),
         workflow_action_type(&binding.action),
         binding.connection_slug,
         binding.connector_slug.as_deref().unwrap_or("-"),
@@ -80,13 +140,14 @@ fn workflow_binding_delete_description(binding: &WorkflowBindingSpec) -> String 
     )
 }
 
-fn workflow_binding_delete_search_text(
+fn workflow_binding_action_search_text(
+    action_command: WorkflowActionCommand,
     binding: &WorkflowBindingSpec,
     command: &str,
     description: &str,
 ) -> String {
     [
-        "workflow action binding delete remove cleanup".to_string(),
+        format!("workflow action binding {}", action_command.search_terms()),
         binding.slug.clone(),
         binding.description.clone(),
         binding.connection_slug.clone(),
@@ -105,17 +166,22 @@ fn workflow_binding_delete_search_text(
     .to_ascii_lowercase()
 }
 
-fn workflow_action_delete_sort_key(row: &ConnectorPopupRow, query: &str) -> (u8, String) {
+fn workflow_action_sort_key(
+    row: &ConnectorPopupRow,
+    command: WorkflowActionCommand,
+    query: &str,
+) -> (u8, String) {
     let name = row.row.name.to_ascii_lowercase();
     let description = row.row.description.to_ascii_lowercase();
     let query = query.to_ascii_lowercase();
+    let canonical = command.canonical();
     if query.is_empty() {
         return (0, name);
     }
-    if name == format!("workflows delete {query}") || name == query {
+    if name == format!("workflows {canonical} {query}") || name == query {
         return (0, name);
     }
-    if name.starts_with(&format!("workflows delete {query}")) || name.starts_with(&query) {
+    if name.starts_with(&format!("workflows {canonical} {query}")) || name.starts_with(&query) {
         return (1, name);
     }
     if name.contains(&query) {
@@ -198,9 +264,8 @@ mod tests {
 
     #[test]
     fn delete_rows_match_binding_metadata() {
-        let rows =
-            workflow_action_delete_rows_for_bindings("delete email hi", vec![sample_binding()])
-                .expect("rows");
+        let rows = workflow_action_rows_for_bindings("delete email hi", vec![sample_binding()])
+            .expect("rows");
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "workflows delete append-email-hi");
@@ -212,17 +277,44 @@ mod tests {
     #[test]
     fn delete_rows_ignore_other_workflow_subcommands() {
         assert!(
-            workflow_action_delete_rows_for_bindings("actions email", vec![sample_binding()])
-                .is_none()
+            workflow_action_rows_for_bindings("actions email", vec![sample_binding()]).is_none()
         );
     }
 
     #[test]
     fn delete_rows_accept_remove_aliases() {
-        let rows = workflow_action_delete_rows_for_bindings("rm paused", vec![paused_binding()])
-            .expect("rows");
+        let rows =
+            workflow_action_rows_for_bindings("rm paused", vec![paused_binding()]).expect("rows");
 
         assert_eq!(rows[0].replacement, "/workflows delete append-paused");
+    }
+
+    #[test]
+    fn pause_rows_only_offer_enabled_bindings() {
+        let rows = workflow_action_rows_for_bindings(
+            "disable email",
+            vec![sample_binding(), paused_binding()],
+        )
+        .expect("rows");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "workflows pause append-email-hi");
+        assert_eq!(rows[0].replacement, "/workflows pause append-email-hi");
+        assert!(rows[0].description.contains("Pause sqlite_insert action"));
+    }
+
+    #[test]
+    fn resume_rows_only_offer_paused_bindings() {
+        let rows = workflow_action_rows_for_bindings(
+            "enable paused",
+            vec![sample_binding(), paused_binding()],
+        )
+        .expect("rows");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "workflows resume append-paused");
+        assert_eq!(rows[0].replacement, "/workflows resume append-paused");
+        assert!(rows[0].description.contains("Resume sqlite_insert action"));
     }
 
     fn sample_binding() -> WorkflowBindingSpec {

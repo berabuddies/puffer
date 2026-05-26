@@ -2,13 +2,14 @@
 mod popup_connections;
 #[path = "popup_workflow_actions.rs"]
 mod popup_workflow_actions;
+#[path = "popup_workflow_subcommands.rs"]
+mod popup_workflow_subcommands;
 use self::popup_connections::{
     live_connect_connection_rows, live_monitor_connection_rows, live_workflow_connection_rows,
     WorkflowConnectorQuery,
 };
-use self::popup_workflow_actions::{
-    workflow_action_delete_accepts_input, workflow_action_delete_rows,
-};
+use self::popup_workflow_actions::{workflow_action_accepts_input, workflow_action_rows};
+use self::popup_workflow_subcommands::workflow_subcommand_rows;
 use puffer_core::CommandSpec;
 use puffer_subscriptions::{
     builtin_connector_templates, suggested_connection_slug, ConnectorTemplate,
@@ -23,13 +24,6 @@ pub(crate) struct PopupRow {
     pub(crate) description: String,
     pub(crate) replacement: String,
     pub(crate) append_space: bool,
-}
-
-struct WorkflowSubcommand {
-    name: &'static str,
-    description: &'static str,
-    hint: Option<&'static str>,
-    search_terms: &'static [&'static str],
 }
 
 #[derive(Clone)]
@@ -50,63 +44,6 @@ enum WorkflowConnectorCommandKind {
     Append,
 }
 
-const WORKFLOW_SUBCOMMANDS: &[WorkflowSubcommand] = &[
-    WorkflowSubcommand {
-        name: "list",
-        description: "Show workflow definitions and latest run status",
-        hint: Some("[query]"),
-        search_terms: &["show", "workflow", "pipeline", "definition", "status"],
-    },
-    WorkflowSubcommand {
-        name: "new",
-        description: "Create a workflow draft for a trigger-ready connection",
-        hint: Some("[slug] [connection-slug] [pattern]"),
-        search_terms: &["create", "draft", "trigger", "pattern", "pipeline"],
-    },
-    WorkflowSubcommand {
-        name: "append",
-        description: "Create a file append action for matching connector events",
-        hint: Some("<connection-slug> <file-path> [pattern]"),
-        search_terms: &["file", "save", "write", "action", "binding"],
-    },
-    WorkflowSubcommand {
-        name: "delete",
-        description: "Remove a workflow action binding",
-        hint: Some("<binding-slug>"),
-        search_terms: &["remove", "rm", "cleanup", "binding", "action"],
-    },
-    WorkflowSubcommand {
-        name: "actions",
-        description: "Search workflow action bindings and delete commands",
-        hint: Some("[query]"),
-        search_terms: &["bindings", "append", "file", "delete", "pattern"],
-    },
-    WorkflowSubcommand {
-        name: "connections",
-        description: "Search connector connections and draft or append commands",
-        hint: Some("[query]"),
-        search_terms: &["connection", "trigger-ready", "repair", "monitor"],
-    },
-    WorkflowSubcommand {
-        name: "connectors",
-        description: "Search connector catalog by app, capability, action, or runtime",
-        hint: Some("[query]"),
-        search_terms: &["connector", "catalog", "apps", "capability", "runtime"],
-    },
-    WorkflowSubcommand {
-        name: "tasks",
-        description: "Search connector monitor tasks and task actions",
-        hint: Some("[query]"),
-        search_terms: &["task", "monitor", "ignored", "actions"],
-    },
-    WorkflowSubcommand {
-        name: "runs",
-        description: "Search workflow runs by id, status, trigger, output, or error",
-        hint: Some("[query]"),
-        search_terms: &["run", "history", "status", "trigger", "output", "error"],
-    },
-];
-
 /// Returns slash-command popup rows for the current slash-input prefix.
 pub(crate) fn popup_rows(input: &str, commands: &[CommandSpec]) -> Vec<PopupRow> {
     if let Some(rows) = workflow_connector_command_rows(input) {
@@ -115,7 +52,7 @@ pub(crate) fn popup_rows(input: &str, commands: &[CommandSpec]) -> Vec<PopupRow>
     if let Some(rows) = monitor_connector_rows(input) {
         return rows;
     }
-    if let Some(rows) = workflow_action_delete_rows(input) {
+    if let Some(rows) = workflow_action_rows(input) {
         return rows;
     }
     if let Some(rows) = workflow_subcommand_rows(input) {
@@ -149,7 +86,7 @@ pub(crate) fn popup_accepts_input(input: &str) -> bool {
     if is_workflows_command(command) {
         let rest = rest.trim_start();
         return workflow_connector_command_accepts(rest)
-            || workflow_action_delete_accepts_input(rest)
+            || workflow_action_accepts_input(rest)
             || !rest.contains(char::is_whitespace);
     }
     command == "monitor" || command == "connect" && !connect_has_explicit_connection_name(rest)
@@ -242,45 +179,6 @@ fn command_sort_key(command: &CommandSpec, filter: &str) -> (u8, String) {
         return (5, command.name.to_string());
     }
     (6, command.name.to_string())
-}
-
-fn row_sort_key(row: &PopupRow, filter: &str) -> (u8, String) {
-    if filter.is_empty() {
-        return (0, row.name.to_string());
-    }
-    if row.name == filter {
-        return (0, row.name.to_string());
-    }
-    if row.name.starts_with(filter) {
-        return (1, row.name.to_string());
-    }
-    if row.name.contains(filter) {
-        return (3, row.name.to_string());
-    }
-    if row.description.to_ascii_lowercase().contains(filter) {
-        return (5, row.name.to_string());
-    }
-    (6, row.name.to_string())
-}
-
-fn workflow_subcommand_rows(input: &str) -> Option<Vec<PopupRow>> {
-    let trimmed = input.strip_prefix('/')?;
-    let (command, rest) = trimmed.split_once(' ')?;
-    if !is_workflows_command(command) {
-        return None;
-    }
-    if rest.trim_start().contains(char::is_whitespace) {
-        return Some(Vec::new());
-    }
-    let filter = rest.trim_start().to_ascii_lowercase();
-    let mut rows = WORKFLOW_SUBCOMMANDS
-        .iter()
-        .filter(|subcommand| workflow_subcommand_matches(subcommand, &filter))
-        .map(workflow_subcommand_row)
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|row| row_sort_key(row, &filter));
-    rows.truncate(MAX_POPUP_ROWS);
-    Some(rows)
 }
 
 fn workflow_connector_command_rows(input: &str) -> Option<Vec<PopupRow>> {
@@ -537,34 +435,6 @@ fn monitor_connector_search_text(
 
 fn is_workflows_command(command: &str) -> bool {
     matches!(command, "workflow" | "workflows" | "pipeline" | "pipelines")
-}
-
-fn workflow_subcommand_matches(subcommand: &WorkflowSubcommand, filter: &str) -> bool {
-    filter.is_empty()
-        || subcommand.name.starts_with(filter)
-        || subcommand.name.contains(filter)
-        || subcommand.description.to_ascii_lowercase().contains(filter)
-        || subcommand
-            .hint
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .contains(filter)
-        || subcommand
-            .search_terms
-            .iter()
-            .any(|term| term.contains(filter))
-}
-
-fn workflow_subcommand_row(subcommand: &WorkflowSubcommand) -> PopupRow {
-    PopupRow {
-        name: format!("workflows {}", subcommand.name),
-        description: subcommand
-            .hint
-            .map(|hint| format!("{}  {hint}", subcommand.description))
-            .unwrap_or_else(|| subcommand.description.to_string()),
-        replacement: format!("/workflows {}", subcommand.name),
-        append_space: true,
-    }
 }
 
 fn connector_catalog_rows(input: &str) -> Option<Vec<PopupRow>> {
@@ -975,6 +845,20 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| row.replacement == "/workflows connectors"));
+    }
+
+    #[test]
+    fn popup_matches_workflow_toggle_subcommand_alias_terms() {
+        let commands = supported_commands();
+        let pause_rows = popup_rows("/workflows dis", &commands);
+        let resume_rows = popup_rows("/workflows ena", &commands);
+
+        assert!(pause_rows
+            .iter()
+            .any(|row| row.name == "workflows pause" && row.replacement == "/workflows pause"));
+        assert!(resume_rows
+            .iter()
+            .any(|row| row.name == "workflows resume" && row.replacement == "/workflows resume"));
     }
 
     #[test]

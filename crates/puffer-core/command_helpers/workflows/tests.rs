@@ -254,18 +254,72 @@ mod tests {
 
         write_workflow_bindings(&mut out, &context, "append hi");
 
-        assert!(out.contains("filters: append | file | connection | connector | pattern | enabled | paused | delete"));
+        assert!(out.contains("filters: append | file | connection | connector | pattern | enabled | paused | pause | resume | delete"));
         assert!(out.contains("showing 1/1 workflow actions for query=\"append hi\""));
         assert!(out.contains("- append-demo-main-hi [enabled]"));
         assert!(out.contains("connection=demo-main"));
         assert!(out.contains("connector=demo-chat"));
         assert!(out.contains("action=file_append path=/tmp/hi filter=hi"));
+        assert!(out.contains("pause=/workflows pause append-demo-main-hi"));
         assert!(out.contains("delete=/workflows delete append-demo-main-hi"));
 
         out.clear();
         write_workflow_bindings(&mut out, &context, "delete append-demo-main-hi");
 
         assert!(out.contains("showing 1/1 workflow actions for query=\"delete append-demo-main-hi\""));
+    }
+
+    #[test]
+    fn workflow_actions_show_contextual_toggle_commands() {
+        let mut enabled = WorkflowBindingSpec {
+            slug: "append-demo-main-hi".to_string(),
+            description: "Append demo-main messages to /tmp/hi".to_string(),
+            connection_slug: "demo-main".to_string(),
+            connector_slug: Some("demo-chat".to_string()),
+            status: puffer_subscriptions::WorkflowBindingStatus::Enabled,
+            filter: None,
+            classify_prompt: None,
+            classify_model: None,
+            action: serde_json::from_value(json!({
+                "type": "file_append",
+                "path": "/tmp/hi",
+                "format": "text"
+            }))
+            .unwrap(),
+            created_at_ms: 42,
+        };
+        let mut paused = enabled.clone();
+        paused.slug = "append-demo-main-paused".to_string();
+        paused.status = puffer_subscriptions::WorkflowBindingStatus::Paused;
+        let context = ConnectorContext {
+            connectors: vec![trigger_template()],
+            connections: Vec::new(),
+            bindings: vec![enabled.clone(), paused],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_workflow_bindings(&mut out, &context, "disable");
+
+        assert!(out.contains("showing 1/2 workflow actions for query=\"disable\""));
+        assert!(out.contains("pause=/workflows pause append-demo-main-hi"));
+        assert!(!out.contains("append-demo-main-paused"));
+
+        enabled.status = puffer_subscriptions::WorkflowBindingStatus::Paused;
+        out.clear();
+        write_workflow_bindings(
+            &mut out,
+            &ConnectorContext {
+                connectors: vec![trigger_template()],
+                connections: Vec::new(),
+                bindings: vec![enabled],
+                error: None,
+            },
+            "resume",
+        );
+
+        assert!(out.contains("showing 1/1 workflow actions for query=\"resume\""));
+        assert!(out.contains("resume=/workflows resume append-demo-main-hi"));
     }
 
     #[test]
