@@ -37,6 +37,32 @@ mod tests {
         }
     }
 
+    fn sample_workflow(slug: &str, name: &str, trigger: TriggerSpec) -> WorkflowDefinition {
+        WorkflowDefinition {
+            schema: "puffer.workflow.v1".to_string(),
+            slug: slug.to_string(),
+            enabled: true,
+            trigger,
+            pipeline: puffer_workflow::AgentFlowPipeline {
+                name: name.to_string(),
+                working_dir: None,
+                concurrency: Some(1),
+                nodes: vec![puffer_workflow::PipelineNode {
+                    id: "codex".to_string(),
+                    node_type: Some("agent".to_string()),
+                    agent: Some("Codex".to_string()),
+                    prompt: format!("Run {name}."),
+                    model: None,
+                    tools: Vec::new(),
+                    env: BTreeMap::new(),
+                    depends_on: Vec::new(),
+                    extra: BTreeMap::new(),
+                }],
+                extra: BTreeMap::new(),
+            },
+        }
+    }
+
     #[test]
     fn workflow_arg_split_preserves_quoted_command_tail() {
         let (mode, query) = split_workflows_args(r#"append demo-main /tmp/hi "hello world""#);
@@ -108,9 +134,92 @@ mod tests {
         };
         let mut out = String::new();
 
-        write_workflows(&mut out, &[workflow], &[]);
+        write_workflows(&mut out, &[workflow], &[], "");
 
         assert!(out.contains("trigger=subscription:workspace.task.created"));
+    }
+
+    #[test]
+    fn workflow_list_filters_and_reports_counts() {
+        let review = sample_workflow(
+            "agent-review",
+            "Agent review",
+            TriggerSpec::Subscription {
+                source_topic: "workspace.task.created".to_string(),
+                pattern: Some("review".to_string()),
+                classify_prompt: None,
+            },
+        );
+        let digest = sample_workflow(
+            "daily-digest",
+            "Daily digest",
+            TriggerSpec::Cron {
+                cron: "0 9 * * *".to_string(),
+            },
+        );
+        let mut out = String::new();
+
+        write_workflows(&mut out, &[review, digest], &[], "review subscription");
+
+        assert!(out.contains("showing 1/2 workflows for query=\"review subscription\""));
+        assert!(out.contains("- agent-review [enabled]"));
+        assert!(!out.contains("- daily-digest ["));
+
+        out.clear();
+        write_workflows(&mut out, &[], &[], "missing");
+
+        assert!(out.contains("showing 0/0 workflows for query=\"missing\""));
+        assert!(out.contains("- none registered"));
+    }
+
+    #[test]
+    fn workflow_runs_report_filtered_counts() {
+        let runs = vec![
+            WorkflowRun {
+                idx: 1,
+                workflow_slug: "agent-review".to_string(),
+                run_id: "run-review".to_string(),
+                trigger: json!({"text": "review this"}),
+                status: puffer_workflow::WorkflowRunStatus::Completed,
+                started_at_ms: 1,
+                ended_at_ms: Some(2),
+                nodes: vec![puffer_workflow::WorkflowRunNode {
+                    id: "review".to_string(),
+                    status: puffer_workflow::WorkflowRunStatus::Completed,
+                    started_at_ms: Some(1),
+                    ended_at_ms: Some(2),
+                    output: Some("approved".to_string()),
+                    error: None,
+                }],
+                error: None,
+                trigger_key: Some("review-key".to_string()),
+            },
+            WorkflowRun {
+                idx: 2,
+                workflow_slug: "daily-digest".to_string(),
+                run_id: "run-digest".to_string(),
+                trigger: json!({"text": "digest"}),
+                status: puffer_workflow::WorkflowRunStatus::Failed,
+                started_at_ms: 3,
+                ended_at_ms: Some(4),
+                nodes: Vec::new(),
+                error: Some("delivery failed".to_string()),
+                trigger_key: None,
+            },
+        ];
+        let mut out = String::new();
+
+        write_runs(&mut out, &runs, "failed delivery");
+
+        assert!(out.contains("showing 1/2 runs for query=\"failed delivery\""));
+        assert!(out.contains("- #2 daily-digest Failed"));
+        assert!(!out.contains("- #1 agent-review"));
+
+        out.clear();
+        write_runs(&mut out, &runs, "does-not-exist");
+
+        assert!(out.contains("showing 0/2 runs for query=\"does-not-exist\""));
+        assert!(out.contains("- no matching runs"));
     }
 
     #[test]

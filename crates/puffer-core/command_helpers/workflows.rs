@@ -57,7 +57,7 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
     }
     match mode {
         "" | "show" | "list" => {
-            write_workflows(&mut out, &workflows, &runs);
+            write_workflows(&mut out, &workflows, &runs, &query);
             write_workflow_bindings(&mut out, &connector_context, "");
             write_connections(&mut out, &connector_context, &roots, "");
             monitor_tasks::write_monitor_tasks(&mut out, &monitor_task_context, "");
@@ -167,13 +167,32 @@ fn write_header(
     }
 }
 
-fn write_workflows(out: &mut String, workflows: &[WorkflowDefinition], runs: &[WorkflowRun]) {
+fn write_workflows(
+    out: &mut String,
+    workflows: &[WorkflowDefinition],
+    runs: &[WorkflowRun],
+    query: &str,
+) {
     out.push_str("\nWorkflows\n");
-    if workflows.is_empty() {
+    let matching = workflows
+        .iter()
+        .filter(|workflow| {
+            matches_query(
+                query,
+                workflow_search_terms(workflow).iter().map(String::as_str),
+            )
+        })
+        .collect::<Vec<_>>();
+    write_result_summary(out, matching.len(), workflows.len(), "workflows", query);
+    if matching.is_empty() && workflows.is_empty() {
         out.push_str("- none registered\n");
         return;
     }
-    for workflow in workflows {
+    if matching.is_empty() {
+        out.push_str("- no matching workflows\n");
+        return;
+    }
+    for workflow in matching {
         let latest = runs
             .iter()
             .filter(|run| run.workflow_slug == workflow.slug)
@@ -653,6 +672,28 @@ fn binding_search_terms(binding: &WorkflowBindingSpec) -> Vec<String> {
     .collect()
 }
 
+fn workflow_search_terms(workflow: &WorkflowDefinition) -> Vec<String> {
+    let mut terms = vec![
+        workflow.slug.clone(),
+        workflow.pipeline.name.clone(),
+        trigger_label(&workflow.trigger),
+        if workflow.enabled {
+            "enabled".to_string()
+        } else {
+            "paused".to_string()
+        },
+    ];
+    for node in &workflow.pipeline.nodes {
+        terms.push(node.id.clone());
+        terms.push(node.node_type.clone().unwrap_or_default());
+        terms.push(node.agent.clone().unwrap_or_default());
+        terms.push(node.prompt.clone());
+        terms.push(node.model.clone().unwrap_or_default());
+        terms.extend(node.tools.iter().cloned());
+    }
+    terms.into_iter().filter(|term| !term.is_empty()).collect()
+}
+
 fn workflow_status_label(status: puffer_subscriptions::WorkflowBindingStatus) -> &'static str {
     match status {
         puffer_subscriptions::WorkflowBindingStatus::Enabled => "enabled",
@@ -789,17 +830,9 @@ fn write_runs(out: &mut String, runs: &[WorkflowRun], query: &str) {
     out.push_str("\nRuns\n");
     let matching = runs
         .iter()
-        .filter(|run| {
-            matches_query(
-                query,
-                [
-                    run.workflow_slug.as_str(),
-                    run.run_id.as_str(),
-                    run.error.as_deref().unwrap_or_default(),
-                ],
-            )
-        })
+        .filter(|run| matches_query(query, run_search_terms(run).iter().map(String::as_str)))
         .collect::<Vec<_>>();
+    write_result_summary(out, matching.len(), runs.len(), "runs", query);
     if matching.is_empty() && runs.is_empty() {
         out.push_str("- none recorded\n");
         return;
@@ -822,6 +855,24 @@ fn write_runs(out: &mut String, runs: &[WorkflowRun], query: &str) {
                 .unwrap_or_default()
         );
     }
+}
+
+fn run_search_terms(run: &WorkflowRun) -> Vec<String> {
+    let mut terms = vec![
+        run.workflow_slug.clone(),
+        run.run_id.clone(),
+        format!("{:?}", run.status).to_ascii_lowercase(),
+        run.error.clone().unwrap_or_default(),
+        run.trigger.to_string(),
+        run.trigger_key.clone().unwrap_or_default(),
+    ];
+    for node in &run.nodes {
+        terms.push(node.id.clone());
+        terms.push(format!("{:?}", node.status).to_ascii_lowercase());
+        terms.push(node.output.clone().unwrap_or_default());
+        terms.push(node.error.clone().unwrap_or_default());
+    }
+    terms.into_iter().filter(|term| !term.is_empty()).collect()
 }
 
 fn trigger_label(trigger: &TriggerSpec) -> String {
