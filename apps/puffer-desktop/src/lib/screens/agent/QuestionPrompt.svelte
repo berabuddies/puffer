@@ -82,11 +82,23 @@
     return searchText[draftKeyFor(index)] ?? "";
   }
 
+  function searchTerms(query: string): string[] {
+    return query
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  function optionSearchText(option: AskUserQuestionItem["options"][number]): string {
+    return [option.label, option.description].join(" ").toLowerCase();
+  }
+
   function optionMatches(option: AskUserQuestionItem["options"][number], query: string): boolean {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return true;
-    return [option.label, option.description]
-      .some((value) => value.toLowerCase().includes(needle));
+    const terms = searchTerms(query);
+    if (terms.length === 0) return true;
+    const searchText = optionSearchText(option);
+    return terms.every((term) => searchText.includes(term));
   }
 
   function filteredOptions(question: AskUserQuestionItem, index: number): AskUserQuestionItem["options"] {

@@ -3217,10 +3217,11 @@ test("searchable user question choices filter connector options", async ({ page 
   const block = page.locator(".pf-question-block").filter({ hasText: "Which connector should Puffer connect?" });
   await expect(block.getByPlaceholder("Search options")).toBeVisible();
   await expect(block.locator(".pf-question-other")).toHaveCount(0);
-  await block.getByPlaceholder("Search options").fill("telegram");
+  await block.getByPlaceholder("Search options").fill("personal connector");
   const telegram = block.locator(".pf-question-option").filter({ hasText: "telegram-login" });
   await expect(telegram).toBeVisible();
   await expect(block.locator(".pf-question-option").filter({ hasText: "slack-login" })).toHaveCount(0);
+  await expect(block.locator(".pf-question-option").filter({ hasText: "email" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
 
   await telegram.click();
