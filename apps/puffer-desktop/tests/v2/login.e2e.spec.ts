@@ -217,6 +217,20 @@ test.describe("real login round-trip (Production Auth Station)", () => {
         fullPage: false
       });
 
+      // Wait for the AuthCallback's fire-and-forget mintWorldRouterApiKey
+      // to land an sk-worldrouter-… key in localStorage. Without this poll
+      // we'd snapshot storage state mid-mint and downstream "key tracks
+      // login" tests would see apiKey=null.
+      await expect
+        .poll(
+          () =>
+            page.evaluate(() =>
+              localStorage.getItem("puffer.worldrouterApiKey")
+            ),
+          { timeout: 30_000 }
+        )
+        .toMatch(/^sk-/);
+
       // Persist the full browser state (cookies for auth.worldrouter.ai +
       // localStorage for 127.0.0.1:1456) so the cached-session test can
       // run without an OTP next time.
