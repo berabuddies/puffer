@@ -114,7 +114,11 @@ impl LambdaInputPattern {
         self.render_value(args, skill_root).as_ref() == Some(input)
     }
 
-    fn render_value(&self, args: &Map<String, Value>, skill_root: Option<&Path>) -> Option<Value> {
+    pub(super) fn render_value(
+        &self,
+        args: &Map<String, Value>,
+        skill_root: Option<&Path>,
+    ) -> Option<Value> {
         match self {
             Self::Exact(expected) => Some(expected.clone()),
             Self::Arg(name) => args.get(name).cloned(),

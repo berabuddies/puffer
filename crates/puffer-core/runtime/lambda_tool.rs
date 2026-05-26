@@ -151,31 +151,6 @@ pub(super) fn prepare_lambda_host_call(
             )),
         );
     };
-    if let Some(filter) = tool_filter {
-        match filter.allows_call(definition, cwd, &parsed.input) {
-            Ok(true) => {}
-            Ok(false) => {
-                return blocked_runtime_tool(
-                    tool_id,
-                    ToolPermissionBehavior::Deny,
-                    Some(format!(
-                        "LambdaHostCall target tool {} is outside the active skill tool scope",
-                        parsed.tool
-                    )),
-                );
-            }
-            Err(error) => {
-                return blocked_runtime_tool(
-                    tool_id,
-                    ToolPermissionBehavior::Deny,
-                    Some(format!(
-                        "LambdaHostCall target tool {} failed skill tool-scope check: {error}",
-                        parsed.tool
-                    )),
-                );
-            }
-        }
-    }
     match gate.admit_call_with_args(&parsed.host_tool, &parsed.args) {
         LambdaGateVerdict::Accept => {
             if let LambdaGateVerdict::Reject(reason) =
@@ -183,19 +158,54 @@ pub(super) fn prepare_lambda_host_call(
             {
                 return lambda_skill_gate_denial(tool_id, reason);
             }
+            let materialized_input = match gate.materialize_concrete_input_binding(
+                &parsed.host_tool,
+                &parsed.args,
+                &parsed.tool,
+            ) {
+                Ok(input) => input,
+                Err(reason) => return lambda_skill_gate_denial(tool_id, reason),
+            };
+            let concrete_input = parsed.input.unwrap_or(materialized_input);
             if let LambdaGateVerdict::Reject(reason) = gate.admit_concrete_input_binding(
                 &parsed.host_tool,
                 &parsed.args,
                 &parsed.tool,
-                &parsed.input,
+                &concrete_input,
             ) {
                 return lambda_skill_gate_denial(tool_id, reason);
+            }
+            if let Some(filter) = tool_filter {
+                match filter.allows_call(definition, cwd, &concrete_input) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return blocked_runtime_tool(
+                            tool_id,
+                            ToolPermissionBehavior::Deny,
+                            Some(format!(
+                                "LambdaHostCall target tool {} is outside the active skill tool scope",
+                                parsed.tool
+                            )),
+                        );
+                    }
+                    Err(error) => {
+                        return blocked_runtime_tool(
+                            tool_id,
+                            ToolPermissionBehavior::Deny,
+                            Some(format!(
+                                "LambdaHostCall target tool {} failed skill tool-scope check: {error}",
+                                parsed.tool
+                            )),
+                        );
+                    }
+                }
             }
             let host_tool = parsed.host_tool.clone();
             let host_args = parsed.args.clone();
             let concrete_tool = parsed.tool.clone();
             let metadata_host_args = redacted_lambda_metadata_value(&host_args, definition);
-            let metadata_concrete_input = redacted_lambda_metadata_value(&parsed.input, definition);
+            let metadata_concrete_input =
+                redacted_lambda_metadata_value(&concrete_input, definition);
             let metadata = admitted_host_call_metadata(
                 &host_tool,
                 metadata_host_args.clone(),
@@ -207,12 +217,14 @@ pub(super) fn prepare_lambda_host_call(
                 parsed.args,
                 metadata_host_args,
                 parsed.tool,
-                parsed.input,
+                concrete_input.clone(),
             ));
+            let concrete_input_text =
+                serde_json::to_string(&concrete_input).unwrap_or_else(|_| "null".to_string());
             successful_runtime_tool_with_metadata(
                 tool_id,
                 format!(
-                    "Lambda host call admitted: {host_tool}. Next call must be {concrete_tool} with the declared input."
+                    "Lambda host call admitted: {host_tool}. Next call must be {concrete_tool} with this exact input: {concrete_input_text}"
                 ),
                 metadata,
             )
@@ -290,7 +302,8 @@ struct LambdaHostCallInput {
     host_tool: String,
     args: Value,
     tool: String,
-    input: Value,
+    #[serde(default)]
+    input: Option<Value>,
 }
 
 fn lambda_skill_gate_denial(tool_id: &str, reason: String) -> ToolExecutionResult {
@@ -298,7 +311,7 @@ fn lambda_skill_gate_denial(tool_id: &str, reason: String) -> ToolExecutionResul
         tool_id,
         reason,
         LAMBDA_HOST_CALL_TOOL_ID,
-        "Retry by calling LambdaHostCall with the formal host_tool, formal args, target concrete tool, and exact concrete input. After LambdaHostCall is admitted, call the declared concrete tool once. Puffer will then run normal user approval for that concrete tool if approval is required.",
+        "Retry by calling LambdaHostCall with the formal host_tool, formal args, and target concrete tool. You may omit input; Puffer will materialize the exact concrete input from the verified contract. After LambdaHostCall is admitted, call the declared concrete tool once with the exact input returned by LambdaHostCall. Puffer will then run normal user approval for that concrete tool if approval is required.",
     )
 }
 

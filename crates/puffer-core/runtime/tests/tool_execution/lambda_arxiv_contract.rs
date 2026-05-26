@@ -219,7 +219,7 @@ fn resources() -> LoadedResources {
     }
 }
 
-fn run_lambda_host_call(args: Value, input: Value) -> ToolExecutionResult {
+fn run_lambda_host_call(args: Value, input: Option<Value>) -> ToolExecutionResult {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let raw = arxiv_host_json();
@@ -229,6 +229,15 @@ fn run_lambda_host_call(args: Value, input: Value) -> ToolExecutionResult {
     let registry = ToolRegistry::from_resources(&resources);
     let providers = empty_providers();
     let request_config = test_openai_request_config();
+
+    let mut tool_input = json!({
+        "host_tool": "arxiv_search",
+        "args": args,
+        "tool": "Bash",
+    });
+    if let Some(input) = input {
+        tool_input["input"] = input;
+    }
 
     execute_tool_call(
         &mut state,
@@ -244,12 +253,7 @@ fn run_lambda_host_call(args: Value, input: Value) -> ToolExecutionResult {
         },
         None,
         "LambdaHostCall",
-        json!({
-            "host_tool": "arxiv_search",
-            "args": args,
-            "tool": "Bash",
-            "input": input,
-        }),
+        tool_input,
     )
     .unwrap()
 }
@@ -274,13 +278,41 @@ fn arxiv_search_admits_exactly_bound_bash_input() {
         "descending",
     ));
 
-    let result = run_lambda_host_call(args, input);
+    let result = run_lambda_host_call(args, Some(input));
 
     assert!(result.success, "{}", result.output.stdout);
     assert!(result
         .output
         .stdout
-        .contains("Next call must be Bash with the declared input"));
+        .contains("Next call must be Bash with this exact input"));
+}
+
+#[test]
+fn arxiv_search_materializes_bash_input_when_omitted() {
+    let args = json!({
+        "query": "au:\"Hanzhi Liu\"",
+        "max_results": 10,
+        "sort_by": "submittedDate",
+        "sort_order": "descending",
+    });
+    let expected = bash_input(arxiv_search_command(
+        "au:\"Hanzhi Liu\"",
+        10,
+        "submittedDate",
+        "descending",
+    ));
+
+    let result = run_lambda_host_call(args, None);
+
+    assert!(result.success, "{}", result.output.stdout);
+    assert!(result
+        .output
+        .stdout
+        .contains(&serde_json::to_string(&expected).expect("expected Bash input serializes")));
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["concrete_input"],
+        expected
+    );
 }
 
 #[test]
@@ -298,7 +330,7 @@ fn arxiv_search_rejects_invalid_refinement_arguments() {
         "descending",
     ));
 
-    let result = run_lambda_host_call(args, input);
+    let result = run_lambda_host_call(args, Some(input));
 
     assert!(!result.success);
     assert!(result
@@ -322,7 +354,7 @@ fn arxiv_search_rejects_bash_input_that_breaks_the_binding() {
         "descending",
     ));
 
-    let result = run_lambda_host_call(args, input);
+    let result = run_lambda_host_call(args, Some(input));
 
     assert!(!result.success);
     assert!(result

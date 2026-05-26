@@ -347,6 +347,32 @@ impl LambdaToolSig {
             self.name, concrete_tool
         ))
     }
+
+    fn materialize_concrete_input(
+        &self,
+        concrete_tool: &str,
+        args: &Value,
+        skill_root: Option<&Path>,
+    ) -> Result<Value, String> {
+        let Some(object) = args.as_object() else {
+            return Err(format!(
+                "formal args for {} must be a JSON object",
+                self.name
+            ));
+        };
+        let Some(contract) = self.concrete_input_contracts.get(concrete_tool) else {
+            return Err(format!(
+                "host tool {} lacks a concrete input contract for {}",
+                self.name, concrete_tool
+            ));
+        };
+        contract.render_value(object, skill_root).ok_or_else(|| {
+            format!(
+                "concrete input for {} could not be materialized from the precompiled {} contract",
+                self.name, concrete_tool
+            )
+        })
+    }
 }
 
 fn unsupported_effects_for_concrete_tool(
@@ -615,6 +641,19 @@ impl LambdaGateState {
             return LambdaGateVerdict::reject(reason);
         }
         LambdaGateVerdict::Accept
+    }
+
+    /// Materializes the exact concrete input declared for a host call.
+    pub(crate) fn materialize_concrete_input_binding(
+        &self,
+        host_tool: &str,
+        args: &Value,
+        concrete_tool: &str,
+    ) -> std::result::Result<Value, String> {
+        let Some(sig) = self.host.lookup_tool(host_tool) else {
+            return Err(format!("unknown tool: {host_tool}"));
+        };
+        sig.materialize_concrete_input(concrete_tool, args, self.host.skill_root.as_deref())
     }
 
     /// Gates one no-argument call and commits registered facts when accepted.
