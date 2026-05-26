@@ -195,16 +195,18 @@
   let monitorTasks = $derived(snapshot.monitor_tasks ?? []);
   let activeMonitorTasks = $derived(monitorTasks.filter((task) => !monitorTaskIgnored(task)));
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
-  let connectorSearchRows = $derived(indexConnectors(connectors, connections));
+  let connectorQueryTerms = $derived(searchTerms(connectorQuery));
+  let connectionsByConnector = $derived(groupConnectionsByConnector(connections));
+  let connectorSearchRows = $derived(indexConnectors(connectors, connectionsByConnector));
   let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
   let monitorBindingSearchRows = $derived(indexWorkflowBindings(monitorBindings, "monitor workflow connection monitor"));
   let actionBindingSearchRows = $derived(indexWorkflowBindings(actionBindings, "workflow action file append trigger save message events"));
   let monitorTaskSearchRows = $derived(indexMonitorTasks(activeMonitorTasks));
-  let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQuery));
-  let filteredMonitorBindings = $derived(filterWorkflowBindings(monitorBindingSearchRows, connectorQuery));
-  let filteredActionBindings = $derived(filterWorkflowBindings(actionBindingSearchRows, connectorQuery));
-  let filteredMonitorTasks = $derived(filterMonitorTasks(monitorTaskSearchRows, connectorQuery));
-  let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQuery));
+  let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQueryTerms));
+  let filteredMonitorBindings = $derived(filterWorkflowBindings(monitorBindingSearchRows, connectorQueryTerms));
+  let filteredActionBindings = $derived(filterWorkflowBindings(actionBindingSearchRows, connectorQueryTerms));
+  let filteredMonitorTasks = $derived(filterMonitorTasks(monitorTaskSearchRows, connectorQueryTerms));
+  let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQueryTerms));
   let workflow = $derived(
     workflows.find((item) => item.slug === workflowSlug) ?? workflows[0] ?? null
   );
@@ -1188,11 +1190,15 @@
     return connector.can_trigger_workflow ?? connector.can_subscribe;
   }
 
-  function connectorActionSlugs(connector: WorkflowConnector | undefined, query: string): string[] {
+  function connectorActionSlugs(
+    connector: WorkflowConnector | undefined,
+    terms: string[],
+    limit: number | null = 3
+  ): string[] {
     const actions = connector?.action_slugs ?? [];
-    const terms = searchTerms(query);
     const matching = terms.length === 0 ? [] : actions.filter((action) => matchesSearchTerms(terms, action.toLowerCase()));
-    return (matching.length > 0 ? matching : actions).slice(0, 3);
+    const visible = matching.length > 0 ? matching : actions;
+    return limit === null ? visible : visible.slice(0, limit);
   }
 
   function connectorHiddenActionCount(connector: WorkflowConnector | undefined, visibleActions: string[]): number {
@@ -1237,11 +1243,22 @@
     return terms.length === 0 || terms.every((term) => searchText.includes(term));
   }
 
-  function indexConnectors(items: WorkflowConnector[], existingConnections: WorkflowConnection[]): ConnectorSearchRow[] {
+  function groupConnectionsByConnector(items: WorkflowConnection[]): Map<string, WorkflowConnection[]> {
+    const groups = new Map<string, WorkflowConnection[]>();
+    for (const connection of items) {
+      const group = groups.get(connection.connector_slug) ?? [];
+      group.push(connection);
+      groups.set(connection.connector_slug, group);
+    }
+    return groups;
+  }
+
+  function indexConnectors(
+    items: WorkflowConnector[],
+    existingConnections: Map<string, WorkflowConnection[]>
+  ): ConnectorSearchRow[] {
     return items.map((connector) => {
-      const connectorConnections = existingConnections.filter(
-        (connection) => connection.connector_slug === connector.connector_slug
-      );
+      const connectorConnections = existingConnections.get(connector.connector_slug) ?? [];
       return {
         connector,
         searchText: buildSearchText([
@@ -1328,9 +1345,15 @@
         binding.action_path,
         binding.action_format,
         binding.filter_pattern,
-        binding.monitor_memory_path
+        binding.monitor_memory_path,
+        workflowBindingDeleteCommand(binding),
+        "delete remove cleanup"
       ])
     }));
+  }
+
+  function workflowBindingDeleteCommand(binding: WorkflowBinding): string {
+    return `/workflows delete ${binding.slug}`;
   }
 
   function indexMonitorTasks(items: WorkflowMonitorTask[]): MonitorTaskSearchRow[] {
@@ -1351,23 +1374,19 @@
     }));
   }
 
-  function filterWorkflowBindings(rows: WorkflowBindingSearchRow[], query: string): WorkflowBinding[] {
-    const terms = searchTerms(query);
+  function filterWorkflowBindings(rows: WorkflowBindingSearchRow[], terms: string[]): WorkflowBinding[] {
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.binding);
   }
 
-  function filterConnections(rows: ConnectionSearchRow[], query: string): WorkflowConnection[] {
-    const terms = searchTerms(query);
+  function filterConnections(rows: ConnectionSearchRow[], terms: string[]): WorkflowConnection[] {
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connection);
   }
 
-  function filterMonitorTasks(rows: MonitorTaskSearchRow[], query: string): WorkflowMonitorTask[] {
-    const terms = searchTerms(query);
+  function filterMonitorTasks(rows: MonitorTaskSearchRow[], terms: string[]): WorkflowMonitorTask[] {
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.task);
   }
 
-  function filterConnectors(rows: ConnectorSearchRow[], query: string): WorkflowConnector[] {
-    const terms = searchTerms(query);
+  function filterConnectors(rows: ConnectorSearchRow[], terms: string[]): WorkflowConnector[] {
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connector);
   }
 
@@ -1965,7 +1984,7 @@
                     {@const monitorCommand = connectionMonitorCommand(connection)}
                     {@const draftCommand = connectionDraftCommand(connection)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
-                    {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
+                    {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     <div class="pf-connection-row-group">
                       <button
@@ -2241,7 +2260,7 @@
                     {@const connectCommand = connectorConnectCommand(connector)}
                     {@const draftCommand = connectorDraftCommand(connector)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
-                    {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
+                    {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     {@const visibleConnections = connectorConnections.slice(0, 2)}
                     {@const hiddenConnections = Math.max(0, connectorConnections.length - visibleConnections.length)}
@@ -2303,7 +2322,7 @@
 
                 {#if selectedConnector}
                   {@const selectedRuntimeHints = connectorRuntimeHints(selectedConnector)}
-                  {@const selectedActionSlugs = connectorActionSlugs(selectedConnector, connectorQuery)}
+                  {@const selectedActionSlugs = connectorActionSlugs(selectedConnector, [], null)}
                   <div class="pf-connector-setup">
                     <div class="pf-connector-detail" aria-label="Selected connector details">
                       <span class="pf-connector-main">

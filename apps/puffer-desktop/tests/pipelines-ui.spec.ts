@@ -351,6 +351,10 @@ test("pipeline selected connector can create an append workflow binding", async 
   await expect(actions).toContainText("hi");
   await expect(page.getByLabel("Workflow action search results")).toHaveText("1/1 actions");
 
+  await page.getByLabel("Search connectors").fill("delete append-email-personal-hi");
+  await expect(actions).toContainText("append-email-personal-hi");
+  await expect(page.getByLabel("Workflow action search results")).toHaveText("1/1 actions");
+
   await actions.getByRole("button", { name: "Delete workflow action append-email-personal-hi" }).click();
   const deleteRequest = await daemon.waitForRequest("workflow_binding_delete", (candidate) => {
     return candidate.params.slug === "append-email-personal-hi";
@@ -1027,6 +1031,26 @@ test("pipeline connector search shows action matches", async ({ page }) => {
   await page.getByLabel("Search connectors").fill("vote poll");
   await expect(telegram).toContainText("vote_poll");
   await expect(slack).not.toBeVisible();
+});
+
+test("pipeline selected connector detail shows all connector actions", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("telegram-login");
+  await page
+    .getByLabel("Connector catalog")
+    .getByRole("button", { name: "Plan telegram-login workflow trigger" })
+    .click();
+
+  const detail = page.getByLabel("Selected connector details");
+  await expect(detail).toContainText("send_message");
+  await expect(detail).toContainText("edit_message");
+  await expect(detail).toContainText("delete_messages");
+  await expect(detail).toContainText("vote_poll");
 });
 
 test("pipeline connector catalog stages a deterministic connect command", async ({ page }) => {
