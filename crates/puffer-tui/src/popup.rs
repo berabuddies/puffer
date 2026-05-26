@@ -1,9 +1,13 @@
 #[path = "popup_connections.rs"]
 mod popup_connections;
-
+#[path = "popup_workflow_actions.rs"]
+mod popup_workflow_actions;
 use self::popup_connections::{
     live_connect_connection_rows, live_monitor_connection_rows, live_workflow_connection_rows,
     WorkflowConnectorQuery,
+};
+use self::popup_workflow_actions::{
+    workflow_action_delete_accepts_input, workflow_action_delete_rows,
 };
 use puffer_core::CommandSpec;
 use puffer_subscriptions::{
@@ -111,6 +115,9 @@ pub(crate) fn popup_rows(input: &str, commands: &[CommandSpec]) -> Vec<PopupRow>
     if let Some(rows) = monitor_connector_rows(input) {
         return rows;
     }
+    if let Some(rows) = workflow_action_delete_rows(input) {
+        return rows;
+    }
     if let Some(rows) = workflow_subcommand_rows(input) {
         return rows;
     }
@@ -141,7 +148,9 @@ pub(crate) fn popup_accepts_input(input: &str) -> bool {
     };
     if is_workflows_command(command) {
         let rest = rest.trim_start();
-        return workflow_connector_command_accepts(rest) || !rest.contains(char::is_whitespace);
+        return workflow_connector_command_accepts(rest)
+            || workflow_action_delete_accepts_input(rest)
+            || !rest.contains(char::is_whitespace);
     }
     command == "monitor" || command == "connect" && !connect_has_explicit_connection_name(rest)
 }
