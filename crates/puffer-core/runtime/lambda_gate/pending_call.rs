@@ -5,21 +5,24 @@ use serde_json::Value;
 pub(crate) struct PendingLambdaHostCall {
     host_tool: String,
     host_args: Value,
+    metadata_host_args: Value,
     concrete_tool: String,
     concrete_input: Value,
 }
 
 impl PendingLambdaHostCall {
-    /// Creates a pending bridge from one formal host tool to one concrete tool call.
+    /// Creates a pending bridge with separately redacted metadata payloads.
     pub(crate) fn new(
         host_tool: impl Into<String>,
         host_args: Value,
+        metadata_host_args: Value,
         concrete_tool: impl Into<String>,
         concrete_input: Value,
     ) -> Self {
         Self {
             host_tool: host_tool.into(),
             host_args,
+            metadata_host_args,
             concrete_tool: concrete_tool.into(),
             concrete_input,
         }
@@ -33,6 +36,11 @@ impl PendingLambdaHostCall {
     /// Returns the formal host arguments admitted by the Lambda gate.
     pub(crate) fn host_args(&self) -> &Value {
         &self.host_args
+    }
+
+    /// Returns the redacted formal host arguments safe for trace metadata.
+    pub(crate) fn metadata_host_args(&self) -> &Value {
+        &self.metadata_host_args
     }
 
     /// Returns the concrete Puffer tool name this bridge permits next.

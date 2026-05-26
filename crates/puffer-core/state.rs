@@ -256,6 +256,8 @@ pub struct AppState {
     pub tool_runner: Arc<dyn ToolRunner>,
     /// In-memory store for interactive/background processes with PTY or pipe I/O.
     pub process_store: Arc<Mutex<crate::runtime::process_store::ProcessStore>>,
+    /// Session-scoped secret handles prepared by verified Lambda Skill bridges.
+    pub(crate) secret_values: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -345,6 +347,7 @@ impl AppState {
             process_store: Arc::new(Mutex::new(
                 crate::runtime::process_store::ProcessStore::default(),
             )),
+            secret_values: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

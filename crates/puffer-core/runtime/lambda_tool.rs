@@ -3,7 +3,7 @@ use super::tool_executor::blocked_runtime_tool;
 use super::RequestToolFilter;
 use crate::permissions::ToolPermissionBehavior;
 use crate::AppState;
-use puffer_tools::{ToolExecutionResult, ToolOutput, ToolRegistry};
+use puffer_tools::{ToolDefinition, ToolExecutionResult, ToolOutput, ToolRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -60,6 +60,7 @@ pub(super) fn commit_successful_lambda_skill_gate_call(
         let metadata = gate.committed_host_call_metadata(
             pending.host_tool(),
             Some(pending.host_args()),
+            Some(pending.metadata_host_args()),
             Some(pending.concrete_tool()),
             Some(&result),
         );
@@ -193,15 +194,18 @@ pub(super) fn prepare_lambda_host_call(
             let host_tool = parsed.host_tool.clone();
             let host_args = parsed.args.clone();
             let concrete_tool = parsed.tool.clone();
+            let metadata_host_args = redacted_lambda_metadata_value(&host_args, definition);
+            let metadata_concrete_input = redacted_lambda_metadata_value(&parsed.input, definition);
             let metadata = admitted_host_call_metadata(
                 &host_tool,
-                host_args.clone(),
+                metadata_host_args.clone(),
                 &concrete_tool,
-                parsed.input.clone(),
+                metadata_concrete_input.clone(),
             );
             state.pending_lambda_host_call = Some(PendingLambdaHostCall::new(
                 parsed.host_tool,
                 parsed.args,
+                metadata_host_args,
                 parsed.tool,
                 parsed.input,
             ));
@@ -214,6 +218,70 @@ pub(super) fn prepare_lambda_host_call(
             )
         }
         LambdaGateVerdict::Reject(reason) => lambda_skill_gate_denial(tool_id, reason),
+    }
+}
+
+fn redacted_lambda_metadata_value(value: &Value, definition: &ToolDefinition) -> Value {
+    let mut redacted = value.clone();
+    for path in secret_input_paths(definition) {
+        redact_json_path(&mut redacted, &path);
+    }
+    redacted
+}
+
+fn secret_input_paths(definition: &ToolDefinition) -> Vec<String> {
+    let schema = definition.input_schema.as_json_schema();
+    let mut paths = schema
+        .get("x-puffer-secret-paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (name, property) in properties {
+            let is_secret = property
+                .get("x-puffer-secret")
+                .or_else(|| property.get("x-secret"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if is_secret {
+                paths.push(name.clone());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn redact_json_path(value: &mut Value, path: &str) {
+    let parts = path
+        .split('.')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return;
+    }
+    redact_json_path_parts(value, &parts);
+}
+
+fn redact_json_path_parts(value: &mut Value, parts: &[&str]) {
+    let Some((head, tail)) = parts.split_first() else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(child) = object.get_mut(*head) else {
+        return;
+    };
+    if tail.is_empty() {
+        *child = Value::String("[redacted]".to_string());
+    } else {
+        redact_json_path_parts(child, tail);
     }
 }
 

@@ -23,6 +23,8 @@ mod lambda_gate_scope;
 mod lambda_host_input_contract;
 #[path = "tool_execution/legacy_alias_permissions.rs"]
 mod legacy_alias_permissions;
+#[path = "tool_execution/modal_secret_action.rs"]
+mod modal_secret_action;
 #[path = "tool_execution/multi_agent_e2e.rs"]
 mod multi_agent_e2e;
 #[path = "tool_execution/openai_lambda_batch.rs"]

@@ -765,8 +765,10 @@ pub fn execute_workflow_tool(
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),
         "McpToolCall" => workflow::mcp_tool_call::execute_mcp_tool_call(state, cwd, input),
         "McpStatus" => workflow::mcp_status::execute_mcp_status(state, cwd, input),
+        "ModalAction" => workflow::modal_action::execute_modal_action(state, cwd, input),
         "ProcessControl" => workflow::process_control::execute_process_control(state, cwd, input),
         "PowerShell" => workflow::powershell::execute_powershell(state, cwd, input),
+        "SecretValue" => workflow::secret_value::execute_secret_value(state, cwd, input),
         "SendMessage" => workflow::send_message::execute_send_message(state, cwd, input),
         "SendUserMessage" | "Brief" => {
             workflow::send_user_message::execute_send_user_message(state, cwd, input)

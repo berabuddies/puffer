@@ -654,6 +654,7 @@ impl LambdaGateState {
         &self,
         host_tool: &str,
         host_args: Option<&Value>,
+        metadata_host_args: Option<&Value>,
         concrete_tool: Option<&str>,
         result: Option<&Value>,
     ) -> Value {
@@ -676,7 +677,7 @@ impl LambdaGateState {
         lambda_skill_metadata(
             "host_call_committed",
             host_tool,
-            host_args.cloned(),
+            metadata_host_args.cloned().or_else(|| host_args.cloned()),
             concrete_tool,
             None,
             registered_facts,
