@@ -1,0 +1,38 @@
+id: ComfyUiAction
+name: ComfyUiAction
+description: |-
+  Execute one typed ComfyUI setup action for verified Lambda Skill contracts.
+
+  This bridge is intentionally narrow. It only admits Comfy Cloud
+  configuration once the skill has already recorded a cloud setup choice and
+  confirmed that COMFY_CLOUD_API_KEY is configured without exposing the raw
+  secret.
+handler: runtime:workflow:comfyui_action
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - configureCloud
+      description: ComfyUI action to perform.
+    choice:
+      description: SetupChoice value produced by the cloud setup confirmation step.
+    apiKey:
+      description: Configured API-key source report produced by load_comfy_cloud_key.
+  required:
+    - action
+    - choice
+    - apiKey
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: true
+  may_write_files: false
+  may_access_network: true
+display:
+  group: creative
+  title: ComfyUiAction
+  show_in_status: true

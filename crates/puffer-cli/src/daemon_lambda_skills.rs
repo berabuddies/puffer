@@ -127,6 +127,7 @@ const SUPPORTED_LAMBDA_CONCRETE_TOOLS: &[&str] = &[
     "AskUserQuestion",
     "Bash",
     "BrowserAction",
+    "ComfyUiAction",
     "Config",
     "CronCreate",
     "CronDelete",

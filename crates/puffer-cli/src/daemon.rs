@@ -5182,6 +5182,7 @@ mod tests {
               "effects": ["proc"],
               "domains": [],
               "tools": [
+                {"name": "comfy_cloud", "params": [{"name": "choice", "ty": "str"}, {"name": "api_key", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ComfyUiAction"], "concreteInputContracts": {"ComfyUiAction": {"action": "configureCloud", "choice": {"$arg": "choice"}, "apiKey": {"$arg": "api_key"}}}, "registers": [], "contextReq": null},
                 {"name": "debugpy_attach", "params": [{"name": "port", "ty": "int"}], "result": "unit", "effects": ["proc"], "concreteTools": ["DebugpyAction"], "concreteInputContracts": {"DebugpyAction": {"action": "attach", "port": {"$int_arg": "port"}}}, "registers": [], "contextReq": null},
                 {"name": "mcp_check", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["McpStatus"], "concreteInputContracts": {"McpStatus": {"server": {"$arg": "value"}}}, "registers": [], "contextReq": null},
                 {"name": "modal_run", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ModalAction"], "concreteInputContracts": {"ModalAction": {"action": "createSecret", "value": {"$arg": "value"}}}, "registers": [], "contextReq": null},
@@ -5217,6 +5218,7 @@ mod tests {
         assert_eq!(
             saved["libraries"][0]["allowedTools"],
             json!([
+                "ComfyUiAction",
                 "DebugpyAction",
                 "McpStatus",
                 "ModalAction",
