@@ -16,3 +16,24 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+/**
+ * The `qrcode` npm package ships only JS — its README documents
+ * `toDataURL(text, options)` but there's no shipped .d.ts and we don't
+ * want to take a separate `@types/qrcode` dependency just for one call.
+ * Declare the narrow subset used by TopUpModal.
+ */
+declare module "qrcode" {
+  interface QRCodeToDataURLOptions {
+    margin?: number;
+    width?: number;
+    color?: { dark?: string; light?: string };
+  }
+  function toDataURL(
+    text: string,
+    options?: QRCodeToDataURLOptions
+  ): Promise<string>;
+  const _default: { toDataURL: typeof toDataURL };
+  export default _default;
+  export { toDataURL };
+}

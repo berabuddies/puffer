@@ -18,6 +18,8 @@ import Contact from "./pages/Contact.svelte";
 import ContactDetail from "./pages/ContactDetail.svelte";
 import Wallet from "./pages/Wallet.svelte";
 import WalletKyc from "./pages/WalletKyc.svelte";
+import WalletKycForm from "./pages/WalletKycForm.svelte";
+import WalletKycVerify from "./pages/WalletKycVerify.svelte";
 import ConnectedApps from "./pages/ConnectedApps.svelte";
 import Agent from "./pages/Agent.svelte";
 import Login from "./pages/Login.svelte";
@@ -58,8 +60,10 @@ export const routes: readonly RouteDef[] = [
   { pattern: "/contact/:id", component: ContactDetail as Component<Record<string, unknown>>, hasShell: true, displayName: "Contact detail" },
   { pattern: "/contact", component: Contact as Component<Record<string, unknown>>, hasShell: true, displayName: "Contact" },
 
+  { pattern: "/wallet/kyc/form", component: WalletKycForm as Component<Record<string, unknown>>, hasShell: true, displayName: "Wallet · KYC form" },
+  { pattern: "/wallet/kyc/verify", component: WalletKycVerify as Component<Record<string, unknown>>, hasShell: true, displayName: "Wallet · KYC verify" },
   { pattern: "/wallet/kyc", component: WalletKyc as Component<Record<string, unknown>>, hasShell: true, displayName: "Wallet · KYC" },
-  { pattern: "/wallet", component: Wallet as Component<Record<string, unknown>>, hasShell: true, displayName: "Wallet" },
+  { pattern: "/wallet", component: Wallet as Component<Record<string, unknown>>, hasShell: true, fullbleed: true, displayName: "Wallet" },
 
   { pattern: "/apps", component: ConnectedApps as Component<Record<string, unknown>>, hasShell: true, displayName: "Connected Apps" },
 

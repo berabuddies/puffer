@@ -23,7 +23,7 @@ export default defineConfig({
     // Caveat: with reuseExistingServer=true a stale `vite dev` already on
     // 1420 without this env will silently bypass the override — restart vite
     // if you see V2 tests hanging on connect.
-    env: { VITE_PUFFER_WS_URL: "ws://127.0.0.1:17777/ws" }
+    env: { VITE_PUFFER_WS_URL: "ws://127.0.0.1:17777/ws", VITE_USE_MOCK_WALLET: "true" }
   },
   use: {
     baseURL: "http://localhost:1456",
