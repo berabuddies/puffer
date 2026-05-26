@@ -30,6 +30,7 @@ pub mod process_control;
 pub mod secret_value;
 pub mod send_message;
 pub mod send_user_message;
+pub mod shopify_action;
 pub mod slack;
 pub mod slack_action;
 pub mod spotify_action;

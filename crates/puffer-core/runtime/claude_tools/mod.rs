@@ -773,6 +773,7 @@ pub fn execute_workflow_tool(
         "SendUserMessage" | "Brief" => {
             workflow::send_user_message::execute_send_user_message(state, cwd, input)
         }
+        "ShopifyAction" => workflow::shopify_action::execute_shopify_action(state, cwd, input),
         "Slack" => workflow::slack::execute_slack(state, cwd, input),
         "SlackAction" => workflow::slack_action::execute_slack_action(state, cwd, input),
         "SpotifyAction" => workflow::spotify_action::execute_spotify_action(state, cwd, input),

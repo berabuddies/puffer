@@ -31,6 +31,8 @@ mod multi_agent_e2e;
 mod openai_lambda_batch;
 #[path = "tool_execution/request_scope_tests.rs"]
 mod request_scope_tests;
+#[path = "tool_execution/shopify_action.rs"]
+mod shopify_action;
 #[path = "tool_execution/task_flow_run_task.rs"]
 mod task_flow_run_task;
 
