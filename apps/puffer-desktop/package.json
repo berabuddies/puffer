@@ -6,9 +6,9 @@
   "scripts": {
     "build:puffer-cli:dev": "cargo build -p puffer-cli",
     "build:puffer-cli:release": "cargo build --release -p puffer-cli",
-    "dev": "vite --host 127.0.0.1 --port 1420",
+    "dev": "vite --host 127.0.0.1 --port 1456",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 1420",
+    "preview": "vite preview --host 127.0.0.1 --port 1456",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test:desktop-ui": "playwright test tests/v2 --pass-with-no-tests",
     "test:desktop-ui:webkit": "playwright test tests/v2 --browser=webkit --pass-with-no-tests",

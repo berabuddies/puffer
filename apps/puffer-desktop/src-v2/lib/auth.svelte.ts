@@ -213,12 +213,44 @@ export function goToLogin(returnTo?: string): void {
     if (returnTo) session.setItem(RETURN_TO_KEY, returnTo);
     else session.removeItem(RETURN_TO_KEY);
   }
-  const redirectUri = `${window.location.origin}/#/auth/callback`;
+  // OAuth 2.0 (RFC 6749 §3.1.2) forbids fragments in redirect_uri, and Auth
+  // Station silently treats fragment-bearing URIs as invalid → loses the user
+  // on the auth domain. We use a plain pathname and let App.svelte's
+  // bootstrap recognize the post-callback landing and bridge it back into
+  // the hash router (see absorbOAuthCallbackInUrl).
+  const redirectUri = `${window.location.origin}/auth/callback`;
   const params = new URLSearchParams({
     redirect_uri: redirectUri,
     client_state: state
   });
   window.location.href = `${AUTH_STATION_URL.replace(/\/$/, "")}/login?${params.toString()}`;
+}
+
+/**
+ * Detects the post-Auth-Station landing — `window.location` looks like
+ * `${origin}/auth/callback?token=…&state=…` because that's the redirect_uri
+ * we sent — and converts it into a hash-routed `/auth/callback?…` so the
+ * existing AuthCallback page (under the hash router) can pick up the query
+ * the way it expects. Call from App.svelte onMount, BEFORE initRouter, so
+ * the router sees the correct hash on first sync.
+ *
+ * Returns true if we rewrote the URL (caller should NOT also run the
+ * normal "/" root-redirect logic — the AuthCallback page owns navigation
+ * from here).
+ */
+export function absorbOAuthCallbackInUrl(): boolean {
+  if (typeof window === "undefined") return false;
+  const path = window.location.pathname;
+  const search = window.location.search;
+  if (path !== "/auth/callback") return false;
+  if (!search || (!search.includes("token=") && !search.includes("error"))) {
+    return false;
+  }
+  // Move the query under the hash route and reset path/search so a refresh
+  // doesn't loop us through the callback again.
+  const newHash = `#/auth/callback${search.startsWith("?") ? search : `?${search}`}`;
+  window.history.replaceState(null, "", `/${newHash}`);
+  return true;
 }
 
 /** Only allow returnTo values that look like local app paths. */

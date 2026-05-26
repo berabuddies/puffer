@@ -35,21 +35,32 @@
 
   import { currentRoute, initRouter, matchRoute, navigate } from "./router.svelte";
   import { routes, getRootRedirect } from "./routes";
-  import { authState, loadAuthFromStorage, markOnboarded } from "./lib/auth.svelte";
+  import {
+    absorbOAuthCallbackInUrl,
+    authState,
+    loadAuthFromStorage,
+    markOnboarded
+  } from "./lib/auth.svelte";
   import Shell from "./components/shell/Shell.svelte";
   import NotFound from "./pages/NotFound.svelte";
   import Toast from "./components/common/Toast.svelte";
 
   onMount(() => {
+    // If Auth Station just redirected us back to /auth/callback (no fragment
+    // — RFC 6749 forbids fragments in redirect_uri), rewrite the URL into
+    // the hash form the rest of the app speaks BEFORE initRouter so the
+    // first sync sees the correct hash route.
+    const absorbed = absorbOAuthCallbackInUrl();
     initRouter();
     // Populate authState from localStorage BEFORE doing the root-redirect
     // resolution; otherwise getRootRedirect() runs with status === "unknown"
     // and falls through to /home, which would briefly show the app shell
     // to a signed-out user.
     loadAuthFromStorage();
-    // Root redirect — handle '/' or '' explicitly. Picks login / onboarding
-    // / home depending on the now-known auth state.
-    if (currentRoute.path === "/" || currentRoute.path === "") {
+    // Root redirect — handle '/' or '' explicitly. Skip when we just
+    // absorbed an OAuth callback: the AuthCallback page owns navigation
+    // for that case.
+    if (!absorbed && (currentRoute.path === "/" || currentRoute.path === "")) {
       navigate(getRootRedirect());
     }
   });

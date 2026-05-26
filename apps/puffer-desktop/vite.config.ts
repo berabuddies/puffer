@@ -19,7 +19,7 @@ export default defineConfig({
   envPrefix: ["VITE_", "TAURI_"],
   server: {
     host,
-    port: 1420,
+    port: 1456,
     strictPort: true,
     hmr: host !== "127.0.0.1"
       ? {
@@ -31,7 +31,7 @@ export default defineConfig({
   },
   preview: {
     host: "127.0.0.1",
-    port: 1420,
+    port: 1456,
     strictPort: true
   }
 });

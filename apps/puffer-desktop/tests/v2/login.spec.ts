@@ -6,7 +6,7 @@
  * Momo hero, (3) clicking the button builds the correct Auth Station URL.
  *
  * Full E2E (real login with wangshun+3@tomo.inc) is gated on adding
- * http://127.0.0.1:1420 to Auth Station's ALLOWED_REDIRECT_ORIGINS.
+ * http://127.0.0.1:1456 to Auth Station's ALLOWED_REDIRECT_ORIGINS.
  */
 import { test, expect } from "@playwright/test";
 
@@ -64,8 +64,12 @@ test.describe("worldrouter login gate", () => {
     const parsed = new URL(outboundUrl!);
     expect(parsed.origin).toBe("https://auth.worldrouter.ai");
     expect(parsed.pathname).toBe("/login");
+    // No fragment — RFC 6749 forbids it in redirect_uri (and Auth Station
+    // silently rejects URIs containing one). App.svelte's
+    // absorbOAuthCallbackInUrl rewrites the post-callback URL into the
+    // hash-routed equivalent on landing.
     expect(parsed.searchParams.get("redirect_uri")).toBe(
-      "http://127.0.0.1:1420/#/auth/callback"
+      "http://localhost:1456/auth/callback"
     );
     expect(parsed.searchParams.get("client_state")).toMatch(/.{8,}/);
   });

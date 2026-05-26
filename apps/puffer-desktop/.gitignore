@@ -14,3 +14,4 @@ references/
 .env
 .env.*
 !.env.example
+tests/v2/.auth-storage.json

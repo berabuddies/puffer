@@ -12,8 +12,8 @@ export default defineConfig({
     timeout: 10_000
   },
   webServer: {
-    command: `${nodeExecutable} ./node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1420`,
-    url: "http://127.0.0.1:1420/?skipOnboarding",
+    command: `${nodeExecutable} ./node_modules/vite/bin/vite.js --host localhost --port 1456`,
+    url: "http://localhost:1456/?skipOnboarding",
     reuseExistingServer: shouldReuseExistingServer,
     timeout: 120_000,
     // wsClient.ts reads VITE_PUFFER_WS_URL at module load; this points the V2
@@ -26,7 +26,7 @@ export default defineConfig({
     env: { VITE_PUFFER_WS_URL: "ws://127.0.0.1:17777/ws" }
   },
   use: {
-    baseURL: "http://127.0.0.1:1420",
+    baseURL: "http://localhost:1456",
     headless: true
   }
 });
