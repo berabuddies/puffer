@@ -21,7 +21,7 @@ input_schema:
       description: Concrete question to answer from the image.
     detail:
       type: string
-      description: Vision detail level: auto, low, or high.
+      description: "Vision detail level: auto, low, or high."
   required:
     - image
     - question
