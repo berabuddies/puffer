@@ -1288,6 +1288,45 @@ test("pipeline connector search matches append workflow commands", async ({ page
   await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
 });
 
+test("pipeline connector catalog rows can create append workflow bindings", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await page.getByLabel("Search connectors").fill("append email hi /tmp/email.log");
+
+  const appendButton = page.getByRole("button", { name: "Create append workflow for email" });
+  await expect(appendButton).toHaveAttribute(
+    "title",
+    "/workflows append email /tmp/email.log hi --connector email"
+  );
+  await appendButton.click();
+
+  const request = await daemon.waitForRequest("workflow_binding_create", (candidate) => {
+    return candidate.params.slug === "append-email-email-log";
+  });
+  expect(request.params).toMatchObject({
+    slug: "append-email-email-log",
+    connection_slug: "email",
+    connector_slug: "email",
+    pattern: "hi",
+    file_append_path: "/tmp/email.log",
+    enabled: true
+  });
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText(
+    "Created append workflow append-email-email-log."
+  );
+  await expect(page.getByLabel("Selected append workflow command")).toContainText(
+    "/workflows append email /tmp/email.log hi --connector email"
+  );
+  const actions = page.getByLabel("Workflow actions");
+  await expect(actions).toContainText("append-email-email-log");
+  await expect(actions).toContainText("/tmp/email.log");
+  await expect(actions).toContainText("hi");
+});
+
 test("pipeline connector search shows action matches", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

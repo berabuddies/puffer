@@ -254,6 +254,7 @@
   let monitorTaskCommandRunningFor = $state<string | null>(null);
   let creatingWorkflowBinding = $state(false);
   let creatingConnectionAppendFor = $state<string | null>(null);
+  let creatingConnectorAppendFor = $state<string | null>(null);
   let togglingWorkflowSlug = $state<string | null>(null);
   let deletingWorkflowBindingSlug = $state<string | null>(null);
   let savingWorkflowSlug = $state<string | null>(null);
@@ -896,6 +897,54 @@
     }
   }
 
+  async function createAppendWorkflowForConnector(connector: WorkflowConnector, plannedConnectionName?: string | null) {
+    if (connectorCommandRunnerBusy()) return;
+    if (!connectorTriggerSupported(connector)) {
+      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet.`;
+      return;
+    }
+    const connectionSlug = connectorConnectionName(connector, plannedConnectionName);
+    if (!connectionSlugValid(connectionSlug)) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    const intent = connectorAppendIntent(connector, connectionSlug);
+    const path = intent.path;
+    const pattern = intent.pattern;
+    const slug = appendBindingSlug(connectionSlug, path);
+    selectedConnectorSlug = connector.connector_slug;
+    selectedConnectorConnectionName = connectionSlug;
+    selectedConnectorDraftPattern = pattern ?? "";
+    selectedConnectorAppendPath = path;
+    creatingWorkflowBinding = true;
+    creatingConnectorAppendFor = connector.connector_slug;
+    error = null;
+    saveNotice = `Creating ${slug}...`;
+    try {
+      const description = pattern
+        ? `Append ${connectionSlug} messages matching ${pattern} to ${path}`
+        : `Append ${connectionSlug} messages to ${path}`;
+      const next = await createWorkflowBinding({
+        slug,
+        description,
+        connection_slug: connectionSlug,
+        connector_slug: connector.connector_slug,
+        pattern,
+        file_append_path: path,
+        enabled: true
+      });
+      applyWorkflowSnapshot(next);
+      saveNotice = `Created append workflow ${slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not create append workflow: ${message}`;
+    } finally {
+      creatingConnectorAppendFor = null;
+      creatingWorkflowBinding = false;
+    }
+  }
+
   async function createAppendWorkflowForConnection(connection: WorkflowConnection) {
     if (connectorCommandRunnerBusy()) return;
     if (!connectionTriggerSupported(connection)) {
@@ -1010,16 +1059,58 @@
   }
 
   function connectorQueryAppendPattern(connection: WorkflowConnection, path: string): string | null {
-    const connectionTerms = new Set([
+    return connectorQueryAppendPatternForTerms(path, new Set([
       connection.slug.toLowerCase(),
       connection.connector_slug.toLowerCase()
-    ]);
+    ]));
+  }
+
+  function connectorAppendIntent(connector: WorkflowConnector, connectionName: string): AppendQueryIntent {
+    const fallback = {
+      path: `/tmp/${connectionName}.log`,
+      pattern: null
+    };
+    const path = connectorQueryAppendPath();
+    if (!path) return fallback;
+    return {
+      path,
+      pattern: connectorQueryAppendPatternForTerms(
+        path,
+        connectorIdentityTerms(connector, connectionName)
+      )
+    };
+  }
+
+  function connectorIdentityTerms(connector: WorkflowConnector, connectionName?: string | null): Set<string> {
+    const values = [
+      connector.connector_slug,
+      connectorConnectionHint(connector),
+      connectionName ?? ""
+    ];
+    return new Set(
+      values
+        .flatMap((value) => [value, ...value.split(/[^a-zA-Z0-9]+/)])
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean)
+    );
+  }
+
+  function connectorQueryNamesConnector(connector: WorkflowConnector): boolean {
+    const identity = connectorIdentityTerms(connector);
+    return connectorQueryRawTokens.some((token) => identity.has(token.toLowerCase()));
+  }
+
+  function connectorAppendQueryMatches(connector: WorkflowConnector): boolean {
+    return connectorQueryAppendPath() !== null && connectorQueryNamesConnector(connector);
+  }
+
+  function connectorQueryAppendPatternForTerms(path: string, identityTerms: Set<string>): string | null {
     const pattern = connectorQueryRawTokens
       .filter((token) => {
         const lower = token.toLowerCase();
         return token !== path
           && !appendQueryStopWords.has(lower)
-          && !connectionTerms.has(lower)
+          && !identityTerms.has(lower)
           && !looksLikeAppendPath(token);
       })
       .join(" ")
@@ -1080,7 +1171,7 @@
     path?: string | null,
     pattern?: string | null
   ): string {
-    const connectionName = plannedConnectionName?.trim() || connectorConnectionHint(connector);
+    const connectionName = connectorConnectionName(connector, plannedConnectionName);
     const existingConnection = connectionsForConnector(connector.connector_slug).find(
       (connection) => connection.slug === connectionName
     );
@@ -1091,6 +1182,10 @@
       pattern,
       existingConnection ? null : connector.connector_slug
     );
+  }
+
+  function connectorConnectionName(connector: WorkflowConnector, plannedConnectionName?: string | null): string {
+    return plannedConnectionName?.trim() || connectorConnectionHint(connector);
   }
 
   function connectorConnectionHint(connector: WorkflowConnector): string {
@@ -1659,7 +1754,10 @@
   ): WorkflowConnector[] {
     const directMatches = rows.filter((row) => matchesSearchTerms(terms, row.searchText));
     if (directMatches.length > 0 || !plannedConnectionName || fallbackTerms.length === 0) {
-      return directMatches.map((row) => row.connector);
+      if (directMatches.length > 0) return directMatches.map((row) => row.connector);
+      const appendMatches = rows.filter((row) => connectorAppendQueryMatches(row.connector));
+      if (appendMatches.length > 0) return appendMatches.map((row) => row.connector);
+      return [];
     }
     return rows
       .filter((row) => matchesSearchTerms(fallbackTerms, row.searchText))
@@ -2637,6 +2735,8 @@
                     {@const plannedConnectionName = connectorPlannedConnectionName(connector)}
                     {@const connectCommand = connectorConnectCommand(connector, plannedConnectionName ?? undefined)}
                     {@const draftCommand = connectorDraftCommand(connector, plannedConnectionName ?? undefined)}
+                    {@const appendIntent = connectorAppendIntent(connector, connectorConnectionName(connector, plannedConnectionName))}
+                    {@const appendCommand = connectorAppendCommand(connector, plannedConnectionName ?? undefined, appendIntent.path, appendIntent.pattern)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
                     {@const expandActions = filteredConnectors.length === 1 && connectorQueryTerms.length > 0}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms, expandActions ? null : 3)}
@@ -2694,6 +2794,17 @@
                         onclick={() => createWorkflowDraftForConnector(connector, plannedConnectionName ?? undefined)}
                       >
                         <Icon name="plus" size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-append-btn"
+                        aria-label={`Create append workflow for ${connector.connector_slug}`}
+                        title={appendCommand}
+                        aria-busy={creatingConnectorAppendFor === connector.connector_slug}
+                        disabled={!canTrigger || connectorCommandRunnerBusy()}
+                        onclick={() => createAppendWorkflowForConnector(connector, plannedConnectionName)}
+                      >
+                        <Icon name="file" size={12} />
                       </button>
                     </div>
                   {/each}
