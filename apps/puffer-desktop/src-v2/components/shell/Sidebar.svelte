@@ -52,6 +52,8 @@
   import { currentUser } from "../../data/user";
   import { contacts } from "../../data/contacts";
   import { apps } from "../../data/apps";
+  import { authState } from "../../lib/auth.svelte";
+  import UserMenu from "./UserMenu.svelte";
   import {
     workSessions,
     lifeSessions,
@@ -566,24 +568,46 @@
     {/if}
   </div>
 
-  <!-- 5. Rail user -->
+  <!-- 5. Rail user
+       Wrapped in <UserMenu> so clicking the row pops a small dropdown
+       anchored above (the row sits at the bottom of the rail). The menu
+       carries a single "Sign out" item that clears local auth state and
+       bounces to Auth Station's /logout endpoint.
+
+       Display name + avatar pull from `authState.user` when signed in.
+       During the brief "unknown" window on mount (before
+       loadAuthFromStorage runs) we fall back to the mock currentUser
+       so the rail never flashes empty. The {@const}s sit inside the
+       UserMenu's trigger snippet because Svelte 5 requires
+       {@const} to be the immediate child of a snippet / block /
+       component — they can't float at the template's top level. -->
   <div class="rail-user">
-    <button
-      class="user-row"
-      class:user-row--icon={collapsed}
-      type="button"
-      aria-label={`Account: ${currentUser.name}`}
-      title={collapsed ? currentUser.name : undefined}
-    >
-      <span class="user-row__avatar" aria-hidden="true">
-        <!-- A subtle initial keeps the rail readable while no avatar image is wired. -->
-        <span class="user-row__initial">{currentUser.avatarLabel}</span>
-      </span>
-      {#if !collapsed}
-        <span class="user-row__name">{currentUser.name}</span>
-        <ChevronDown size={18} strokeWidth={1.75} aria-hidden="true" />
-      {/if}
-    </button>
+    <UserMenu>
+      {#snippet trigger()}
+        {@const displayName =
+          authState.user?.name || authState.user?.email || currentUser.name}
+        {@const avatarUrl = authState.user?.picture ?? null}
+        {@const avatarInitial = (displayName?.trim()?.[0] || currentUser.avatarLabel).toUpperCase()}
+        <div
+          class="user-row"
+          class:user-row--icon={collapsed}
+          aria-label={`Account: ${displayName}`}
+          title={collapsed ? displayName : undefined}
+        >
+          <span class="user-row__avatar" aria-hidden="true">
+            {#if avatarUrl}
+              <img class="user-row__avatar-img" src={avatarUrl} alt="" />
+            {:else}
+              <span class="user-row__initial">{avatarInitial}</span>
+            {/if}
+          </span>
+          {#if !collapsed}
+            <span class="user-row__name">{displayName}</span>
+            <ChevronDown size={18} strokeWidth={1.75} aria-hidden="true" />
+          {/if}
+        </div>
+      {/snippet}
+    </UserMenu>
   </div>
 </aside>
 
@@ -1127,6 +1151,15 @@
     font-size: var(--font-size-button);
     font-weight: var(--font-weight-semibold);
     color: var(--color-text-secondary);
+  }
+  /* When the Auth Station JWT carries a `picture` URL we render the
+     image inside the same 28×28 avatar pill, replacing the initial. */
+  .user-row__avatar-img {
+    width: 100%;
+    height: 100%;
+    border-radius: var(--radius-pill);
+    object-fit: cover;
+    display: block;
   }
   .user-row__name {
     flex: 1;

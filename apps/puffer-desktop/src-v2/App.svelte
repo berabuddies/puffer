@@ -4,18 +4,28 @@
   Reads the reactive `currentRoute` from the router, matches it against
   the route table, and either:
     1. Renders the matched component inside <Shell> (when hasShell === true),
-    2. Renders it bare (when hasShell === false → onboarding flows),
+    2. Renders it bare (when hasShell === false → onboarding flows, login),
     3. Falls back to <NotFound /> (still wrapped in Shell so the chrome stays
        consistent — matches the rest of the app).
 
+  Auth gate:
+    On mount we call `loadAuthFromStorage()` to flip `authState.status` from
+    its initial "unknown" to a definitive signedIn/signedOut. Until that
+    happens we render a minimal "Loading…" splash instead of the matched
+    route — otherwise a signed-out user would briefly flash onboarding
+    or home chrome before being kicked to /login.
+
+    Once status is known, a $effect enforces the gate:
+      - signedOut on any route that isn't /login or /auth/callback
+        → navigate("/login")
+      - signedIn on /login → navigate(getRootRedirect()) (i.e. land on
+        /home or onboarding depending on the onboarded flag)
+
   Root redirect:
-    '/' (or empty hash) is resolved against `getRootRedirect()`, which
-    consults the `puffer.onboarded` localStorage flag. First-run users land
-    in `/onboarding/where`; returning users land in `/home`. Once a user
-    reaches `/home` we set the flag so subsequent launches skip onboarding —
-    `Done.svelte` already routes to `/home` after its 3-second hold, so this
-    keeps the wiring entirely in App.svelte instead of touching the
-    onboarding pages (which another agent owns).
+    '/' (or empty hash) is resolved against `getRootRedirect()`, which now
+    consults auth state first and onboarding flag second. We only kick
+    off the root-redirect resolution once auth is known so the decision
+    is made with full information.
 
   The Toast renderer is mounted once at the root so any module can call
   `pushToast()` and the message will surface no matter which page is active.
@@ -25,15 +35,20 @@
 
   import { currentRoute, initRouter, matchRoute, navigate } from "./router.svelte";
   import { routes, getRootRedirect } from "./routes";
-  import { markOnboarded } from "./lib/auth.svelte";
+  import { authState, loadAuthFromStorage, markOnboarded } from "./lib/auth.svelte";
   import Shell from "./components/shell/Shell.svelte";
   import NotFound from "./pages/NotFound.svelte";
   import Toast from "./components/common/Toast.svelte";
 
   onMount(() => {
     initRouter();
-    // Root redirect — handle '/' or '' explicitly. Picks onboarding vs home
-    // based on the persisted onboarded flag.
+    // Populate authState from localStorage BEFORE doing the root-redirect
+    // resolution; otherwise getRootRedirect() runs with status === "unknown"
+    // and falls through to /home, which would briefly show the app shell
+    // to a signed-out user.
+    loadAuthFromStorage();
+    // Root redirect — handle '/' or '' explicitly. Picks login / onboarding
+    // / home depending on the now-known auth state.
     if (currentRoute.path === "/" || currentRoute.path === "") {
       navigate(getRootRedirect());
     }
@@ -56,9 +71,41 @@
       markOnboarded();
     }
   });
+
+  /**
+   * Auth gate. Runs after every auth/route change.
+   *
+   * Public routes that don't require sign-in:
+   *   /login            — the sign-in screen itself
+   *   /auth/callback    — the redirect target from Auth Station
+   *
+   * Everything else demands a signedIn status.
+   */
+  const PUBLIC_PATHS = new Set(["/login", "/auth/callback"]);
+
+  $effect(() => {
+    // Don't gate while we're still figuring out auth state — the splash
+    // below covers this window.
+    if (authState.status === "unknown") return;
+
+    const path = currentRoute.path;
+    if (authState.status === "signedOut" && !PUBLIC_PATHS.has(path)) {
+      navigate("/login");
+      return;
+    }
+    if (authState.status === "signedIn" && path === "/login") {
+      navigate(getRootRedirect());
+    }
+  });
 </script>
 
-{#if !Component}
+{#if authState.status === "unknown"}
+  <!-- Auth check is still running. Plain splash keeps us from flashing
+       chrome that may not be appropriate once we know the answer. -->
+  <main class="auth-splash">
+    <p class="auth-splash__text">Loading…</p>
+  </main>
+{:else if !Component}
   <Shell>
     <NotFound />
   </Shell>
@@ -78,3 +125,20 @@
 <!-- Global toast layer — must live outside the Shell so it overlays both
      shelled pages and the bare onboarding flow. -->
 <Toast />
+
+<style>
+  .auth-splash {
+    min-height: 100vh;
+    width: 100%;
+    background: var(--color-surface-app);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .auth-splash__text {
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    line-height: var(--line-height-body);
+    color: var(--color-text-muted);
+  }
+</style>

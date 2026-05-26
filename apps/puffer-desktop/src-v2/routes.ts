@@ -20,6 +20,8 @@ import Wallet from "./pages/Wallet.svelte";
 import WalletKyc from "./pages/WalletKyc.svelte";
 import ConnectedApps from "./pages/ConnectedApps.svelte";
 import Agent from "./pages/Agent.svelte";
+import Login from "./pages/Login.svelte";
+import AuthCallback from "./pages/AuthCallback.svelte";
 import OnboardingWhere from "./pages/onboarding/Where.svelte";
 import OnboardingRole from "./pages/onboarding/Role.svelte";
 import OnboardingApps from "./pages/onboarding/Apps.svelte";
@@ -45,6 +47,11 @@ export interface RouteDef {
 
 export const routes: readonly RouteDef[] = [
   // Order: most specific first (longer paths before shorter prefixes).
+  // Auth routes live at the top — they need to resolve even when the
+  // user is signed out, before any of the gated app routes.
+  { pattern: "/login", component: Login as Component<Record<string, unknown>>, hasShell: false, displayName: "Login" },
+  { pattern: "/auth/callback", component: AuthCallback as Component<Record<string, unknown>>, hasShell: false, displayName: "Auth callback" },
+
   { pattern: "/home/empty", component: HomeEmpty as Component<Record<string, unknown>>, hasShell: true, displayName: "Home (empty)" },
   { pattern: "/home", component: Home as Component<Record<string, unknown>>, hasShell: true, displayName: "Home" },
 
@@ -65,18 +72,29 @@ export const routes: readonly RouteDef[] = [
 ];
 
 /**
- * '/' redirects depending on whether the user has finished onboarding.
+ * '/' redirects depending on auth + onboarding state.
  *
- * App.svelte calls this on mount and again whenever it lands on '/'. We keep
- * the static `ROOT_REDIRECT` export so existing callers (and any unit test
- * that imports it for a fixed default) keep compiling — it always points to
- * the main app entry. New callers should prefer `getRootRedirect()` so the
- * decision honours the `puffer.onboarded` localStorage flag.
+ * Decision tree:
+ *   authState.status === "signedOut" → "/login" (gate fires regardless
+ *     of onboarded flag — we never want to show in-app chrome to an
+ *     unauthenticated user).
+ *   authState.status === "signedIn"  →
+ *       isOnboarded() === false → "/onboarding/where" (first-run flow)
+ *       isOnboarded() === true  → "/home"
+ *   authState.status === "unknown"   → "/home" (App.svelte shows a
+ *     loading splash while status is unknown, so the only consumer of
+ *     this branch is the very first paint between mount and
+ *     loadAuthFromStorage running).
+ *
+ * `ROOT_REDIRECT` stays exported for tests / callers that just want a
+ * stable default. New callers should prefer `getRootRedirect()`.
  */
-import { isOnboarded } from "./lib/auth.svelte";
+import { authState, isOnboarded } from "./lib/auth.svelte";
 
 export const ROOT_REDIRECT = "/home";
 
 export function getRootRedirect(): string {
-  return isOnboarded() ? "/home" : "/onboarding/where";
+  if (authState.status === "signedOut") return "/login";
+  if (authState.status === "signedIn" && !isOnboarded()) return "/onboarding/where";
+  return "/home";
 }
