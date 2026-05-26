@@ -105,13 +105,13 @@ fn slash_completion_fills_connect_catalog_rows() {
 }
 
 #[test]
-fn enter_completion_fills_partial_connect_catalog_rows() {
+fn enter_completion_keeps_descriptive_connect_search_as_search() {
     let commands = supported_commands();
     let mut tui = TuiState::default();
     tui.insert_str("/connect telegram personal", &commands);
 
     assert!(tui.complete_on_enter(&commands));
-    assert_eq!(tui.input, "/connect telegram-login personal");
+    assert_eq!(tui.input, "/connect telegram-login telegram-user");
 }
 
 #[test]

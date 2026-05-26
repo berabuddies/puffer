@@ -568,19 +568,14 @@ fn connector_catalog_rows(input: &str) -> Option<Vec<PopupRow>> {
         return None;
     }
     let query = ConnectCatalogQuery::new(rest);
-    let mut rows = if query.connection_name.is_some() {
-        Vec::new()
-    } else {
-        live_connect_connection_rows()
-            .into_iter()
-            .filter(|row| query.matches(row))
-            .collect::<Vec<_>>()
-    };
-    let mut builtin_rows = builtin_connector_rows_matching(&query, false);
-    if builtin_rows.is_empty() && query.fallback_terms.is_some() {
-        builtin_rows = builtin_connector_rows_matching(&query, true);
+    let mut rows = live_connect_connection_rows()
+        .into_iter()
+        .filter(|row| query.matches(row))
+        .collect::<Vec<_>>();
+    rows.extend(builtin_connector_rows_matching(&query, false));
+    if rows.is_empty() && query.fallback_terms.is_some() {
+        rows.extend(builtin_connector_rows_matching(&query, true));
     }
-    rows.extend(builtin_rows);
     rows.sort_by_key(|row| connector_row_sort_key(row, rest.trim()));
     rows.truncate(MAX_POPUP_ROWS);
     Some(rows.into_iter().map(|row| row.row).collect())
@@ -636,7 +631,13 @@ fn builtin_connector_rows_matching(
                 query.matches(row)
             }
         })
-        .map(|row| query.apply_connection_name(row))
+        .map(|row| {
+            if fallback {
+                query.apply_connection_name(row)
+            } else {
+                row
+            }
+        })
         .collect()
 }
 
@@ -860,11 +861,20 @@ mod tests {
         let rows = popup_rows("/connect vote poll", &commands);
 
         assert!(rows.iter().any(|row| row.name == "connect telegram-login"
-            && row.replacement == "/connect telegram-login poll"));
+            && row.replacement == "/connect telegram-login telegram-user"));
         let event_rows = popup_rows("/connect imap events", &commands);
         assert!(event_rows
             .iter()
-            .any(|row| row.name == "connect email" && row.replacement == "/connect email events"));
+            .any(|row| row.name == "connect email" && row.replacement == "/connect email email"));
+    }
+
+    #[test]
+    fn popup_keeps_descriptive_connect_query_as_search() {
+        let commands = supported_commands();
+        let rows = popup_rows("/connect telegram personal", &commands);
+
+        assert!(rows.iter().any(|row| row.name == "connect telegram-login"
+            && row.replacement == "/connect telegram-login telegram-user"));
     }
 
     #[test]
