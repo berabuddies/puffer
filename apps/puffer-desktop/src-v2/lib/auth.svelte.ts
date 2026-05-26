@@ -314,7 +314,42 @@ export async function mintWorldRouterApiKey(
 
   const store = safeLocalStorage();
   if (store) store.setItem(API_KEY_KEY, mint.key);
+
+  // Register with the puffer Tauri host so chat actually picks it up.
+  // We swallow errors here (key is still cached locally; retry will hit
+  // the same path on next login) so a transient WS hiccup doesn't fail
+  // the whole mint.
+  try {
+    await registerApiKeyWithPufferHost(mint.key);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[auth] minted API key but failed to register with puffer host; chat may not pick it up until retry",
+      err
+    );
+  }
+
   return mint.key;
+}
+
+/**
+ * Register the minted `sk-worldrouter-…` key with the puffer Tauri host
+ * over WebSocket. The host stores it as the `puffer` provider's API key
+ * (the only worldrouter-compatible provider id the backend whitelists)
+ * and will inject it as `PUFFER_API_KEY` when it spawns the puffer CLI
+ * for a chat turn — which is what makes chat actually work.
+ *
+ * Kept here (next to mintWorldRouterApiKey) instead of in wsClient.ts so
+ * the auth module owns the whole "JWT → API key → registered" pipeline.
+ */
+export async function registerApiKeyWithPufferHost(apiKey: string): Promise<void> {
+  // Lazy import keeps auth.svelte.ts importable in non-browser contexts
+  // (e.g. unit tests) where wsClient pulls in `WebSocket`.
+  const { request } = await import("./wsClient");
+  await request("login_with_api_key", {
+    providerId: "puffer",
+    apiKey
+  });
 }
 
 async function safeJson(res: Response): Promise<unknown> {
@@ -476,6 +511,16 @@ export function signOut(): void {
     store.removeItem(REFRESH_TOKEN_KEY);
   }
   if (store) store.removeItem(API_KEY_KEY);
+  // Best-effort: tell the puffer host to forget the key too, so a stale
+  // PUFFER_API_KEY doesn't leak across signed-out sessions.
+  void (async () => {
+    try {
+      const { request } = await import("./wsClient");
+      await request("logout_provider", { providerId: "puffer" });
+    } catch {
+      /* host may be unavailable — local logout still proceeds */
+    }
+  })();
   authState.status = "signedOut";
   authState.user = null;
 
