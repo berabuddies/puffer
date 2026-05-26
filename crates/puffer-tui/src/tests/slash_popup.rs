@@ -58,6 +58,22 @@ fn enter_completion_fills_workflow_append_connector_arguments() {
 }
 
 #[test]
+fn enter_completion_fills_workflow_append_query_path_and_pattern() {
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.insert_str(
+        "/workflows append telegram-user support ping /tmp/support",
+        &commands,
+    );
+
+    assert!(tui.complete_on_enter(&commands));
+    assert_eq!(
+        tui.input,
+        "/workflows append telegram-user /tmp/support 'support ping' --connector telegram-login"
+    );
+}
+
+#[test]
 fn enter_completion_fills_monitor_connector_arguments() {
     let commands = supported_commands();
     let mut tui = TuiState::default();

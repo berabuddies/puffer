@@ -3,6 +3,7 @@ mod popup_connections;
 
 use self::popup_connections::{
     live_connect_connection_rows, live_monitor_connection_rows, live_workflow_connection_rows,
+    WorkflowConnectorQuery,
 };
 use puffer_core::CommandSpec;
 use puffer_subscriptions::{
@@ -274,10 +275,10 @@ fn workflow_connector_command_rows(input: &str) -> Option<Vec<PopupRow>> {
         .1
         .trim_start();
     let (kind, query) = workflow_connector_command_query(rest)?;
-    let terms = search_terms(query);
+    let query_filter = WorkflowConnectorQuery::new(kind, query);
     let mut rows = live_workflow_connection_rows(kind)
         .into_iter()
-        .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
+        .filter_map(|row| query_filter.prepare(row))
         .collect::<Vec<_>>();
     let live_connections = rows
         .iter()
@@ -288,7 +289,7 @@ fn workflow_connector_command_rows(input: &str) -> Option<Vec<PopupRow>> {
             .into_iter()
             .filter(template_supports_workflow_command)
             .map(|template| workflow_connector_command_row(kind, template))
-            .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
+            .filter_map(|row| query_filter.prepare(row))
             .filter(|row| !live_connections.contains(&row.row.name)),
     );
     rows.sort_by_key(|row| connector_row_sort_key(row, query.trim()));
