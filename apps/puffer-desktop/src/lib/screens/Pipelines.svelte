@@ -160,6 +160,7 @@
   let connectorQuery = $state("");
   let selectedConnectorSlug = $state<string | null>(null);
   let selectedConnectorConnectionName = $state("");
+  let selectedConnectorDraftPattern = $state("");
   let runIdx = $state<number | null>(null);
   let stepIdx = $state<number | null>(null);
   let loading = $state(false);
@@ -223,7 +224,7 @@
   );
   let selectedConnectorDraftCommand = $derived(
     selectedConnector && connectorTriggerSupported(selectedConnector) && !selectedConnectorConnectionInvalid
-      ? workflowDraftCommand(selectedConnectorConnectionName.trim())
+      ? workflowDraftCommand(selectedConnectorConnectionName.trim(), selectedConnectorDraftPattern)
       : ""
   );
   let workflowDirty = $derived(workflow ? dirtyWorkflowSlugs.includes(workflow.slug) : false);
@@ -604,7 +605,7 @@
   function normalizedPattern(value: string | null | undefined): string | null {
     const trimmed = (value ?? "").trim();
     if (!trimmed) return null;
-    return trimmed === "*" ? ".*" : value ?? null;
+    return trimmed === "*" ? ".*" : trimmed;
   }
 
   function triggerForSave(trigger: WorkflowDefinition["trigger"]): WorkflowDefinition["trigger"] {
@@ -680,7 +681,11 @@
     });
   }
 
-  function createWorkflowDraftForConnector(connector: WorkflowConnector, plannedConnectionName?: string) {
+  function createWorkflowDraftForConnector(
+    connector: WorkflowConnector,
+    plannedConnectionName?: string,
+    pattern?: string
+  ) {
     const connectorConnections = connectionsForConnector(connector.connector_slug);
     const matchingConnection = plannedConnectionName
       ? connectorConnections.find((connection) => connection.slug === plannedConnectionName)
@@ -701,6 +706,7 @@
       connectionSlug,
       connectorSlug: connector.connector_slug,
       connectionName: connectionSlug,
+      pattern,
       saveMessage: existingConnection
         ? `Created ${connectionSlug}-backed workflow locally. Save to persist this workflow.`
         : `Created ${connectionSlug}-backed workflow locally. Run ${command} before enabling it.`
@@ -709,12 +715,24 @@
 
   function createWorkflowDraftForSelectedConnector() {
     if (!selectedConnector || selectedConnectorConnectionInvalid) return;
-    createWorkflowDraftForConnector(selectedConnector, selectedConnectorConnectionName);
+    createWorkflowDraftForConnector(
+      selectedConnector,
+      selectedConnectorConnectionName,
+      selectedConnectorDraftPattern
+    );
   }
 
-  function workflowDraftCommand(connectionSlug: string): string {
+  function workflowDraftCommand(connectionSlug: string, pattern?: string | null): string {
     const slug = connectionSlug.trim();
-    return slug ? `/workflows new ${slug}-workflow ${slug}` : "";
+    if (!slug) return "";
+    const normalized = normalizedPattern(pattern);
+    const base = `/workflows new ${slug}-workflow ${slug}`;
+    return normalized ? `${base} ${quoteWorkflowArg(normalized)}` : base;
+  }
+
+  function quoteWorkflowArg(value: string): string {
+    if (/^[a-zA-Z0-9_./:@%+=,-]+$/.test(value)) return value;
+    return `'${value.replaceAll("'", "'\\''")}'`;
   }
 
   function connectionDraftCommand(connection: WorkflowConnection): string {
@@ -754,6 +772,10 @@
       ...item,
       trigger: { type: "connection", connection_slug: value.trim(), pattern: defaultPattern(item) }
     }));
+  }
+
+  function updateSelectedConnectorDraftPattern(value: string) {
+    selectedConnectorDraftPattern = value;
   }
 
   async function copyWorkflowCommand(command: string) {
@@ -2052,6 +2074,17 @@
                     </label>
                     {#if selectedConnectorConnectionInvalid}
                       <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
+                    {/if}
+                    {#if connectorTriggerSupported(selectedConnector)}
+                      <label class="pf-connector-name">
+                        <span>Draft pattern</span>
+                        <input
+                          aria-label="Workflow draft pattern"
+                          placeholder=".*"
+                          value={selectedConnectorDraftPattern}
+                          oninput={(event) => updateSelectedConnectorDraftPattern(event.currentTarget.value)}
+                        />
+                      </label>
                     {/if}
                     <div class="pf-connector-command" aria-label="Selected connector command">
                       <Icon name="terminal" size={12} />

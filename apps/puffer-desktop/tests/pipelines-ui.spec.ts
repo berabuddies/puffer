@@ -113,8 +113,8 @@ test("pipeline editor creates new workflow drafts before saving", async ({ page 
   await expect(page.locator(".pf-editor-inline").getByRole("checkbox")).not.toBeChecked();
   await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
   await expect(page.getByLabel("Workflow connection")).toHaveValue("telegram-user");
-  await expect(page.locator(".pf-editor-config").getByLabel("Pattern")).toHaveValue(".*");
-  await page.locator(".pf-editor-config").getByLabel("Pattern").fill("hi");
+  await expect(page.locator(".pf-editor-config").getByLabel("Pattern", { exact: true })).toHaveValue(".*");
+  await page.locator(".pf-editor-config").getByLabel("Pattern", { exact: true }).fill("hi");
 
   const saveButton = page.getByRole("button", { name: "Save workflow" });
   await expect(saveButton).toBeEnabled();
@@ -265,14 +265,17 @@ test("pipeline selected connector exposes a copyable workflow draft command", as
   await page.getByLabel("Search connectors").fill("email events");
   await page.locator('[aria-label="Connector catalog"]').getByRole("button", { name: "Plan email workflow trigger" }).click();
   await page.getByLabel("Connector connection name").fill("email-personal");
+  await page.getByLabel("Workflow draft pattern").fill("hello world");
 
   const draftCommand = page.getByLabel("Selected workflow draft command");
-  await expect(draftCommand).toContainText("/workflows new email-personal-workflow email-personal");
+  await expect(draftCommand).toContainText("/workflows new email-personal-workflow email-personal 'hello world'");
   await draftCommand.getByRole("button", { name: "Copy workflow draft command" }).click();
-  await expect(page.locator(".pf-pipe-save-note")).toContainText("Copied /workflows new email-personal-workflow email-personal.");
+  await expect(page.locator(".pf-pipe-save-note")).toContainText(
+    "Copied /workflows new email-personal-workflow email-personal 'hello world'."
+  );
 
   const copied = await page.evaluate(() => (window as Window & { __copiedWorkflowCommand?: string }).__copiedWorkflowCommand);
-  expect(copied).toBe("/workflows new email-personal-workflow email-personal");
+  expect(copied).toBe("/workflows new email-personal-workflow email-personal 'hello world'");
 });
 
 test("pipeline selected connector can create a planned workflow draft", async ({ page }) => {
@@ -286,6 +289,7 @@ test("pipeline selected connector can create a planned workflow draft", async ({
   await page.getByLabel("Search connectors").fill("email events");
   await catalog.getByRole("button", { name: "Plan email workflow trigger" }).click();
   await page.getByLabel("Connector connection name").fill("email-personal");
+  await page.getByLabel("Workflow draft pattern").fill("hi");
   await page.getByRole("button", { name: "Create workflow draft for selected connector" }).click();
 
   await expect(page.locator(".pf-pipe-save-note")).toContainText("Run /connect email email-personal before enabling it");
@@ -293,6 +297,7 @@ test("pipeline selected connector can create a planned workflow draft", async ({
   await expect(page.locator(".pf-editor-config").getByLabel("Slug")).toHaveValue("email-personal-workflow");
   await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
   await expect(page.getByLabel("Workflow connection")).toHaveValue("email-personal");
+  await expect(page.locator(".pf-editor-config").getByLabel("Pattern", { exact: true })).toHaveValue("hi");
 
   await page.getByRole("button", { name: "Save workflow" }).click();
   const request = await daemon.waitForRequest("workflow_save", (candidate) => {
@@ -307,7 +312,7 @@ test("pipeline selected connector can create a planned workflow draft", async ({
   expect(workflow.trigger).toMatchObject({
     type: "connection",
     connection_slug: "email-personal",
-    pattern: ".*"
+    pattern: "hi"
   });
 });
 
