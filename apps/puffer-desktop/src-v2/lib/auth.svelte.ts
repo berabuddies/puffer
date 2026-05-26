@@ -32,6 +32,13 @@ const REFRESH_TOKEN_KEY = "puffer.authRefreshToken";
 const STATE_KEY = "puffer.authState";
 const RETURN_TO_KEY = "puffer.authReturnTo";
 const API_KEY_KEY = "puffer.worldrouterApiKey";
+/**
+ * The JWT `sub` of the user that originally minted the cached API key. We
+ * use this to detect cross-user key inheritance: if the cached owner
+ * doesn't match the currently-signed-in user's `sub`, the key is treated
+ * as missing so AuthCallback re-mints a fresh one for the current user.
+ */
+const API_KEY_OWNER_KEY = "puffer.worldrouterApiKeyOwner";
 
 const AUTH_STATION_URL = import.meta.env.VITE_AUTH_STATION_URL as string | undefined;
 // control-api hosts the JWT→API-key two-hop. Mirrors donor's
@@ -237,11 +244,12 @@ export async function loadAuthFromStorage(): Promise<void> {
   }
 
   // Both gone (or refresh rejected). Sign out and wipe everything that
-  // belongs to the previous session — including the API key, so it
-  // can't outlive its login.
+  // belongs to the previous session — including the API key + its owner
+  // tag, so it can't outlive its login.
   store.removeItem(TOKEN_KEY);
   store.removeItem(REFRESH_TOKEN_KEY);
   store.removeItem(API_KEY_KEY);
+  store.removeItem(API_KEY_OWNER_KEY);
   authState.status = "signedOut";
   authState.user = null;
 }
@@ -290,11 +298,47 @@ export function getAuthToken(): string | null {
   return store.getItem(TOKEN_KEY);
 }
 
-/** Return the cached worldrouter `sk-worldrouter-…` API key (or null). */
+/**
+ * Return the cached worldrouter `sk-worldrouter-…` API key, but ONLY if
+ * it's tagged with an owner that matches the currently-signed-in user.
+ *
+ * The owner tag (`puffer.worldrouterApiKeyOwner`) is set whenever
+ * mintWorldRouterApiKey persists a fresh key, capturing the JWT `sub`
+ * the key was minted for. On a cross-user switch — e.g. user A signed
+ * in (key cached under sub-A), then A signs out and B logs in on the
+ * same machine — the cached owner (sub-A) won't match B's current sub,
+ * so this returns null. AuthCallback's `if (!getWorldRouterApiKey())`
+ * guard then mints a fresh key for B instead of inheriting A's.
+ *
+ * Returns null in these cases:
+ *   - storage unavailable
+ *   - no key cached
+ *   - no owner tag (legacy entries written before this guard shipped —
+ *     treat as untrusted, force re-mint)
+ *   - owner tag present but doesn't match `authState.user.sub`
+ *   - authState is not yet `signedIn` (still loading)
+ */
 export function getWorldRouterApiKey(): string | null {
   const store = safeLocalStorage();
   if (!store) return null;
-  return store.getItem(API_KEY_KEY);
+  const key = store.getItem(API_KEY_KEY);
+  if (!key) return null;
+  const owner = store.getItem(API_KEY_OWNER_KEY);
+  // Untagged legacy keys: treat as untrusted so the next login mints
+  // fresh under the new tagging scheme.
+  if (!owner) return null;
+  // If the current session has resolved an identity, require a match.
+  // If status is still "unknown" we conservatively return the key — the
+  // gate effect won't dispatch chat traffic until status flips anyway,
+  // and any post-login overwrite will re-check ownership.
+  if (
+    authState.status === "signedIn" &&
+    authState.user?.sub &&
+    authState.user.sub !== owner
+  ) {
+    return null;
+  }
+  return key;
 }
 
 /* ───────── worldrouter API-key minting (two-hop) ───────── */
@@ -351,6 +395,11 @@ export class ApiKeyMintError extends Error {
 export async function mintWorldRouterApiKey(
   authStationToken: string
 ): Promise<string> {
+  // Capture WHO this mint is for at the moment we start, so we can
+  // detect mid-mint identity changes (signOut, user-switch) before
+  // committing the result to localStorage.
+  const ownerSub = decodeJwtPayload(authStationToken)?.sub ?? null;
+
   // Hop 1: exchange Auth Station JWT for an Infer-session token + team_id.
   const exchangeRes = await fetch(`${CONTROL_API_URL}/auth/exchange`, {
     method: "POST",
@@ -409,8 +458,29 @@ export async function mintWorldRouterApiKey(
     );
   }
 
+  // Race guard: if the user signed out OR a different user signed in
+  // during the ~15s control-api round-trip, the freshly-minted key
+  // belongs to a session that's no longer current. Drop it on the
+  // floor rather than overwrite a now-stale cache (which would later
+  // be re-registered with the puffer host for the wrong identity by
+  // syncApiKeyToHostIfCached).
+  const stillCurrent =
+    ownerSub != null &&
+    authState.status === "signedIn" &&
+    authState.user?.sub === ownerSub;
+  if (!stillCurrent) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[auth] dropping minted worldrouter API key — owner session is no longer current"
+    );
+    return mint.key;
+  }
+
   const store = safeLocalStorage();
-  if (store) store.setItem(API_KEY_KEY, mint.key);
+  if (store) {
+    store.setItem(API_KEY_KEY, mint.key);
+    store.setItem(API_KEY_OWNER_KEY, ownerSub);
+  }
 
   // Register with the puffer Tauri host so chat actually picks it up.
   // We swallow errors here (key is still cached locally; retry will hit
@@ -642,8 +712,9 @@ export function signOut(): void {
   if (store) {
     store.removeItem(TOKEN_KEY);
     store.removeItem(REFRESH_TOKEN_KEY);
+    store.removeItem(API_KEY_KEY);
+    store.removeItem(API_KEY_OWNER_KEY);
   }
-  if (store) store.removeItem(API_KEY_KEY);
   // Best-effort: tell the puffer host to forget the key too, so a stale
   // PUFFER_API_KEY doesn't leak across signed-out sessions.
   void (async () => {

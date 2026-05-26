@@ -34,11 +34,20 @@ async function ensureCachedApiKey(): Promise<void> {
   const localOrigin = state.origins?.find(
     (o) => o.origin === "http://localhost:1456"
   );
+  // Both apiKey AND apiKeyOwner must be present — the owner tag is the
+  // new (P0 fix) ownership guard. An untagged legacy entry is treated
+  // as untrusted by getWorldRouterApiKey, so re-mint to refresh the
+  // tagging.
   const hasKey = localOrigin?.localStorage?.some(
     (e) => e.name === "puffer.worldrouterApiKey" && e.value.startsWith("sk-")
   );
-  if (hasKey) return;
-  // Mint a key against the cached JWT and write it back into the state file.
+  const hasOwner = localOrigin?.localStorage?.some(
+    (e) => e.name === "puffer.worldrouterApiKeyOwner" && e.value.length > 0
+  );
+  if (hasKey && hasOwner) return;
+  // Mint a key against the cached JWT and write it back into the state
+  // file. loadAuthFromStorage MUST run first so authState is signedIn
+  // — the mint race guard requires it before persisting.
   const { chromium } = await import("@playwright/test");
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ storageState: STORAGE_STATE_FILE });
@@ -46,6 +55,7 @@ async function ensureCachedApiKey(): Promise<void> {
   await page.goto("http://localhost:1456/");
   const minted = await page.evaluate(async () => {
     const mod = await import("/src-v2/lib/auth.svelte.ts");
+    await mod.loadAuthFromStorage();
     const token = mod.getAuthToken();
     if (!token) return { ok: false, reason: "no token in cached state" };
     try {
@@ -261,11 +271,139 @@ test.describe("login persistence", () => {
     const wiped = await page.evaluate(() => ({
       token: localStorage.getItem("puffer.authToken"),
       refresh: localStorage.getItem("puffer.authRefreshToken"),
-      apiKey: localStorage.getItem("puffer.worldrouterApiKey")
+      apiKey: localStorage.getItem("puffer.worldrouterApiKey"),
+      apiKeyOwner: localStorage.getItem("puffer.worldrouterApiKeyOwner")
     }));
     expect(wiped.token).toBeNull();
     expect(wiped.refresh).toBeNull();
     expect(wiped.apiKey, "API key MUST be cleared when login is wiped").toBeNull();
+    expect(
+      wiped.apiKeyOwner,
+      "API key owner tag MUST be cleared alongside the key"
+    ).toBeNull();
+  });
+
+  test("getWorldRouterApiKey rejects a cached key whose owner doesn't match current user (P0 cross-user fix)", async ({
+    page
+  }) => {
+    test.setTimeout(60_000);
+    // Land on /home with whatever the cached state gives us, then
+    // overwrite localStorage AND re-run loadAuthFromStorage so authState
+    // re-decodes from our test JWT (rather than the cached real one).
+    // Doing the overwrite via addInitScript would race with Playwright's
+    // own storageState restore — explicit page.evaluate after the gate
+    // settles is deterministic.
+    await page.goto("/");
+    await page.waitForURL(/localhost:1456\/#\/(home|onboarding)/, {
+      timeout: 15_000
+    });
+
+    const result = await page.evaluate(async () => {
+      const mod = await import("/src-v2/lib/auth.svelte.ts");
+      const b64url = (s: string) =>
+        btoa(s).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+      const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+      const payload = b64url(
+        JSON.stringify({
+          sub: "user-B-sub",
+          email: "userB@example.com",
+          exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24
+        })
+      );
+      // Cross-user scenario: user-B's JWT in token slot, user-A's key+owner
+      // in the key slots. P0 fix says getWorldRouterApiKey returns null.
+      localStorage.setItem("puffer.authToken", `${header}.${payload}.sig`);
+      localStorage.setItem(
+        "puffer.worldrouterApiKey",
+        "sk-worldrouter-belongs-to-A"
+      );
+      localStorage.setItem("puffer.worldrouterApiKeyOwner", "user-A-sub");
+      // Reload authState from the overwritten storage so authState.user.sub
+      // is now "user-B-sub" — without this the test reads stale authState
+      // from the initial cached-state load.
+      await mod.loadAuthFromStorage();
+      return {
+        getKey: mod.getWorldRouterApiKey(),
+        rawKey: localStorage.getItem("puffer.worldrouterApiKey"),
+        rawOwner: localStorage.getItem("puffer.worldrouterApiKeyOwner")
+      };
+    });
+    expect(result.rawKey).toBe("sk-worldrouter-belongs-to-A");
+    expect(result.rawOwner).toBe("user-A-sub");
+    expect(
+      result.getKey,
+      "getWorldRouterApiKey MUST return null when cached owner != current user"
+    ).toBeNull();
+  });
+
+  test("mintWorldRouterApiKey drops the result if authState changed mid-mint (P0 race-guard fix)", async ({
+    page
+  }) => {
+    test.setTimeout(60_000);
+    // Stub control-api so we don't actually mint against prod.
+    await page.route("**/control-api.worldrouter.ai/**", (route) => {
+      const url = route.request().url();
+      if (url.endsWith("/auth/exchange")) {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            session_token: "stub-session",
+            default_team_id: "stub-team"
+          })
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ key: "sk-worldrouter-RACE-LOSER" })
+      });
+    });
+
+    await page.goto("/");
+    await page.waitForURL(/localhost:1456\/#\/(home|onboarding|login)/, {
+      timeout: 15_000
+    });
+    const outcome = await page.evaluate(async () => {
+      const mod = await import("/src-v2/lib/auth.svelte.ts");
+      // Force authState into a state where it CAN'T match a "ghost-user"
+      // JWT: wipe storage, re-load → status=signedOut, user=null.
+      localStorage.removeItem("puffer.authToken");
+      localStorage.removeItem("puffer.authRefreshToken");
+      localStorage.removeItem("puffer.worldrouterApiKey");
+      localStorage.removeItem("puffer.worldrouterApiKeyOwner");
+      await mod.loadAuthFromStorage();
+      // Build a valid-looking JWT for "ghost-user". The race guard
+      // inside mint requires authState.user.sub === jwt.sub; here
+      // authState.user is null → guard rejects.
+      const b64url = (s: string) =>
+        btoa(s).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+      const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+      const payload = b64url(
+        JSON.stringify({
+          sub: "ghost-user",
+          email: "ghost@example.com",
+          exp: Math.floor(Date.now() / 1000) + 3600
+        })
+      );
+      const token = `${header}.${payload}.sig`;
+      const returned = await mod.mintWorldRouterApiKey(token);
+      return {
+        returnedKey: returned,
+        persistedKey: localStorage.getItem("puffer.worldrouterApiKey"),
+        persistedOwner: localStorage.getItem("puffer.worldrouterApiKeyOwner"),
+        authStatus: mod.authState.status
+      };
+    });
+    expect(outcome.authStatus).toBe("signedOut");
+    // The function returns the key (caller convenience) but does NOT
+    // persist it when the owner session is no longer current.
+    expect(outcome.returnedKey).toBe("sk-worldrouter-RACE-LOSER");
+    expect(
+      outcome.persistedKey,
+      "mint MUST NOT persist the key when authState's user doesn't match jwt.sub"
+    ).toBeNull();
+    expect(outcome.persistedOwner).toBeNull();
   });
 
   test("signOut clears the API key alongside auth state", async ({ page }) => {
@@ -274,7 +412,8 @@ test.describe("login persistence", () => {
     const before = await page.evaluate(() => ({
       token: localStorage.getItem("puffer.authToken"),
       refresh: localStorage.getItem("puffer.authRefreshToken"),
-      apiKey: localStorage.getItem("puffer.worldrouterApiKey")
+      apiKey: localStorage.getItem("puffer.worldrouterApiKey"),
+      apiKeyOwner: localStorage.getItem("puffer.worldrouterApiKeyOwner")
     }));
     expect(before.token).not.toBeNull();
 
@@ -307,11 +446,13 @@ test.describe("login persistence", () => {
       return {
         token: localStorage.getItem("puffer.authToken"),
         refresh: localStorage.getItem("puffer.authRefreshToken"),
-        apiKey: localStorage.getItem("puffer.worldrouterApiKey")
+        apiKey: localStorage.getItem("puffer.worldrouterApiKey"),
+        apiKeyOwner: localStorage.getItem("puffer.worldrouterApiKeyOwner")
       };
     });
     expect(after.token).toBeNull();
     expect(after.refresh).toBeNull();
     expect(after.apiKey).toBeNull();
+    expect(after.apiKeyOwner).toBeNull();
   });
 });

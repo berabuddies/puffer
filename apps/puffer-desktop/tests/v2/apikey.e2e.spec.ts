@@ -37,9 +37,12 @@ test.describe("worldrouter API-key minting", () => {
     // Drive the helper directly from the page context so we hit control-api
     // with the same origin (and same cookies, if any) as production usage.
     const result = await page.evaluate(async () => {
-      // Dynamically import the helper so this test stays decoupled from
-      // module-load timing.
       const mod = await import("/src-v2/lib/auth.svelte.ts");
+      // mintWorldRouterApiKey's race guard requires authState to be
+      // signedIn with the same sub as the JWT being minted. Without
+      // loadAuthFromStorage first, authState is "unknown" and the guard
+      // would drop the mint result on the floor.
+      await mod.loadAuthFromStorage();
       const token = mod.getAuthToken();
       if (!token) return { ok: false, reason: "no token in localStorage" };
       try {
