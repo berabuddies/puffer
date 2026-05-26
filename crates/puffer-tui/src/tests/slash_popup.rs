@@ -34,6 +34,27 @@ fn enter_completion_lets_exact_workflow_subcommands_submit() {
 }
 
 #[test]
+fn slash_completion_fills_connect_catalog_rows() {
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.insert_str("/connect email", &commands);
+
+    assert!(tui.apply_selected_command(&commands));
+    assert_eq!(tui.input, "/connect email email");
+    assert_eq!(tui.cursor, tui.input.len());
+}
+
+#[test]
+fn enter_completion_fills_partial_connect_catalog_rows() {
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.insert_str("/connect telegram personal", &commands);
+
+    assert!(tui.complete_on_enter(&commands));
+    assert_eq!(tui.input, "/connect telegram-login telegram-user");
+}
+
+#[test]
 fn render_shows_workflow_subcommand_popup_after_command_space() {
     let backend = TestBackend::new(110, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -61,4 +82,34 @@ fn render_shows_workflow_subcommand_popup_after_command_space() {
     assert!(rendered.contains("/workflows connections"));
     assert!(rendered.contains("/workflows connectors"));
     assert!(rendered.contains("Search connector catalog"));
+}
+
+#[test]
+fn render_shows_connect_catalog_popup_after_command_space() {
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/connect telegram personal",
+                26,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("/connect telegram-login"));
+    assert!(rendered.contains("connection=telegram-user"));
+    assert!(rendered.contains("Telegram personal account"));
 }

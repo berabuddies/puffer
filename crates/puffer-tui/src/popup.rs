@@ -1,4 +1,7 @@
 use puffer_core::CommandSpec;
+use puffer_subscriptions::{
+    builtin_connector_templates, suggested_connection_slug, ConnectorTemplate,
+};
 
 const MAX_POPUP_ROWS: usize = 8;
 
@@ -15,6 +18,11 @@ struct WorkflowSubcommand {
     description: &'static str,
     hint: Option<&'static str>,
     search_terms: &'static [&'static str],
+}
+
+struct ConnectorPopupRow {
+    row: PopupRow,
+    search_text: String,
 }
 
 const WORKFLOW_SUBCOMMANDS: &[WorkflowSubcommand] = &[
@@ -79,6 +87,9 @@ pub(crate) fn popup_rows(input: &str, commands: &[CommandSpec]) -> Vec<PopupRow>
     if let Some(rows) = workflow_subcommand_rows(input) {
         return rows;
     }
+    if let Some(rows) = connector_catalog_rows(input) {
+        return rows;
+    }
     if !input.starts_with('/') || input.contains(' ') {
         return Vec::new();
     }
@@ -101,7 +112,10 @@ pub(crate) fn popup_accepts_input(input: &str) -> bool {
     let Some((command, rest)) = input.trim_start_matches('/').split_once(' ') else {
         return true;
     };
-    is_workflows_command(command) && !rest.trim_start().contains(char::is_whitespace)
+    if is_workflows_command(command) {
+        return !rest.trim_start().contains(char::is_whitespace);
+    }
+    command == "connect" && !connect_has_explicit_connection_name(rest)
 }
 
 /// Returns true when the input already exactly matches the selected popup row.
@@ -264,6 +278,137 @@ fn workflow_subcommand_row(subcommand: &WorkflowSubcommand) -> PopupRow {
     }
 }
 
+fn connector_catalog_rows(input: &str) -> Option<Vec<PopupRow>> {
+    let rest = input
+        .strip_prefix('/')?
+        .split_once(' ')
+        .filter(|(command, _)| *command == "connect")?
+        .1;
+    if connect_has_explicit_connection_name(rest) {
+        return None;
+    }
+    let terms = search_terms(rest);
+    let mut rows = builtin_connector_templates()
+        .into_iter()
+        .map(connector_popup_row)
+        .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| connector_row_sort_key(row, rest.trim()));
+    rows.truncate(MAX_POPUP_ROWS);
+    Some(rows.into_iter().map(|row| row.row).collect())
+}
+
+fn connect_has_explicit_connection_name(rest: &str) -> bool {
+    let tokens = rest.split_whitespace().collect::<Vec<_>>();
+    tokens.len() >= 2
+        && builtin_connector_templates()
+            .into_iter()
+            .any(|template| template.slug == tokens[0])
+}
+
+fn connector_popup_row(template: ConnectorTemplate) -> ConnectorPopupRow {
+    let suggested_connection = suggested_connection_slug(&template.slug);
+    let slug = template.slug.clone();
+    let description = connector_popup_description(&template, &suggested_connection);
+    let search_text = connector_popup_search_text(&template, &suggested_connection);
+    ConnectorPopupRow {
+        row: PopupRow {
+            name: format!("connect {slug}"),
+            description,
+            replacement: format!("/connect {slug} {suggested_connection}"),
+            append_space: false,
+        },
+        search_text,
+    }
+}
+
+fn connector_popup_description(template: &ConnectorTemplate, suggested_connection: &str) -> String {
+    let mut details = vec![format!("connection={suggested_connection}")];
+    details.push(
+        if template.requires_auth {
+            "auth"
+        } else {
+            "no auth"
+        }
+        .to_string(),
+    );
+    if template.can_subscribe {
+        details.push("trigger".to_string());
+    }
+    if template.can_proxy_agent {
+        details.push("agent proxy".to_string());
+    }
+    if !template.skill.trim().is_empty() {
+        details.push(format!("skill={}", template.skill.trim()));
+    }
+    if !template.actions.is_empty() {
+        let mut actions = template.actions.keys().cloned().collect::<Vec<_>>();
+        actions.sort();
+        details.push(format!("actions={}", actions.join(",")));
+    }
+    format!("{}  {}", template.description, details.join("; "))
+}
+
+fn connector_popup_search_text(template: &ConnectorTemplate, suggested_connection: &str) -> String {
+    let actions = template
+        .actions
+        .keys()
+        .flat_map(|action| [action.to_string(), action.replace('_', " ")])
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{} {} {} {} {} {} {} {}",
+        template.slug,
+        suggested_connection,
+        template.description,
+        template.skill,
+        template.binary,
+        if template.requires_auth {
+            "auth"
+        } else {
+            "no auth"
+        },
+        if template.can_subscribe {
+            "trigger subscribe subscriber event events workflow"
+        } else {
+            "no trigger setup only"
+        },
+        actions
+    )
+    .to_ascii_lowercase()
+}
+
+fn connector_row_sort_key(row: &ConnectorPopupRow, filter: &str) -> (u8, String) {
+    let name = row.row.name.to_ascii_lowercase();
+    let description = row.row.description.to_ascii_lowercase();
+    let filter = filter.to_ascii_lowercase();
+    if filter.is_empty() {
+        return (0, name);
+    }
+    if name == format!("connect {filter}") || name == filter {
+        return (0, name);
+    }
+    if name.starts_with(&format!("connect {filter}")) || name.starts_with(&filter) {
+        return (1, name);
+    }
+    if name.contains(&filter) {
+        return (2, name);
+    }
+    if description.contains(&filter) {
+        return (3, name);
+    }
+    (4, name)
+}
+
+fn search_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::popup_rows;
@@ -331,6 +476,37 @@ mod tests {
         let rows = popup_rows("/connector-slug", &commands);
 
         assert_eq!(rows.first().map(|row| row.name.as_str()), Some("connect"));
+    }
+
+    #[test]
+    fn popup_matches_connect_catalog_after_command_space() {
+        let commands = supported_commands();
+        let rows = popup_rows("/connect tel", &commands);
+
+        assert!(rows.iter().any(|row| row.name == "connect telegram-login"
+            && row.replacement == "/connect telegram-login telegram-user"));
+        assert!(rows.iter().any(|row| row.name == "connect telegram-bot"
+            && row.replacement == "/connect telegram-bot telegram-bot"));
+    }
+
+    #[test]
+    fn popup_matches_connect_catalog_metadata_terms() {
+        let commands = supported_commands();
+        let rows = popup_rows("/connect vote poll", &commands);
+
+        assert!(rows.iter().any(|row| row.name == "connect telegram-login"));
+        let event_rows = popup_rows("/connect imap events", &commands);
+        assert!(event_rows.iter().any(|row| row.name == "connect email"));
+    }
+
+    #[test]
+    fn popup_hides_connect_catalog_after_explicit_connection_name() {
+        let commands = supported_commands();
+
+        assert!(popup_rows("/connect telegram-login personal-account", &commands).is_empty());
+        assert!(!super::popup_accepts_input(
+            "/connect telegram-login personal-account"
+        ));
     }
 
     #[test]

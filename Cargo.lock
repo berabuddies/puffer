@@ -4900,6 +4900,7 @@ dependencies = [
  "puffer-provider-registry",
  "puffer-resources",
  "puffer-session-store",
+ "puffer-subscriptions",
  "puffer-test-support",
  "puffer-tools",
  "puffer-transport-anthropic",
