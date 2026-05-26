@@ -34,6 +34,7 @@ pub(super) fn ensure_filesystem_path_access(
     input: &Value,
     tool_filter: Option<&RequestToolFilter>,
     mut policy: FilesystemPermissionPolicy,
+    skip_prompt: bool,
 ) -> Result<std::result::Result<FilesystemPermissionPolicy, ToolExecutionResult>> {
     let Some(request) = filesystem_path_request(cwd, &definition.id, input) else {
         return Ok(Ok(policy));
@@ -58,6 +59,10 @@ pub(super) fn ensure_filesystem_path_access(
         }
     }
     if filesystem_policy_allows_path(cwd, &policy, &request.path) {
+        return Ok(Ok(policy));
+    }
+    if skip_prompt {
+        policy.workspace_roots.push(request.grant_root);
         return Ok(Ok(policy));
     }
 

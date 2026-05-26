@@ -12,6 +12,7 @@ pub struct LambdaSkillStatus {
     pub model_invocable: bool,
     pub model_invocation_disabled: bool,
     pub allowed_tools: Vec<String>,
+    pub require_approval: bool,
     pub failure_reason: Option<String>,
 }
 
@@ -48,6 +49,15 @@ impl LambdaSkillStatus {
         }
         format!("allowed tools {}", self.allowed_tools.join(", "))
     }
+
+    /// Renders whether verified concrete calls still require user approval.
+    pub(crate) fn approval_label(&self) -> &'static str {
+        if self.require_approval {
+            "verified tool approval required"
+        } else {
+            "verified tool approval skipped"
+        }
+    }
 }
 
 /// Returns one status value for a Lambda-verified skill.
@@ -66,6 +76,7 @@ pub fn lambda_skill_status(skill: &SkillSpec) -> Option<LambdaSkillStatus> {
         model_invocable: !skill.disable_model_invocation && readiness.failure_reason.is_none(),
         model_invocation_disabled: skill.disable_model_invocation,
         allowed_tools,
+        require_approval: verification.require_approval,
         failure_reason: readiness.failure_reason,
     })
 }

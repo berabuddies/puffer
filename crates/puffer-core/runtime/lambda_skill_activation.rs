@@ -28,6 +28,9 @@ pub(crate) fn gate_for_verified_skill_activation(
         );
     };
     active_gate.set_request_tool_filter(request_tool_filter_for_verified_skill(skill)?);
+    if let Some(verification) = skill.verification.as_ref() {
+        active_gate.set_require_concrete_tool_approval(verification.require_approval);
+    }
     Ok(gate)
 }
 

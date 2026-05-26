@@ -95,6 +95,26 @@ pub(super) fn lambda_skill_gate_scopes_tool_call(
     filter.allows_call(definition, cwd, input).unwrap_or(true)
 }
 
+/// Returns true when an exact verified concrete call should skip user approval.
+pub(super) fn lambda_skill_skips_concrete_approval(
+    state: &AppState,
+    registry: &ToolRegistry,
+    tool_id: &str,
+    input: &Value,
+) -> bool {
+    let Some(pending) = state.pending_lambda_host_call.as_ref() else {
+        return false;
+    };
+    if pending.requires_approval() {
+        return false;
+    }
+    let canonical_input = registry
+        .definition(tool_id)
+        .map(|definition| lambda_pending_input_for_tool(definition, input))
+        .unwrap_or_else(|| input.clone());
+    pending.permits_concrete_call(tool_id, &canonical_input)
+}
+
 /// Commits the Lambda Skill gate transition after the concrete tool succeeds.
 pub(super) fn commit_successful_lambda_skill_gate_call(
     state: &mut AppState,
@@ -281,6 +301,7 @@ pub(super) fn prepare_lambda_host_call(
                 metadata_host_args,
                 parsed.tool,
                 pending_concrete_input.clone(),
+                gate.require_concrete_tool_approval(),
             ));
             let concrete_input_text = serde_json::to_string(&pending_concrete_input)
                 .unwrap_or_else(|_| "null".to_string());

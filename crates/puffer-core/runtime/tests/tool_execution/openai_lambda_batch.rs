@@ -37,6 +37,7 @@ fn openai_skill_batch_serializes_before_parallel_safe_concrete_tools() {
                     host_catalogue_path: Some(host_path.display().to_string()),
                     compiler_path: None,
                     host_tool_bindings: Default::default(),
+                    require_approval: false,
                     tools: Some(1),
                     actions: Some(1),
                 }),

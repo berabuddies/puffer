@@ -1,7 +1,7 @@
 use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,8 @@ struct SaveLambdaSkillLibraryParams {
     #[serde(default)]
     disable_model_invocation: bool,
     #[serde(default)]
+    require_approval: bool,
+    #[serde(default)]
     disabled_skills: Vec<String>,
     #[serde(default)]
     scope: Option<String>,
@@ -37,6 +39,14 @@ struct SetLambdaSkillEnabledParams {
     source_kind: String,
     skill_name: String,
     enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetLambdaSkillApprovalParams {
+    library_id: String,
+    source_kind: String,
+    require_approval: bool,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +76,8 @@ struct LambdaSkillLibraryManifestDto {
     user_invocable: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     disable_model_invocation: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    require_approval: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     disabled_skills: Vec<String>,
 }
@@ -83,6 +95,7 @@ struct LambdaSkillLibraryInfoDto {
     skill_host_tool_bindings: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     user_invocable: bool,
     disable_model_invocation: bool,
+    require_approval: bool,
     disabled_skills: Vec<String>,
     source_kind: String,
     source_path: String,
@@ -104,6 +117,7 @@ struct LambdaVerifiedSkillInfoDto {
     gate_source: Option<String>,
     failure_reason: Option<String>,
     allowed_tools: Vec<String>,
+    require_approval: bool,
     tools: Option<usize>,
     actions: Option<usize>,
 }
@@ -234,6 +248,7 @@ pub(crate) fn handle_save_lambda_skill_library(
         skill_host_tool_bindings: normalize_skill_tool_bindings(params.skill_host_tool_bindings),
         user_invocable: params.user_invocable,
         disable_model_invocation: params.disable_model_invocation,
+        require_approval: params.require_approval,
         disabled_skills: normalize_lambda_skill_names(params.disabled_skills),
     };
     infer_missing_lambda_skill_manifest_fields(&mut manifest);
@@ -279,6 +294,23 @@ pub(crate) fn handle_set_lambda_skill_enabled(
         manifest.disabled_skills.push(skill_name);
         manifest.disabled_skills.sort();
     }
+    std::fs::write(&path, serde_yaml::to_string(&manifest)?)
+        .with_context(|| format!("write {}", path.display()))?;
+    lambda_skill_libraries_snapshot(state)
+}
+
+pub(crate) fn handle_set_lambda_skill_approval(
+    state: &DaemonState,
+    params: &Value,
+) -> Result<Value> {
+    let params: SetLambdaSkillApprovalParams = serde_json::from_value(params.clone())?;
+    let id = params.library_id.trim();
+    validate_lambda_skill_library_id(id)?;
+    let path = lambda_skill_manifest_path(state, params.source_kind.trim(), id)?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let mut manifest: LambdaSkillLibraryManifestDto =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    manifest.require_approval = params.require_approval;
     std::fs::write(&path, serde_yaml::to_string(&manifest)?)
         .with_context(|| format!("write {}", path.display()))?;
     lambda_skill_libraries_snapshot(state)
@@ -390,6 +422,7 @@ fn lambda_skill_library_manifest_dtos(
             skill_host_tool_bindings: BTreeMap::new(),
             user_invocable: manifest.user_invocable,
             disable_model_invocation: manifest.disable_model_invocation,
+            require_approval: manifest.require_approval,
             disabled_skills: normalize_lambda_skill_names(manifest.disabled_skills),
             source_kind: source_kind.to_string(),
             source_path: path.display().to_string(),
@@ -576,6 +609,7 @@ fn lambda_verified_skill_dto_for_dir(
         gate_source: readiness.gate_source,
         failure_reason: readiness.failure_reason,
         allowed_tools: library.allowed_tools.clone(),
+        require_approval: library.require_approval,
         tools: stats.as_ref().and_then(|stats| stats.tools),
         actions: stats.as_ref().and_then(|stats| stats.actions),
     })

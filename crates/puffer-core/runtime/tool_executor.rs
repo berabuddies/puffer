@@ -12,7 +12,8 @@ use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
 use super::lambda_gate::merge_tool_metadata;
 use super::lambda_tool::{
     commit_successful_lambda_skill_gate_call, lambda_skill_gate_scopes_tool_call,
-    prepare_lambda_host_call, reject_lambda_skill_gate_preflight, LAMBDA_HOST_CALL_TOOL_ID,
+    lambda_skill_skips_concrete_approval, prepare_lambda_host_call,
+    reject_lambda_skill_gate_preflight, LAMBDA_HOST_CALL_TOOL_ID,
 };
 use super::local_tools::{
     enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
@@ -105,6 +106,8 @@ pub(super) fn execute_tool_call(
     {
         return Ok(denied);
     }
+    let skip_verified_approval =
+        lambda_skill_skips_concrete_approval(state, registry, tool_id, &input);
     let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
@@ -126,27 +129,29 @@ pub(super) fn execute_tool_call(
             ));
         }
         ToolPermissionBehavior::Ask => {
-            match resolve_ask_behavior(
-                state,
-                resources,
-                providers,
-                auth_store,
-                cwd,
-                effective_tool_filter.as_ref(),
-                &definition,
-                &input,
-                permission_decision.reason.as_deref(),
-                &permission_context.effective_profile().current_session_id,
-                &permission_context.effective_profile().workspace_roots,
-            )? {
-                AskResolution::AllowOnce => {}
-                AskResolution::AllowSession => {}
-                AskResolution::Deny => {
-                    return Ok(blocked_runtime_tool(
-                        tool_id,
-                        ToolPermissionBehavior::Deny,
-                        Some("permission denied by user".to_string()),
-                    ));
+            if !skip_verified_approval {
+                match resolve_ask_behavior(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    cwd,
+                    effective_tool_filter.as_ref(),
+                    &definition,
+                    &input,
+                    permission_decision.reason.as_deref(),
+                    &permission_context.effective_profile().current_session_id,
+                    &permission_context.effective_profile().workspace_roots,
+                )? {
+                    AskResolution::AllowOnce => {}
+                    AskResolution::AllowSession => {}
+                    AskResolution::Deny => {
+                        return Ok(blocked_runtime_tool(
+                            tool_id,
+                            ToolPermissionBehavior::Deny,
+                            Some("permission denied by user".to_string()),
+                        ));
+                    }
                 }
             }
         }
@@ -161,6 +166,7 @@ pub(super) fn execute_tool_call(
         &input,
         effective_tool_filter.as_ref(),
         filesystem_policy,
+        skip_verified_approval,
     )? {
         Ok(policy) => policy,
         Err(denied) => return Ok(denied),
@@ -344,6 +350,8 @@ pub(super) fn resolve_tool_permission(
             )));
         }
     };
+    let skip_verified_approval =
+        lambda_skill_skips_concrete_approval(state, registry, tool_id, input);
     let input = prepare_browser_permission_input(state, cwd, &definition, input.clone())?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
@@ -364,37 +372,41 @@ pub(super) fn resolve_tool_permission(
             )));
         }
         ToolPermissionBehavior::Ask => {
-            match resolve_ask_behavior(
-                state,
-                resources,
-                providers,
-                auth_store,
-                cwd,
-                effective_tool_filter.as_ref(),
-                &definition,
-                &input,
-                permission_decision.reason.as_deref(),
-                &permission_context.effective_profile().current_session_id,
-                &permission_context.effective_profile().workspace_roots,
-            )? {
-                AskResolution::AllowOnce => {
-                    permission_context.derived_policy().filesystem().clone()
-                }
-                AskResolution::AllowSession => {
-                    remember_browser_target(state, &definition, &input);
-                    runtime_filesystem_policy(
-                        cwd,
-                        resources,
-                        state,
-                        effective_tool_filter.as_ref(),
-                    )?
-                }
-                AskResolution::Deny => {
-                    return Ok(PermissionOutcome::Denied(blocked_runtime_tool(
-                        tool_id,
-                        ToolPermissionBehavior::Deny,
-                        Some("permission denied by user".to_string()),
-                    )));
+            if skip_verified_approval {
+                permission_context.derived_policy().filesystem().clone()
+            } else {
+                match resolve_ask_behavior(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    cwd,
+                    effective_tool_filter.as_ref(),
+                    &definition,
+                    &input,
+                    permission_decision.reason.as_deref(),
+                    &permission_context.effective_profile().current_session_id,
+                    &permission_context.effective_profile().workspace_roots,
+                )? {
+                    AskResolution::AllowOnce => {
+                        permission_context.derived_policy().filesystem().clone()
+                    }
+                    AskResolution::AllowSession => {
+                        remember_browser_target(state, &definition, &input);
+                        runtime_filesystem_policy(
+                            cwd,
+                            resources,
+                            state,
+                            effective_tool_filter.as_ref(),
+                        )?
+                    }
+                    AskResolution::Deny => {
+                        return Ok(PermissionOutcome::Denied(blocked_runtime_tool(
+                            tool_id,
+                            ToolPermissionBehavior::Deny,
+                            Some("permission denied by user".to_string()),
+                        )));
+                    }
                 }
             }
         }
@@ -409,6 +421,7 @@ pub(super) fn resolve_tool_permission(
         &input,
         effective_tool_filter.as_ref(),
         base_policy,
+        skip_verified_approval,
     )
     .map(|outcome| match outcome {
         Ok(policy) => PermissionOutcome::Allowed(policy),

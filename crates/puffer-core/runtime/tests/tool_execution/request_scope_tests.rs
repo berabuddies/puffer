@@ -661,6 +661,7 @@ fn model_invoked_verified_lambda_skill_installs_gate_and_tool_scope() {
                     host_catalogue_path: Some(host_path.display().to_string()),
                     compiler_path: None,
                     host_tool_bindings: Default::default(),
+                    require_approval: false,
                     tools: Some(1),
                     actions: Some(1),
                 }),

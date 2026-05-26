@@ -500,6 +500,7 @@ pub(crate) struct LambdaGateState {
     caps: BTreeSet<String>,
     facts: BTreeSet<LambdaFact>,
     request_tool_filter: Option<RequestToolFilter>,
+    require_concrete_tool_approval: bool,
 }
 
 impl LambdaGateState {
@@ -511,6 +512,7 @@ impl LambdaGateState {
             caps,
             facts: BTreeSet::new(),
             request_tool_filter: None,
+            require_concrete_tool_approval: false,
         }
     }
 
@@ -522,6 +524,7 @@ impl LambdaGateState {
             caps: caps.into_iter().collect(),
             facts: BTreeSet::new(),
             request_tool_filter: None,
+            require_concrete_tool_approval: false,
         }
     }
 
@@ -533,6 +536,16 @@ impl LambdaGateState {
     /// Returns the concrete Puffer tool scope active for this Lambda Skill.
     pub(crate) fn request_tool_filter(&self) -> Option<&RequestToolFilter> {
         self.request_tool_filter.as_ref()
+    }
+
+    /// Sets whether verified concrete calls should still use normal approval.
+    pub(crate) fn set_require_concrete_tool_approval(&mut self, require_approval: bool) {
+        self.require_concrete_tool_approval = require_approval;
+    }
+
+    /// Returns true when verified concrete calls should still use normal approval.
+    pub(crate) fn require_concrete_tool_approval(&self) -> bool {
+        self.require_concrete_tool_approval
     }
 
     /// Returns the current standing facts.

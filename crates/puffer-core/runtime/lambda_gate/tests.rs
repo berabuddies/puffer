@@ -473,6 +473,7 @@ fn skill_path_contract_matches_loaded_skill_root() {
         host_catalogue_path: Some(catalogue.display().to_string()),
         compiler_path: None,
         host_tool_bindings: Default::default(),
+        require_approval: false,
         tools: None,
         actions: None,
     });
@@ -520,6 +521,7 @@ fn skill_shell_path_template_contract_quotes_loaded_skill_root() {
         host_catalogue_path: Some(catalogue.display().to_string()),
         compiler_path: None,
         host_tool_bindings: Default::default(),
+        require_approval: false,
         tools: None,
         actions: None,
     });
@@ -839,11 +841,7 @@ fn native_mcp_tool_name_refinement_is_checked_semantically() {
     let mut gate = LambdaGateState::with_host_caps(host);
     let registry = serde_json::json!({"tools": ["mcp__agentmail__send_message"]});
     assert!(gate
-        .step_call_with_args_and_result(
-            "discover_tools",
-            &serde_json::json!({}),
-            &registry
-        )
+        .step_call_with_args_and_result("discover_tools", &serde_json::json!({}), &registry)
         .is_accept());
 
     assert!(gate
@@ -886,6 +884,7 @@ fn gate_for_verified_skill_reads_catalogue_file() {
         host_catalogue_path: Some(catalogue.display().to_string()),
         compiler_path: None,
         host_tool_bindings: Default::default(),
+        require_approval: false,
         tools: None,
         actions: None,
     });
@@ -913,6 +912,7 @@ fn gate_for_verified_skill_ignores_compiler_path_without_host_catalogue() {
         host_catalogue_path: None,
         compiler_path: Some(compiler.display().to_string()),
         host_tool_bindings: Default::default(),
+        require_approval: false,
         tools: None,
         actions: None,
     });

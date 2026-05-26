@@ -8,6 +8,7 @@ pub(crate) struct PendingLambdaHostCall {
     metadata_host_args: Value,
     concrete_tool: String,
     concrete_input: Value,
+    require_approval: bool,
 }
 
 impl PendingLambdaHostCall {
@@ -18,6 +19,7 @@ impl PendingLambdaHostCall {
         metadata_host_args: Value,
         concrete_tool: impl Into<String>,
         concrete_input: Value,
+        require_approval: bool,
     ) -> Self {
         Self {
             host_tool: host_tool.into(),
@@ -25,6 +27,7 @@ impl PendingLambdaHostCall {
             metadata_host_args,
             concrete_tool: concrete_tool.into(),
             concrete_input,
+            require_approval,
         }
     }
 
@@ -51,5 +54,10 @@ impl PendingLambdaHostCall {
     /// Returns true when the pending bridge permits this concrete call.
     pub(crate) fn permits_concrete_call(&self, tool_id: &str, input: &Value) -> bool {
         self.concrete_tool == tool_id && self.concrete_input == *input
+    }
+
+    /// Returns true when this verified bridge should still run normal approval.
+    pub(crate) fn requires_approval(&self) -> bool {
+        self.require_approval
     }
 }

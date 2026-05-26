@@ -1369,7 +1369,7 @@ mod tests {
         fs::write(
             manifest_dir.join("verified.yaml"),
             format!(
-                "id: verified\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\nhost_tool_bindings:\n  gh_auth_status:\n    - Bash\nskill_host_tool_bindings:\n  gh-fix-ci:\n    gh_pr_view:\n      - Bash\n",
+                "id: verified\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\nrequire_approval: true\nhost_tool_bindings:\n  gh_auth_status:\n    - Bash\nskill_host_tool_bindings:\n  gh-fix-ci:\n    gh_pr_view:\n      - Bash\n",
                 external_root.display()
             ),
         )
@@ -1416,6 +1416,7 @@ mod tests {
             verification.host_tool_bindings.get("gh_pr_view"),
             Some(&vec!["Bash".to_string()])
         );
+        assert!(verification.require_approval);
     }
 
     #[test]

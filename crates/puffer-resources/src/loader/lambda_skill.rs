@@ -32,6 +32,12 @@ pub(super) struct LambdaSkillLibrarySpec {
     user_invocable: bool,
     #[serde(default = "default_lambda_skill_disable_model_invocation")]
     disable_model_invocation: bool,
+    #[serde(
+        default,
+        alias = "requireApproval",
+        alias = "require_concrete_tool_approval"
+    )]
+    require_approval: bool,
     #[serde(default, alias = "disabledSkills")]
     disabled_skills: Vec<String>,
     #[serde(default)]
@@ -264,6 +270,7 @@ fn load_lambda_skill_dir(
                 host_catalogue_path: host_catalogue_path.map(|path| path.display().to_string()),
                 compiler_path: None,
                 host_tool_bindings,
+                require_approval: spec.require_approval,
                 tools: stats.as_ref().and_then(|stats| stats.tools),
                 actions: stats.as_ref().and_then(|stats| stats.actions),
             }),

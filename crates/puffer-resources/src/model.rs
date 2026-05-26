@@ -278,6 +278,8 @@ pub struct SkillVerificationSpec {
     #[serde(default)]
     pub host_tool_bindings: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    pub require_approval: bool,
+    #[serde(default)]
     pub tools: Option<usize>,
     #[serde(default)]
     pub actions: Option<usize>,

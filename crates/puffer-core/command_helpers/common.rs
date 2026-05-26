@@ -80,7 +80,7 @@ pub fn render_skills_config_panel(cwd: &Path) -> String {
         .user_config_dir
         .join("resources/lambda_skill_libraries");
     format!(
-        "Lambda Skill library config\n\nManifest directories:\n- workspace: {}\n- user: {}\n\nCreate one YAML file per external library, for example:\n\n```yaml\nid: my-lambda-skills\nroot: /absolute/path/to/lambda-skill-library\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\n```\n\nPuffer expects each Verified Skill folder to include precompiled verification output such as out/GENERATED.SKILL.md and out/host.json. After saving, run /reload-plugins or restart the session. Use /skills or /doctor to verify gate readiness.",
+        "Lambda Skill library config\n\nManifest directories:\n- workspace: {}\n- user: {}\n\nCreate one YAML file per external library, for example:\n\n```yaml\nid: my-lambda-skills\nroot: /absolute/path/to/lambda-skill-library\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\nrequire_approval: false\n```\n\nPuffer expects each Verified Skill folder to include precompiled verification output such as out/GENERATED.SKILL.md and out/host.json. After saving, run /reload-plugins or restart the session. Use /skills or /doctor to verify gate readiness.",
         workspace_dir.display(),
         user_dir.display()
     )
@@ -587,6 +587,7 @@ fn append_skill_verification_details(details: &mut Vec<String>, skill: &SkillSpe
         details.push(status.readiness_label());
         details.push(status.model_invocation_label().to_string());
         details.push(status.allowed_tools_label());
+        details.push(status.approval_label().to_string());
         return;
     }
     details.push(lambda_verified_label(verification));
@@ -835,6 +836,7 @@ mod tests {
                         host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
                         host_tool_bindings: Default::default(),
+                        require_approval: false,
                         tools: Some(10),
                         actions: Some(2),
                     }),
@@ -850,7 +852,7 @@ mod tests {
 
         let rendered = render_skills_panel(&resources);
         assert!(rendered.contains(
-            "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions) · gate-ready via host catalogue · model-invocable · allowed tools Read, LambdaHostCall, LambdaInternal"
+            "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions) · gate-ready via host catalogue · model-invocable · allowed tools Read, LambdaHostCall, LambdaInternal · verified tool approval skipped"
         ));
     }
 
@@ -868,6 +870,7 @@ mod tests {
                 host_catalogue_path: None,
                 compiler_path: None,
                 host_tool_bindings: Default::default(),
+                require_approval: false,
                 tools: Some(10),
                 actions: Some(2),
             }),
@@ -899,6 +902,7 @@ mod tests {
                 host_catalogue_path: None,
                 compiler_path: None,
                 host_tool_bindings: Default::default(),
+                require_approval: false,
                 tools: Some(10),
                 actions: Some(2),
             }),
@@ -925,6 +929,7 @@ mod tests {
                 host_catalogue_path: None,
                 compiler_path: None,
                 host_tool_bindings: Default::default(),
+                require_approval: false,
                 tools: Some(10),
                 actions: Some(2),
             }),

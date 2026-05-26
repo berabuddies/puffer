@@ -20,6 +20,7 @@
     removeLambdaSkillLibrary,
     saveLambdaSkillLibrary,
     savePermissions,
+    setLambdaSkillApproval,
     setLambdaSkillEnabled,
     updateConfig,
     type LambdaSkillLibraryInfo,
@@ -134,6 +135,7 @@
   let lambdaSaving = $state(false);
   let lambdaRemovingLibrary = $state<string | null>(null);
   let lambdaTogglingSkill = $state<string | null>(null);
+  let lambdaTogglingApproval = $state<string | null>(null);
   let lambdaError = $state<string | null>(null);
   let lambdaSaved = $state<string | null>(null);
 
@@ -325,7 +327,10 @@
       skill.tools != null ? `${skill.tools} tools` : null,
       skill.actions != null ? `${skill.actions} actions` : null
     ].filter(Boolean);
-    return counts.length > 0 ? `${scope} Verified Skill · ${counts.join(" · ")}` : `${scope} Verified Skill`;
+    const approval = skill.requireApproval ? "asks before tools" : "no extra approval";
+    return counts.length > 0
+      ? `${scope} Verified Skill · ${counts.join(" · ")} · ${approval}`
+      : `${scope} Verified Skill · ${approval}`;
   }
 
   function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
@@ -376,7 +381,8 @@
           root,
           scope: "workspace",
           userInvocable: true,
-          disableModelInvocation: false
+          disableModelInvocation: false,
+          requireApproval: false
         }),
         15000,
         "Adding this Verified Skills folder is still running. Try Refresh again in a moment."
@@ -444,6 +450,38 @@
       void loadLambdaSkillLibraries();
     } finally {
       lambdaTogglingSkill = null;
+    }
+  }
+
+  async function toggleVerifiedSkillApproval(library: LambdaSkillLibraryInfo, requireApproval: boolean) {
+    if (library.sourceKind !== "workspace" && library.sourceKind !== "user") {
+      lambdaError = "This Verified Skills folder is not backed by an editable config.";
+      return;
+    }
+    const key = lambdaLibraryKey(library);
+    lambdaTogglingApproval = key;
+    lambdaError = null;
+    lambdaSaved = null;
+    try {
+      lambdaSnapshot = await withTimeout(
+        setLambdaSkillApproval({
+          libraryId: library.id,
+          sourceKind: library.sourceKind,
+          requireApproval
+        }),
+        15000,
+        "Updating this Verified Skills approval setting is still running. Try Refresh again in a moment."
+      );
+      lambdaLoaded = true;
+      lambdaSaved = requireApproval
+        ? `Extra approval enabled for ${basenameFromPath(library.root)}`
+        : `Verified calls now run without extra approval for ${basenameFromPath(library.root)}`;
+      props.onRefresh();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      void loadLambdaSkillLibraries();
+    } finally {
+      lambdaTogglingApproval = null;
     }
   }
 
@@ -1128,17 +1166,29 @@
       <h3 class="pf-settings-subhead">Folders</h3>
       <div class="pf-mcp-list">
         {#each lambdaSnapshot?.libraries ?? [] as library (library.sourcePath)}
-          <div class="pf-mcp-card">
+          <div class="pf-mcp-card pf-verified-folder-card">
             <span class="ico"><Icon name="shield" size={16} /></span>
             <div>
               <div class="title">{basenameFromPath(library.root)}</div>
               <div class="desc">
                 {verifiedSkillScopeLabel(library)} Verified Skills folder
+                · {library.requireApproval ? "asks before verified tools" : "runs verified tools without extra approval"}
               </div>
             </div>
             <span class:ready={verifiedSkillStatus(library) === "Ready for model use"} class="pf-status-pill">
               {verifiedSkillStatus(library)}
             </span>
+            <label class="pf-inline-switch">
+              <span>Ask before tools</span>
+              <input
+                type="checkbox"
+                class="sc-switch"
+                checked={library.requireApproval}
+                disabled={lambdaTogglingApproval === lambdaLibraryKey(library) || lambdaSaving || (library.sourceKind !== "workspace" && library.sourceKind !== "user")}
+                aria-label={`Require approval for ${basenameFromPath(library.root)} verified tools`}
+                onchange={(e) => toggleVerifiedSkillApproval(library, (e.currentTarget as HTMLInputElement).checked)}
+              />
+            </label>
             <input
               type="checkbox"
               class="sc-switch"

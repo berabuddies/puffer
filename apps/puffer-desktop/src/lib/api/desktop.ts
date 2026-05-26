@@ -1783,6 +1783,7 @@ export type LambdaSkillLibraryInfo = {
   skillHostToolBindings: Record<string, Record<string, string[]>>;
   userInvocable: boolean;
   disableModelInvocation: boolean;
+  requireApproval: boolean;
   disabledSkills: string[];
   sourceKind: string;
   sourcePath: string;
@@ -1802,6 +1803,7 @@ export type LambdaVerifiedSkillInfo = {
   gateSource?: string | null;
   failureReason?: string | null;
   allowedTools: string[];
+  requireApproval: boolean;
   tools?: number | null;
   actions?: number | null;
 };
@@ -1828,6 +1830,7 @@ export type SaveLambdaSkillLibraryInput = {
   skillHostToolBindings?: Record<string, Record<string, string[]>>;
   userInvocable?: boolean;
   disableModelInvocation?: boolean;
+  requireApproval?: boolean;
   scope?: "workspace" | "user";
 };
 
@@ -1836,6 +1839,12 @@ export type SetLambdaSkillEnabledInput = {
   sourceKind: "workspace" | "user";
   skillName: string;
   enabled: boolean;
+};
+
+export type SetLambdaSkillApprovalInput = {
+  libraryId: string;
+  sourceKind: "workspace" | "user";
+  requireApproval: boolean;
 };
 
 export type RemoveLambdaSkillLibraryInput = {
@@ -1907,6 +1916,13 @@ export async function setLambdaSkillEnabled(
 ): Promise<LambdaSkillLibrariesSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<LambdaSkillLibrariesSnapshot>("set_lambda_skill_enabled", input);
+}
+
+export async function setLambdaSkillApproval(
+  input: SetLambdaSkillApprovalInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("set_lambda_skill_approval", input);
 }
 
 /** Patch the user config file and return the fresh settings snapshot. The

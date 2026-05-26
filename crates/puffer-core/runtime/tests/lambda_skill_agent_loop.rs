@@ -150,6 +150,7 @@ fn openai_responses_model_selected_lambda_skill_scope_is_turn_local() {
                     host_catalogue_path: Some(host_path.display().to_string()),
                     compiler_path: None,
                     host_tool_bindings: Default::default(),
+                    require_approval: false,
                     tools: Some(1),
                     actions: Some(1),
                 }),

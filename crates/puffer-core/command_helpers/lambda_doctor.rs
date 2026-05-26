@@ -105,11 +105,12 @@ pub(crate) fn lambda_skill_doctor_warnings(
 
 fn render_lambda_skill_status_line(status: &LambdaSkillStatus) -> String {
     format!(
-        "{}: {}; {}; {}",
+        "{}: {}; {}; {}; {}",
         status.name,
         status.readiness_label(),
         status.model_invocation_label(),
-        status.allowed_tools_label()
+        status.allowed_tools_label(),
+        status.approval_label()
     )
 }
 
@@ -181,6 +182,7 @@ mod tests {
                         host_catalogue_path: None,
                         compiler_path: None,
                         host_tool_bindings: Default::default(),
+                        require_approval: false,
                         tools: Some(2),
                         actions: Some(3),
                     }),
@@ -201,7 +203,7 @@ mod tests {
             "lambda_skills=1 precompiled_catalogues=0 missing_gate_config=1 stats_known=1 tools=2 actions=3"
         ));
         assert!(status.contains(
-            "lambda_skill verified-demo: not gate-ready: verified Lambda Skill requires a precompiled host catalogue; set host_catalogue_subpath in the lambda_skill_libraries manifest; model invocation blocked; allowed tools Read, LambdaHostCall, LambdaInternal"
+            "lambda_skill verified-demo: not gate-ready: verified Lambda Skill requires a precompiled host catalogue; set host_catalogue_subpath in the lambda_skill_libraries manifest; model invocation blocked; allowed tools Read, LambdaHostCall, LambdaInternal; verified tool approval skipped"
         ));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].summary.contains("verified-demo"));
@@ -234,6 +236,7 @@ mod tests {
                         host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
                         host_tool_bindings: Default::default(),
+                        require_approval: false,
                         tools: Some(2),
                         actions: Some(1),
                     }),
@@ -252,7 +255,7 @@ mod tests {
 
         assert!(status.contains("lambda_skills=1 precompiled_catalogues=1"));
         assert!(status.contains(
-            "lambda_skill verified-ready: gate-ready via host catalogue; model-invocable; allowed tools Read, ToolSearch, LambdaHostCall, LambdaInternal"
+            "lambda_skill verified-ready: gate-ready via host catalogue; model-invocable; allowed tools Read, ToolSearch, LambdaHostCall, LambdaInternal; verified tool approval skipped"
         ));
         assert!(warnings.is_empty());
     }
@@ -281,6 +284,7 @@ mod tests {
                         host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
                         host_tool_bindings: Default::default(),
+                        require_approval: false,
                         tools: Some(2),
                         actions: Some(1),
                     }),
@@ -337,6 +341,7 @@ mod tests {
                         host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
                         host_tool_bindings: Default::default(),
+                        require_approval: false,
                         tools: Some(1),
                         actions: Some(1),
                     }),
@@ -388,6 +393,7 @@ mod tests {
                         host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
                         host_tool_bindings: Default::default(),
+                        require_approval: false,
                         tools: Some(1),
                         actions: Some(1),
                     }),
@@ -439,6 +445,7 @@ mod tests {
                         host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
                         host_tool_bindings: Default::default(),
+                        require_approval: false,
                         tools: Some(1),
                         actions: Some(1),
                     }),
