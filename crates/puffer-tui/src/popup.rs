@@ -4,13 +4,13 @@ const MAX_POPUP_ROWS: usize = 8;
 
 /// Returns slash-command popup rows for the current slash-input prefix.
 pub(crate) fn popup_rows<'a>(input: &str, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
-    let filter = input.trim_start_matches('/');
+    let filter = input.trim_start_matches('/').to_ascii_lowercase();
     let mut rows = commands
         .iter()
         .filter(|command| !command.hidden)
-        .filter(|command| command_matches(command, filter))
+        .filter(|command| command_matches(command, &filter))
         .collect::<Vec<_>>();
-    rows.sort_by_key(|command| sort_key(command, filter));
+    rows.sort_by_key(|command| sort_key(command, &filter));
     rows.truncate(MAX_POPUP_ROWS);
     rows
 }
@@ -24,6 +24,13 @@ fn command_matches(command: &CommandSpec, filter: &str) -> bool {
             .any(|alias| alias.starts_with(filter))
         || command.name.contains(filter)
         || command.aliases.iter().any(|alias| alias.contains(filter))
+        || command.description.to_ascii_lowercase().contains(filter)
+        || command
+            .argument_hint
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains(filter)
 }
 
 fn sort_key(command: &CommandSpec, filter: &str) -> (u8, String) {
@@ -43,7 +50,16 @@ fn sort_key(command: &CommandSpec, filter: &str) -> (u8, String) {
     {
         return (2, command.name.to_string());
     }
-    (3, command.name.to_string())
+    if command.name.contains(filter) {
+        return (3, command.name.to_string());
+    }
+    if command.aliases.iter().any(|alias| alias.contains(filter)) {
+        return (4, command.name.to_string());
+    }
+    if command.description.to_ascii_lowercase().contains(filter) {
+        return (5, command.name.to_string());
+    }
+    (6, command.name.to_string())
 }
 
 #[cfg(test)]
@@ -95,6 +111,24 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "test");
+    }
+
+    #[test]
+    fn popup_matches_workflow_connector_terms_in_descriptions() {
+        let commands = supported_commands();
+        let rows = popup_rows("/connector", &commands);
+        let names = rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>();
+
+        assert!(names.contains(&"connect"));
+        assert!(names.contains(&"workflows"));
+    }
+
+    #[test]
+    fn popup_matches_argument_hints() {
+        let commands = supported_commands();
+        let rows = popup_rows("/connector-slug", &commands);
+
+        assert_eq!(rows.first().map(|row| row.name.as_str()), Some("connect"));
     }
 
     fn visible_command(name: &str) -> CommandSpec {

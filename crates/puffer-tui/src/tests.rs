@@ -62,6 +62,35 @@ fn render_shows_command_popup_for_slash_input() {
 }
 
 #[test]
+fn render_shows_workflow_connector_commands_for_description_search() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/connector",
+                10,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("/connect"));
+    assert!(rendered.contains("/workflows"));
+}
+
+#[test]
 fn parse_shell_shortcut_accepts_bang_prefix() {
     assert_eq!(parse_shell_shortcut("!printf hi"), Some("printf hi"));
     assert_eq!(parse_shell_shortcut("!!printf hi"), Some("printf hi"));
