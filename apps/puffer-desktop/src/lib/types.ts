@@ -446,9 +446,22 @@ export type WorkflowBinding = {
   status: string;
   enabled: boolean;
   action_type: string;
+  action_path?: string | null;
+  action_format?: string | null;
+  filter_pattern?: string | null;
   monitor?: boolean;
   monitor_memory_path?: string | null;
   created_at_ms?: number | null;
+};
+
+export type WorkflowBindingCreateRequest = {
+  slug?: string;
+  description?: string;
+  connection_slug: string;
+  connector_slug?: string | null;
+  pattern?: string | null;
+  file_append_path: string;
+  enabled?: boolean;
 };
 
 export type WorkflowSnapshot = {

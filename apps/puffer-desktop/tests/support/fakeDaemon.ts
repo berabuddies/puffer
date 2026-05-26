@@ -1267,6 +1267,8 @@ export class FakeDaemon {
         return this.workflowListResponse();
       case "workflow_save":
         return this.saveWorkflow(request.params);
+      case "workflow_binding_create":
+        return this.createWorkflowBinding(request.params);
       case "workflow_toggle":
         return this.toggleWorkflow(request.params);
       case "list_dir":
@@ -1314,6 +1316,47 @@ export class FakeDaemon {
         ...this.workflowSnapshot.workflows.filter((candidate) => candidate.slug !== slug),
         { ...workflow }
       ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
+    };
+    return this.workflowListResponse();
+  }
+
+  private createWorkflowBinding(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "");
+    const connectorSlug = String(params.connector_slug ?? "");
+    const path = String(params.file_append_path ?? params.path ?? "");
+    const slug = String(params.slug ?? `append-${connectionSlug}-${path.split("/").filter(Boolean).at(-1) ?? "events"}`);
+    if (!connectionSlug || !path) throw new Error("missing workflow binding");
+    const enabled = params.enabled !== false;
+    const pattern = typeof params.pattern === "string" && params.pattern.trim() ? params.pattern.trim() : null;
+    const binding = {
+      slug,
+      description: String(params.description ?? `Append ${connectionSlug} messages to ${path}`),
+      connection_slug: connectionSlug,
+      connector_slug: connectorSlug || null,
+      status: enabled ? "enabled" : "paused",
+      enabled,
+      action_type: "file_append",
+      action_path: path,
+      action_format: "text",
+      filter_pattern: pattern,
+      monitor: false,
+      monitor_memory_path: null,
+      created_at_ms: Date.now()
+    };
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflow_bindings: [
+        ...(this.workflowSnapshot.workflow_bindings ?? []).filter((candidate) => candidate.slug !== slug),
+        binding
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? ""))),
+      connections: this.workflowSnapshot.connections?.map((connection) => {
+        if (connection.slug !== connectionSlug) return connection;
+        return {
+          ...connection,
+          has_consumer: enabled || Boolean(connection.has_consumer),
+          state: enabled && connection.state === "authenticated" ? "active" : connection.state
+        };
+      })
     };
     return this.workflowListResponse();
   }

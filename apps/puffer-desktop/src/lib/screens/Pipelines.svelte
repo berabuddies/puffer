@@ -2,7 +2,7 @@
   import "../design/pipeline.css";
 
   import { onMount } from "svelte";
-  import { loadWorkflowSnapshot, saveWorkflow, toggleWorkflow } from "../api/desktop";
+  import { createWorkflowBinding, loadWorkflowSnapshot, saveWorkflow, toggleWorkflow } from "../api/desktop";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import Puffer from "../design/Puffer.svelte";
   import type {
@@ -66,7 +66,7 @@
     searchText: string;
   };
 
-  type MonitorBindingSearchRow = {
+  type WorkflowBindingSearchRow = {
     binding: WorkflowBinding;
     searchText: string;
   };
@@ -161,6 +161,7 @@
   let selectedConnectorSlug = $state<string | null>(null);
   let selectedConnectorConnectionName = $state("");
   let selectedConnectorDraftPattern = $state("");
+  let selectedConnectorAppendPath = $state("/tmp/hi");
   let runIdx = $state<number | null>(null);
   let stepIdx = $state<number | null>(null);
   let loading = $state(false);
@@ -170,6 +171,7 @@
   let connectionCommandRunningFor = $state<string | null>(null);
   let monitorCommandRunningFor = $state<string | null>(null);
   let monitorTaskCommandRunningFor = $state<string | null>(null);
+  let creatingWorkflowBinding = $state(false);
   let togglingWorkflowSlug = $state<string | null>(null);
   let savingWorkflowSlug = $state<string | null>(null);
   let refreshGeneration = 0;
@@ -181,15 +183,18 @@
   let connections = $derived(snapshot.connections ?? []);
   let workflowBindings = $derived(snapshot.workflow_bindings ?? []);
   let monitorBindings = $derived(workflowBindings.filter((binding) => binding.monitor === true));
+  let actionBindings = $derived(workflowBindings.filter((binding) => binding.monitor !== true));
   let monitorTasks = $derived(snapshot.monitor_tasks ?? []);
   let activeMonitorTasks = $derived(monitorTasks.filter((task) => !monitorTaskIgnored(task)));
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
   let connectorSearchRows = $derived(indexConnectors(connectors, connections));
   let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
-  let monitorBindingSearchRows = $derived(indexMonitorBindings(monitorBindings));
+  let monitorBindingSearchRows = $derived(indexWorkflowBindings(monitorBindings, "monitor workflow connection monitor"));
+  let actionBindingSearchRows = $derived(indexWorkflowBindings(actionBindings, "workflow action file append trigger save message events"));
   let monitorTaskSearchRows = $derived(indexMonitorTasks(activeMonitorTasks));
   let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQuery));
-  let filteredMonitorBindings = $derived(filterMonitorBindings(monitorBindingSearchRows, connectorQuery));
+  let filteredMonitorBindings = $derived(filterWorkflowBindings(monitorBindingSearchRows, connectorQuery));
+  let filteredActionBindings = $derived(filterWorkflowBindings(actionBindingSearchRows, connectorQuery));
   let filteredMonitorTasks = $derived(filterMonitorTasks(monitorTaskSearchRows, connectorQuery));
   let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQuery));
   let workflow = $derived(
@@ -217,6 +222,9 @@
   let selectedConnectorConnectionInvalid = $derived(
     selectedConnector !== null && !connectionSlugValid(selectedConnectorConnectionName)
   );
+  let selectedConnectorAppendPathInvalid = $derived(
+    selectedConnector !== null && !appendPathValid(selectedConnectorAppendPath)
+  );
   let selectedConnectorCommand = $derived(
     selectedConnector && !selectedConnectorConnectionInvalid
       ? connectorConnectCommand(selectedConnector, selectedConnectorConnectionName.trim())
@@ -227,6 +235,7 @@
       ? workflowDraftCommand(selectedConnectorConnectionName.trim(), selectedConnectorDraftPattern)
       : ""
   );
+  let selectedAppendWorkflowPreview = $derived(selectedConnector ? appendWorkflowPreview() : "");
   let workflowDirty = $derived(workflow ? dirtyWorkflowSlugs.includes(workflow.slug) : false);
 
   let wrapEl = $state<HTMLDivElement | undefined>();
@@ -722,6 +731,49 @@
     );
   }
 
+  async function createAppendWorkflowForSelectedConnector() {
+    if (!selectedConnector) return;
+    if (connectorCommandRunnerBusy()) return;
+    const connectionSlug = selectedConnectorConnectionName.trim();
+    const path = selectedConnectorAppendPath.trim();
+    if (!connectorTriggerSupported(selectedConnector)) {
+      saveNotice = `${selectedConnector.connector_slug} cannot start workflow triggers yet.`;
+      return;
+    }
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    if (!appendPathValid(path)) {
+      saveNotice = "Append paths must be relative or under /tmp.";
+      return;
+    }
+    creatingWorkflowBinding = true;
+    error = null;
+    const pattern = normalizedPattern(selectedConnectorDraftPattern);
+    const slug = appendBindingSlug(connectionSlug, path);
+    saveNotice = `Creating ${slug}...`;
+    try {
+      const next = await createWorkflowBinding({
+        slug,
+        description: `Append ${connectionSlug} messages to ${path}`,
+        connection_slug: connectionSlug,
+        connector_slug: selectedConnector.connector_slug,
+        pattern: pattern || null,
+        file_append_path: path,
+        enabled: true
+      });
+      applyWorkflowSnapshot(next);
+      saveNotice = `Created append workflow ${slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not create append workflow: ${message}`;
+    } finally {
+      creatingWorkflowBinding = false;
+    }
+  }
+
   function workflowDraftCommand(connectionSlug: string, pattern?: string | null): string {
     const slug = connectionSlug.trim();
     if (!slug) return "";
@@ -763,6 +815,30 @@
     return /^[a-z0-9-]+$/.test(value.trim());
   }
 
+  function appendPathValid(value: string): boolean {
+    const path = value.trim();
+    const segments = path.split("/").filter(Boolean);
+    if (!path || path.startsWith("~/") || segments.includes("..")) return false;
+    return !path.startsWith("/") || path.startsWith("/tmp/");
+  }
+
+  function appendBindingSlug(connectionSlug: string, path: string): string {
+    const leaf = path.split("/").filter(Boolean).at(-1) ?? "events";
+    return `append-${connectionSlug}-${slugFragment(leaf)}`;
+  }
+
+  function slugFragment(value: string): string {
+    const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+    return slug || "events";
+  }
+
+  function appendWorkflowPreview(): string {
+    if (!selectedConnector || selectedConnectorConnectionInvalid) return "Enter a valid connection name.";
+    if (selectedConnectorAppendPathInvalid) return "Enter a relative path or /tmp path.";
+    const pattern = normalizedPattern(selectedConnectorDraftPattern);
+    return `${selectedConnectorConnectionName.trim()} ${pattern || ".*"} -> ${selectedConnectorAppendPath.trim()}`;
+  }
+
   function updateSelectedConnectorConnectionName(value: string) {
     selectedConnectorConnectionName = value;
     if (!selectedConnector || !connectorTriggerSupported(selectedConnector) || !connectionSlugValid(value)) {
@@ -776,6 +852,10 @@
 
   function updateSelectedConnectorDraftPattern(value: string) {
     selectedConnectorDraftPattern = value;
+  }
+
+  function updateSelectedConnectorAppendPath(value: string) {
+    selectedConnectorAppendPath = value;
   }
 
   async function copyWorkflowCommand(command: string) {
@@ -862,6 +942,7 @@
       || connectionCommandRunningFor !== null
       || monitorCommandRunningFor !== null
       || monitorTaskCommandRunningFor !== null
+      || creatingWorkflowBinding
       || togglingWorkflowSlug !== null;
   }
 
@@ -1131,11 +1212,11 @@
     });
   }
 
-  function indexMonitorBindings(items: WorkflowBinding[]): MonitorBindingSearchRow[] {
+  function indexWorkflowBindings(items: WorkflowBinding[], scope: string): WorkflowBindingSearchRow[] {
     return items.map((binding) => ({
       binding,
       searchText: buildSearchText([
-        "monitor workflow connection monitor",
+        scope,
         binding.slug,
         binding.description,
         binding.connection_slug,
@@ -1143,6 +1224,9 @@
         binding.status,
         binding.enabled ? "enabled active" : "paused disabled",
         binding.action_type,
+        binding.action_path,
+        binding.action_format,
+        binding.filter_pattern,
         binding.monitor_memory_path
       ])
     }));
@@ -1166,7 +1250,7 @@
     }));
   }
 
-  function filterMonitorBindings(rows: MonitorBindingSearchRow[], query: string): WorkflowBinding[] {
+  function filterWorkflowBindings(rows: WorkflowBindingSearchRow[], query: string): WorkflowBinding[] {
     const terms = searchTerms(query);
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.binding);
   }
@@ -1754,6 +1838,11 @@
                   {filteredMonitorBindings.length}/{monitorBindings.length} monitors
                 </div>
               {/if}
+              {#if actionBindings.length > 0}
+                <div class="pf-connector-result-summary" aria-label="Workflow action search results">
+                  {filteredActionBindings.length}/{actionBindings.length} actions
+                </div>
+              {/if}
               {#if activeMonitorTasks.length > 0}
                 <div class="pf-connector-result-summary" aria-label="Monitor task search results">
                   {filteredMonitorTasks.length}/{activeMonitorTasks.length} monitor tasks
@@ -1871,6 +1960,49 @@
                           class="pf-monitor-action-btn"
                           aria-label={monitorBindingToggleLabel(binding)}
                           title={monitorBindingToggleLabel(binding)}
+                          aria-busy={togglingWorkflowSlug === binding.slug}
+                          disabled={togglingWorkflowSlug !== null}
+                          onclick={() => toggleMonitorBinding(binding)}
+                        >
+                          <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
+                        </button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+
+                {#if actionBindings.length > 0}
+                  <div class="pf-monitor-workflows" aria-label="Workflow actions">
+                    <div class="pf-monitor-tasks-head">
+                      <span><Icon name="file" size={12} />Workflow actions</span>
+                      <small>{filteredActionBindings.length}/{actionBindings.length}</small>
+                    </div>
+                    {#if filteredActionBindings.length === 0}
+                      <div class="pf-connector-empty">No matching workflow actions.</div>
+                    {/if}
+                    {#each filteredActionBindings as binding (binding.slug)}
+                      <div class="pf-monitor-workflow-row" data-enabled={binding.enabled}>
+                        <div class="pf-monitor-workflow-main">
+                          <span class="pf-connector-main">
+                            <strong>{monitorBindingLabel(binding)}</strong>
+                            <small>{binding.slug} - {binding.connection_slug}</small>
+                            {#if binding.action_path}
+                              <span class="pf-monitor-task-detail">{binding.action_path}</span>
+                            {/if}
+                          </span>
+                          <span class="pf-connector-tags">
+                            <span>{monitorBindingStatus(binding)}</span>
+                            {#if binding.connector_slug}<span>{binding.connector_slug}</span>{/if}
+                            <span>{binding.action_type}</span>
+                            {#if binding.filter_pattern}<span>{binding.filter_pattern}</span>{/if}
+                            {#if binding.action_format}<span>{binding.action_format}</span>{/if}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          class="pf-monitor-action-btn"
+                          aria-label={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
+                          title={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
                           aria-busy={togglingWorkflowSlug === binding.slug}
                           disabled={togglingWorkflowSlug !== null}
                           onclick={() => toggleMonitorBinding(binding)}
@@ -2085,6 +2217,19 @@
                           oninput={(event) => updateSelectedConnectorDraftPattern(event.currentTarget.value)}
                         />
                       </label>
+                      <label class="pf-connector-name">
+                        <span>Append path</span>
+                        <input
+                          aria-label="Append file path"
+                          aria-invalid={selectedConnectorAppendPathInvalid}
+                          placeholder="/tmp/hi"
+                          value={selectedConnectorAppendPath}
+                          oninput={(event) => updateSelectedConnectorAppendPath(event.currentTarget.value)}
+                        />
+                      </label>
+                      {#if selectedConnectorAppendPathInvalid}
+                        <div class="pf-connector-validation">Use a relative path or an absolute /tmp path.</div>
+                      {/if}
                     {/if}
                     <div class="pf-connector-command" aria-label="Selected connector command">
                       <Icon name="terminal" size={12} />
@@ -2141,6 +2286,23 @@
                             onclick={copySelectedConnectorDraftCommand}
                           >
                             <Icon name="copy" size={12} />
+                          </button>
+                        </div>
+                      </div>
+                      <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected append workflow">
+                        <Icon name="file" size={12} />
+                        <code>{selectedAppendWorkflowPreview}</code>
+                        <div class="pf-connector-command-actions">
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Create append workflow for selected connector"
+                            title="Create append workflow for selected connector"
+                            aria-busy={creatingWorkflowBinding}
+                            disabled={selectedConnectorConnectionInvalid || selectedConnectorAppendPathInvalid || connectorCommandRunnerBusy()}
+                            onclick={createAppendWorkflowForSelectedConnector}
+                          >
+                            <Icon name="plus" size={12} />
                           </button>
                         </div>
                       </div>

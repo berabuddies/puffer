@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
-    connection_workflow_trigger_supported, connector_runtime_hints,
+    connection_subscriber_manifest, connection_workflow_trigger_supported, connector_runtime_hints,
     connector_workflow_trigger_supported, suggested_connection_slug, ActionSpec, ConnectionRecord,
-    SubscriberManifestRoots, WorkflowBindingSpec, WorkflowBindingStatus,
+    ConnectorTemplate, FilterSpec, SubscriberManifestRoots, TaggedFilterSpec, WorkflowBindingSpec,
+    WorkflowBindingStatus,
 };
 use puffer_workflow::{RegisterOptions, WorkflowStore};
 use serde::Deserialize;
@@ -37,6 +38,49 @@ pub(crate) fn handle_workflow_save(paths: &ConfigPaths, params: &Value) -> Resul
     add_workflow_binding_context(paths, &mut snapshot);
     add_monitor_task_context(paths, &mut snapshot);
     Ok(snapshot)
+}
+
+/// Creates or updates a simple connection-triggered file append workflow binding.
+pub(crate) fn handle_workflow_binding_create(paths: &ConfigPaths, params: &Value) -> Result<Value> {
+    let parsed: WorkflowBindingCreateParams =
+        serde_json::from_value(params.clone()).context("invalid workflow binding create params")?;
+    let manager = subscription_manager()?;
+    let (connection, connector_slug, template) = resolve_binding_trigger(
+        paths,
+        manager.as_ref(),
+        &parsed.connection_slug,
+        parsed.connector_slug.as_deref(),
+    )?;
+    let binding = file_append_binding_from_params(parsed, connector_slug)?;
+    let enabled = binding.status == WorkflowBindingStatus::Enabled;
+    let binding_slug = binding.slug.clone();
+    let previous = manager.store().get(&binding_slug);
+    manager.store().upsert(binding.clone())?;
+    let setup_result = (|| -> Result<()> {
+        if enabled {
+            if let Some(connection) = connection.as_ref() {
+                ensure_workflow_subscriber_started(manager.as_ref(), paths, connection, &template)?;
+            }
+        }
+        manager.refresh_connection_consumers()?;
+        Ok(())
+    })();
+    if let Err(error) = setup_result {
+        let rollback_result = if let Some(previous) = previous {
+            manager.store().upsert(previous).map(|_| ())
+        } else {
+            manager.store().delete(&binding_slug)
+        };
+        if let Err(rollback_error) = rollback_result {
+            anyhow::bail!(
+                "workflow binding `{binding_slug}` setup failed: {error:#}; rollback failed: {rollback_error:#}"
+            );
+        }
+        manager.refresh_connection_consumers()?;
+        return Err(error)
+            .with_context(|| format!("workflow binding `{binding_slug}` setup failed"));
+    }
+    handle_workflow_list(paths)
 }
 
 /// Toggles a native workflow or subscription workflow binding.
@@ -212,6 +256,9 @@ fn add_workflow_binding_context(paths: &ConfigPaths, snapshot: &mut Value) {
 
 fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> Value {
     let action_type = workflow_action_type(&binding.action);
+    let action_path = workflow_action_path(&binding.action);
+    let action_format = workflow_action_format(&binding.action);
+    let filter_pattern = workflow_filter_pattern(binding.filter.as_ref());
     let monitor = binding.slug.starts_with("monitor-")
         || (matches!(binding.action, ActionSpec::TriageAgent { .. })
             && binding.description.to_ascii_lowercase().contains("monitor"));
@@ -232,6 +279,9 @@ fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> V
         "status": workflow_status_label(binding.status),
         "enabled": binding.status == WorkflowBindingStatus::Enabled,
         "action_type": action_type,
+        "action_path": action_path,
+        "action_format": action_format,
+        "filter_pattern": filter_pattern,
         "monitor": monitor,
         "monitor_memory_path": monitor_memory_path,
         "created_at_ms": binding.created_at_ms,
@@ -252,6 +302,31 @@ fn workflow_action_type(action: &ActionSpec) -> &'static str {
     }
 }
 
+fn workflow_action_path(action: &ActionSpec) -> Option<&str> {
+    match action {
+        ActionSpec::SqliteInsert { path, .. } | ActionSpec::FileAppend { path, .. } => {
+            Some(path.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn workflow_action_format(action: &ActionSpec) -> Option<String> {
+    match action {
+        ActionSpec::FileAppend { format, .. } => serde_json::to_value(format)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned)),
+        _ => None,
+    }
+}
+
+fn workflow_filter_pattern(filter: Option<&FilterSpec>) -> Option<&str> {
+    match filter {
+        Some(FilterSpec::Tagged(TaggedFilterSpec::Regex { pattern, .. })) => Some(pattern.as_str()),
+        _ => None,
+    }
+}
+
 fn workflow_status(enabled: bool) -> WorkflowBindingStatus {
     if enabled {
         WorkflowBindingStatus::Enabled
@@ -265,6 +340,185 @@ fn workflow_status_label(status: WorkflowBindingStatus) -> &'static str {
         WorkflowBindingStatus::Enabled => "enabled",
         WorkflowBindingStatus::Paused => "paused",
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowBindingCreateParams {
+    #[serde(default)]
+    slug: Option<String>,
+    connection_slug: String,
+    #[serde(default)]
+    connector_slug: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default, alias = "path")]
+    file_append_path: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+fn resolve_binding_trigger(
+    paths: &ConfigPaths,
+    manager: &puffer_subscriptions::SubscriptionManager,
+    connection_slug: &str,
+    connector_slug: Option<&str>,
+) -> Result<(Option<ConnectionRecord>, String, ConnectorTemplate)> {
+    let roots = subscriber_manifest_roots(paths);
+    if let Some(connection) = manager.connection_store().get(connection_slug) {
+        if let Some(connector_slug) = connector_slug {
+            if connector_slug != connection.connector_slug {
+                anyhow::bail!(
+                    "connection `{}` uses connector `{}`, not `{connector_slug}`",
+                    connection.slug,
+                    connection.connector_slug
+                );
+            }
+        }
+        let template = manager
+            .connector_store()
+            .get(&connection.connector_slug)
+            .ok_or_else(|| {
+                anyhow::anyhow!("connector `{}` not found", connection.connector_slug)
+            })?;
+        if !connection_workflow_trigger_supported(&roots, &connection, &template) {
+            anyhow::bail!(
+                "connector `{}` cannot produce workflow trigger events",
+                connection.connector_slug
+            );
+        }
+        return Ok((
+            Some(connection.clone()),
+            connection.connector_slug.clone(),
+            template,
+        ));
+    }
+
+    let connector_slug = connector_slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("missing connector_slug for a new workflow connection")?;
+    let template = manager
+        .connector_store()
+        .get(connector_slug)
+        .ok_or_else(|| anyhow::anyhow!("connector `{connector_slug}` not found"))?;
+    if !connector_workflow_trigger_supported(&roots, &template) {
+        anyhow::bail!("connector `{connector_slug}` cannot produce workflow trigger events");
+    }
+    Ok((None, connector_slug.to_string(), template))
+}
+
+fn file_append_binding_from_params(
+    params: WorkflowBindingCreateParams,
+    connector_slug: String,
+) -> Result<WorkflowBindingSpec> {
+    let connection_slug = params.connection_slug.trim();
+    if connection_slug.is_empty() {
+        anyhow::bail!("connection_slug must not be empty");
+    }
+    let path = params
+        .file_append_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("missing file_append_path")?
+        .to_string();
+    let slug = params
+        .slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_file_append_slug(connection_slug, &path));
+    let pattern = params
+        .pattern
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != ".*")
+        .map(ToOwned::to_owned);
+    let action = serde_json::from_value::<ActionSpec>(json!({
+        "type": "file_append",
+        "path": path,
+        "format": "text",
+    }))
+    .context("build file_append action")?;
+    Ok(WorkflowBindingSpec {
+        slug,
+        description: params.description.unwrap_or_else(|| {
+            format!(
+                "Append {connection_slug} messages to {}",
+                workflow_action_path(&action).unwrap_or("")
+            )
+        }),
+        connection_slug: connection_slug.to_string(),
+        connector_slug: Some(connector_slug),
+        status: workflow_status(params.enabled.unwrap_or(true)),
+        filter: pattern.map(|pattern| {
+            FilterSpec::Tagged(TaggedFilterSpec::Regex {
+                pattern,
+                case_insensitive: true,
+            })
+        }),
+        classify_prompt: None,
+        classify_model: None,
+        action,
+        created_at_ms: puffer_subscriptions::now_ms(),
+    })
+}
+
+fn default_file_append_slug(connection_slug: &str, path: &str) -> String {
+    let path_leaf = path
+        .rsplit('/')
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or("events");
+    format!("append-{connection_slug}-{}", slug_fragment(path_leaf))
+}
+
+fn slug_fragment(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            slug.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "events".to_string()
+    } else {
+        slug
+    }
+}
+
+fn connector_stream_supported(template: &ConnectorTemplate) -> bool {
+    template.can_subscribe && template.command_argv().is_some()
+}
+
+fn ensure_workflow_subscriber_started(
+    manager: &puffer_subscriptions::SubscriptionManager,
+    paths: &ConfigPaths,
+    connection: &ConnectionRecord,
+    template: &ConnectorTemplate,
+) -> Result<()> {
+    if connector_stream_supported(template) {
+        return Ok(());
+    }
+    if let Some(manifest) =
+        connection_subscriber_manifest(&subscriber_manifest_roots(paths), connection, template)?
+    {
+        manager.start_subscriber(manifest)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -572,6 +826,76 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("runtime/monitors/telegram-user.md"));
+    }
+
+    #[test]
+    fn file_append_binding_params_build_regex_filtered_spec() {
+        let binding = file_append_binding_from_params(
+            WorkflowBindingCreateParams {
+                slug: Some("append-telegram-user-hi".to_string()),
+                connection_slug: "telegram-user".to_string(),
+                connector_slug: Some("telegram-login".to_string()),
+                description: None,
+                pattern: Some("hi".to_string()),
+                file_append_path: Some("/tmp/hi".to_string()),
+                enabled: Some(true),
+            },
+            "telegram-login".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(binding.slug, "append-telegram-user-hi");
+        assert_eq!(
+            binding.description,
+            "Append telegram-user messages to /tmp/hi"
+        );
+        assert_eq!(binding.connection_slug, "telegram-user");
+        assert_eq!(binding.connector_slug.as_deref(), Some("telegram-login"));
+        assert_eq!(binding.status, WorkflowBindingStatus::Enabled);
+        assert!(matches!(
+            binding.filter,
+            Some(FilterSpec::Tagged(TaggedFilterSpec::Regex {
+                ref pattern,
+                case_insensitive: true
+            })) if pattern == "hi"
+        ));
+        assert!(matches!(
+            binding.action,
+            ActionSpec::FileAppend {
+                ref path,
+                ..
+            } if path == "/tmp/hi"
+        ));
+    }
+
+    #[test]
+    fn workflow_binding_json_includes_file_append_details() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let binding = file_append_binding_from_params(
+            WorkflowBindingCreateParams {
+                slug: None,
+                connection_slug: "telegram-user".to_string(),
+                connector_slug: None,
+                description: Some("Capture hellos".to_string()),
+                pattern: Some(".*".to_string()),
+                file_append_path: Some("/tmp/hi".to_string()),
+                enabled: Some(false),
+            },
+            "telegram-login".to_string(),
+        )
+        .unwrap();
+
+        let value = workflow_binding_json(&paths, binding);
+
+        assert_eq!(value["slug"], "append-telegram-user-hi");
+        assert_eq!(value["description"], "Capture hellos");
+        assert_eq!(value["status"], "paused");
+        assert_eq!(value["action_type"], "file_append");
+        assert_eq!(value["action_path"], "/tmp/hi");
+        assert_eq!(value["action_format"], "text");
+        assert!(value["filter_pattern"].is_null());
+        assert_eq!(value["monitor"], false);
     }
 
     #[test]

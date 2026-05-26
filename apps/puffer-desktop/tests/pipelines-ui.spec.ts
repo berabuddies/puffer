@@ -316,6 +316,42 @@ test("pipeline selected connector can create a planned workflow draft", async ({
   });
 });
 
+test("pipeline selected connector can create an append workflow binding", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  await page.getByLabel("Search connectors").fill("email events");
+  await catalog.getByRole("button", { name: "Plan email workflow trigger" }).click();
+  await page.getByLabel("Connector connection name").fill("email-personal");
+  await page.getByLabel("Workflow draft pattern").fill("hi");
+  await page.getByLabel("Append file path").fill("/tmp/hi");
+  await page.getByRole("button", { name: "Create append workflow for selected connector" }).click();
+
+  const request = await daemon.waitForRequest("workflow_binding_create", (candidate) => {
+    return candidate.params.slug === "append-email-personal-hi";
+  });
+  expect(request.params).toMatchObject({
+    slug: "append-email-personal-hi",
+    connection_slug: "email-personal",
+    connector_slug: "email",
+    pattern: "hi",
+    file_append_path: "/tmp/hi",
+    enabled: true
+  });
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Created append workflow append-email-personal-hi.");
+  const actions = page.getByLabel("Workflow actions");
+  await expect(actions).toContainText("append-email-personal-hi");
+  await expect(actions).toContainText("email-personal");
+  await expect(actions).toContainText("/tmp/hi");
+  await expect(actions).toContainText("hi");
+  await expect(page.getByLabel("Workflow action search results")).toHaveText("1/1 actions");
+});
+
 test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

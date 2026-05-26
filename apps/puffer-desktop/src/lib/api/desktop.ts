@@ -19,6 +19,7 @@ import type {
   MessageActor,
   TimelineItem,
   WorkflowDefinition,
+  WorkflowBindingCreateRequest,
   WorkflowRun,
   WorkflowSnapshot
 } from "../types";
@@ -1093,6 +1094,12 @@ export async function loadWorkflowSnapshot(): Promise<WorkflowSnapshot> {
 export async function saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<WorkflowSnapshot>("workflow_save", { workflow });
+}
+
+/** Create or update one connection-triggered workflow binding. */
+export async function createWorkflowBinding(binding: WorkflowBindingCreateRequest): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_binding_create", binding);
 }
 
 /** Toggle a native workflow or subscription workflow binding. */
