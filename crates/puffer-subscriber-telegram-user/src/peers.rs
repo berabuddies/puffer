@@ -20,6 +20,8 @@ const DEFAULT_PEER_LIMIT: usize = 50;
 const MAX_PEER_LIMIT: usize = 200;
 const DEFAULT_MESSAGE_LIMIT: usize = 10;
 const MAX_MESSAGE_LIMIT: usize = 50;
+const DEFAULT_FILTERED_MESSAGE_SCAN_LIMIT: usize = 200;
+const MAX_MESSAGE_SCAN_LIMIT: usize = 500;
 const DEFAULT_CONTEXT_RADIUS: usize = 2;
 const MAX_CONTEXT_RADIUS: usize = 10;
 const MAX_MESSAGE_TEXT_CHARS: usize = 2_000;
@@ -167,6 +169,8 @@ pub(crate) async fn handle_list_messages(
     peer: String,
     limit: Option<usize>,
     before_id: Option<i32>,
+    sender: Option<String>,
+    scan_limit: Option<usize>,
     succinct: bool,
 ) -> anyhow::Result<()> {
     let chat = match resolve_peer(client, &peer).await {
@@ -181,12 +185,19 @@ pub(crate) async fn handle_list_messages(
         }
     };
     let limit = clamp_message_limit(limit);
-    let mut iter = client.iter_messages(chat.pack()).limit(limit);
+    let sender = sender
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let sender_filter = sender.as_deref().map(normalize_peer_text);
+    let scan_limit = clamp_message_scan_limit(scan_limit, limit, sender_filter.is_some());
+    let mut iter = client.iter_messages(chat.pack()).limit(scan_limit);
     if let Some(before_id) = before_id {
         iter = iter.offset_id(before_id);
     }
     let mut messages = Vec::new();
-    while messages.len() < limit {
+    let mut scanned = 0usize;
+    let mut last_scanned_id = None;
+    while scanned < scan_limit && messages.len() < limit {
         let maybe_message = match iter.next().await {
             Ok(message) => message,
             Err(error) => {
@@ -201,9 +212,16 @@ pub(crate) async fn handle_list_messages(
         let Some(message) = maybe_message else {
             break;
         };
+        scanned += 1;
+        last_scanned_id = Some(message.id());
+        if let Some(query) = &sender_filter {
+            if !message_sender_matches(&message, query) {
+                continue;
+            }
+        }
         messages.push(message);
     }
-    let next_before_id = messages.iter().map(Message::id).min();
+    let next_before_id = last_scanned_id;
     messages.sort_by_key(Message::id);
     let mut payload_messages = Vec::with_capacity(messages.len());
     for message in &messages {
@@ -229,6 +247,10 @@ pub(crate) async fn handle_list_messages(
             "limit": limit,
             "count": count,
             "limit_reached": count >= limit,
+            "sender_filter": sender,
+            "scan_limit": scan_limit,
+            "scanned": scanned,
+            "scan_limit_reached": scanned >= scan_limit,
             "before_id": before_id,
             "next_before_id": next_before_id,
             "chat": chat_payload,
@@ -304,6 +326,21 @@ fn clamp_message_limit(limit: Option<usize>) -> usize {
         .clamp(1, MAX_MESSAGE_LIMIT)
 }
 
+fn clamp_message_scan_limit(
+    scan_limit: Option<usize>,
+    result_limit: usize,
+    sender_filtered: bool,
+) -> usize {
+    let default_limit = if sender_filtered {
+        DEFAULT_FILTERED_MESSAGE_SCAN_LIMIT
+    } else {
+        result_limit
+    };
+    scan_limit
+        .unwrap_or(default_limit)
+        .clamp(result_limit, MAX_MESSAGE_SCAN_LIMIT)
+}
+
 fn clamp_context_radius(context_radius: Option<usize>) -> usize {
     context_radius
         .unwrap_or(DEFAULT_CONTEXT_RADIUS)
@@ -343,6 +380,16 @@ fn normalized_contains(value: &str, normalized_query: &str) -> bool {
 
 fn normalize_peer_text(value: &str) -> String {
     value.trim().to_lowercase()
+}
+
+fn message_sender_matches(message: &Message, normalized_query: &str) -> bool {
+    if matches!(normalized_query, "me" | "self" | "outgoing") && message.outgoing() {
+        return true;
+    }
+    message
+        .sender()
+        .as_ref()
+        .is_some_and(|sender| peer_matches_query(sender, normalized_query))
 }
 
 fn peer_payload(chat: &Chat) -> serde_json::Value {
@@ -759,8 +806,9 @@ fn peer_kind_filter_label(peer_kind: TelegramPeerKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_context_radius, clamp_message_limit, clamp_peer_limit, display_reply_text,
-        display_text, normalized_contains, truncate_text, username_matches_query,
+        clamp_context_radius, clamp_message_limit, clamp_message_scan_limit, clamp_peer_limit,
+        display_reply_text, display_text, normalized_contains, truncate_text,
+        username_matches_query,
     };
     use serde_json::json;
 
@@ -776,6 +824,14 @@ mod tests {
         assert_eq!(clamp_message_limit(None), 10);
         assert_eq!(clamp_message_limit(Some(0)), 1);
         assert_eq!(clamp_message_limit(Some(500)), 50);
+    }
+
+    #[test]
+    fn message_scan_limit_expands_for_sender_filters() {
+        assert_eq!(clamp_message_scan_limit(None, 20, false), 20);
+        assert_eq!(clamp_message_scan_limit(None, 20, true), 200);
+        assert_eq!(clamp_message_scan_limit(Some(5), 20, true), 20);
+        assert_eq!(clamp_message_scan_limit(Some(5_000), 20, true), 500);
     }
 
     #[test]

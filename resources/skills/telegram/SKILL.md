@@ -61,13 +61,18 @@ search messages by peer id. Prefer numeric peer ids over titles.
 ```bash
 /telegram search-peers "TonyKe" --kind user
 /telegram list-messages --peer 123456789 --limit 20
+/telegram list-messages --peer 123456789 --from "TonyKe" --scan-limit 200 --limit 20
 /telegram search-messages "karen" --peer 123456789 --context 0 --limit 10
 ```
 
 Use `/telegram list-messages` when the user asks to inspect recent chat
 history without a specific search term. Use the returned `--before-id` cursor
-to fetch older pages. Use `--context 0` for fast search; non-zero context
-returns previous messages before each hit.
+to fetch older pages. Add `--from <sender>` when the user asks for messages
+from one person in a group; the sender filter matches sender id, username,
+`@handle`, or display name. The command scans a bounded recent window while
+collecting sender matches; increase `--scan-limit` when a sparse sender needs a
+deeper page. Use `--context 0` for fast search; non-zero context returns
+previous messages before each hit.
 
 Use `--succint` with the internal CLI for normal agent work. It returns plain
 text context lines with relative offsets, for example `-2 Sender: message`,

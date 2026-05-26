@@ -143,6 +143,8 @@ fn list_messages_input(tokens: Vec<String>, connection_slug: String) -> Result<V
     let mut peer = None;
     let mut limit = 20usize;
     let mut before_id = None;
+    let mut sender = None;
+    let mut scan_limit = None;
     let mut succinct = true;
     let mut positionals = Vec::new();
     let mut iter = tokens.into_iter();
@@ -162,6 +164,20 @@ fn list_messages_input(tokens: Vec<String>, connection_slug: String) -> Result<V
             )?);
         } else if let Some(value) = prefixed_value(&token, "--before-id=") {
             before_id = Some(parse_i32(&value, "--before-id")?);
+        } else if matches!(token.as_str(), "--from" | "--sender" | "--from-user") {
+            sender = Some(non_empty(require_next(&mut iter, &token)?, "sender")?);
+        } else if let Some(value) = prefixed_value(&token, "--from=")
+            .or_else(|| prefixed_value(&token, "--sender="))
+            .or_else(|| prefixed_value(&token, "--from-user="))
+        {
+            sender = Some(non_empty(value, "sender")?);
+        } else if token == "--scan-limit" {
+            scan_limit = Some(parse_usize(
+                &require_next(&mut iter, "--scan-limit")?,
+                "--scan-limit",
+            )?);
+        } else if let Some(value) = prefixed_value(&token, "--scan-limit=") {
+            scan_limit = Some(parse_usize(&value, "--scan-limit")?);
         } else if matches!(token.as_str(), "--json" | "--full") {
             succinct = false;
         } else if matches!(token.as_str(), "--succint" | "--succinct") {
@@ -182,6 +198,8 @@ fn list_messages_input(tokens: Vec<String>, connection_slug: String) -> Result<V
         "peer": peer,
         "limit": limit,
         "before_id": before_id,
+        "sender": sender,
+        "scan_limit": scan_limit,
         "succinct": succinct,
     }))
 }
@@ -286,7 +304,7 @@ fn usage_lines() -> &'static str {
     "/telegram [--connection localtg] search-peers <query> [--kind user|group|channel]\n\
      /telegram [--connection localtg] list-peers [--query <query>] [--limit 50]\n\
      /telegram [--connection localtg] search-messages <query> --peer <id|@username> [--context 0] [--limit 10]\n\
-     /telegram [--connection localtg] list-messages --peer <id|@username> [--limit 20] [--before-id <id>]"
+     /telegram [--connection localtg] list-messages --peer <id|@username> [--from <sender>] [--limit 20] [--before-id <id>]"
 }
 
 #[cfg(test)]
@@ -317,6 +335,16 @@ mod tests {
         assert_eq!(input["action"], "list_messages");
         assert_eq!(input["limit"], 30);
         assert_eq!(input["before_id"], 325);
+    }
+
+    #[test]
+    fn list_messages_accepts_sender_filter_and_scan_limit() {
+        let input =
+            tool(r#"messages --peer 477843728 --from "Tony Ke" --scan-limit 200 --limit 25"#);
+        assert_eq!(input["action"], "list_messages");
+        assert_eq!(input["sender"], "Tony Ke");
+        assert_eq!(input["scan_limit"], 200);
+        assert_eq!(input["limit"], 25);
     }
 
     #[test]

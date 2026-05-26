@@ -78,6 +78,18 @@ input_schema:
     before_id:
       type: integer
       description: Optional exclusive Telegram message id cursor for older list_messages pages.
+    sender:
+      type: string
+      description: Optional list_messages sender filter matched against sender id, username, @handle, or display name.
+    from:
+      type: string
+      description: Alias for sender when listing messages from one Telegram user.
+    from_user:
+      type: string
+      description: Alias for sender when listing messages from one Telegram user.
+    scan_limit:
+      type: integer
+      description: Optional maximum number of recent history messages to scan while looking for sender-filtered list_messages matches.
     context:
       type: integer
       description: Optional previous message count before each match for search_messages.

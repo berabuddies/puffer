@@ -94,9 +94,20 @@ pub(super) fn format_succinct_message_list(payload: &Value) -> String {
         .get("limit_reached")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let sender_filter = value_string(payload, "sender_filter").filter(|value| !value.is_empty());
+    let scanned = payload.get("scanned").and_then(Value::as_u64);
+    let scan_limit = payload.get("scan_limit").and_then(Value::as_u64);
+    let scan_limit_reached = payload
+        .get("scan_limit_reached")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let mut output = String::new();
     let _ = writeln!(output, "Telegram messages in {}{}", chat_title, chat_handle);
+    let show_scan_metadata = sender_filter.is_some();
+    if let Some(sender) = sender_filter {
+        let _ = writeln!(output, "Sender filter: {}", one_line(&sender));
+    }
     let _ = writeln!(
         output,
         "{} message{} returned{}",
@@ -108,6 +119,18 @@ pub(super) fn format_succinct_message_list(payload: &Value) -> String {
             ""
         }
     );
+    if let (true, Some(scanned), Some(scan_limit)) = (show_scan_metadata, scanned, scan_limit) {
+        let _ = writeln!(
+            output,
+            "Scanned {scanned}/{scan_limit} message{}{}",
+            if scan_limit == 1 { "" } else { "s" },
+            if scan_limit_reached {
+                " (scan limit reached)"
+            } else {
+                ""
+            }
+        );
+    }
     if let Some(before_id) = payload.get("next_before_id").and_then(Value::as_i64) {
         let _ = writeln!(output, "Older page cursor: --before-id {before_id}");
     }

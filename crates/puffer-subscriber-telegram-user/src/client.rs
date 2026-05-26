@@ -618,9 +618,14 @@ async fn handle_runtime_command(
             peer,
             limit,
             before_id,
+            sender,
+            scan_limit,
             succinct,
         } => {
-            handle_list_messages(env, client, peer, limit, before_id, succinct).await?;
+            handle_list_messages(
+                env, client, peer, limit, before_id, sender, scan_limit, succinct,
+            )
+            .await?;
         }
         SubscriberCommand::SendMessage {
             peer,

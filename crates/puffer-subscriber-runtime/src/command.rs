@@ -129,7 +129,8 @@ pub enum SubscriberCommand {
         succinct: bool,
     },
     /// List recent messages within one Telegram peer without requiring a
-    /// search term. Callers can page backward with `before_id`.
+    /// search term. Callers can page backward with `before_id`, and may
+    /// filter by sender while bounding the amount of history scanned.
     TelegramListMessages {
         /// Peer reference: a `@username` or numeric chat id string returned by
         /// `TelegramListPeers`.
@@ -141,6 +142,19 @@ pub enum SubscriberCommand {
         /// subscribers return messages older than this id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         before_id: Option<i32>,
+        /// Optional sender filter matched against sender id, username, handle,
+        /// or display name. The aliases keep local CLI and tool JSON natural.
+        #[serde(
+            default,
+            alias = "from",
+            alias = "from_user",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sender: Option<String>,
+        /// Optional maximum number of messages to scan while looking for
+        /// sender-filtered matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_limit: Option<usize>,
         /// Return compact message payloads for LLM consumption.
         #[serde(default, alias = "succint")]
         succinct: bool,
@@ -319,5 +333,27 @@ mod tests {
     fn telegram_auth_ok_serializes_as_stable_kind() {
         let value = serde_json::to_value(SubscriberCommand::TelegramAuthOk).unwrap();
         assert_eq!(value, serde_json::json!({"kind": "telegram_auth_ok"}));
+    }
+
+    #[test]
+    fn telegram_list_messages_accepts_sender_aliases() {
+        let command: SubscriberCommand = serde_json::from_value(serde_json::json!({
+            "kind": "telegram_list_messages",
+            "peer": "477843728",
+            "from": "@tony",
+            "scan_limit": 200,
+            "succinct": true
+        }))
+        .unwrap();
+
+        match command {
+            SubscriberCommand::TelegramListMessages {
+                sender, scan_limit, ..
+            } => {
+                assert_eq!(sender.as_deref(), Some("@tony"));
+                assert_eq!(scan_limit, Some(200));
+            }
+            other => panic!("expected telegram list messages command, got {other:?}"),
+        }
     }
 }

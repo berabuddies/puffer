@@ -291,6 +291,12 @@ struct ListMessagesInput {
     /// Optional exclusive Telegram message id cursor for older pages.
     #[serde(default)]
     before_id: Option<i32>,
+    /// Optional sender filter matched against sender id, username, handle, or display name.
+    #[serde(default, alias = "from", alias = "from_user")]
+    sender: Option<String>,
+    /// Optional maximum number of history messages to scan for sender-filtered matches.
+    #[serde(default)]
+    scan_limit: Option<usize>,
     /// Return compact message list payloads for LLM consumption.
     #[serde(default, alias = "succint")]
     succinct: bool,
@@ -307,6 +313,15 @@ fn execute_telegram_list_messages(
     if parsed.peer.trim().is_empty() {
         return Err(anyhow!("telegram list_messages requires a non-empty peer"));
     }
+    if parsed
+        .sender
+        .as_deref()
+        .is_some_and(|sender| sender.trim().is_empty())
+    {
+        return Err(anyhow!(
+            "telegram list_messages sender filter must not be empty"
+        ));
+    }
     ensure_telegram_connection_subscriber(cwd, &connection_slug)?;
     let manager = subscription_globals::manager()?;
     let succinct = parsed.succinct;
@@ -314,6 +329,8 @@ fn execute_telegram_list_messages(
         peer: parsed.peer,
         limit: parsed.limit,
         before_id: parsed.before_id,
+        sender: parsed.sender,
+        scan_limit: parsed.scan_limit,
         succinct,
     };
     let event = manager.send_command_and_wait(
@@ -758,7 +775,8 @@ fn telegram_connection_description(payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        connection_slug_from_input, format_succinct_message_search, telegram_connection_description,
+        connection_slug_from_input, format_succinct_message_list, format_succinct_message_search,
+        telegram_connection_description,
     };
     use serde_json::json;
 
@@ -863,5 +881,44 @@ mod tests {
         );
         assert!(!formatted.contains('{'));
         assert!(!formatted.contains("\"context\""));
+    }
+
+    #[test]
+    fn succinct_message_list_formats_sender_scan_metadata() {
+        let payload = json!({
+            "count": 1,
+            "limit_reached": false,
+            "sender_filter": "Tony",
+            "scanned": 200,
+            "scan_limit": 200,
+            "scan_limit_reached": true,
+            "next_before_id": 77,
+            "chat": {
+                "id": "477843728",
+                "kind": "group",
+                "title": "Ops"
+            },
+            "messages": [{
+                "id": 81,
+                "date": "2026-05-26T09:00:00Z",
+                "from": "Tony",
+                "outgoing": false,
+                "text": "hi"
+            }]
+        });
+
+        let formatted = format_succinct_message_list(&payload);
+
+        assert_eq!(
+            formatted,
+            concat!(
+                "Telegram messages in Ops\n",
+                "Sender filter: Tony\n",
+                "1 message returned\n",
+                "Scanned 200/200 messages (scan limit reached)\n",
+                "Older page cursor: --before-id 77\n",
+                "#81 2026-05-26T09:00:00Z Tony: hi"
+            )
+        );
     }
 }
