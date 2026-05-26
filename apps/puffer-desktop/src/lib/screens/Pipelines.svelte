@@ -192,6 +192,7 @@
   let monitorCommandRunningFor = $state<string | null>(null);
   let monitorTaskCommandRunningFor = $state<string | null>(null);
   let creatingWorkflowBinding = $state(false);
+  let creatingConnectionAppendFor = $state<string | null>(null);
   let togglingWorkflowSlug = $state<string | null>(null);
   let deletingWorkflowBindingSlug = $state<string | null>(null);
   let savingWorkflowSlug = $state<string | null>(null);
@@ -814,6 +815,44 @@
       error = message;
       saveNotice = `Could not create append workflow: ${message}`;
     } finally {
+      creatingWorkflowBinding = false;
+    }
+  }
+
+  async function createAppendWorkflowForConnection(connection: WorkflowConnection) {
+    if (connectorCommandRunnerBusy()) return;
+    if (!connectionTriggerSupported(connection)) {
+      saveNotice = `${connection.slug} cannot start workflow triggers. Choose an event-capable connection.`;
+      return;
+    }
+    const path = `/tmp/${connection.slug}.log`;
+    const slug = appendBindingSlug(connection.slug, path);
+    selectedConnectorSlug = connection.connector_slug;
+    selectedConnectorConnectionName = connection.slug;
+    selectedConnectorDraftPattern = "";
+    selectedConnectorAppendPath = path;
+    creatingWorkflowBinding = true;
+    creatingConnectionAppendFor = connection.slug;
+    error = null;
+    saveNotice = `Creating ${slug}...`;
+    try {
+      const next = await createWorkflowBinding({
+        slug,
+        description: `Append ${connection.slug} messages to ${path}`,
+        connection_slug: connection.slug,
+        connector_slug: connection.connector_slug,
+        pattern: null,
+        file_append_path: path,
+        enabled: true
+      });
+      applyWorkflowSnapshot(next);
+      saveNotice = `Created append workflow ${slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not create append workflow: ${message}`;
+    } finally {
+      creatingConnectionAppendFor = null;
       creatingWorkflowBinding = false;
     }
   }
@@ -2121,6 +2160,7 @@
                     {@const connectCommand = connectionConnectCommand(connection)}
                     {@const monitorCommand = connectionMonitorCommand(connection)}
                     {@const draftCommand = connectionDraftCommand(connection)}
+                    {@const appendCommand = connectionAppendCommand(connection)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
@@ -2172,6 +2212,17 @@
                         onclick={() => createWorkflowDraftForConnection(connection)}
                       >
                         <Icon name="plus" size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-append-btn"
+                        aria-label={`Create append workflow for ${connection.slug}`}
+                        title={appendCommand}
+                        aria-busy={creatingConnectionAppendFor === connection.slug}
+                        disabled={!canTrigger || connectorCommandRunnerBusy()}
+                        onclick={() => createAppendWorkflowForConnection(connection)}
+                      >
+                        <Icon name="file" size={12} />
                       </button>
                       <button
                         type="button"
@@ -3423,7 +3474,7 @@
   }
 
   .pf-connection-row-group {
-    grid-template-columns: minmax(0, 1fr) 30px 30px 30px;
+    grid-template-columns: minmax(0, 1fr) 30px 30px 30px 30px;
   }
 
   .pf-connector-row-group {

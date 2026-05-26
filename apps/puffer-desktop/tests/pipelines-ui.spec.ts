@@ -563,6 +563,46 @@ test("pipeline selected connector can create an append workflow binding", async 
   await expect(page.locator(".pf-pipe-save-note")).toContainText("Deleted append-email-personal-hi.");
 });
 
+test("pipeline connection rows can create append workflow bindings", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await page.getByLabel("Search connectors").fill("append telegram-user");
+
+  const connections = page.getByLabel("Connections");
+  await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).toBeVisible();
+  const appendButton = page.getByRole("button", { name: "Create append workflow for telegram-user" });
+  await expect(appendButton).toHaveAttribute(
+    "title",
+    "/workflows append telegram-user /tmp/telegram-user.log"
+  );
+  await appendButton.click();
+
+  const request = await daemon.waitForRequest("workflow_binding_create", (candidate) => {
+    return candidate.params.slug === "append-telegram-user-telegram-user-log";
+  });
+  expect(request.params).toMatchObject({
+    slug: "append-telegram-user-telegram-user-log",
+    connection_slug: "telegram-user",
+    connector_slug: "telegram-login",
+    pattern: null,
+    file_append_path: "/tmp/telegram-user.log",
+    enabled: true
+  });
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText(
+    "Created append workflow append-telegram-user-telegram-user-log."
+  );
+  await expect(page.getByLabel("Selected append workflow command")).toContainText(
+    "/workflows append telegram-user /tmp/telegram-user.log"
+  );
+  const actions = page.getByLabel("Workflow actions");
+  await expect(actions).toContainText("append-telegram-user-telegram-user-log");
+  await expect(actions).toContainText("/tmp/telegram-user.log");
+});
+
 test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
