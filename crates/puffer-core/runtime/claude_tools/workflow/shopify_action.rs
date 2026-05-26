@@ -12,6 +12,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const FULFILLMENT_ORDERS_QUERY: &str =
     "query($id: ID!) { order(id: $id) { id fulfillmentOrders(first: 100) { nodes { id } } } }";
 const FULFILLMENT_CREATE_MUTATION: &str = "mutation($fulfillment: FulfillmentInput!, $message: String) { fulfillmentCreate(fulfillment: $fulfillment, message: $message) { fulfillment { id status } userErrors { field message } } }";
+const INVENTORY_LEVELS_QUERY: &str = "query($id: ID!) { inventoryItem(id: $id) { id inventoryLevels(first: 2) { nodes { location { id } } } } }";
+const INVENTORY_ADJUST_MUTATION: &str = "mutation($input: InventoryAdjustQuantitiesInput!) { inventoryAdjustQuantities(input: $input) { inventoryAdjustmentGroup { id reason changes { name delta } } userErrors { field message } } }";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +21,10 @@ struct ShopifyActionInput {
     action: String,
     #[serde(default, alias = "order_id")]
     order_id: Option<String>,
+    #[serde(default, alias = "item_id")]
+    item_id: Option<String>,
+    #[serde(default)]
+    delta: Option<i64>,
     #[serde(default, alias = "input_json")]
     input_json: Option<Value>,
 }
@@ -35,6 +41,7 @@ pub fn execute_shopify_action(_state: &mut AppState, _cwd: &Path, input: Value) 
         serde_json::from_value(input).context("invalid ShopifyAction input")?;
     match parsed.action.trim() {
         "fulfillmentCreate" => execute_fulfillment_create(parsed),
+        "inventoryAdjustSingleLocation" => execute_inventory_adjust_single_location(parsed),
         other => bail!("unsupported ShopifyAction action `{other}`"),
     }
 }
@@ -75,6 +82,43 @@ fn execute_fulfillment_create(input: ShopifyActionInput) -> Result<String> {
     validate_fulfillment_create_response(&mutation_response)?;
     Ok(serde_json::to_string_pretty(&json!({
         "orderId": order_id,
+        "response": mutation_response
+    }))?)
+}
+
+fn execute_inventory_adjust_single_location(input: ShopifyActionInput) -> Result<String> {
+    let item_id = required(input.item_id, "itemId")?;
+    ensure_shopify_gid(&item_id, "InventoryItem", "itemId")?;
+    let delta = input.delta.context("ShopifyAction `delta` is required")?;
+    let config = shopify_config_from_env()?;
+    let client = Client::builder()
+        .timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS))
+        .build()
+        .context("build Shopify HTTP client")?;
+
+    let levels_response = send_shopify_graphql(
+        &client,
+        &config,
+        json!({
+            "query": INVENTORY_LEVELS_QUERY,
+            "variables": { "id": item_id }
+        }),
+    )?;
+    let location_id = extract_single_inventory_location_id(&levels_response)?;
+    let variables = inventory_adjust_variables(&item_id, &location_id, delta);
+    let mutation_response = send_shopify_graphql(
+        &client,
+        &config,
+        json!({
+            "query": INVENTORY_ADJUST_MUTATION,
+            "variables": variables
+        }),
+    )?;
+    validate_inventory_adjust_response(&mutation_response)?;
+    Ok(serde_json::to_string_pretty(&json!({
+        "itemId": item_id,
+        "locationId": location_id,
+        "delta": delta,
         "response": mutation_response
     }))?)
 }
@@ -122,6 +166,20 @@ fn fulfillment_variables(input_json: Value) -> Result<Value> {
     Ok(Value::Object(variables))
 }
 
+fn inventory_adjust_variables(item_id: &str, location_id: &str, delta: i64) -> Value {
+    json!({
+        "input": {
+            "reason": "correction",
+            "name": "available",
+            "changes": [{
+                "delta": delta,
+                "inventoryItemId": item_id,
+                "locationId": location_id
+            }]
+        }
+    })
+}
+
 fn fulfillment_order_ids(variables: &Value) -> Result<BTreeSet<String>> {
     let items = variables
         .get("fulfillment")
@@ -164,6 +222,28 @@ fn extract_order_fulfillment_ids(response: &Value) -> Result<BTreeSet<String>> {
     Ok(ids)
 }
 
+fn extract_single_inventory_location_id(response: &Value) -> Result<String> {
+    fail_on_graphql_errors(response, "inventoryItem inventoryLevels query")?;
+    let nodes = response
+        .pointer("/data/inventoryItem/inventoryLevels/nodes")
+        .and_then(Value::as_array)
+        .context("ShopifyAction inventory item response did not include inventoryLevels")?;
+    if nodes.len() != 1 {
+        bail!(
+            "ShopifyAction inventoryAdjustSingleLocation requires exactly one inventory level, found {}",
+            nodes.len()
+        );
+    }
+    let location_id = nodes[0]
+        .pointer("/location/id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("ShopifyAction inventory level did not include a location id")?;
+    ensure_shopify_gid(location_id, "Location", "locationId")?;
+    Ok(location_id.to_string())
+}
+
 fn ensure_ids_belong_to_order(
     requested: &BTreeSet<String>,
     allowed: &BTreeSet<String>,
@@ -177,6 +257,27 @@ fn ensure_ids_belong_to_order(
             "ShopifyAction fulfillmentOrderId does not belong to order: {}",
             missing.join(", ")
         );
+    }
+    Ok(())
+}
+
+fn validate_inventory_adjust_response(response: &Value) -> Result<()> {
+    fail_on_graphql_errors(response, "inventoryAdjustQuantities mutation")?;
+    let user_errors = response
+        .pointer("/data/inventoryAdjustQuantities/userErrors")
+        .and_then(Value::as_array)
+        .context("ShopifyAction inventoryAdjustQuantities response did not include userErrors")?;
+    if !user_errors.is_empty() {
+        bail!(
+            "ShopifyAction inventoryAdjustQuantities returned userErrors: {}",
+            serde_json::to_string(user_errors)?
+        );
+    }
+    if response
+        .pointer("/data/inventoryAdjustQuantities/inventoryAdjustmentGroup")
+        .is_none()
+    {
+        bail!("ShopifyAction inventoryAdjustQuantities response did not include adjustment group");
     }
     Ok(())
 }
@@ -210,6 +311,13 @@ fn fail_on_graphql_errors(response: &Value, operation: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn ensure_shopify_gid(value: &str, resource: &str, name: &str) -> Result<()> {
+    if value.starts_with(&format!("gid://shopify/{resource}/")) {
+        return Ok(());
+    }
+    bail!("ShopifyAction `{name}` must be a Shopify {resource} gid")
 }
 
 fn send_shopify_graphql(client: &Client, config: &ShopifyConfig, payload: Value) -> Result<Value> {
@@ -306,6 +414,82 @@ mod tests {
             .expect_err("foreign fulfillment order ids must fail closed");
 
         assert!(error.to_string().contains("does not belong"));
+    }
+
+    #[test]
+    fn builds_inventory_adjust_variables() {
+        let variables = inventory_adjust_variables(
+            "gid://shopify/InventoryItem/100",
+            "gid://shopify/Location/200",
+            -3,
+        );
+
+        assert_eq!(
+            variables,
+            json!({
+                "input": {
+                    "reason": "correction",
+                    "name": "available",
+                    "changes": [{
+                        "delta": -3,
+                        "inventoryItemId": "gid://shopify/InventoryItem/100",
+                        "locationId": "gid://shopify/Location/200"
+                    }]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_single_inventory_location() {
+        let location = extract_single_inventory_location_id(&json!({
+            "data": {
+                "inventoryItem": {
+                    "inventoryLevels": {
+                        "nodes": [
+                            {"location": {"id": "gid://shopify/Location/200"}}
+                        ]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(location, "gid://shopify/Location/200");
+    }
+
+    #[test]
+    fn rejects_ambiguous_inventory_locations() {
+        let error = extract_single_inventory_location_id(&json!({
+            "data": {
+                "inventoryItem": {
+                    "inventoryLevels": {
+                        "nodes": [
+                            {"location": {"id": "gid://shopify/Location/200"}},
+                            {"location": {"id": "gid://shopify/Location/300"}}
+                        ]
+                    }
+                }
+            }
+        }))
+        .expect_err("multiple inventory levels must fail closed");
+
+        assert!(error.to_string().contains("exactly one inventory level"));
+    }
+
+    #[test]
+    fn rejects_inventory_adjust_user_errors() {
+        let error = validate_inventory_adjust_response(&json!({
+            "data": {
+                "inventoryAdjustQuantities": {
+                    "inventoryAdjustmentGroup": null,
+                    "userErrors": [{"field": ["input"], "message": "bad"}]
+                }
+            }
+        }))
+        .expect_err("Shopify inventory userErrors must fail closed");
+
+        assert!(error.to_string().contains("userErrors"));
     }
 
     #[test]
