@@ -82,6 +82,11 @@
     searchText: string;
   };
 
+  type WorkflowRunSearchRow = {
+    run: WorkflowRun;
+    searchText: string;
+  };
+
   type WorkflowDraftSource = {
     slugBase?: string;
     name?: string;
@@ -176,6 +181,7 @@
   let selectedConnectorDraftPattern = $state("");
   let selectedConnectorAppendPath = $state("/tmp/hi");
   let runIdx = $state<number | null>(null);
+  let runQuery = $state("");
   let stepIdx = $state<number | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
@@ -222,6 +228,9 @@
   let runs = $derived(
     workflow ? snapshot.runs.filter((run) => run.workflow_slug === workflow.slug) : []
   );
+  let runQueryTerms = $derived(searchTerms(runQuery));
+  let runSearchRows = $derived(indexRuns(runs));
+  let filteredRuns = $derived(filterRuns(runSearchRows, runQueryTerms));
   let run = $derived(runs.find((item) => item.idx === runIdx) ?? runs[0] ?? null);
   let graphNodes = $derived(workflow ? nodesFor(workflow) : []);
   let graphEdges = $derived(workflow ? edgesFor(workflow) : []);
@@ -389,6 +398,7 @@
   $effect(() => {
     workflowSlug;
     runIdx = null;
+    runQuery = "";
     stepIdx = null;
   });
 
@@ -1457,6 +1467,17 @@
         .map((node) => [node.id, node.status, node.output, node.error].join(" "))
         .join(" ")
     ]);
+  }
+
+  function indexRuns(items: WorkflowRun[]): WorkflowRunSearchRow[] {
+    return items.map((item) => ({
+      run: item,
+      searchText: workflowRunSearchText(item)
+    }));
+  }
+
+  function filterRuns(rows: WorkflowRunSearchRow[], terms: string[]): WorkflowRun[] {
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.run);
   }
 
   function updateNode(id: string, patch: Partial<EditablePipelineNode>) {
@@ -2650,10 +2671,27 @@
             <div class="pf-pipe-traj-head">
               <Icon name="terminal" size={12} />
               <span>Runs</span>
-              <span class="pf-pipe-traj-count">{runs.length}</span>
+              <span class="pf-pipe-traj-count">{filteredRuns.length}/{runs.length}</span>
             </div>
-            <div class="pf-pipe-run-list">
-              {#each runs as item (item.idx)}
+            <label class="pf-run-search">
+              <span class="pf-connector-searchbox">
+                <Icon name="search" size={12} />
+                <input
+                  aria-label="Search workflow runs"
+                  value={runQuery}
+                  placeholder="Search runs"
+                  oninput={(event) => (runQuery = event.currentTarget.value)}
+                />
+              </span>
+            </label>
+            <div class="pf-run-result-summary" aria-label="Workflow run search results">
+              {filteredRuns.length}/{runs.length} runs
+            </div>
+            <div class="pf-pipe-run-list" aria-label="Workflow runs">
+              {#if filteredRuns.length === 0}
+                <div class="pf-pipe-empty">No matching runs.</div>
+              {/if}
+              {#each filteredRuns as item (item.idx)}
                 <button
                   type="button"
                   class="pf-run-row"
@@ -3573,6 +3611,18 @@
   .pf-editor-runs {
     max-height: 260px;
     border-top: 1px solid var(--border);
+  }
+
+  .pf-run-search {
+    display: block;
+    padding: 0 10px 4px;
+  }
+
+  .pf-run-result-summary {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 1.3;
+    padding: 0 10px 4px;
   }
 
   .pf-pipe-run-list {

@@ -152,6 +152,107 @@ test("pipeline workflow list search filters by workflow and run metadata", async
   await expect(workflowList.getByText("No matching workflows.")).toBeVisible();
 });
 
+test("pipeline workflow run search filters selected workflow runs", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setWorkflowSnapshot({
+    workflows: [
+      {
+        schema: "puffer.workflow.v1",
+        slug: "release-pipeline",
+        enabled: true,
+        trigger: { type: "connection", connection_slug: "telegram-user", pattern: "ship" },
+        pipeline: {
+          name: "Release pipeline",
+          working_dir: "/tmp/puffer",
+          concurrency: 1,
+          nodes: [
+            {
+              id: "deploy",
+              type: "codex",
+              agent: "Codex deployer",
+              model: "gpt-5.4-codex",
+              tools: ["bash", "git"],
+              prompt: "Deploy and report release status."
+            }
+          ]
+        }
+      }
+    ],
+    runs: [
+      {
+        idx: 12,
+        workflow_slug: "release-pipeline",
+        run_id: "run-release-failed",
+        trigger: { text: "ship this" },
+        status: "failed",
+        started_at_ms: Date.now() - 20_000,
+        ended_at_ms: Date.now() - 10_000,
+        nodes: [
+          {
+            id: "deploy",
+            status: "failed",
+            started_at_ms: Date.now() - 20_000,
+            ended_at_ms: Date.now() - 10_000,
+            output: null,
+            error: "deploy failed"
+          }
+        ],
+        error: "deploy failed",
+        trigger_key: "telegram-user:ship"
+      },
+      {
+        idx: 11,
+        workflow_slug: "release-pipeline",
+        run_id: "run-release-retry",
+        trigger: { text: "manual retry" },
+        status: "completed",
+        started_at_ms: Date.now() - 40_000,
+        ended_at_ms: Date.now() - 30_000,
+        nodes: [
+          {
+            id: "deploy",
+            status: "completed",
+            started_at_ms: Date.now() - 40_000,
+            ended_at_ms: Date.now() - 30_000,
+            output: "retry deployed",
+            error: null
+          }
+        ],
+        error: null,
+        trigger_key: "manual:retry"
+      }
+    ],
+    connectors: [],
+    connections: []
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const runList = page.getByLabel("Workflow runs");
+  await expect(page.getByLabel("Workflow run search results")).toHaveText("2/2 runs");
+  await expect(runList.getByRole("button", { name: /#12/ })).toBeVisible();
+  await expect(runList.getByRole("button", { name: /#11/ })).toBeVisible();
+
+  await page.getByLabel("Search workflow runs").fill("failed deploy");
+  await expect(page.getByLabel("Workflow run search results")).toHaveText("1/2 runs");
+  await expect(runList.getByRole("button", { name: /#12/ })).toBeVisible();
+  await expect(runList.getByRole("button", { name: /#11/ })).not.toBeVisible();
+
+  await page.getByLabel("Search workflow runs").fill("manual retry");
+  await expect(page.getByLabel("Workflow run search results")).toHaveText("1/2 runs");
+  const retryRun = runList.getByRole("button", { name: /#11/ });
+  await expect(retryRun).toBeVisible();
+  await retryRun.click();
+  await expect(page.locator(".pf-pipe-traj-list")).toContainText("retry deployed");
+
+  await page.getByLabel("Search workflow runs").fill("does-not-exist");
+  await expect(page.getByLabel("Workflow run search results")).toHaveText("0/2 runs");
+  await expect(runList.getByText("No matching runs.")).toBeVisible();
+  await expect(page.locator(".pf-pipe-traj-list")).toContainText("retry deployed");
+});
+
 test("pipeline connector search selects a connection trigger", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
