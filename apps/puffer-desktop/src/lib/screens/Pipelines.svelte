@@ -1210,7 +1210,7 @@
   }
 
   function connectionsForConnector(slug: string): WorkflowConnection[] {
-    return connections.filter((connection) => connection.connector_slug === slug);
+    return connectionsByConnector.get(slug) ?? [];
   }
 
   function activeConnectionSlug(item: EditableWorkflow | null): string | null {
@@ -2260,7 +2260,8 @@
                     {@const connectCommand = connectorConnectCommand(connector)}
                     {@const draftCommand = connectorDraftCommand(connector)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
-                    {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms)}
+                    {@const expandActions = filteredConnectors.length === 1 && connectorQueryTerms.length > 0}
+                    {@const actionSlugs = connectorActionSlugs(connector, connectorQueryTerms, expandActions ? null : 3)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     {@const visibleConnections = connectorConnections.slice(0, 2)}
                     {@const hiddenConnections = Math.max(0, connectorConnections.length - visibleConnections.length)}

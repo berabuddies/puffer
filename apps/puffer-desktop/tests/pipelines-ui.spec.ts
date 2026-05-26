@@ -1033,6 +1033,26 @@ test("pipeline connector search shows action matches", async ({ page }) => {
   await expect(slack).not.toBeVisible();
 });
 
+test("pipeline connector catalog expands action chips for unique connector searches", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("telegram-login");
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const telegram = catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" });
+
+  await expect(page.getByLabel("Connector search results")).toHaveText("1/30 connectors; 1/2 connections");
+  await expect(telegram).toContainText("send_message");
+  await expect(telegram).toContainText("edit_message");
+  await expect(telegram).toContainText("delete_messages");
+  await expect(telegram).toContainText("vote_poll");
+  await expect(telegram).not.toContainText("+1 actions");
+});
+
 test("pipeline selected connector detail shows all connector actions", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
