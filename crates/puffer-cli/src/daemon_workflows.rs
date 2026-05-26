@@ -1,5 +1,7 @@
 //! Workflow daemon RPC helpers.
 
+mod planned;
+
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
@@ -395,18 +397,14 @@ fn resolve_binding_trigger(
         ));
     }
 
-    let connector_slug = connector_slug
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("missing connector_slug for a new workflow connection")?;
-    let template = manager
-        .connector_store()
-        .get(connector_slug)
-        .ok_or_else(|| anyhow::anyhow!("connector `{connector_slug}` not found"))?;
-    if !connector_workflow_trigger_supported(&roots, &template) {
-        anyhow::bail!("connector `{connector_slug}` cannot produce workflow trigger events");
-    }
-    Ok((None, connector_slug.to_string(), template))
+    let connectors = manager.connector_store().list_with_builtins();
+    let (connector_slug, template) = planned::resolve_planned_binding_template(
+        &roots,
+        &connectors,
+        connection_slug,
+        connector_slug,
+    )?;
+    Ok((None, connector_slug, template))
 }
 
 fn file_append_binding_from_params(

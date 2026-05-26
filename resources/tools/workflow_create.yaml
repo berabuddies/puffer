@@ -4,8 +4,10 @@ description: |-
   Create a workflow from a connection trigger and action.
 
   A workflow is a connection plus Puffer-side filter that triggers one action
-  or YAML action graph. Use this after the connection exists and the action has
-  been validated.
+  or YAML action graph. Use this after the action has been validated. If the
+  connection does not exist yet, provide connector_slug or use a suggested
+  connection name such as `telegram-user` or `email` so Puffer can stage a
+  planned connection workflow.
 
   To save every matching message to `/tmp/hi`, use `pattern: hi` and:
     yaml_action: |
@@ -24,7 +26,13 @@ input_schema:
       type: string
     connection_slug:
       type: string
-      description: Authorized connection slug.
+      description: Authorized connection slug or planned connection slug.
+    connector_slug:
+      type: string
+      description: >-
+        Optional connector slug for planned workflows when connection_slug does
+        not exist yet. Omit when connection_slug is an existing connection or a
+        built-in suggested connection name.
     filter:
       type: object
       description: Optional Puffer-side JSON, regex, or limited path-expression filter.

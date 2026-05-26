@@ -2,8 +2,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
     connection_subscriber_manifest, connection_workflow_trigger_supported,
-    connector_workflow_trigger_supported, ActionSpec, ConnectionRecord, ConnectorTemplate,
-    FilterSpec, SubscriberManifestRoots, TaggedFilterSpec, WorkflowBindingSpec,
+    connector_workflow_trigger_supported, suggested_connection_slug, ActionSpec, ConnectionRecord,
+    ConnectorTemplate, FilterSpec, SubscriberManifestRoots, TaggedFilterSpec, WorkflowBindingSpec,
     WorkflowBindingStatus,
 };
 use serde_json::json;
@@ -182,22 +182,52 @@ fn resolve_trigger(
         });
     }
 
-    let connector_slug = connector_slug
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("missing --connector for a planned workflow connection")?;
-    let template = manager
-        .connector_store()
-        .get(connector_slug)
-        .ok_or_else(|| anyhow!("connector `{connector_slug}` not found"))?;
-    if !connector_workflow_trigger_supported(&roots, &template) {
-        bail!("connector `{connector_slug}` cannot produce workflow trigger events");
-    }
+    let connectors = manager.connector_store().list_with_builtins();
+    let (connector_slug, template) =
+        resolve_planned_trigger_template(&roots, &connectors, connection_slug, connector_slug)?;
     Ok(TriggerSelection {
         connection: None,
-        connector_slug: connector_slug.to_string(),
+        connector_slug,
         template,
     })
+}
+
+fn resolve_planned_trigger_template(
+    roots: &SubscriberManifestRoots,
+    connectors: &[ConnectorTemplate],
+    connection_slug: &str,
+    connector_slug: Option<&str>,
+) -> Result<(String, ConnectorTemplate)> {
+    if let Some(connector_slug) = connector_slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let template = connectors
+            .iter()
+            .find(|template| template.slug == connector_slug)
+            .ok_or_else(|| anyhow!("connector `{connector_slug}` not found"))?;
+        if !connector_workflow_trigger_supported(roots, template) {
+            bail!("connector `{connector_slug}` cannot produce workflow trigger events");
+        }
+        return Ok((connector_slug.to_string(), template.clone()));
+    }
+
+    let matches = connectors
+        .iter()
+        .filter(|template| {
+            suggested_connection_slug(&template.slug) == connection_slug
+                && connector_workflow_trigger_supported(roots, template)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [template] => Ok((template.slug.clone(), (*template).clone())),
+        [] => bail!(
+            "missing --connector for planned workflow connection `{connection_slug}`; no trigger-ready connector suggests that connection name"
+        ),
+        _ => bail!(
+            "planned workflow connection `{connection_slug}` is ambiguous; pass --connector <connector-slug>"
+        ),
+    }
 }
 
 fn binding_from_request(
@@ -329,6 +359,7 @@ fn ensure_workflow_subscriber_started(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn parses_append_args_with_connector_and_quoted_pattern() {
@@ -376,5 +407,46 @@ mod tests {
         let binding = binding_from_request(&request, "telegram-login".to_string()).unwrap();
 
         assert!(binding.filter.is_none());
+    }
+
+    #[test]
+    fn planned_append_infers_suggested_connection_connector() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut template = connector_template("email");
+        template.command = vec!["puffer-subscriber-email".to_string()];
+
+        let (connector_slug, _) =
+            resolve_planned_trigger_template(&roots, &[template], "email", None).unwrap();
+
+        assert_eq!(connector_slug, "email");
+    }
+
+    #[test]
+    fn planned_append_uses_explicit_connector_for_custom_connection_name() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut template = connector_template("email");
+        template.command = vec!["puffer-subscriber-email".to_string()];
+
+        let (connector_slug, _) =
+            resolve_planned_trigger_template(&roots, &[template], "team-mail", Some("email"))
+                .unwrap();
+
+        assert_eq!(connector_slug, "email");
+    }
+
+    fn connector_template(slug: &str) -> ConnectorTemplate {
+        ConnectorTemplate {
+            slug: slug.to_string(),
+            description: String::new(),
+            skill: String::new(),
+            binary: String::new(),
+            command: Vec::new(),
+            requires_auth: true,
+            can_subscribe: true,
+            can_proxy_agent: false,
+            subscriber: None,
+            output_schema: json!({}),
+            actions: BTreeMap::new(),
+        }
     }
 }

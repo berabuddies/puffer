@@ -5,7 +5,8 @@ use crate::AppState;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
-    connection_subscriber_manifest, connection_workflow_trigger_supported, validate_action_spec,
+    connection_subscriber_manifest, connection_workflow_trigger_supported,
+    connector_workflow_trigger_supported, suggested_connection_slug, validate_action_spec,
     ActionGraphNode, ActionSpec, ConnectionRecord, ConnectorTemplate, FilterSpec,
     SubscriberManifestRoots, TaggedFilterSpec, WorkflowBindingRun, WorkflowBindingSpec,
     WorkflowBindingStatus,
@@ -35,6 +36,8 @@ struct WorkflowCreateInput {
     #[serde(default)]
     description: Option<String>,
     connection_slug: String,
+    #[serde(default)]
+    connector_slug: Option<String>,
     #[serde(default)]
     filter: Option<Value>,
     #[serde(default)]
@@ -130,26 +133,22 @@ pub fn execute_workflow_create(_state: &mut AppState, cwd: &Path, input: Value) 
     validate_action_spec(&action).map_err(anyhow::Error::msg)?;
     let filter = create_filter(parsed.filter, parsed.pattern)?;
     let manager = subscription_manager()?;
-    let connection = manager
-        .connection_store()
-        .get(&parsed.connection_slug)
-        .ok_or_else(|| anyhow::anyhow!("connection `{}` not found", parsed.connection_slug))?;
-    let template = manager
-        .connector_store()
-        .get(&connection.connector_slug)
-        .ok_or_else(|| anyhow::anyhow!("connector `{}` not found", connection.connector_slug))?;
-    if !workflow_trigger_supported(cwd, &connection, &template) {
-        anyhow::bail!(
-            "connector `{}` cannot produce workflow trigger events",
-            connection.connector_slug
-        );
-    }
-    let should_start_subscriber = parsed.enabled.unwrap_or(true);
+    let roots = subscriber_manifest_roots(cwd);
+    let connectors = manager.connector_store().list_with_builtins();
+    let connections = manager.connection_store().list();
+    let (connection, connector_slug, template) = resolve_create_trigger_from_context(
+        &roots,
+        &connectors,
+        &connections,
+        &parsed.connection_slug,
+        parsed.connector_slug.as_deref(),
+    )?;
+    let should_start_subscriber = parsed.enabled.unwrap_or(true) && connection.is_some();
     let spec = WorkflowBindingSpec {
         slug: parsed.slug,
         description: parsed.description.unwrap_or_default(),
         connection_slug: parsed.connection_slug,
-        connector_slug: Some(connection.connector_slug.clone()),
+        connector_slug: Some(connector_slug),
         status: workflow_status(parsed.enabled.unwrap_or(true)),
         filter,
         classify_prompt: parsed.classify_prompt,
@@ -161,7 +160,9 @@ pub fn execute_workflow_create(_state: &mut AppState, cwd: &Path, input: Value) 
     manager.store().create(spec.clone())?;
     let setup_result = (|| -> Result<()> {
         if should_start_subscriber {
-            ensure_workflow_subscriber_started(&manager, cwd, &connection, &template)?;
+            if let Some(connection) = connection.as_ref() {
+                ensure_workflow_subscriber_started(&manager, cwd, connection, &template)?;
+            }
         }
         manager.refresh_connection_consumers()?;
         Ok(())
@@ -182,6 +183,87 @@ pub fn execute_workflow_create(_state: &mut AppState, cwd: &Path, input: Value) 
         });
     }
     Ok(serde_json::to_string_pretty(&spec)?)
+}
+
+fn resolve_create_trigger_from_context(
+    roots: &SubscriberManifestRoots,
+    connectors: &[ConnectorTemplate],
+    connections: &[ConnectionRecord],
+    connection_slug: &str,
+    connector_slug: Option<&str>,
+) -> Result<(Option<ConnectionRecord>, String, ConnectorTemplate)> {
+    if let Some(connection) = connections
+        .iter()
+        .find(|connection| connection.slug == connection_slug)
+    {
+        if let Some(connector_slug) = connector_slug {
+            if connector_slug != connection.connector_slug {
+                anyhow::bail!(
+                    "connection `{}` uses connector `{}`, not `{connector_slug}`",
+                    connection.slug,
+                    connection.connector_slug
+                );
+            }
+        }
+        let template = connectors
+            .iter()
+            .find(|template| template.slug == connection.connector_slug)
+            .ok_or_else(|| {
+                anyhow::anyhow!("connector `{}` not found", connection.connector_slug)
+            })?;
+        if !connection_workflow_trigger_supported(roots, connection, template) {
+            anyhow::bail!(
+                "connector `{}` cannot produce workflow trigger events",
+                connection.connector_slug
+            );
+        }
+        return Ok((
+            Some(connection.clone()),
+            connection.connector_slug.clone(),
+            template.clone(),
+        ));
+    }
+
+    resolve_planned_create_trigger(roots, connectors, connection_slug, connector_slug)
+        .map(|(connector_slug, template)| (None, connector_slug, template))
+}
+
+fn resolve_planned_create_trigger(
+    roots: &SubscriberManifestRoots,
+    connectors: &[ConnectorTemplate],
+    connection_slug: &str,
+    connector_slug: Option<&str>,
+) -> Result<(String, ConnectorTemplate)> {
+    if let Some(connector_slug) = connector_slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let template = connectors
+            .iter()
+            .find(|template| template.slug == connector_slug)
+            .ok_or_else(|| anyhow::anyhow!("connector `{connector_slug}` not found"))?;
+        if !connector_workflow_trigger_supported(roots, template) {
+            anyhow::bail!("connector `{connector_slug}` cannot produce workflow trigger events");
+        }
+        return Ok((connector_slug.to_string(), template.clone()));
+    }
+
+    let matches = connectors
+        .iter()
+        .filter(|template| {
+            suggested_connection_slug(&template.slug) == connection_slug
+                && connector_workflow_trigger_supported(roots, template)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [template] => Ok((template.slug.clone(), (*template).clone())),
+        [] => anyhow::bail!(
+            "connection `{connection_slug}` not found; provide `connector_slug` for a planned workflow connection or run `/connect` first"
+        ),
+        _ => anyhow::bail!(
+            "connection `{connection_slug}` is ambiguous; provide `connector_slug` for the planned workflow connection"
+        ),
+    }
 }
 
 /// Executes `WorkflowValidate`.
@@ -625,7 +707,10 @@ fn create_filter(filter: Option<Value>, pattern: Option<String>) -> Result<Optio
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_action_yaml, subscriber_manifest_roots, workflow_trigger_supported};
+    use super::{
+        parse_action_yaml, resolve_create_trigger_from_context, subscriber_manifest_roots,
+        workflow_trigger_supported,
+    };
     use puffer_subscriptions::{
         find_subscriber_manifest, ActionSpec, ConnectionRecord, ConnectorSubscriberTemplate,
         ConnectorTemplate,
@@ -801,6 +886,72 @@ write_file:
             &connection,
             &template
         ));
+    }
+
+    #[test]
+    fn workflow_create_trigger_uses_existing_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = subscriber_manifest_roots(temp.path());
+        let mut template = connector_template("email", true);
+        template.command = vec!["puffer-subscriber-email".to_string()];
+        let connection = ConnectionRecord::authenticated("personal-email", "email", "demo");
+
+        let (connection, connector_slug, _) = resolve_create_trigger_from_context(
+            &roots,
+            &[template],
+            &[connection],
+            "personal-email",
+            None,
+        )
+        .unwrap();
+
+        assert!(connection.is_some());
+        assert_eq!(connector_slug, "email");
+    }
+
+    #[test]
+    fn workflow_create_trigger_infers_planned_suggested_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = subscriber_manifest_roots(temp.path());
+        let mut template = connector_template("email", true);
+        template.command = vec!["puffer-subscriber-email".to_string()];
+
+        let (connection, connector_slug, _) =
+            resolve_create_trigger_from_context(&roots, &[template], &[], "email", None).unwrap();
+
+        assert!(connection.is_none());
+        assert_eq!(connector_slug, "email");
+    }
+
+    #[test]
+    fn workflow_create_trigger_accepts_explicit_planned_connector() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = subscriber_manifest_roots(temp.path());
+        let mut template = connector_template("email", true);
+        template.command = vec!["puffer-subscriber-email".to_string()];
+
+        let (connection, connector_slug, _) = resolve_create_trigger_from_context(
+            &roots,
+            &[template],
+            &[],
+            "team-mail",
+            Some("email"),
+        )
+        .unwrap();
+
+        assert!(connection.is_none());
+        assert_eq!(connector_slug, "email");
+    }
+
+    #[test]
+    fn workflow_create_trigger_rejects_unknown_planned_connector() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = subscriber_manifest_roots(temp.path());
+
+        let error =
+            resolve_create_trigger_from_context(&roots, &[], &[], "team-mail", None).unwrap_err();
+
+        assert!(error.to_string().contains("provide `connector_slug`"));
     }
 
     fn connector_template(slug: &str, can_subscribe: bool) -> ConnectorTemplate {
