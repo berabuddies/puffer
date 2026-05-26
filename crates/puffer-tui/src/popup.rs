@@ -1,7 +1,14 @@
+#[path = "popup_connections.rs"]
+mod popup_connections;
+
+use self::popup_connections::{
+    live_connect_connection_rows, live_monitor_connection_rows, live_workflow_connection_rows,
+};
 use puffer_core::CommandSpec;
 use puffer_subscriptions::{
     builtin_connector_templates, suggested_connection_slug, ConnectorTemplate,
 };
+use std::collections::BTreeSet;
 
 const MAX_POPUP_ROWS: usize = 8;
 
@@ -268,12 +275,22 @@ fn workflow_connector_command_rows(input: &str) -> Option<Vec<PopupRow>> {
         .trim_start();
     let (kind, query) = workflow_connector_command_query(rest)?;
     let terms = search_terms(query);
-    let mut rows = builtin_connector_templates()
+    let mut rows = live_workflow_connection_rows(kind)
         .into_iter()
-        .filter(template_supports_workflow_command)
-        .map(|template| workflow_connector_command_row(kind, template))
         .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
         .collect::<Vec<_>>();
+    let live_connections = rows
+        .iter()
+        .map(|row| row.row.name.clone())
+        .collect::<BTreeSet<_>>();
+    rows.extend(
+        builtin_connector_templates()
+            .into_iter()
+            .filter(template_supports_workflow_command)
+            .map(|template| workflow_connector_command_row(kind, template))
+            .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
+            .filter(|row| !live_connections.contains(&row.row.name)),
+    );
     rows.sort_by_key(|row| connector_row_sort_key(row, query.trim()));
     rows.truncate(MAX_POPUP_ROWS);
     Some(rows.into_iter().map(|row| row.row).collect())
@@ -286,12 +303,22 @@ fn monitor_connector_rows(input: &str) -> Option<Vec<PopupRow>> {
         .filter(|(command, _)| *command == "monitor")?
         .1;
     let terms = search_terms(rest);
-    let mut rows = builtin_connector_templates()
+    let mut rows = live_monitor_connection_rows()
         .into_iter()
-        .filter(template_supports_event_workflow)
-        .map(monitor_connector_row)
         .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
         .collect::<Vec<_>>();
+    let live_connections = rows
+        .iter()
+        .map(|row| row.row.name.clone())
+        .collect::<BTreeSet<_>>();
+    rows.extend(
+        builtin_connector_templates()
+            .into_iter()
+            .filter(template_supports_event_workflow)
+            .map(monitor_connector_row)
+            .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
+            .filter(|row| !live_connections.contains(&row.row.name)),
+    );
     rows.sort_by_key(|row| connector_command_row_sort_key(row, rest.trim(), "monitor"));
     rows.truncate(MAX_POPUP_ROWS);
     Some(rows.into_iter().map(|row| row.row).collect())
@@ -533,11 +560,16 @@ fn connector_catalog_rows(input: &str) -> Option<Vec<PopupRow>> {
         return None;
     }
     let terms = search_terms(rest);
-    let mut rows = builtin_connector_templates()
+    let mut rows = live_connect_connection_rows()
         .into_iter()
-        .map(connector_popup_row)
         .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
         .collect::<Vec<_>>();
+    rows.extend(
+        builtin_connector_templates()
+            .into_iter()
+            .map(connector_popup_row)
+            .filter(|row| terms.iter().all(|term| row.search_text.contains(term))),
+    );
     rows.sort_by_key(|row| connector_row_sort_key(row, rest.trim()));
     rows.truncate(MAX_POPUP_ROWS);
     Some(rows.into_iter().map(|row| row.row).collect())
@@ -664,7 +696,7 @@ fn search_terms(query: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::popup_rows;
+    use super::*;
     use puffer_core::{supported_commands, CommandKind, CommandSpec};
 
     #[test]
