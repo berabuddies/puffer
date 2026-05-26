@@ -30,6 +30,7 @@ mod tag;
 mod tasks;
 mod terminal_setup;
 mod usage_buddy;
+mod workflows;
 
 pub(super) fn puffer_home_lock() -> &'static Mutex<()> {
     crate::test_locks::env_lock()

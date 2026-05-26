@@ -76,7 +76,7 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
         _ => {
             out.push_str(
                 "Usage: /workflows [list|new|connections|connectors|tasks|runs] [query]\n\
-                 Tip: use /connect to add a connector connection, then select it as a workflow trigger.",
+                 Tip: /workflows new [slug] [connection-slug] [pattern] creates a disabled draft.",
             );
         }
     }
@@ -613,7 +613,9 @@ fn write_runs(out: &mut String, runs: &[WorkflowRun], query: &str) {
 fn trigger_label(trigger: &TriggerSpec) -> String {
     match trigger {
         TriggerSpec::Cron { cron } => format!("cron:{cron}"),
-        TriggerSpec::Subscription { source_topic, .. } => format!("connection:{source_topic}"),
+        TriggerSpec::Subscription { source_topic, .. } => {
+            format!("subscription:{source_topic}")
+        }
         TriggerSpec::Connection {
             connection_slug, ..
         } => format!("connection:{connection_slug}"),

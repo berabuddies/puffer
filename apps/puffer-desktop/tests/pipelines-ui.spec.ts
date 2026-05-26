@@ -113,6 +113,8 @@ test("pipeline editor creates new workflow drafts before saving", async ({ page 
   await expect(page.locator(".pf-editor-inline").getByRole("checkbox")).not.toBeChecked();
   await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
   await expect(page.getByLabel("Workflow connection")).toHaveValue("telegram-user");
+  await expect(page.locator(".pf-editor-config").getByLabel("Pattern")).toHaveValue(".*");
+  await page.locator(".pf-editor-config").getByLabel("Pattern").fill("hi");
 
   const saveButton = page.getByRole("button", { name: "Save workflow" });
   await expect(saveButton).toBeEnabled();
@@ -125,11 +127,11 @@ test("pipeline editor creates new workflow drafts before saving", async ({ page 
   const workflow = request.params.workflow as {
     slug?: string;
     enabled?: boolean;
-    trigger?: { type?: string; connection_slug?: string };
+    trigger?: { type?: string; connection_slug?: string; pattern?: string };
     pipeline?: { name?: string };
   };
   expect(workflow.enabled).toBe(false);
-  expect(workflow.trigger).toMatchObject({ type: "connection", connection_slug: "telegram-user" });
+  expect(workflow.trigger).toMatchObject({ type: "connection", connection_slug: "telegram-user", pattern: "hi" });
   expect(workflow.pipeline?.name).toBe("Workflow draft");
   await expect(page.locator(".pf-pipe-save-note")).toContainText("Saved workflow-draft.");
   await expect(saveButton).toBeDisabled();

@@ -77,6 +77,7 @@
     connectionSlug?: string;
     connectorSlug?: string;
     connectionName?: string;
+    pattern?: string;
     saveMessage?: string;
   };
 
@@ -419,15 +420,16 @@
   function createWorkflowDraft(source: WorkflowDraftSource = {}) {
     const slug = uniqueWorkflowSlug(source.slugBase ?? "workflow-draft");
     const draft = starterWorkflow(slug, source.name ?? "Workflow draft", false);
+    const pattern = normalizedPattern(source.pattern) ?? ".*";
     const connection = source.connectionSlug
       ? connections.find((item) => item.slug === source.connectionSlug)
       : triggerReadyConnections[0];
     const connectionSlug = source.connectionSlug ?? connection?.slug;
     draft.trigger = connection
-      ? { type: "connection", connection_slug: connection.slug, pattern: ".*" }
+      ? { type: "connection", connection_slug: connection.slug, pattern }
       : connectionSlug
-        ? { type: "connection", connection_slug: connectionSlug, pattern: ".*" }
-      : { type: "subscription", source_topic: "workspace.task.created", pattern: ".*" };
+        ? { type: "connection", connection_slug: connectionSlug, pattern }
+      : { type: "subscription", source_topic: "workspace.task.created", pattern };
     editorWorkflows = [...editorWorkflows, draft];
     workflowSlug = slug;
     selectedNodeId = draft.pipeline.nodes[0]?.id ?? null;
@@ -497,7 +499,7 @@
       schema: item.schema || "puffer.workflow.v1",
       slug: item.slug,
       enabled: item.enabled,
-      trigger: item.trigger,
+      trigger: triggerForSave(item.trigger),
       pipeline: {
         name: item.pipeline.name,
         working_dir: item.pipeline.working_dir,
@@ -595,8 +597,19 @@
 
   function defaultPattern(item: EditableWorkflow): string {
     return item.trigger.type === "connection" || item.trigger.type === "subscription"
-      ? item.trigger.pattern ?? "*"
-      : "*";
+      ? normalizedPattern(item.trigger.pattern) ?? ".*"
+      : ".*";
+  }
+
+  function normalizedPattern(value: string | null | undefined): string | null {
+    const trimmed = (value ?? "").trim();
+    if (!trimmed) return null;
+    return trimmed === "*" ? ".*" : value ?? null;
+  }
+
+  function triggerForSave(trigger: WorkflowDefinition["trigger"]): WorkflowDefinition["trigger"] {
+    if (trigger.type === "cron") return trigger;
+    return { ...trigger, pattern: normalizedPattern(trigger.pattern) };
   }
 
   function defaultConnectionSlug(item: EditableWorkflow): string {
@@ -1675,7 +1688,7 @@
               </label>
               <label>
                 <span>Pattern</span>
-                <input value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
+                <input placeholder=".*" value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
               </label>
             {:else}
               <label>
@@ -1684,7 +1697,7 @@
               </label>
               <label>
                 <span>Pattern</span>
-                <input value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
+                <input placeholder=".*" value={workflow.trigger.pattern ?? ""} oninput={(event) => updateTriggerField("pattern", event.currentTarget.value)} />
               </label>
             {/if}
             <div class="pf-connector-picker">

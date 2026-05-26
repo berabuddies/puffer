@@ -48,6 +48,42 @@ mod tests {
     }
 
     #[test]
+    fn workflow_list_labels_subscription_triggers_as_subscriptions() {
+        let workflow = WorkflowDefinition {
+            schema: "puffer.workflow.v1".to_string(),
+            slug: "agent-review".to_string(),
+            enabled: false,
+            trigger: TriggerSpec::Subscription {
+                source_topic: "workspace.task.created".to_string(),
+                pattern: Some("review".to_string()),
+                classify_prompt: None,
+            },
+            pipeline: puffer_workflow::AgentFlowPipeline {
+                name: "Agent review".to_string(),
+                working_dir: None,
+                concurrency: Some(1),
+                nodes: vec![puffer_workflow::PipelineNode {
+                    id: "codex".to_string(),
+                    node_type: Some("codex".to_string()),
+                    agent: Some("Codex".to_string()),
+                    prompt: "Review the event.".to_string(),
+                    model: None,
+                    tools: Vec::new(),
+                    env: BTreeMap::new(),
+                    depends_on: Vec::new(),
+                    extra: BTreeMap::new(),
+                }],
+                extra: BTreeMap::new(),
+            },
+        };
+        let mut out = String::new();
+
+        write_workflows(&mut out, &[workflow], &[]);
+
+        assert!(out.contains("trigger=subscription:workspace.task.created"));
+    }
+
+    #[test]
     fn workflow_connections_omit_monitor_command_for_non_trigger_connections() {
         let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
         let mut template = trigger_template();
