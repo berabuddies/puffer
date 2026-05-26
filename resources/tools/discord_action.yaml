@@ -17,6 +17,7 @@ input_schema:
       enum:
         - sendEmbeds
         - readMessages
+        - searchMessages
       description: Discord action to perform.
     service:
       type: string
@@ -27,6 +28,19 @@ input_schema:
       type: string
       pattern: "^[0-9]+$"
       description: Discord channel snowflake.
+    guildId:
+      type: string
+      pattern: "^[0-9]+$"
+      description: Discord guild snowflake used to discover channels for searchMessages.
+    channelIds:
+      type: array
+      description: Discord channel snowflakes to search for searchMessages.
+      items:
+        type: string
+        pattern: "^[0-9]+$"
+    query:
+      type: string
+      description: Case-insensitive text query for searchMessages.
     body:
       type: string
       description: Message content for sendEmbeds.
