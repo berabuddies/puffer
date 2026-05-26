@@ -378,6 +378,10 @@ fn cross_backend_mcp_equivalence() {
             endpoint: String::new(),
             target: "builtin:filesystem".into(),
             description: "Workspace filesystem stub".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }]
@@ -570,6 +574,10 @@ fn cross_backend_real_mcp_tools() {
                 stub_bin.display()
             ),
             description: "Integration-test stub MCP server".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }]
@@ -657,6 +665,10 @@ fn cross_backend_real_mcp_resources_and_prompts() {
                 stub_bin.display()
             ),
             description: "Integration-test stub MCP server".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }]
@@ -779,6 +791,10 @@ fn cross_backend_progress_notifications_round_trip() {
                 stub_bin.display()
             ),
             description: "Integration-test stub MCP server".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }]
@@ -1116,6 +1132,10 @@ fn cross_backend_elicitation_round_trips() {
                 stub_bin.display()
             ),
             description: "Integration-test stub MCP server".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }]
@@ -1446,6 +1466,10 @@ fn cross_backend_http_mcp_round_trip() {
             endpoint: String::new(),
             target: stub.url.clone(),
             description: "Cross-backend HTTP MCP stub".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }]
@@ -1552,6 +1576,10 @@ fn cross_backend_oauth_token_push_round_trip() {
             endpoint: String::new(),
             target: "https://mcp.example.com/v1".into(),
             description: "OAuth-gated MCP stub".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: Some(McpOAuthSpec::Detailed(McpOAuthDetail {
                 enabled: true,
@@ -1661,6 +1689,10 @@ fn cross_backend_mcp_tool_advertising() {
                 stub_bin.display()
             ),
             description: "Integration-test stub MCP server".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }]

@@ -4,8 +4,9 @@
 //! but trimmed to the puffer-only needs:
 //!
 //! * No executor backend (codex's remote process API doesn't apply here).
-//! * No env policy / inheritance gymnastics — we merge the spec's `env` map
-//!   onto the inherited environment and stop there.
+//! * Env policy is manifest-controlled: legacy manifests inherit the parent
+//!   environment, while verified-skill manifests can request a safe baseline
+//!   plus explicit env only.
 //! * Lifecycle is owned by the connection manager, so this module just builds
 //!   a [`TokioChildProcess`] and a stderr forwarder.
 //!
@@ -20,7 +21,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use super::transport::StdioTransportSpec;
+use super::transport::{expand_env, StdioTransportSpec};
+
+const SAFE_STDIO_ENV_KEYS: &[&str] = &[
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
+];
 
 /// Build and spawn a child-process transport for one stdio MCP server.
 ///
@@ -43,8 +48,21 @@ pub(crate) fn spawn_stdio_child(
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
+    if !spec.inherit_env {
+        command.env_clear();
+        for key in SAFE_STDIO_ENV_KEYS {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        for (key, value) in std::env::vars() {
+            if key.starts_with("XDG_") {
+                command.env(key, value);
+            }
+        }
+    }
     for (key, value) in &spec.env {
-        command.env(key, value);
+        command.env(key, expand_env(value));
     }
 
     let (transport, stderr) = TokioChildProcess::builder(command)

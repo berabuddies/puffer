@@ -1415,6 +1415,10 @@ fn handle_add_mcp_server(state: &DaemonState, params: &Value) -> Result<Value> {
             .description
             .map(|value| value.trim().to_string())
             .unwrap_or_default(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: Default::default(),
         oauth: None,
     };
@@ -5181,6 +5185,7 @@ mod tests {
                 {"name": "debugpy_attach", "params": [{"name": "port", "ty": "int"}], "result": "unit", "effects": ["proc"], "concreteTools": ["DebugpyAction"], "concreteInputContracts": {"DebugpyAction": {"action": "attach", "port": {"$int_arg": "port"}}}, "registers": [], "contextReq": null},
                 {"name": "mcp_check", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["McpStatus"], "concreteInputContracts": {"McpStatus": {"server": {"$arg": "value"}}}, "registers": [], "contextReq": null},
                 {"name": "modal_run", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ModalAction"], "concreteInputContracts": {"ModalAction": {"action": "createSecret", "value": {"$arg": "value"}}}, "registers": [], "contextReq": null},
+                {"name": "native_mcp_discover", "params": [], "result": "str", "effects": ["proc"], "concreteTools": ["NativeMcpAction"], "concreteInputContracts": {"NativeMcpAction": {"action": "discoverTools"}}, "registers": [], "contextReq": null},
                 {"name": "secret_prepare", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["SecretValue"], "concreteInputContracts": {"SecretValue": {"action": "prepare", "value": {"$arg": "value"}}}, "registers": [], "contextReq": null},
                 {"name": "shopify_fulfill", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ShopifyAction"], "concreteInputContracts": {"ShopifyAction": {"action": "fulfillmentCreate", "orderId": {"$arg": "value"}, "inputJson": "{}"}}, "registers": [], "contextReq": null},
                 {"name": "td_validate", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["TouchDesignerAction"], "concreteInputContracts": {"TouchDesignerAction": {"action": "validateScript", "code": {"$arg": "value"}}}, "registers": [], "contextReq": null}
@@ -5215,6 +5220,7 @@ mod tests {
                 "DebugpyAction",
                 "McpStatus",
                 "ModalAction",
+                "NativeMcpAction",
                 "SecretValue",
                 "ShopifyAction",
                 "TouchDesignerAction"

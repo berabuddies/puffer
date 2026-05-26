@@ -540,6 +540,10 @@ mod tests {
             endpoint: String::new(),
             target: "builtin:filesystem".to_string(),
             description: "Filesystem server".to_string(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }

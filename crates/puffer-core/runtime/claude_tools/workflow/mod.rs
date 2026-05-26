@@ -26,6 +26,7 @@ mod lsp_live_diagnostics;
 pub mod mcp_status;
 pub mod mcp_tool_call;
 pub mod modal_action;
+pub mod native_mcp_action;
 pub mod powershell;
 pub mod process_control;
 pub mod secret_value;

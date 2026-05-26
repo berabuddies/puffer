@@ -350,6 +350,10 @@ fn replace_mcp_roster_drops_old_entries() {
         endpoint: String::new(),
         target: "/bin/nonexistent-alpha".into(),
         description: String::new(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: Default::default(),
         oauth: None,
     });
@@ -365,6 +369,10 @@ fn replace_mcp_roster_drops_old_entries() {
         endpoint: String::new(),
         target: "/bin/nonexistent-beta".into(),
         description: String::new(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: Default::default(),
         oauth: None,
     }];

@@ -557,6 +557,10 @@ mod tests {
             endpoint: String::new(),
             target: "builtin:filesystem".into(),
             description: "Filesystem server".into(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }
@@ -570,6 +574,10 @@ mod tests {
             endpoint: String::new(),
             target: format!("{id}-target"),
             description: format!("{id} description"),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }

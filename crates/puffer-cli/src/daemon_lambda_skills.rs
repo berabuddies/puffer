@@ -148,6 +148,7 @@ const SUPPORTED_LAMBDA_CONCRETE_TOOLS: &[&str] = &[
     "McpToolCall",
     "Memory",
     "ModalAction",
+    "NativeMcpAction",
     "NotebookEdit",
     "PowerShell",
     "ProcessControl",

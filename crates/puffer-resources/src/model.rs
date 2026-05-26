@@ -296,7 +296,11 @@ pub struct PluginCommandSpec {
 /// `transport` selects the wire protocol used to reach the server:
 ///
 /// * `stdio` (default) — `target` is a shell-words command line, executed
-///   as a subprocess; the runner pipes JSON-RPC over stdin/stdout.
+///   as a subprocess; the runner pipes JSON-RPC over stdin/stdout. `env`
+///   supplies explicit child environment values. `inherit_env` defaults to
+///   true for backwards compatibility; set it to false when a verified
+///   skill requires a safe baseline environment plus only explicit env.
+///   `timeout` and `connect_timeout` are optional second-based limits.
 /// * `http` (alias `streamable-http`) — `target` is the absolute URL of an
 ///   rmcp streamable-HTTP endpoint. Optional `headers` are sent on every
 ///   request; values support `${VAR}` / `$VAR` env-var expansion so users
@@ -314,10 +318,24 @@ pub struct McpServerSpec {
     pub target: String,
     #[serde(default)]
     pub description: String,
+    /// Extra environment variables supplied to stdio MCP subprocesses.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Whether stdio MCP subprocesses inherit the full Puffer process
+    /// environment. Defaults to true to preserve existing user manifests.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub inherit_env: bool,
+    /// Per-tool-call timeout in seconds. Defaults to 120 when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Initial connection and discovery timeout in seconds. Defaults to 60
+    /// when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout: Option<u64>,
     /// Extra HTTP headers attached to every request when
     /// `transport == "http"` / `"streamable-http"`. Ignored for other
     /// transports. Values support `${VAR}` env-var expansion.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub headers: std::collections::BTreeMap<String, String>,
     /// OAuth 2.0 configuration for HTTP MCP servers (pass 1.5e).
     ///
@@ -375,6 +393,10 @@ pub struct McpOAuthDetail {
 
 fn default_true() -> bool {
     true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl McpOAuthSpec {

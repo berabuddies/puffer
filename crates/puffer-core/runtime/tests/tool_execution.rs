@@ -29,6 +29,8 @@ mod legacy_alias_permissions;
 mod modal_secret_action;
 #[path = "tool_execution/multi_agent_e2e.rs"]
 mod multi_agent_e2e;
+#[path = "tool_execution/native_mcp_action.rs"]
+mod native_mcp_action;
 #[path = "tool_execution/openai_lambda_batch.rs"]
 mod openai_lambda_batch;
 #[path = "tool_execution/request_scope_tests.rs"]
