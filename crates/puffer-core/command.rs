@@ -8,10 +8,10 @@ use crate::command_helpers::{
     handle_permissions_command, handle_plan_command, handle_plugin_command, handle_recap_command,
     handle_reflect_command, handle_remote_control_command, handle_remote_env_command,
     handle_resume_command, handle_sandbox_command, handle_session_command, handle_tag_command,
-    handle_tasks_command, handle_telegram_command, handle_terminal_setup_command,
-    handle_workflows_command, list_skills, persist_user_settings, record_command_checkpoint,
-    reload_config_from_disk, remove_provider_credentials, render_login_guidance, rewind_transcript,
-    run_doctor, run_provider_login_flow, supports_auth_mode,
+    handle_tasks_command, handle_terminal_setup_command, handle_workflows_command, list_skills,
+    persist_user_settings, record_command_checkpoint, reload_config_from_disk,
+    remove_provider_credentials, render_login_guidance, rewind_transcript, run_doctor,
+    run_provider_login_flow, supports_auth_mode,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_status_summary, render_usage_summary,
@@ -464,10 +464,6 @@ fn execute_local_command(
         "workflows" => match handle_workflows_command(state, args) {
             Ok(message) => emit_system(state, session_store, message),
             Err(error) => emit_system(state, session_store, format!("/workflows failed: {error}")),
-        },
-        "telegram" => match handle_telegram_command(state, resources, args) {
-            Ok(message) => emit_system(state, session_store, message),
-            Err(error) => emit_system(state, session_store, format!("/telegram failed: {error}")),
         },
         "config" => handle_config_command(state, session_store, args),
         "context" => describe_context(state, resources, providers, session_store),

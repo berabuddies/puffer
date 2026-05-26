@@ -445,15 +445,6 @@ pub fn supported_commands() -> Vec<CommandSpec> {
         ),
         cmd("theme", &[], "Change the theme", None, CommandKind::Local),
         cmd(
-            "telegram",
-            &[],
-            "Search Telegram peers and messages locally",
-            Some(
-                "[--connection <name>] <search-peers|list-peers|search-messages|list-messages> ...",
-            ),
-            CommandKind::Local,
-        ),
-        cmd(
             "usage",
             &[],
             "Show plan usage limits",
