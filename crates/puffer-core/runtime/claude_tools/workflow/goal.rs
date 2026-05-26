@@ -11,11 +11,11 @@
 //! agree on the 4-state machine, token accounting, plan-mode
 //! exclusion, and goal_id continuity.
 
-use crate::AppState;
 use crate::runtime::goals::{self, GoalToolEnvelope};
-use anyhow::{Result, anyhow};
+use crate::AppState;
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::Path;
 
 /// `get_goal` is read-only — no fields. Defined as `#[serde(deny_unknown_fields)]`
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use crate::runtime::goals;
     use crate::state::GoalStatus;
-    use puffer_config::{ConfigPaths, PufferConfig, ensure_workspace_dirs};
+    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
     use puffer_session_store::SessionStore;
     use serde_json::json;
     use tempfile::tempdir;
@@ -169,12 +169,10 @@ mod tests {
             execute_update_goal(&mut state, tmp.path(), json!({"status": "complete"})).unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["goal"]["status"], "complete");
-        assert!(
-            parsed["completionBudgetReport"]
-                .as_str()
-                .unwrap()
-                .contains("250 of 1000")
-        );
+        assert!(parsed["completionBudgetReport"]
+            .as_str()
+            .unwrap()
+            .contains("250 of 1000"));
     }
 
     #[test]
@@ -194,11 +192,10 @@ mod tests {
         execute_create_goal(&mut state, tmp.path(), json!({"objective": "x"})).unwrap();
         let err =
             execute_update_goal(&mut state, tmp.path(), json!({"status": "active"})).unwrap_err();
-        assert!(
-            err.to_string()
-                .to_ascii_lowercase()
-                .contains("invalid update_goal input")
-        );
+        assert!(err
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("invalid update_goal input"));
     }
 
     #[test]

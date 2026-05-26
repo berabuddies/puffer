@@ -1,6 +1,6 @@
 use super::store::{
-    StoredTask, TaskStore, TodoInputItem, load_store, now_ms, process_is_running, save_store,
-    tasks_path,
+    load_store, now_ms, process_is_running, save_store, tasks_path, StoredTask, TaskStore,
+    TodoInputItem,
 };
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
@@ -220,7 +220,7 @@ fn truncate_process_output(output: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PROCESS_OUTPUT_CHARS, truncate_process_output};
+    use super::{truncate_process_output, MAX_PROCESS_OUTPUT_CHARS};
 
     #[test]
     fn truncate_process_output_leaves_short_text_unchanged() {

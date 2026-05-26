@@ -51,9 +51,9 @@ use super::http_launcher::{
 };
 use super::launcher::spawn_stdio_child;
 use super::transport::{
-    HttpOAuthSpec, HttpTransportSpec, StdioTransportSpec, TransportRecipe, expand_env,
+    expand_env, HttpOAuthSpec, HttpTransportSpec, StdioTransportSpec, TransportRecipe,
 };
-use puffer_mcp_oauth::{OAuthConfig, OAuthError, OAuthService, default_token_dir};
+use puffer_mcp_oauth::{default_token_dir, OAuthConfig, OAuthError, OAuthService};
 use std::path::PathBuf;
 
 /// Bounded-retry policy: at most `MAX_RETRIES` failed launches inside the

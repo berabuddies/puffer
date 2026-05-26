@@ -1,8 +1,8 @@
 use super::store::{
-    AgentStore, StoredTask, TaskCreateInput, TaskIdInput, TaskOutputInput, TaskStopInput,
-    TaskStore, TaskUpdateInput, agents_path, append_agent_message, ensure_safe_identifier,
-    load_store, monitor_tasks_path, next_monitor_task_id, next_task_id, now_ms, save_store,
-    tasks_path, team_lead_agent_id, terminate_process, wait_for_process_exit,
+    agents_path, append_agent_message, ensure_safe_identifier, load_store, monitor_tasks_path,
+    next_monitor_task_id, next_task_id, now_ms, save_store, tasks_path, team_lead_agent_id,
+    terminate_process, wait_for_process_exit, AgentStore, StoredTask, TaskCreateInput, TaskIdInput,
+    TaskOutputInput, TaskStopInput, TaskStore, TaskUpdateInput,
 };
 use super::task_runtime::{
     read_runtime_agent_output, read_task_output, refresh_stored_task, runtime_agent_output_path,
@@ -10,8 +10,8 @@ use super::task_runtime::{
     wait_for_stored_task,
 };
 use crate::AppState;
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::{Map, Value, json};
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -573,11 +573,9 @@ pub(super) fn execute_task_output(
         if let Some(error) = agent_payload.get("error").and_then(Value::as_str) {
             task_payload["error"] = json!(error);
         }
-        task_payload["outputFile"] = json!(
-            runtime_agent_output_path(store_cwd, &parsed.task_id)
-                .display()
-                .to_string()
-        );
+        task_payload["outputFile"] = json!(runtime_agent_output_path(store_cwd, &parsed.task_id)
+            .display()
+            .to_string());
         return task_output_response(
             if timed_out {
                 "timeout"

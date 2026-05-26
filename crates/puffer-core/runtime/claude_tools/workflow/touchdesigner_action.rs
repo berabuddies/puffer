@@ -1,5 +1,5 @@
 use crate::AppState;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::Path;

@@ -1,6 +1,6 @@
 use super::secret_value;
 use crate::AppState;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;

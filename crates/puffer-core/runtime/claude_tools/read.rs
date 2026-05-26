@@ -1,5 +1,5 @@
 use crate::workspace_paths;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::Deserialize;
 use serde::Serialize;
@@ -535,11 +535,9 @@ mod tests {
         assert_eq!(parsed["file"]["startLine"], 1);
         assert_eq!(parsed["file"]["numLines"], 2000);
         assert_eq!(parsed["file"]["totalLines"], 2500);
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|content| content.starts_with("     1\tline-0\n"))
-        );
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|content| content.starts_with("     1\tline-0\n")));
     }
 
     #[test]
@@ -550,11 +548,9 @@ mod tests {
         });
         let error = execute_claude_read_tool(temp.path(), &[], &workspace_write_policy(), payload)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Read requires an absolute file_path")
-        );
+        assert!(error
+            .to_string()
+            .contains("Read requires an absolute file_path"));
     }
 
     #[test]
@@ -612,16 +608,12 @@ mod tests {
         let parsed: Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(parsed["type"], "text");
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("not valid UTF-8"))
-        );
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("00000000  ff 00 41 42 7f"))
-        );
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("not valid UTF-8")));
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("00000000  ff 00 41 42 7f")));
     }
 
     #[test]
@@ -653,11 +645,9 @@ mod tests {
         let parsed: Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(parsed["type"], "text");
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("hello"))
-        );
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("hello")));
     }
 
     #[test]
@@ -673,11 +663,9 @@ mod tests {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|text| text.contains("contents are empty"))
-        );
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("contents are empty")));
     }
 
     /// Regression: a model that passes `offset: 0` used to get back
@@ -729,11 +717,9 @@ mod tests {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|text| text.contains("shorter than the provided offset (5)"))
-        );
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("shorter than the provided offset (5)")));
     }
 
     #[test]
@@ -780,11 +766,9 @@ mod tests {
 
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "text");
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|text| text.contains("Page one"))
-        );
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("Page one")));
     }
 
     fn env_lock() -> &'static Mutex<()> {
@@ -810,11 +794,9 @@ mod tests {
 
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "text");
-        assert!(
-            parsed["file"]["content"]
-                .as_str()
-                .is_some_and(|text| text.contains("hello"))
-        );
+        assert!(parsed["file"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("hello")));
     }
 
     #[test]

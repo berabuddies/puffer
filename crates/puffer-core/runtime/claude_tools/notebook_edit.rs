@@ -1,8 +1,8 @@
 use crate::workspace_paths;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -475,12 +475,10 @@ mod tests {
         )
         .unwrap();
         let payload: NotebookEditOutput = serde_json::from_str(&output).unwrap();
-        assert!(
-            payload
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("Cell ID must be specified"))
-        );
+        assert!(payload
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Cell ID must be specified")));
     }
 
     #[test]
@@ -527,12 +525,10 @@ mod tests {
         )
         .unwrap();
         let payload: NotebookEditOutput = serde_json::from_str(&output).unwrap();
-        assert!(
-            payload
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("Cell type is required"))
-        );
+        assert!(payload
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Cell type is required")));
     }
 
     #[test]

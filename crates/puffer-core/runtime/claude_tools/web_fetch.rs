@@ -1,11 +1,11 @@
 use super::retry_http_send;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use html2text::from_read;
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
 use reqwest::{StatusCode, Url};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;

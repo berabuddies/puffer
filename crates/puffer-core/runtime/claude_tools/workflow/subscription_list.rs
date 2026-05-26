@@ -3,7 +3,7 @@
 
 use crate::AppState;
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::Path;
 
 use super::subscription_globals;

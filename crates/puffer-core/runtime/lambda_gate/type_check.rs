@@ -834,7 +834,9 @@ mod tests {
 
     #[test]
     fn enum_symbol_refinements_match_json_strings() {
-        let args = object(json!({"cred": "secret", "cred_obj": {"sec": "secret"}, "mode": "private", "wait": true}));
+        let args = object(
+            json!({"cred": "secret", "cred_obj": {"sec": "secret"}, "mode": "private", "wait": true}),
+        );
         assert!(lambda_arg_matches_type(
             args.get("cred").unwrap(),
             "cred",
@@ -955,7 +957,10 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(unsupported_refinements_in_type("int{n > 0 && n <= 10}").is_empty());
-        assert!(unsupported_refinements_in_type("Request{uses_budget_tokens(r) ==> budget_tokens < max_tokens}").is_empty());
+        assert!(unsupported_refinements_in_type(
+            "Request{uses_budget_tokens(r) ==> budget_tokens < max_tokens}"
+        )
+        .is_empty());
         assert!(unsupported_refinements_in_type("Result<unit{authed(s)}, Err>").is_empty());
         assert!(unsupported_refinements_in_type(
             "{layout: LayoutName, style: StyleName, aspect: AspectName}"

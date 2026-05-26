@@ -1,8 +1,8 @@
 use crate::AppState;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;

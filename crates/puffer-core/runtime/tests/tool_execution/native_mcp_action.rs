@@ -124,15 +124,12 @@ fn native_mcp_add_rejects_raw_secret_manifest_values() {
         )
         .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("refuses to persist raw MCP env secret")
-    );
-    assert!(
-        !cwd.join(".puffer/resources/mcp_servers/secreted.yaml")
-            .exists()
-    );
+    assert!(error
+        .to_string()
+        .contains("refuses to persist raw MCP env secret"));
+    assert!(!cwd
+        .join(".puffer/resources/mcp_servers/secreted.yaml")
+        .exists());
 }
 
 #[test]

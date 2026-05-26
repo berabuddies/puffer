@@ -1,5 +1,5 @@
 use crate::workspace_paths;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use glob::{MatchOptions, Pattern};
 use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::{Deserialize, Serialize};

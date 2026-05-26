@@ -2,7 +2,7 @@ use crate::AppState;
 use anyhow::Result;
 use puffer_runner_api::{McpServerInfo, McpTool, RunnerError};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -73,15 +73,13 @@ fn format_status(
                 "toolCount": tools.len(),
             });
             if include_tools {
-                entry["tools"] = json!(
-                    tools
-                        .iter()
-                        .map(|tool| json!({
-                            "name": tool.name,
-                            "description": tool.description,
-                        }))
-                        .collect::<Vec<_>>()
-                );
+                entry["tools"] = json!(tools
+                    .iter()
+                    .map(|tool| json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                    }))
+                    .collect::<Vec<_>>());
             }
             entry
         })

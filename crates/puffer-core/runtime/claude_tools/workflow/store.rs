@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, bail};
-use puffer_config::{ConfigPaths, ensure_workspace_dirs};
+use anyhow::{bail, Context, Result};
+use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_session_store::MessageActor;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

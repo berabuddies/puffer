@@ -1,10 +1,10 @@
-use crate::AppState;
 use crate::runtime::structured_output_support::{
-    StructuredOutputConfig, validate_structured_output_payload,
+    validate_structured_output_payload, StructuredOutputConfig,
 };
+use crate::AppState;
 use anyhow::Result;
-use serde_json::Value;
 use serde_json::json;
+use serde_json::Value;
 use std::path::Path;
 
 /// Executes the Claude-compatible `StructuredOutput` workflow tool.
@@ -28,8 +28,8 @@ pub fn execute_structured_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AppState;
     use crate::runtime::structured_output_support::StructuredOutputConfig;
+    use crate::AppState;
     use puffer_config::PufferConfig;
     use puffer_session_store::SessionMetadata;
     use serde_json::json;

@@ -1,10 +1,10 @@
 use crate::AppState;
-use anyhow::{Context, Result, bail};
-use base64::Engine as _;
+use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use reqwest::blocking::Client;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;

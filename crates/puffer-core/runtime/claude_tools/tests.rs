@@ -1,6 +1,6 @@
 use super::*;
-use crate::permissions::FilesystemPermissionPolicy;
 use crate::permissions::profile::{EffectiveApprovalPolicy, EffectiveSandboxMode};
+use crate::permissions::FilesystemPermissionPolicy;
 use puffer_resources::LoadedResources;
 
 #[test]
@@ -51,8 +51,8 @@ use puffer_tools::{
 };
 use serde_json::json;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Records every `execute_tool` call and forwards execution to an inner

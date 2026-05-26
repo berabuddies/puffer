@@ -1,5 +1,5 @@
 use crate::workspace_paths;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use puffer_runner_api::FilesystemExecutionPolicy;
 use puffer_runner_api::StalenessRejection;
 use serde::{Deserialize, Serialize};
@@ -264,11 +264,9 @@ mod tests {
         assert_eq!(parsed["type"], "create");
         assert_eq!(parsed["filePath"], path.display().to_string());
         assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
-        assert!(
-            read_state
-                .get(&path)
-                .is_some_and(|snapshot| !snapshot.is_partial_view)
-        );
+        assert!(read_state
+            .get(&path)
+            .is_some_and(|snapshot| !snapshot.is_partial_view));
     }
 
     #[test]
@@ -367,18 +365,14 @@ mod tests {
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "update");
         assert_eq!(parsed["originalFile"], "old");
-        assert!(
-            parsed["structuredPatch"]
-                .as_array()
-                .is_some_and(|hunks| !hunks.is_empty())
-        );
+        assert!(parsed["structuredPatch"]
+            .as_array()
+            .is_some_and(|hunks| !hunks.is_empty()));
         assert!(parsed["gitDiff"].as_str().is_some());
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
-        assert!(
-            read_state
-                .get(&path)
-                .is_some_and(|snapshot| snapshot.timestamp_ms >= 1 && !snapshot.is_partial_view)
-        );
+        assert!(read_state
+            .get(&path)
+            .is_some_and(|snapshot| snapshot.timestamp_ms >= 1 && !snapshot.is_partial_view));
     }
 
     #[test]

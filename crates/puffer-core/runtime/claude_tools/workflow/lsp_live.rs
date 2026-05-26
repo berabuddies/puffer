@@ -1,9 +1,9 @@
 use super::store::{git_toplevel, resolve_path};
-use anyhow::{Context, Result, anyhow, bail};
-use puffer_resources::{LoadedResources, plugin_lsp_servers};
+use anyhow::{anyhow, bail, Context, Result};
+use puffer_resources::{plugin_lsp_servers, LoadedResources};
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

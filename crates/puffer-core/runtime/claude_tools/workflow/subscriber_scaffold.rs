@@ -9,9 +9,9 @@
 //! user-approval step.
 
 use crate::AppState;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
