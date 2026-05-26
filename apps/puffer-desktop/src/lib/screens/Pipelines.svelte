@@ -2173,11 +2173,7 @@
                     {/if}
                     {#each filteredMonitorTasks as task (task.task_id)}
                       {@const actions = monitorTaskActions(task)}
-                      {@const visibleActions = actions.slice(0, 2)}
-                      {@const hiddenActions = Math.max(0, actions.length - visibleActions.length)}
                       {@const reasons = monitorTaskIgnoreReasons(task)}
-                      {@const visibleReasons = reasons.slice(0, 2)}
-                      {@const hiddenReasons = Math.max(0, reasons.length - visibleReasons.length)}
                       <div class="pf-monitor-task-row" data-status={task.status}>
                         <button
                           type="button"
@@ -2198,11 +2194,12 @@
                             <span>{task.status || "pending"}</span>
                             {#if task.monitor_connector}<span>{task.monitor_connector}</span>{/if}
                             {#if task.monitor_connection}<span>{task.monitor_connection}</span>{/if}
-                            {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
+                            {#if actions.length > 0}<span>{actions.length} actions</span>{/if}
+                            {#if reasons.length > 0}<span>{reasons.length} ignores</span>{/if}
                           </span>
                         </button>
                         <div class="pf-monitor-task-actions">
-                          {#each visibleActions as action (action.name)}
+                          {#each actions as action (action.name)}
                             <button
                               type="button"
                               class="pf-monitor-action-btn"
@@ -2215,7 +2212,7 @@
                               <Icon name="play" size={11} />{action.name}
                             </button>
                           {/each}
-                          {#each visibleReasons as reason (reason)}
+                          {#each reasons as reason (reason)}
                             <button
                               type="button"
                               class="pf-monitor-action-btn"
@@ -2228,9 +2225,6 @@
                               <Icon name="eyeOff" size={11} />{reason}
                             </button>
                           {/each}
-                          {#if hiddenReasons > 0}
-                            <span class="pf-monitor-task-more">+{hiddenReasons} ignores</span>
-                          {/if}
                           {#if reasons.length === 0}
                             <button
                               type="button"
@@ -3226,13 +3220,6 @@
   .pf-monitor-action-btn:disabled {
     opacity: 0.56;
     cursor: default;
-  }
-
-  .pf-monitor-task-more {
-    align-self: center;
-    color: var(--muted-foreground);
-    font-size: 10.5px;
-    font-weight: 700;
   }
 
   .pf-connection-row-group,

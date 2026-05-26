@@ -793,9 +793,13 @@ export class FakeDaemon {
           {
             name: "Open context",
             prompt: "Open the Telegram thread and summarize the latest deployment question."
+          },
+          {
+            name: "Escalate owner",
+            prompt: "Escalate the deployment question to the on-call owner with the latest context."
           }
         ],
-        possible_ignore_reasons: ["duplicate support ping", "already answered in thread"],
+        possible_ignore_reasons: ["duplicate support ping", "already answered in thread", "not actionable"],
         started_at_ms: now - 15_000,
         updated_at_ms: now - 5_000
       }

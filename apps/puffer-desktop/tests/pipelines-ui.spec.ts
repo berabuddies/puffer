@@ -1222,14 +1222,18 @@ test("pipeline monitor task panel exposes task actions", async ({ page }) => {
   await expect(page.getByLabel("Monitor task search results")).toHaveText("1/1 monitor tasks");
   await expect(tasks).toContainText("Draft reply");
   await expect(tasks).toContainText("Open context");
+  await expect(tasks).toContainText("Escalate owner");
   await expect(tasks).toContainText("already answered in thread");
+  await expect(tasks).toContainText("not actionable");
+  await expect(tasks).toContainText("3 actions");
+  await expect(tasks).toContainText("3 ignores");
 
-  await tasks.getByRole("button", { name: "Run monitor action monitor-1 Draft reply" }).click();
+  await tasks.getByRole("button", { name: "Run monitor action monitor-1 Escalate owner" }).click();
   const actionRequest = await daemon.waitForRequest(
     "run_agent_turn",
     (candidate) =>
       String(candidate.params.message ?? "").startsWith("Act on monitored task monitor-1:")
-      && String(candidate.params.message ?? "").includes("Draft a concise reply to Alice")
+      && String(candidate.params.message ?? "").includes("Escalate the deployment question")
   );
   expect(String(actionRequest.params.sessionId ?? "")).not.toHaveLength(0);
 });
@@ -1247,10 +1251,11 @@ test("pipeline monitor task panel can start ignore flows", async ({ page }) => {
   await expect(tasks.getByRole("button", { name: "Ignore monitor-1 already answered in thread" })).toBeVisible();
 
   await page.getByLabel("Search connectors").fill("support ping");
-  await tasks.getByRole("button", { name: "Ignore monitor-1 duplicate support ping" }).click();
+  await expect(tasks.getByRole("button", { name: "Ignore monitor-1 duplicate support ping" })).toBeVisible();
+  await tasks.getByRole("button", { name: "Ignore monitor-1 not actionable" }).click();
   const ignoreRequest = await daemon.waitForRequest(
     "run_agent_turn",
-    (candidate) => candidate.params.message === "/tasks ignore monitor-1 duplicate support ping"
+    (candidate) => candidate.params.message === "/tasks ignore monitor-1 not actionable"
   );
   expect(String(ignoreRequest.params.sessionId ?? "")).not.toHaveLength(0);
 });
