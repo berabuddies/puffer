@@ -77,6 +77,52 @@ fn modal_secret_create_validates_assignment_before_cli() {
 }
 
 #[test]
+fn modal_define_function_writes_definition_file() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+
+    let output = crate::runtime::claude_tools::workflow::modal_action::execute_modal_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "defineFunction",
+            "gpu": "A100",
+            "image": "modal.Image.debian_slim().pip_install(\"torch\")",
+            "schedule": "modal.Cron(\"0 0 * * *\")"
+        }),
+    )
+    .unwrap();
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["app_defined"], json!(true));
+    assert_eq!(value["kind"], json!("function"));
+    let path = PathBuf::from(value["path"].as_str().unwrap());
+    let body = fs::read_to_string(path).unwrap();
+    assert!(body.contains("@app.function"));
+    assert!(body.contains("gpu=\"A100\""));
+    assert!(body.contains("modal.Image.debian_slim().pip_install(\"torch\")"));
+    assert!(body.contains("modal.Cron(\"0 0 * * *\")"));
+}
+
+#[test]
+fn modal_define_class_rejects_execution_tokens() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+
+    let error = crate::runtime::claude_tools::workflow::modal_action::execute_modal_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "defineClass",
+            "gpu": "H100",
+            "image": "modal.Image.debian_slim(); import os"
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("single expression"));
+}
+
+#[test]
 fn lambda_host_call_redacts_secret_schema_fields_in_gate_metadata() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
