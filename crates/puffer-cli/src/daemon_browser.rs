@@ -18,6 +18,7 @@ use url::Url;
 use crate::daemon::ServerEnvelope;
 
 mod agent;
+mod cdp;
 mod chrome;
 mod client;
 mod console;
@@ -37,15 +38,14 @@ mod upload;
 mod worker;
 
 pub(crate) use agent::handle_browser_agent;
+pub(super) use cdp::parse_evaluation_response;
+pub(super) use cdp::send_cdp;
 use chrome::safe_profile_name;
 pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};
 use console::BrowserConsoleRegistry;
 use recording::BrowserRecordingRegistry;
 pub(crate) use rpc::*;
 use screenshot::BrowserElementRef;
-#[cfg(test)]
-pub(super) use session::parse_evaluation_response;
-pub(super) use session::send_cdp;
 use session::{BrowserRootSession, BrowserSession};
 use tabs::{backend_session_id, parse_backend_session_id, BrowserTabRegistry};
 pub(crate) use tabs::{BrowserCurrentTabContext, BrowserTabInfo, BrowserTabsState};

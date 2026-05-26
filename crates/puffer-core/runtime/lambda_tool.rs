@@ -232,6 +232,18 @@ pub(super) fn prepare_lambda_host_call(
             )),
         );
     };
+    if let Some(filter) = tool_filter {
+        if !filter.allows_definition(definition) {
+            return blocked_runtime_tool(
+                tool_id,
+                ToolPermissionBehavior::Deny,
+                Some(format!(
+                    "LambdaHostCall target tool {} is outside the active skill tool scope",
+                    parsed.tool
+                )),
+            );
+        }
+    }
     match gate.admit_call_with_args(&parsed.host_tool, &parsed.args) {
         LambdaGateVerdict::Accept => {
             if let LambdaGateVerdict::Reject(reason) =
@@ -247,8 +259,9 @@ pub(super) fn prepare_lambda_host_call(
                 Ok(input) => input,
                 Err(reason) => return lambda_skill_gate_denial(tool_id, reason),
             };
-            let concrete_input = parsed.input.unwrap_or(materialized_input);
-            let contract_input = lambda_contract_input_for_tool(definition, &concrete_input);
+            let concrete_input = parsed.input.unwrap_or_else(|| materialized_input.clone());
+            let contract_input =
+                lambda_contract_input_for_tool(definition, &concrete_input, &materialized_input);
             if let LambdaGateVerdict::Reject(reason) = gate.admit_concrete_input_binding(
                 &parsed.host_tool,
                 &parsed.args,
@@ -317,9 +330,13 @@ pub(super) fn prepare_lambda_host_call(
     }
 }
 
-fn lambda_contract_input_for_tool(definition: &ToolDefinition, input: &Value) -> Value {
+fn lambda_contract_input_for_tool(
+    definition: &ToolDefinition,
+    input: &Value,
+    expected: &Value,
+) -> Value {
     if is_bash_tool(definition) {
-        return canonical_bash_contract_input(input).unwrap_or_else(|| input.clone());
+        return canonical_bash_contract_input(input, expected).unwrap_or_else(|| input.clone());
     }
     input.clone()
 }
@@ -337,19 +354,23 @@ fn is_bash_tool(definition: &ToolDefinition) -> bool {
         || definition.handler == "runtime:claude_bash"
 }
 
-fn canonical_bash_contract_input(input: &Value) -> Option<Value> {
+fn canonical_bash_contract_input(input: &Value, expected: &Value) -> Option<Value> {
     let parsed = serde_json::from_value::<ClaudeBashInput>(input.clone()).ok()?;
+    let expected = expected.as_object()?;
     let mut object = Map::new();
     object.insert("command".to_string(), Value::String(parsed.command));
-    if let Some(timeout) = parsed.timeout {
+    if expected.contains_key("timeout") {
+        let timeout = parsed.timeout?;
         object.insert("timeout".to_string(), Value::Number(Number::from(timeout)));
     }
-    object.insert(
-        "run_in_background".to_string(),
-        Value::Bool(parsed.run_in_background),
-    );
-    if parsed.tty {
-        object.insert("tty".to_string(), Value::Bool(true));
+    if expected.contains_key("run_in_background") {
+        object.insert(
+            "run_in_background".to_string(),
+            Value::Bool(parsed.run_in_background),
+        );
+    }
+    if expected.contains_key("tty") {
+        object.insert("tty".to_string(), Value::Bool(parsed.tty));
     }
     Some(Value::Object(object))
 }
