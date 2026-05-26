@@ -803,6 +803,9 @@ pub fn execute_workflow_tool(
         "SubscriptionPause" => {
             workflow::subscription_pause::execute_subscription_pause(state, cwd, input)
         }
+        "TouchDesignerAction" => {
+            workflow::touchdesigner_action::execute_touchdesigner_action(state, cwd, input)
+        }
         "WorkflowInspect" => workflow::workflow_tools::execute_workflow_inspect(state, cwd, input),
         "WorkflowList" => workflow::workflow_tools::execute_workflow_list(state, cwd, input),
         "WorkflowToggle" => workflow::workflow_tools::execute_workflow_toggle(state, cwd, input),

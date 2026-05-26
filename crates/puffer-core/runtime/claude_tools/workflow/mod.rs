@@ -55,6 +55,7 @@ pub mod team_delete;
 mod telegram_format;
 pub mod telegram_login;
 pub mod todo_write;
+pub mod touchdesigner_action;
 pub mod vision_analyze;
 pub mod workflow_tools;
 

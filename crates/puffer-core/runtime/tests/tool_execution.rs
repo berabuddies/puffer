@@ -35,6 +35,8 @@ mod request_scope_tests;
 mod shopify_action;
 #[path = "tool_execution/task_flow_run_task.rs"]
 mod task_flow_run_task;
+#[path = "tool_execution/touchdesigner_action.rs"]
+mod touchdesigner_action;
 
 fn temp_state() -> AppState {
     let tempdir = tempfile::tempdir().unwrap();

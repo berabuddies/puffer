@@ -1,0 +1,35 @@
+id: TouchDesignerAction
+name: TouchDesignerAction
+description: |-
+  Validate TouchDesigner Python snippets through Puffer's typed runtime.
+
+  Use this for verified Lambda Skill contracts that must turn arbitrary text
+  into a SafeScript before td_execute_python may run. Puffer rejects hardcoded
+  absolute paths and obvious one-step scripts that should use native
+  TouchDesigner MCP tools instead.
+handler: runtime:workflow:touchdesigner_action
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - validateScript
+      description: TouchDesigner action to perform.
+    code:
+      type: string
+      description: TouchDesigner Python code to validate.
+  required:
+    - action
+    - code
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+display:
+  group: touchdesigner
+  title: TouchDesignerAction
+  show_in_status: true
