@@ -156,10 +156,10 @@ impl UserQuestionOverlay {
         if question.searchable {
             let indices = self.filtered_option_indices(question, custom_answer);
             if indices.is_empty() {
-                let text = if custom_answer.is_empty() {
+                let text = if custom_answer.trim().is_empty() {
                     "No options available".to_string()
                 } else {
-                    format!("No matches for {custom_answer}")
+                    format!("No options match \"{}\"", custom_answer.trim())
                 };
                 return vec![(false, text)];
             }
@@ -526,11 +526,20 @@ impl UserQuestionOverlay {
     }
 
     /// Returns the footer hint for the active question.
-    pub(crate) fn footer_hint(&self) -> &'static str {
+    pub(crate) fn footer_hint(&self) -> String {
         if self.is_searchable_choice() {
-            "Type to search · Arrows to move · Enter to select · Esc to close"
+            let status = self
+                .current_question()
+                .map(|question| {
+                    let visible_count = self
+                        .filtered_option_indices(question, self.current_custom_answer())
+                        .len();
+                    searchable_status(question, self.current_custom_answer(), visible_count)
+                })
+                .unwrap_or_else(|| "0 options".to_string());
+            format!("{status} · Type to search · Arrows to move · Enter to select · Esc to close")
         } else {
-            "Use arrows or shortcuts · Enter to select · Esc to close"
+            "Use arrows or shortcuts · Enter to select · Esc to close".to_string()
         }
     }
 
@@ -660,4 +669,18 @@ fn normalize_search_query(value: &str) -> String {
 
 fn searchable_option_text(label: &str, description: &str) -> String {
     format!("{} {}", label.trim(), description.trim()).to_ascii_lowercase()
+}
+
+fn searchable_status(question: &UserQuestion, query: &str, visible_count: usize) -> String {
+    let total = question.options.len();
+    if query.trim().is_empty() {
+        if total == 1 {
+            return "1 option".to_string();
+        }
+        return format!("{total} options");
+    }
+    if visible_count == 1 {
+        return format!("1/{total} match");
+    }
+    format!("{visible_count}/{total} matches")
 }

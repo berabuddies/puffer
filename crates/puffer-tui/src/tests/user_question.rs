@@ -188,6 +188,10 @@ fn user_question_searchable_choice_filters_and_selects() {
     let rows = overlay.rows();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].1.contains("telegram-login"));
+    assert_eq!(
+        overlay.footer_hint(),
+        "1/3 match · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
     assert_eq!(overlay.custom_answer(), "tele");
 
     assert!(handle_user_question_key(
@@ -206,6 +210,10 @@ fn user_question_searchable_choice_filters_and_selects() {
 #[test]
 fn user_question_searchable_choice_matches_multiple_terms() {
     let mut overlay = UserQuestionOverlay::from_value(sample_searchable_payload()).unwrap();
+    assert_eq!(
+        overlay.footer_hint(),
+        "3 options · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
 
     for ch in "slack account".chars() {
         overlay.insert_custom_char(ch);
@@ -214,6 +222,29 @@ fn user_question_searchable_choice_matches_multiple_terms() {
     let rows = overlay.rows();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].1.contains("slack-login"));
+    assert_eq!(
+        overlay.footer_hint(),
+        "1/3 match · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
+}
+
+#[test]
+fn user_question_searchable_choice_reports_empty_search() {
+    let mut overlay = UserQuestionOverlay::from_value(sample_searchable_payload()).unwrap();
+
+    for ch in "matrix connector".chars() {
+        overlay.insert_custom_char(ch);
+    }
+
+    assert_eq!(
+        overlay.rows(),
+        vec![(false, "No options match \"matrix connector\"".to_string())]
+    );
+    assert_eq!(
+        overlay.footer_hint(),
+        "0/3 matches · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
+    assert!(overlay.confirm_current().is_none());
 }
 
 #[test]
