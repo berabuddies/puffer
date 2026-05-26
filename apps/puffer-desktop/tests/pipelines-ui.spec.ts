@@ -1320,6 +1320,45 @@ test("pipeline connector command can start setup from the picker", async ({ page
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
+test("pipeline selected connector can run workflow commands", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const stageEmailConnector = async () => {
+    await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+    await page.getByLabel("Search connectors").fill("email");
+    await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
+    await page.getByLabel("Connector connection name").fill("email-personal");
+    await page.getByLabel("Workflow draft pattern").fill("hi there");
+    await page.getByLabel("Append file path").fill("/tmp/email.log");
+  };
+
+  await stageEmailConnector();
+
+  await page.getByRole("button", { name: "Run workflow draft command" }).click();
+  const draftRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/workflows new email-personal-workflow email-personal 'hi there'"
+  );
+  const draftSessionId = String(draftRequest.params.sessionId ?? "");
+  expect(draftSessionId).not.toHaveLength(0);
+  daemon.emit(`session:${draftSessionId}:event`, {
+    type: "turn-complete",
+    turnId: `turn-${draftSessionId}`,
+    assistantText: "Draft command accepted."
+  });
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+
+  await stageEmailConnector();
+  await page.getByRole("button", { name: "Run append workflow command" }).click();
+  const appendRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/workflows append email-personal /tmp/email.log 'hi there' --connector email"
+  );
+  expect(String(appendRequest.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
 test("pipeline connector catalog can run default setup from a connector row", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

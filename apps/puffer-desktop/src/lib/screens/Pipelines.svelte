@@ -187,6 +187,7 @@
   let error = $state<string | null>(null);
   let connectorCommandRunning = $state(false);
   let connectorCommandRunningFor = $state<string | null>(null);
+  let selectedWorkflowCommandRunningFor = $state<"draft" | "append" | null>(null);
   let connectionCommandRunningFor = $state<string | null>(null);
   let monitorCommandRunningFor = $state<string | null>(null);
   let monitorTaskCommandRunningFor = $state<string | null>(null);
@@ -998,6 +999,36 @@
     }
   }
 
+  async function runSelectedWorkflowCommand(kind: "draft" | "append", command: string) {
+    const trimmed = command.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    if (kind === "append" && selectedConnectorAppendPathInvalid) {
+      saveNotice = "Append paths must be relative or under /tmp.";
+      return;
+    }
+    if (!trimmed || connectorCommandRunnerBusy() || !onRunWorkflowCommand) return;
+    selectedWorkflowCommandRunningFor = kind;
+    try {
+      const started = await onRunWorkflowCommand(trimmed);
+      saveNotice = started === false ? `Could not start ${trimmed}.` : `Started ${trimmed} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${trimmed}.`;
+    } finally {
+      selectedWorkflowCommandRunningFor = null;
+    }
+  }
+
+  async function runSelectedConnectorDraftCommand() {
+    await runSelectedWorkflowCommand("draft", selectedConnectorDraftCommand);
+  }
+
+  async function runSelectedConnectorAppendCommand() {
+    await runSelectedWorkflowCommand("append", selectedConnectorAppendCommand);
+  }
+
   async function runConnectorSetupCommand(connector: WorkflowConnector) {
     const connectionName = connectorConnectionHint(connector);
     const command = connectorConnectCommand(connector, connectionName);
@@ -1033,6 +1064,7 @@
   function connectorCommandRunnerBusy(): boolean {
     return connectorCommandRunning
       || connectorCommandRunningFor !== null
+      || selectedWorkflowCommandRunningFor !== null
       || connectionCommandRunningFor !== null
       || monitorCommandRunningFor !== null
       || monitorTaskCommandRunningFor !== null
@@ -2534,6 +2566,19 @@
                           >
                             <Icon name="copy" size={12} />
                           </button>
+                          {#if onRunWorkflowCommand}
+                            <button
+                              type="button"
+                              class="pf-icon-btn"
+                              aria-label="Run workflow draft command"
+                              title="Run workflow draft command"
+                              aria-busy={selectedWorkflowCommandRunningFor === "draft"}
+                              disabled={connectorCommandRunnerBusy() || !selectedConnectorDraftCommand}
+                              onclick={runSelectedConnectorDraftCommand}
+                            >
+                              <Icon name="play" size={12} />
+                            </button>
+                          {/if}
                         </div>
                       </div>
                       <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected append workflow command">
@@ -2550,6 +2595,19 @@
                           >
                             <Icon name="copy" size={12} />
                           </button>
+                          {#if onRunWorkflowCommand}
+                            <button
+                              type="button"
+                              class="pf-icon-btn"
+                              aria-label="Run append workflow command"
+                              title="Run append workflow command"
+                              aria-busy={selectedWorkflowCommandRunningFor === "append"}
+                              disabled={connectorCommandRunnerBusy() || !selectedConnectorAppendCommand}
+                              onclick={runSelectedConnectorAppendCommand}
+                            >
+                              <Icon name="play" size={12} />
+                            </button>
+                          {/if}
                           <button
                             type="button"
                             class="pf-icon-btn"
