@@ -760,6 +760,7 @@ pub fn execute_workflow_tool(
         "ImageGeneration" => {
             workflow::image_generation::execute_image_generation(state, cwd, input)
         }
+        "DebugpyAction" => workflow::debugpy_action::execute_debugpy_action(state, cwd, input),
         "DiscordAction" => workflow::discord_action::execute_discord_action(state, cwd, input),
         "Lark" => workflow::lark::execute_lark(state, cwd, input),
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),

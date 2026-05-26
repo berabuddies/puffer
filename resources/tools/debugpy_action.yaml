@@ -1,0 +1,38 @@
+id: DebugpyAction
+name: DebugpyAction
+description: |-
+  Attach to a local debugpy listener through Puffer's typed DAP runtime.
+
+  Use this for verified Lambda Skill contracts that need to turn a
+  debugpy_listening(port) fact into an attached(port) fact. Puffer only
+  connects to 127.0.0.1 and only commits the host call after the DAP attach
+  handshake succeeds.
+handler: runtime:workflow:debugpy_action
+approval_policy: auto
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - attach
+      description: Debugpy action to perform.
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      description: Loopback debugpy listener port.
+  required:
+    - action
+    - port
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+  may_access_network: true
+display:
+  group: debugging
+  title: DebugpyAction
+  show_in_status: true

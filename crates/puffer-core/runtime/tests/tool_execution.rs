@@ -15,6 +15,8 @@ mod anthropic_stream;
 mod browser_permissions;
 #[path = "tool_execution/computer_use_action.rs"]
 mod computer_use_action;
+#[path = "tool_execution/debugpy_action.rs"]
+mod debugpy_action;
 #[path = "tool_execution/lambda_arxiv_contract.rs"]
 mod lambda_arxiv_contract;
 #[path = "tool_execution/lambda_gate_scope.rs"]
