@@ -3,13 +3,14 @@ use anyhow::Result;
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
     builtin_connector_templates, connection_workflow_trigger_supported, connector_runtime_hints,
-    connector_workflow_trigger_supported, suggested_connection_slug, ConnectionRecord,
-    ConnectorTemplate, SubscriberManifestRoots,
+    connector_workflow_trigger_supported, suggested_connection_slug, ActionSpec, ConnectionRecord,
+    ConnectorTemplate, FilterSpec, SubscriberManifestRoots, TaggedFilterSpec, WorkflowBindingSpec,
 };
 use puffer_workflow::{TriggerSpec, WorkflowDefinition, WorkflowRun, WorkflowStore};
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 
+mod append;
 mod create;
 mod monitor_tasks;
 
@@ -22,9 +23,7 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
     let connector_context = connector_context();
     let monitor_task_context = monitor_tasks::load_monitor_task_context(&paths);
     let roots = subscriber_manifest_roots(&paths);
-    let mut parts = args.split_whitespace();
-    let mode = parts.next().unwrap_or_default();
-    let query = parts.collect::<Vec<_>>().join(" ");
+    let (mode, query) = split_workflows_args(args);
 
     let mut out = String::new();
     if matches!(
@@ -37,6 +36,10 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
             | "connector"
             | "tasks"
             | "task"
+            | "actions"
+            | "action"
+            | "bindings"
+            | "binding"
             | "monitors"
             | "monitor-tasks"
             | "runs"
@@ -54,6 +57,7 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
     match mode {
         "" | "show" | "list" => {
             write_workflows(&mut out, &workflows, &runs);
+            write_workflow_bindings(&mut out, &connector_context, "");
             write_connections(&mut out, &connector_context, &roots, "");
             monitor_tasks::write_monitor_tasks(&mut out, &monitor_task_context, "");
             write_connectors(&mut out, &connector_context, &roots, false, "");
@@ -67,25 +71,43 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
         "tasks" | "task" | "monitors" | "monitor-tasks" => {
             monitor_tasks::write_monitor_tasks(&mut out, &monitor_task_context, &query);
         }
+        "actions" | "action" | "bindings" | "binding" => {
+            write_workflow_bindings(&mut out, &connector_context, &query);
+        }
         "runs" | "run" => {
             write_runs(&mut out, &runs, &query);
         }
         "new" | "create" => {
             out.push_str(&create::create_workflow(&paths, &query)?);
         }
+        "append" | "file-append" => {
+            out.push_str(&append::create_append_binding(&paths, &query)?);
+        }
         _ => {
             out.push_str(
-                "Usage: /workflows [list|new|connections|connectors|tasks|runs] [query]\n\
-                 Tip: /workflows new [slug] [connection-slug] [pattern] creates a disabled draft.",
+                "Usage: /workflows [list|new|append|actions|connections|connectors|tasks|runs] [query]\n\
+                 Tip: /workflows append <connection-slug> <file-path> [pattern] creates an enabled file append binding.",
             );
         }
     }
     Ok(out)
 }
 
+fn split_workflows_args(args: &str) -> (&str, &str) {
+    let trimmed = args.trim();
+    match trimmed.find(char::is_whitespace) {
+        Some(index) => {
+            let (mode, query) = trimmed.split_at(index);
+            (mode, query.trim_start())
+        }
+        None => (trimmed, ""),
+    }
+}
+
 struct ConnectorContext {
     connectors: Vec<ConnectorTemplate>,
     connections: Vec<ConnectionRecord>,
+    bindings: Vec<WorkflowBindingSpec>,
     error: Option<String>,
 }
 
@@ -99,12 +121,14 @@ fn connector_context() -> ConnectorContext {
             ConnectorContext {
                 connectors: manager.connector_store().list_with_builtins(),
                 connections: manager.connection_store().list(),
+                bindings: manager.store().list(),
                 error,
             }
         }
         Err(error) => ConnectorContext {
             connectors: builtin_connector_templates(),
             connections: Vec::new(),
+            bindings: Vec::new(),
             error: Some(error.to_string()),
         },
     }
@@ -122,8 +146,9 @@ fn write_header(
     let _ = writeln!(out, "workspace={}", paths.workspace_root.display());
     let _ = writeln!(
         out,
-        "workflows={} runs={} connections={} connectors={} monitor_tasks={}/{}",
+        "workflows={} bindings={} runs={} connections={} connectors={} monitor_tasks={}/{}",
         workflows.len(),
+        context.bindings.len(),
         runs.len(),
         context.connections.len(),
         context.connectors.len(),
@@ -166,6 +191,56 @@ fn write_workflows(out: &mut String, workflows: &[WorkflowDefinition], runs: &[W
             latest_text
         );
     }
+}
+
+fn write_workflow_bindings(out: &mut String, context: &ConnectorContext, query: &str) {
+    out.push_str("\nWorkflow actions\n");
+    write_binding_filter_hints(out);
+    let bindings = context
+        .bindings
+        .iter()
+        .filter(|binding| {
+            matches_query(
+                query,
+                binding_search_terms(binding).iter().map(String::as_str),
+            )
+        })
+        .collect::<Vec<_>>();
+    write_result_summary(
+        out,
+        bindings.len(),
+        context.bindings.len(),
+        "workflow actions",
+        query,
+    );
+    if bindings.is_empty() && context.bindings.is_empty() {
+        out.push_str(
+            "- none configured; run /workflows append <connection-slug> <file-path> [pattern]\n",
+        );
+        return;
+    }
+    if bindings.is_empty() {
+        out.push_str("- no matching workflow actions\n");
+        return;
+    }
+    for binding in bindings {
+        let _ = writeln!(
+            out,
+            "- {} [{}] connection={} connector={} action={}{} filter={} {}",
+            binding.slug,
+            workflow_status_label(binding.status),
+            binding.connection_slug,
+            binding.connector_slug.as_deref().unwrap_or("-"),
+            workflow_action_type(&binding.action),
+            workflow_action_target(&binding.action),
+            workflow_filter_label(binding.filter.as_ref()),
+            binding.description
+        );
+    }
+}
+
+fn write_binding_filter_hints(out: &mut String) {
+    out.push_str("filters: append | file | connection | connector | pattern | enabled | paused\n");
 }
 
 fn write_connections(
@@ -221,10 +296,18 @@ fn write_connections(
         } else {
             String::new()
         };
+        let append = if trigger_supported {
+            format!(
+                " append={}",
+                workflow_append_command(&connection.slug, None)
+            )
+        } else {
+            String::new()
+        };
         let connect_command = connection_connect_command(connection);
         let _ = writeln!(
             out,
-            "- {} connector={} state={:?} {} {} repair={}{}{} {}",
+            "- {} connector={} state={:?} {} {} repair={}{}{}{} {}",
             connection.slug,
             connection.connector_slug,
             connection.state,
@@ -232,6 +315,7 @@ fn write_connections(
             trigger,
             connect_command,
             draft,
+            append,
             monitor,
             connection.description
         );
@@ -240,7 +324,7 @@ fn write_connections(
 
 fn write_connection_filter_hints(out: &mut String) {
     out.push_str(
-        "filters: trigger-ready | no-trigger | draft | monitor | repair | active | idle\n",
+        "filters: trigger-ready | no-trigger | draft | append | monitor | repair | active | idle\n",
     );
 }
 
@@ -268,6 +352,8 @@ fn write_connectors(
             let trigger_supported = connector_workflow_trigger_supported(roots, connector);
             let draft_command =
                 trigger_supported.then(|| connector_draft_command(context, connector));
+            let append_command =
+                trigger_supported.then(|| connector_append_command(context, connector));
             let runtime_hints = connector_runtime_hints(roots, connector);
             let action_capability = if connector.actions.is_empty() {
                 ""
@@ -295,9 +381,11 @@ fn write_connectors(
                         suggested_connection.as_str(),
                         connect_command.as_str(),
                         draft_command.as_deref().unwrap_or_default(),
+                        append_command.as_deref().unwrap_or_default(),
                         "connect",
                         "setup",
                         "draft workflow new",
+                        "append file save workflow",
                         action_capability,
                     ])
                     .filter(|term| !term.is_empty())
@@ -357,9 +445,12 @@ fn write_connectors(
         let draft_summary = trigger_supported
             .then(|| format!(" draft={}", connector_draft_command(context, connector)))
             .unwrap_or_default();
+        let append_summary = trigger_supported
+            .then(|| format!(" append={}", connector_append_command(context, connector)))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {} [{}] {} runtime={}{}{} connect={}{}",
+            "- {} [{}] {} runtime={}{}{} connect={}{}{}",
             connector.slug,
             capabilities.join(","),
             connector.description,
@@ -367,7 +458,8 @@ fn write_connectors(
             action_summary,
             connection_summary,
             connect_command,
-            draft_summary
+            draft_summary,
+            append_summary
         );
     }
 }
@@ -375,11 +467,11 @@ fn write_connectors(
 fn write_connector_filter_hints(out: &mut String, include_all: bool) {
     if include_all {
         out.push_str(
-            "filters: trigger-ready | no-trigger | draft | has-actions | serve | subscriber | internal-tool | command\n",
+            "filters: trigger-ready | no-trigger | draft | append | has-actions | serve | subscriber | internal-tool | command\n",
         );
     } else {
         out.push_str(
-            "filters: /workflows connectors trigger-ready | no-trigger | draft | has-actions | serve | subscriber | internal-tool\n",
+            "filters: /workflows connectors trigger-ready | no-trigger | draft | append | has-actions | serve | subscriber | internal-tool\n",
         );
     }
 }
@@ -417,6 +509,14 @@ fn workflow_draft_command(connection_slug: &str) -> String {
     format!("/workflows new {connection_slug}-workflow {connection_slug}")
 }
 
+fn workflow_append_command(connection_slug: &str, connector_slug: Option<&str>) -> String {
+    let base = format!("/workflows append {connection_slug} /tmp/{connection_slug}.log");
+    match connector_slug {
+        Some(connector_slug) => format!("{base} --connector {connector_slug}"),
+        None => base,
+    }
+}
+
 fn connector_draft_command(context: &ConnectorContext, connector: &ConnectorTemplate) -> String {
     let connection_slug = context
         .connections
@@ -425,6 +525,21 @@ fn connector_draft_command(context: &ConnectorContext, connector: &ConnectorTemp
         .map(|connection| connection.slug.clone())
         .unwrap_or_else(|| suggested_connection_slug(&connector.slug));
     workflow_draft_command(&connection_slug)
+}
+
+fn connector_append_command(context: &ConnectorContext, connector: &ConnectorTemplate) -> String {
+    if let Some(connection) = context
+        .connections
+        .iter()
+        .find(|connection| connection.connector_slug == connector.slug)
+    {
+        workflow_append_command(&connection.slug, None)
+    } else {
+        workflow_append_command(
+            &suggested_connection_slug(&connector.slug),
+            Some(&connector.slug),
+        )
+    }
 }
 
 fn connection_search_terms(
@@ -455,6 +570,9 @@ fn connection_search_terms(
                 "trigger",
                 "trigger-ready",
                 "draft",
+                "append",
+                "file",
+                "save",
                 "new",
                 "workflow",
                 "monitor",
@@ -465,6 +583,7 @@ fn connection_search_terms(
         );
         terms.push(format!("/monitor {}", connection.slug));
         terms.push(workflow_draft_command(&connection.slug));
+        terms.push(workflow_append_command(&connection.slug, None));
     } else {
         terms.extend(
             ["no trigger", "no-trigger", "setup-only"]
@@ -489,6 +608,75 @@ fn connection_search_terms(
         );
     }
     terms
+}
+
+fn binding_search_terms(binding: &WorkflowBindingSpec) -> Vec<String> {
+    [
+        "workflow action binding".to_string(),
+        binding.slug.clone(),
+        binding.description.clone(),
+        binding.connection_slug.clone(),
+        binding.connector_slug.clone().unwrap_or_default(),
+        workflow_status_label(binding.status).to_string(),
+        workflow_action_type(&binding.action).to_string(),
+        workflow_action_target(&binding.action),
+        workflow_filter_label(binding.filter.as_ref()),
+    ]
+    .into_iter()
+    .filter(|term| !term.is_empty())
+    .collect()
+}
+
+fn workflow_status_label(status: puffer_subscriptions::WorkflowBindingStatus) -> &'static str {
+    match status {
+        puffer_subscriptions::WorkflowBindingStatus::Enabled => "enabled",
+        puffer_subscriptions::WorkflowBindingStatus::Paused => "paused",
+    }
+}
+
+fn workflow_action_type(action: &ActionSpec) -> &'static str {
+    match action {
+        ActionSpec::SqliteInsert { .. } => "sqlite_insert",
+        ActionSpec::FileAppend { .. } => "file_append",
+        ActionSpec::ForwardMessage { .. } => "forward_message",
+        ActionSpec::RunWorkflow { .. } => "run_workflow",
+        ActionSpec::ConnectorAct { .. } => "connector_act",
+        ActionSpec::ToolCall { .. } => "tool_call",
+        ActionSpec::TriageAgent { .. } => "triage_agent",
+        ActionSpec::Graph { .. } => "graph",
+        ActionSpec::Unknown => "unknown",
+    }
+}
+
+fn workflow_action_target(action: &ActionSpec) -> String {
+    match action {
+        ActionSpec::SqliteInsert { path, table } => format!(" path={path} table={table}"),
+        ActionSpec::FileAppend { path, .. } => format!(" path={path}"),
+        ActionSpec::ForwardMessage {
+            platform, target, ..
+        } => {
+            format!(" platform={platform} target={target}")
+        }
+        ActionSpec::RunWorkflow { slug } => format!(" workflow={slug}"),
+        ActionSpec::ConnectorAct {
+            connector_slug,
+            action,
+            ..
+        } => format!(" connector={connector_slug} action={action}"),
+        ActionSpec::ToolCall { tool, .. } => format!(" tool={tool}"),
+        ActionSpec::TriageAgent { .. } | ActionSpec::Graph { .. } | ActionSpec::Unknown => {
+            String::new()
+        }
+    }
+}
+
+fn workflow_filter_label(filter: Option<&FilterSpec>) -> String {
+    match filter {
+        Some(FilterSpec::Tagged(TaggedFilterSpec::Regex { pattern, .. })) => pattern.clone(),
+        Some(FilterSpec::Tagged(TaggedFilterSpec::Jq { expression })) => expression.clone(),
+        Some(FilterSpec::Json(shape)) => shape.to_string(),
+        None => ".*".to_string(),
+    }
 }
 
 fn connector_connect_command(connector: &ConnectorTemplate) -> String {

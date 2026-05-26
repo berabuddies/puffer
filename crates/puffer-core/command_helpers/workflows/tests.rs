@@ -22,6 +22,19 @@ mod tests {
     }
 
     #[test]
+    fn workflow_arg_split_preserves_quoted_command_tail() {
+        let (mode, query) = split_workflows_args(r#"append demo-main /tmp/hi "hello world""#);
+
+        assert_eq!(mode, "append");
+        assert_eq!(query, r#"demo-main /tmp/hi "hello world""#);
+
+        let (mode, query) = split_workflows_args("  connectors   append file  ");
+
+        assert_eq!(mode, "connectors");
+        assert_eq!(query, "append file");
+    }
+
+    #[test]
     fn workflow_connections_show_monitor_command_for_trigger_ready_connections() {
         let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
         let context = ConnectorContext {
@@ -35,15 +48,16 @@ mod tests {
                 cursor: None,
                 auth_failure_notified: false,
             }],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
 
         write_connections(&mut out, &context, &roots, "");
 
-        assert!(out.contains("filters: trigger-ready | no-trigger | draft | monitor | repair"));
+        assert!(out.contains("filters: trigger-ready | no-trigger | draft | append | monitor | repair"));
         assert!(out.contains(
-            "trigger=ready repair=/connect demo-chat demo-main draft=/workflows new demo-main-workflow demo-main monitor=/monitor demo-main"
+            "trigger=ready repair=/connect demo-chat demo-main draft=/workflows new demo-main-workflow demo-main append=/workflows append demo-main /tmp/demo-main.log monitor=/monitor demo-main"
         ));
     }
 
@@ -84,6 +98,45 @@ mod tests {
     }
 
     #[test]
+    fn workflow_actions_show_file_append_bindings() {
+        let binding = WorkflowBindingSpec {
+            slug: "append-demo-main-hi".to_string(),
+            description: "Append demo-main messages to /tmp/hi".to_string(),
+            connection_slug: "demo-main".to_string(),
+            connector_slug: Some("demo-chat".to_string()),
+            status: puffer_subscriptions::WorkflowBindingStatus::Enabled,
+            filter: Some(FilterSpec::Tagged(TaggedFilterSpec::Regex {
+                pattern: "hi".to_string(),
+                case_insensitive: true,
+            })),
+            classify_prompt: None,
+            classify_model: None,
+            action: serde_json::from_value(json!({
+                "type": "file_append",
+                "path": "/tmp/hi",
+                "format": "text"
+            }))
+            .unwrap(),
+            created_at_ms: 42,
+        };
+        let context = ConnectorContext {
+            connectors: vec![trigger_template()],
+            connections: Vec::new(),
+            bindings: vec![binding],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_workflow_bindings(&mut out, &context, "append hi");
+
+        assert!(out.contains("showing 1/1 workflow actions for query=\"append hi\""));
+        assert!(out.contains("- append-demo-main-hi [enabled]"));
+        assert!(out.contains("connection=demo-main"));
+        assert!(out.contains("connector=demo-chat"));
+        assert!(out.contains("action=file_append path=/tmp/hi filter=hi"));
+    }
+
+    #[test]
     fn workflow_connections_omit_monitor_command_for_non_trigger_connections() {
         let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
         let mut template = trigger_template();
@@ -100,6 +153,7 @@ mod tests {
                 cursor: None,
                 auth_failure_notified: false,
             }],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -126,6 +180,7 @@ mod tests {
                 cursor: None,
                 auth_failure_notified: false,
             }],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -140,6 +195,12 @@ mod tests {
 
         assert!(out.contains("showing 1/1 connections for query=\"draft demo-main\""));
         assert!(out.contains("draft=/workflows new demo-main-workflow demo-main"));
+
+        out.clear();
+        write_connections(&mut out, &context, &roots, "append /tmp/demo-main.log");
+
+        assert!(out.contains("showing 1/1 connections for query=\"append /tmp/demo-main.log\""));
+        assert!(out.contains("append=/workflows append demo-main /tmp/demo-main.log"));
     }
 
     #[test]
@@ -171,6 +232,7 @@ mod tests {
                     auth_failure_notified: false,
                 },
             ],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -215,6 +277,7 @@ mod tests {
                     auth_failure_notified: false,
                 },
             ],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -258,6 +321,7 @@ mod tests {
                     auth_failure_notified: false,
                 },
             ],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -283,6 +347,7 @@ mod tests {
                 cursor: None,
                 auth_failure_notified: false,
             }],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -293,6 +358,7 @@ mod tests {
         assert!(out.contains("connections=team-demo"));
         assert!(out.contains("connect=/connect demo-chat demo-chat"));
         assert!(out.contains("draft=/workflows new team-demo-workflow team-demo"));
+        assert!(out.contains("append=/workflows append team-demo /tmp/team-demo.log"));
     }
 
     #[test]
@@ -312,6 +378,7 @@ mod tests {
                 cursor: None,
                 auth_failure_notified: false,
             }],
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -333,6 +400,7 @@ mod tests {
         let context = ConnectorContext {
             connectors: vec![trigger_template(), other],
             connections: Vec::new(),
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -341,6 +409,29 @@ mod tests {
 
         assert!(out.contains("- demo-chat"));
         assert!(out.contains("draft=/workflows new demo-chat-workflow demo-chat"));
+        assert!(!out.contains("- other-chat"));
+    }
+
+    #[test]
+    fn workflow_connectors_filter_matches_append_command_terms() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut other = trigger_template();
+        other.slug = "other-chat".to_string();
+        other.description = "Other chat".to_string();
+        let context = ConnectorContext {
+            connectors: vec![trigger_template(), other],
+            connections: Vec::new(),
+            bindings: Vec::new(),
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "append /tmp/demo-chat.log");
+
+        assert!(out.contains("- demo-chat"));
+        assert!(out.contains(
+            "append=/workflows append demo-chat /tmp/demo-chat.log --connector demo-chat"
+        ));
         assert!(!out.contains("- other-chat"));
     }
 
@@ -355,6 +446,7 @@ mod tests {
         let context = ConnectorContext {
             connectors: vec![trigger_template(), setup_only],
             connections: Vec::new(),
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -362,7 +454,7 @@ mod tests {
         write_connectors(&mut out, &context, &roots, true, "no trigger");
 
         assert!(out.contains("showing 1/2 connectors for query=\"no trigger\""));
-        assert!(out.contains("filters: trigger-ready | no-trigger | draft | has-actions | serve"));
+        assert!(out.contains("filters: trigger-ready | no-trigger | draft | append | has-actions | serve"));
         assert!(out.contains("- setup-chat [no-trigger]"));
         assert!(!out.contains("draft=/workflows new setup-chat"));
         assert!(!out.contains("- demo-chat"));
@@ -379,6 +471,7 @@ mod tests {
         let context = ConnectorContext {
             connectors: vec![trigger_template(), setup_only],
             connections: Vec::new(),
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();
@@ -401,6 +494,7 @@ mod tests {
         let context = ConnectorContext {
             connectors: vec![trigger_template(), serve],
             connections: Vec::new(),
+            bindings: Vec::new(),
             error: None,
         };
         let mut out = String::new();

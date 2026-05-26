@@ -59,7 +59,7 @@ fn workflows_command_is_registered_as_local_command() {
     assert_eq!(workflows.kind, CommandKind::Local);
     assert_eq!(
         workflows.argument_hint.as_deref(),
-        Some("[list|new|connections|connectors|tasks|runs] [query]")
+        Some("[list|new|append|actions|connections|connectors|tasks|runs] [query]")
     );
     assert_eq!(
         find_command(&commands, "pipelines").map(|command| command.name.as_str()),
@@ -349,7 +349,7 @@ fn workflows_connectors_filter_presets_use_stable_capability_terms() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("filters: trigger-ready | no-trigger | draft | has-actions"));
+    assert!(text.contains("filters: trigger-ready | no-trigger | draft | append | has-actions"));
     assert!(text.contains("showing 7/30 connectors for query=\"has-actions\""));
     assert!(text.contains("- telegram-login [auth,events,no-trigger,actions]"));
     assert!(text.contains("actions=send_message,"));
