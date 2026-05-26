@@ -52,17 +52,18 @@
     // first sync sees the correct hash route.
     const absorbed = absorbOAuthCallbackInUrl();
     initRouter();
-    // Populate authState from localStorage BEFORE doing the root-redirect
-    // resolution; otherwise getRootRedirect() runs with status === "unknown"
-    // and falls through to /home, which would briefly show the app shell
-    // to a signed-out user.
-    loadAuthFromStorage();
-    // Root redirect — handle '/' or '' explicitly. Skip when we just
-    // absorbed an OAuth callback: the AuthCallback page owns navigation
-    // for that case.
-    if (!absorbed && (currentRoute.path === "/" || currentRoute.path === "")) {
-      navigate(getRootRedirect());
-    }
+    // Populate authState from localStorage BEFORE the root-redirect runs.
+    // loadAuthFromStorage may need a network round-trip (refresh JWT
+    // exchange), so it's async — we keep the gate showing the "Loading…"
+    // splash via authState.status === "unknown" until it resolves.
+    void loadAuthFromStorage().then(() => {
+      // Root redirect — handle '/' or '' explicitly. Skip when we just
+      // absorbed an OAuth callback: the AuthCallback page owns navigation
+      // for that case.
+      if (!absorbed && (currentRoute.path === "/" || currentRoute.path === "")) {
+        navigate(getRootRedirect());
+      }
+    });
   });
 
   // Resolve current match each time the route changes.

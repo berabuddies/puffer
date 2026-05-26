@@ -158,32 +158,106 @@ function decodeJwtPayload(token: string): AuthUser | null {
 /* ───────── Public auth helpers ───────── */
 
 /**
- * Read token from localStorage and populate `authState`. Must be called
- * once on app mount, before the gate effect runs.
+ * Re-hydrate auth state on app mount. Async because we may need to ask
+ * Auth Station to refresh the access JWT (24h TTL) using the cached
+ * refresh token (7d TTL) — that's what gives us the "7 days between
+ * logins" guarantee the user asked for.
+ *
+ * State transitions:
+ *   - access JWT valid              → signedIn
+ *   - access expired, refresh works → mint new access, signedIn
+ *   - both gone / refresh fails     → signedOut + wipe ALL cached
+ *     auth data (JWT, refresh token, API key) so a stale sk-* key
+ *     can't outlive its login.
+ *
+ * Side-effect on signedIn: if we have a cached worldrouter API key,
+ * re-register it with the puffer Tauri host (idempotent; covers host
+ * restarts that may have lost the in-memory credential).
  */
-export function loadAuthFromStorage(): void {
+export async function loadAuthFromStorage(): Promise<void> {
   const store = safeLocalStorage();
   if (!store) {
-    // No storage means no possibility of a stored session — treat as
-    // signed out so the gate routes the user to /login.
     authState.status = "signedOut";
     authState.user = null;
     return;
   }
+
   const token = store.getItem(TOKEN_KEY);
-  const user = token ? decodeJwtPayload(token) : null;
-  if (!user) {
-    // Clean up any stale token so the next launch doesn't keep retrying it.
-    if (token) {
-      store.removeItem(TOKEN_KEY);
-      store.removeItem(REFRESH_TOKEN_KEY);
-    }
-    authState.status = "signedOut";
-    authState.user = null;
+  const refreshToken = store.getItem(REFRESH_TOKEN_KEY);
+
+  // Happy path: access JWT still valid.
+  let user = token ? decodeJwtPayload(token) : null;
+  if (user) {
+    authState.status = "signedIn";
+    authState.user = user;
+    syncApiKeyToHostIfCached();
     return;
   }
-  authState.status = "signedIn";
-  authState.user = user;
+
+  // Access JWT missing / expired. Try refresh if we still have the
+  // 7-day refresh token.
+  if (refreshToken && AUTH_STATION_URL) {
+    try {
+      const fresh = await refreshAuthStationToken(refreshToken);
+      store.setItem(TOKEN_KEY, fresh);
+      user = decodeJwtPayload(fresh);
+      if (user) {
+        authState.status = "signedIn";
+        authState.user = user;
+        syncApiKeyToHostIfCached();
+        return;
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[auth] refresh failed — signing out", err);
+    }
+  }
+
+  // Both gone (or refresh rejected). Sign out and wipe everything that
+  // belongs to the previous session — including the API key, so it
+  // can't outlive its login.
+  store.removeItem(TOKEN_KEY);
+  store.removeItem(REFRESH_TOKEN_KEY);
+  store.removeItem(API_KEY_KEY);
+  authState.status = "signedOut";
+  authState.user = null;
+}
+
+/**
+ * Exchange a refresh token for a new access JWT.
+ * Per auth-docs/api-reference.md, refresh tokens are NOT rotated — same
+ * token can be re-used until the 7-day TTL expires.
+ */
+async function refreshAuthStationToken(refreshToken: string): Promise<string> {
+  if (!AUTH_STATION_URL) throw new Error("AUTH_STATION_URL not configured");
+  const res = await fetch(`${AUTH_STATION_URL.replace(/\/$/, "")}/token/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken })
+  });
+  if (!res.ok) {
+    throw new Error(`token/refresh failed: HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as { token?: string };
+  if (typeof body.token !== "string" || body.token.length === 0) {
+    throw new Error("token/refresh returned no token");
+  }
+  return body.token;
+}
+
+/**
+ * Best-effort re-register: if we already have a cached API key (from a
+ * prior login), push it back to the puffer host. Covers the case where
+ * the host restarted and lost its in-memory credential map, while
+ * leaving our localStorage intact. Idempotent on the host side.
+ */
+function syncApiKeyToHostIfCached(): void {
+  const key = getWorldRouterApiKey();
+  if (!key) return;
+  void registerApiKeyWithPufferHost(key).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn("[auth] re-register API key after restart failed", err);
+  });
 }
 
 /** Return the currently-stored access token (or null). */
