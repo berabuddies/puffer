@@ -826,6 +826,9 @@ async fn dispatch_request(
         "workflow_binding_create" => respond!(
             crate::daemon_workflows::handle_workflow_binding_create(&state.paths, &params)
         ),
+        "workflow_binding_delete" => respond!(
+            crate::daemon_workflows::handle_workflow_binding_delete(&state.paths, &params)
+        ),
         "workflow_toggle" => respond!(crate::daemon_workflows::handle_workflow_toggle(
             &state.paths,
             &params

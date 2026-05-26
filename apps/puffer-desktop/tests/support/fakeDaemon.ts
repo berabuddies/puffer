@@ -1269,6 +1269,8 @@ export class FakeDaemon {
         return this.saveWorkflow(request.params);
       case "workflow_binding_create":
         return this.createWorkflowBinding(request.params);
+      case "workflow_binding_delete":
+        return this.deleteWorkflowBinding(request.params);
       case "workflow_toggle":
         return this.toggleWorkflow(request.params);
       case "list_dir":
@@ -1357,6 +1359,21 @@ export class FakeDaemon {
           state: enabled && connection.state === "authenticated" ? "active" : connection.state
         };
       })
+    };
+    return this.workflowListResponse();
+  }
+
+  private deleteWorkflowBinding(params: JsonRecord): JsonRecord {
+    const slug = String(params.slug ?? "");
+    if (!slug) throw new Error("missing workflow binding slug");
+    const before = this.workflowSnapshot.workflow_bindings?.length ?? 0;
+    const workflow_bindings = (this.workflowSnapshot.workflow_bindings ?? []).filter(
+      (binding) => binding.slug !== slug
+    );
+    if (workflow_bindings.length === before) throw new Error(`workflow binding ${slug} not found`);
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflow_bindings
     };
     return this.workflowListResponse();
   }

@@ -59,7 +59,7 @@ fn workflows_command_is_registered_as_local_command() {
     assert_eq!(workflows.kind, CommandKind::Local);
     assert_eq!(
         workflows.argument_hint.as_deref(),
-        Some("[list|new|append|actions|connections|connectors|tasks|runs] [query]")
+        Some("[list|new|append|delete|actions|connections|connectors|tasks|runs] [query]")
     );
     assert_eq!(
         find_command(&commands, "pipelines").map(|command| command.name.as_str()),

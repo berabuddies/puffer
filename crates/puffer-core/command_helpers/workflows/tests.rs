@@ -129,11 +129,18 @@ mod tests {
 
         write_workflow_bindings(&mut out, &context, "append hi");
 
+        assert!(out.contains("filters: append | file | connection | connector | pattern | enabled | paused | delete"));
         assert!(out.contains("showing 1/1 workflow actions for query=\"append hi\""));
         assert!(out.contains("- append-demo-main-hi [enabled]"));
         assert!(out.contains("connection=demo-main"));
         assert!(out.contains("connector=demo-chat"));
         assert!(out.contains("action=file_append path=/tmp/hi filter=hi"));
+        assert!(out.contains("delete=/workflows delete append-demo-main-hi"));
+
+        out.clear();
+        write_workflow_bindings(&mut out, &context, "delete append-demo-main-hi");
+
+        assert!(out.contains("showing 1/1 workflow actions for query=\"delete append-demo-main-hi\""));
     }
 
     #[test]

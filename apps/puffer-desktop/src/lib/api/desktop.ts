@@ -1102,6 +1102,12 @@ export async function createWorkflowBinding(binding: WorkflowBindingCreateReques
   return client.request<WorkflowSnapshot>("workflow_binding_create", binding);
 }
 
+/** Delete one connection-triggered workflow binding. */
+export async function deleteWorkflowBinding(slug: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_binding_delete", { slug });
+}
+
 /** Toggle a native workflow or subscription workflow binding. */
 export async function toggleWorkflow(slug: string, enabled: boolean): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();

@@ -350,6 +350,13 @@ test("pipeline selected connector can create an append workflow binding", async 
   await expect(actions).toContainText("/tmp/hi");
   await expect(actions).toContainText("hi");
   await expect(page.getByLabel("Workflow action search results")).toHaveText("1/1 actions");
+
+  await actions.getByRole("button", { name: "Delete workflow action append-email-personal-hi" }).click();
+  const deleteRequest = await daemon.waitForRequest("workflow_binding_delete", (candidate) => {
+    return candidate.params.slug === "append-email-personal-hi";
+  });
+  expect(deleteRequest.params.slug).toBe("append-email-personal-hi");
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Deleted append-email-personal-hi.");
 });
 
 test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
@@ -1144,6 +1151,14 @@ test("pipeline monitor workflow panel can pause and resume monitor bindings", as
   );
   expect(resumeRequest.params.enabled).toBe(true);
   await expect(monitors).toContainText("enabled");
+
+  await monitors.getByRole("button", { name: "Delete monitor workflow monitor-telegram-user" }).click();
+  const deleteRequest = await daemon.waitForRequest(
+    "workflow_binding_delete",
+    (candidate) => candidate.params.slug === "monitor-telegram-user"
+  );
+  expect(deleteRequest.params.slug).toBe("monitor-telegram-user");
+  await expect(page.getByLabel("Monitor workflows")).toHaveCount(0);
 });
 
 test("pipeline monitor task panel exposes task actions", async ({ page }) => {

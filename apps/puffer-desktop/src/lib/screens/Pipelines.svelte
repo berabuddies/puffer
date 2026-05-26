@@ -2,7 +2,13 @@
   import "../design/pipeline.css";
 
   import { onMount } from "svelte";
-  import { createWorkflowBinding, loadWorkflowSnapshot, saveWorkflow, toggleWorkflow } from "../api/desktop";
+  import {
+    createWorkflowBinding,
+    deleteWorkflowBinding,
+    loadWorkflowSnapshot,
+    saveWorkflow,
+    toggleWorkflow
+  } from "../api/desktop";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import Puffer from "../design/Puffer.svelte";
   import type {
@@ -174,6 +180,7 @@
   let monitorTaskCommandRunningFor = $state<string | null>(null);
   let creatingWorkflowBinding = $state(false);
   let togglingWorkflowSlug = $state<string | null>(null);
+  let deletingWorkflowBindingSlug = $state<string | null>(null);
   let savingWorkflowSlug = $state<string | null>(null);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
@@ -1060,8 +1067,17 @@
     return `${binding.enabled ? "Pause" : "Resume"} ${binding.slug}`;
   }
 
+  function workflowBindingBusy(binding: WorkflowBinding): boolean {
+    return (
+      togglingWorkflowSlug !== null ||
+      deletingWorkflowBindingSlug !== null ||
+      creatingWorkflowBinding ||
+      binding.slug === deletingWorkflowBindingSlug
+    );
+  }
+
   async function toggleMonitorBinding(binding: WorkflowBinding) {
-    if (togglingWorkflowSlug) return;
+    if (workflowBindingBusy(binding)) return;
     const enabled = !binding.enabled;
     togglingWorkflowSlug = binding.slug;
     error = null;
@@ -1076,6 +1092,24 @@
       saveNotice = `Could not toggle ${binding.slug}: ${message}`;
     } finally {
       togglingWorkflowSlug = null;
+    }
+  }
+
+  async function deleteWorkflowBindingRow(binding: WorkflowBinding) {
+    if (workflowBindingBusy(binding)) return;
+    deletingWorkflowBindingSlug = binding.slug;
+    error = null;
+    saveNotice = `Deleting ${binding.slug}...`;
+    try {
+      const next = await deleteWorkflowBinding(binding.slug);
+      applyWorkflowSnapshot(next);
+      saveNotice = `Deleted ${binding.slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not delete ${binding.slug}: ${message}`;
+    } finally {
+      deletingWorkflowBindingSlug = null;
     }
   }
 
@@ -2022,17 +2056,30 @@
                             {#if binding.monitor_memory_path}<span>memory</span>{/if}
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          class="pf-monitor-action-btn"
-                          aria-label={monitorBindingToggleLabel(binding)}
-                          title={monitorBindingToggleLabel(binding)}
-                          aria-busy={togglingWorkflowSlug === binding.slug}
-                          disabled={togglingWorkflowSlug !== null}
-                          onclick={() => toggleMonitorBinding(binding)}
-                        >
-                          <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
-                        </button>
+                        <div class="pf-monitor-row-actions">
+                          <button
+                            type="button"
+                            class="pf-monitor-action-btn"
+                            aria-label={monitorBindingToggleLabel(binding)}
+                            title={monitorBindingToggleLabel(binding)}
+                            aria-busy={togglingWorkflowSlug === binding.slug}
+                            disabled={workflowBindingBusy(binding)}
+                            onclick={() => toggleMonitorBinding(binding)}
+                          >
+                            <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
+                          </button>
+                          <button
+                            type="button"
+                            class="pf-monitor-action-btn pf-monitor-delete-btn"
+                            aria-label={`Delete monitor workflow ${binding.slug}`}
+                            title={`Delete monitor workflow ${binding.slug}`}
+                            aria-busy={deletingWorkflowBindingSlug === binding.slug}
+                            disabled={workflowBindingBusy(binding)}
+                            onclick={() => deleteWorkflowBindingRow(binding)}
+                          >
+                            <Icon name="x" size={11} />Delete
+                          </button>
+                        </div>
                       </div>
                     {/each}
                   </div>
@@ -2065,17 +2112,30 @@
                             {#if binding.action_format}<span>{binding.action_format}</span>{/if}
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          class="pf-monitor-action-btn"
-                          aria-label={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
-                          title={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
-                          aria-busy={togglingWorkflowSlug === binding.slug}
-                          disabled={togglingWorkflowSlug !== null}
-                          onclick={() => toggleMonitorBinding(binding)}
-                        >
-                          <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
-                        </button>
+                        <div class="pf-monitor-row-actions">
+                          <button
+                            type="button"
+                            class="pf-monitor-action-btn"
+                            aria-label={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
+                            title={`${binding.enabled ? "Pause" : "Resume"} workflow action ${binding.slug}`}
+                            aria-busy={togglingWorkflowSlug === binding.slug}
+                            disabled={workflowBindingBusy(binding)}
+                            onclick={() => toggleMonitorBinding(binding)}
+                          >
+                            <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
+                          </button>
+                          <button
+                            type="button"
+                            class="pf-monitor-action-btn pf-monitor-delete-btn"
+                            aria-label={`Delete workflow action ${binding.slug}`}
+                            title={`Delete workflow action ${binding.slug}`}
+                            aria-busy={deletingWorkflowBindingSlug === binding.slug}
+                            disabled={workflowBindingBusy(binding)}
+                            onclick={() => deleteWorkflowBindingRow(binding)}
+                          >
+                            <Icon name="x" size={11} />Delete
+                          </button>
+                        </div>
                       </div>
                     {/each}
                   </div>
@@ -3100,6 +3160,15 @@
     gap: 5px;
   }
 
+  .pf-monitor-row-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 5px;
+    min-width: 0;
+  }
+
   .pf-monitor-action-btn {
     all: unset;
     box-sizing: border-box;
@@ -3125,6 +3194,13 @@
   .pf-monitor-action-btn:focus-visible {
     border-color: color-mix(in oklab, var(--puffer-accent) 34%, var(--border));
     background: color-mix(in oklab, var(--puffer-accent) 10%, var(--card));
+  }
+
+  .pf-monitor-delete-btn:hover:not(:disabled),
+  .pf-monitor-delete-btn:focus-visible {
+    border-color: color-mix(in oklab, var(--danger, oklch(0.55 0.2 30)) 38%, var(--border));
+    background: color-mix(in oklab, var(--danger, oklch(0.55 0.2 30)) 9%, var(--card));
+    color: color-mix(in oklab, var(--danger, oklch(0.55 0.2 30)) 75%, var(--foreground));
   }
 
   .pf-monitor-action-btn:disabled {

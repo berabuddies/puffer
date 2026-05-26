@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 
 mod append;
 mod create;
+mod delete;
 mod monitor_tasks;
 
 /// Renders a terminal-friendly workflow, connection, and connector summary.
@@ -83,10 +84,13 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
         "append" | "file-append" => {
             out.push_str(&append::create_append_binding(&paths, &query)?);
         }
+        "delete" | "remove" | "rm" => {
+            out.push_str(&delete::delete_workflow_binding(&query)?);
+        }
         _ => {
             out.push_str(
-                "Usage: /workflows [list|new|append|actions|connections|connectors|tasks|runs] [query]\n\
-                 Tip: /workflows append <connection-slug> <file-path> [pattern] creates an enabled file append binding.",
+                "Usage: /workflows [list|new|append|delete|actions|connections|connectors|tasks|runs] [query]\n\
+                 Tip: /workflows append <connection-slug> <file-path> [pattern] creates an enabled file append binding; /workflows delete <binding-slug> removes one.",
             );
         }
     }
@@ -236,11 +240,14 @@ fn write_workflow_bindings(out: &mut String, context: &ConnectorContext, query: 
             workflow_filter_label(binding.filter.as_ref()),
             binding.description
         );
+        let _ = writeln!(out, "  delete={}", workflow_delete_command(&binding.slug));
     }
 }
 
 fn write_binding_filter_hints(out: &mut String) {
-    out.push_str("filters: append | file | connection | connector | pattern | enabled | paused\n");
+    out.push_str(
+        "filters: append | file | connection | connector | pattern | enabled | paused | delete\n",
+    );
 }
 
 fn write_connections(
@@ -517,6 +524,10 @@ fn workflow_append_command(connection_slug: &str, connector_slug: Option<&str>) 
     }
 }
 
+fn workflow_delete_command(binding_slug: &str) -> String {
+    format!("/workflows delete {binding_slug}")
+}
+
 fn connector_draft_command(context: &ConnectorContext, connector: &ConnectorTemplate) -> String {
     let connection_slug = context
         .connections
@@ -621,6 +632,8 @@ fn binding_search_terms(binding: &WorkflowBindingSpec) -> Vec<String> {
         workflow_action_type(&binding.action).to_string(),
         workflow_action_target(&binding.action),
         workflow_filter_label(binding.filter.as_ref()),
+        workflow_delete_command(&binding.slug),
+        "delete remove cleanup".to_string(),
     ]
     .into_iter()
     .filter(|term| !term.is_empty())
