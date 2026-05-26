@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_subscriptions::ConnectionState;
+    use puffer_subscriptions::{
+        ConnectionState, ConnectorActionDefinition, ConnectorPermissionDefinition,
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -18,6 +20,20 @@ mod tests {
             subscriber: None,
             output_schema: json!({}),
             actions: BTreeMap::new(),
+        }
+    }
+
+    fn action_definition(slug: &str) -> ConnectorActionDefinition {
+        ConnectorActionDefinition {
+            slug: slug.to_string(),
+            description: format!("{slug} action"),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            permission: ConnectorPermissionDefinition {
+                category: "external_message_send".to_string(),
+                summary: format!("{slug} action"),
+                external_side_effect: true,
+            },
         }
     }
 
@@ -366,6 +382,45 @@ mod tests {
         assert!(out.contains("connect=/connect demo-chat demo-chat"));
         assert!(out.contains("draft=/workflows new team-demo-workflow team-demo"));
         assert!(out.contains("append=/workflows append team-demo /tmp/team-demo.log"));
+    }
+
+    #[test]
+    fn workflow_connectors_unique_query_shows_all_action_slugs() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut template = trigger_template();
+        for slug in [
+            "send_message",
+            "edit_message",
+            "delete_messages",
+            "vote_poll",
+        ] {
+            template
+                .actions
+                .insert(slug.to_string(), action_definition(slug));
+        }
+        let mut other = trigger_template();
+        other.slug = "other-chat".to_string();
+        other.description = "Other chat".to_string();
+        let context = ConnectorContext {
+            connectors: vec![template, other],
+            connections: Vec::new(),
+            bindings: Vec::new(),
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "demo-chat");
+
+        assert!(out.contains("showing 1/2 connectors for query=\"demo-chat\""));
+        assert!(out.contains("actions=send_message,delete_messages,edit_message,+1"));
+        assert!(out.contains("actions_all=send_message,delete_messages,edit_message,vote_poll"));
+        assert!(!out.contains("- other-chat"));
+
+        out.clear();
+        write_connectors(&mut out, &context, &roots, true, "");
+
+        assert!(out.contains("showing 2/2 connectors"));
+        assert!(!out.contains("actions_all="));
     }
 
     #[test]

@@ -421,6 +421,7 @@ fn write_connectors(
         out.push_str("- no matching connectors\n");
         return;
     }
+    let show_unique_connector_detail = connectors.len() == 1 && !query.trim().is_empty();
     for connector in connectors {
         let mut capabilities = Vec::new();
         if connector.requires_auth {
@@ -468,6 +469,7 @@ fn write_connectors(
             draft_summary,
             append_summary
         );
+        write_connector_detail(out, connector, show_unique_connector_detail);
     }
 }
 
@@ -506,6 +508,17 @@ fn connector_action_slugs(connector: &ConnectorTemplate) -> Vec<&str> {
         },
     );
     slugs
+}
+
+fn write_connector_detail(out: &mut String, connector: &ConnectorTemplate, show: bool) {
+    if !show {
+        return;
+    }
+    let action_slugs = connector_action_slugs(connector);
+    if action_slugs.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "  actions_all={}", action_slugs.join(","));
 }
 
 fn connection_connect_command(connection: &ConnectionRecord) -> String {
