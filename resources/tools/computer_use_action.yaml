@@ -22,6 +22,7 @@ input_schema:
         - clickCoord
         - doubleClick
         - rightClick
+        - drag
         - scroll
         - typeText
         - keyCombo
@@ -38,6 +39,12 @@ input_schema:
     element:
       type: integer
       description: Element index from the current capture.
+    fromElement:
+      type: integer
+      description: Source element index for drag, resolved from the current capture.
+    toElement:
+      type: integer
+      description: Destination element index for drag, resolved from the current capture.
     x:
       type: integer
       description: X coordinate for clickCoord.

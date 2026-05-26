@@ -11,9 +11,17 @@ use std::time::Duration;
 #[derive(Debug, Default)]
 struct RecordingRunner {
     calls: Mutex<Vec<(String, String, Value)>>,
+    stdout: Mutex<String>,
 }
 
 impl RecordingRunner {
+    fn with_stdout(stdout: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            stdout: Mutex::new(stdout.to_string()),
+        }
+    }
+
     fn calls(&self) -> Vec<(String, String, Value)> {
         self.calls.lock().unwrap().clone()
     }
@@ -74,7 +82,7 @@ impl puffer_runner_api::ToolRunner for RecordingRunner {
             server: server.to_string(),
             tool: tool.to_string(),
             success: true,
-            stdout: String::new(),
+            stdout: self.stdout.lock().unwrap().clone(),
             stderr: String::new(),
             metadata: json!({ "args": args }),
         })
@@ -212,6 +220,79 @@ fn computer_use_focus_app_can_raise_window() {
     assert_eq!(calls[0].0, "computer_use");
     assert_eq!(calls[0].1, "get_app_state");
     assert_eq!(calls[0].2["app"], "Finder");
+}
+
+#[test]
+fn computer_use_drag_resolves_element_centers_from_capture() {
+    let runner = Arc::new(RecordingRunner::with_stdout(
+        "#3  AXButton 'Source' @ (10, 20, 30, 40) [Finder]\n\
+         #17 AXButton 'Target' @ (100, 200, 20, 10) [Finder]\n",
+    ));
+    let mut state = temp_state().with_tool_runner(runner.clone());
+    let cwd = state.cwd.clone();
+
+    crate::runtime::claude_tools::workflow::computer_use_action::execute_computer_use_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "capture",
+            "mode": "ax",
+            "app": "Finder"
+        }),
+    )
+    .unwrap();
+    crate::runtime::claude_tools::workflow::computer_use_action::execute_computer_use_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "drag",
+            "fromElement": 3,
+            "toElement": 17
+        }),
+    )
+    .unwrap();
+
+    let calls = runner.calls();
+    assert_eq!(calls[1].0, "computer_use");
+    assert_eq!(calls[1].1, "drag");
+    assert_eq!(calls[1].2["app"], "Finder");
+    assert_eq!(calls[1].2["from_x"], 25);
+    assert_eq!(calls[1].2["from_y"], 40);
+    assert_eq!(calls[1].2["to_x"], 110);
+    assert_eq!(calls[1].2["to_y"], 205);
+}
+
+#[test]
+fn computer_use_drag_requires_captured_element_bounds() {
+    let runner = Arc::new(RecordingRunner::with_stdout(
+        "#3  AXButton 'Source' @ (10, 20, 30, 40) [Finder]\n",
+    ));
+    let mut state = temp_state().with_tool_runner(runner);
+    let cwd = state.cwd.clone();
+
+    crate::runtime::claude_tools::workflow::computer_use_action::execute_computer_use_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "capture",
+            "mode": "ax",
+            "app": "Finder"
+        }),
+    )
+    .unwrap();
+    let error =
+        crate::runtime::claude_tools::workflow::computer_use_action::execute_computer_use_action(
+            &mut state,
+            &cwd,
+            json!({
+                "action": "drag",
+                "fromElement": 3,
+                "toElement": 99
+            }),
+        )
+        .expect_err("drag must fail closed without both captured elements");
+
+    assert!(format!("{error:#}").contains("requires captured bounds for element 99"));
 }
 
 #[test]
