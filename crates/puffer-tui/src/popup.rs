@@ -25,6 +25,12 @@ struct ConnectorPopupRow {
     search_text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowConnectorCommandKind {
+    New,
+    Append,
+}
+
 const WORKFLOW_SUBCOMMANDS: &[WorkflowSubcommand] = &[
     WorkflowSubcommand {
         name: "list",
@@ -84,6 +90,9 @@ const WORKFLOW_SUBCOMMANDS: &[WorkflowSubcommand] = &[
 
 /// Returns slash-command popup rows for the current slash-input prefix.
 pub(crate) fn popup_rows(input: &str, commands: &[CommandSpec]) -> Vec<PopupRow> {
+    if let Some(rows) = workflow_connector_command_rows(input) {
+        return rows;
+    }
     if let Some(rows) = workflow_subcommand_rows(input) {
         return rows;
     }
@@ -113,7 +122,8 @@ pub(crate) fn popup_accepts_input(input: &str) -> bool {
         return true;
     };
     if is_workflows_command(command) {
-        return !rest.trim_start().contains(char::is_whitespace);
+        let rest = rest.trim_start();
+        return workflow_connector_command_accepts(rest) || !rest.contains(char::is_whitespace);
     }
     command == "connect" && !connect_has_explicit_connection_name(rest)
 }
@@ -244,6 +254,169 @@ fn workflow_subcommand_rows(input: &str) -> Option<Vec<PopupRow>> {
     rows.sort_by_key(|row| row_sort_key(row, &filter));
     rows.truncate(MAX_POPUP_ROWS);
     Some(rows)
+}
+
+fn workflow_connector_command_rows(input: &str) -> Option<Vec<PopupRow>> {
+    let rest = input
+        .strip_prefix('/')?
+        .split_once(' ')
+        .filter(|(command, _)| is_workflows_command(command))?
+        .1
+        .trim_start();
+    let (kind, query) = workflow_connector_command_query(rest)?;
+    let terms = search_terms(query);
+    let mut rows = builtin_connector_templates()
+        .into_iter()
+        .filter(template_supports_workflow_command)
+        .map(|template| workflow_connector_command_row(kind, template))
+        .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| connector_row_sort_key(row, query.trim()));
+    rows.truncate(MAX_POPUP_ROWS);
+    Some(rows.into_iter().map(|row| row.row).collect())
+}
+
+fn workflow_connector_command_accepts(rest: &str) -> bool {
+    workflow_connector_command_query(rest).is_some()
+}
+
+fn workflow_connector_command_query(rest: &str) -> Option<(WorkflowConnectorCommandKind, &str)> {
+    let (subcommand, query) = split_first_whitespace(rest)?;
+    let kind = match subcommand {
+        "new" => WorkflowConnectorCommandKind::New,
+        "append" => WorkflowConnectorCommandKind::Append,
+        _ => return None,
+    };
+    (!workflow_connector_command_complete(kind, query)).then_some((kind, query.trim_start()))
+}
+
+fn split_first_whitespace(value: &str) -> Option<(&str, &str)> {
+    let index = value.find(char::is_whitespace)?;
+    Some((&value[..index], &value[index..]))
+}
+
+fn workflow_connector_command_complete(kind: WorkflowConnectorCommandKind, query: &str) -> bool {
+    let tokens = query.split_whitespace().collect::<Vec<_>>();
+    match kind {
+        WorkflowConnectorCommandKind::New => {
+            tokens.len() >= 3
+                || (tokens.len() >= 2
+                    && tokens
+                        .first()
+                        .is_some_and(|slug| slug.ends_with("-workflow")))
+        }
+        WorkflowConnectorCommandKind::Append => {
+            tokens.len() >= 2
+                && tokens
+                    .get(1)
+                    .is_some_and(|path| looks_like_workflow_append_path(path))
+        }
+    }
+}
+
+fn looks_like_workflow_append_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.contains('/')
+        || value.contains('.')
+}
+
+fn template_supports_workflow_command(template: &ConnectorTemplate) -> bool {
+    template.can_subscribe && (template.command_argv().is_some() || template.subscriber.is_some())
+        || template.slug == "email"
+}
+
+fn workflow_connector_command_row(
+    kind: WorkflowConnectorCommandKind,
+    template: ConnectorTemplate,
+) -> ConnectorPopupRow {
+    let suggested_connection = suggested_connection_slug(&template.slug);
+    let slug = template.slug.clone();
+    let command = workflow_connector_command(kind, &template, &suggested_connection);
+    let description =
+        workflow_connector_command_description(kind, &template, &suggested_connection);
+    let search_text = workflow_connector_command_search_text(&template, &suggested_connection);
+    ConnectorPopupRow {
+        row: PopupRow {
+            name: workflow_connector_command_name(kind, &suggested_connection),
+            description,
+            replacement: command,
+            append_space: false,
+        },
+        search_text: format!(
+            "{} {} {}",
+            workflow_connector_command_name(kind, &suggested_connection),
+            slug,
+            search_text
+        )
+        .to_ascii_lowercase(),
+    }
+}
+
+fn workflow_connector_command(
+    kind: WorkflowConnectorCommandKind,
+    template: &ConnectorTemplate,
+    suggested_connection: &str,
+) -> String {
+    match kind {
+        WorkflowConnectorCommandKind::New => {
+            format!("/workflows new {suggested_connection}-workflow {suggested_connection}")
+        }
+        WorkflowConnectorCommandKind::Append => format!(
+            "/workflows append {suggested_connection} /tmp/{suggested_connection}.log --connector {}",
+            template.slug
+        ),
+    }
+}
+
+fn workflow_connector_command_name(
+    kind: WorkflowConnectorCommandKind,
+    suggested_connection: &str,
+) -> String {
+    match kind {
+        WorkflowConnectorCommandKind::New => format!("workflows new {suggested_connection}"),
+        WorkflowConnectorCommandKind::Append => {
+            format!("workflows append {suggested_connection}")
+        }
+    }
+}
+
+fn workflow_connector_command_description(
+    kind: WorkflowConnectorCommandKind,
+    template: &ConnectorTemplate,
+    suggested_connection: &str,
+) -> String {
+    let action = match kind {
+        WorkflowConnectorCommandKind::New => "Create draft",
+        WorkflowConnectorCommandKind::Append => "Append events",
+    };
+    format!(
+        "{action} from {}  connection={suggested_connection}; connector={}",
+        template.description, template.slug
+    )
+}
+
+fn workflow_connector_command_search_text(
+    template: &ConnectorTemplate,
+    suggested_connection: &str,
+) -> String {
+    let actions = template
+        .actions
+        .keys()
+        .flat_map(|action| [action.to_string(), action.replace('_', " ")])
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{} {} {} {} {} trigger trigger-ready event events workflow draft new append file save {}",
+        template.slug,
+        suggested_connection,
+        template.description,
+        template.skill,
+        template.binary,
+        actions
+    )
+    .to_ascii_lowercase()
 }
 
 fn is_workflows_command(command: &str) -> bool {
@@ -506,6 +679,45 @@ mod tests {
         assert!(popup_rows("/connect telegram-login personal-account", &commands).is_empty());
         assert!(!super::popup_accepts_input(
             "/connect telegram-login personal-account"
+        ));
+    }
+
+    #[test]
+    fn popup_matches_workflow_new_connector_arguments() {
+        let commands = supported_commands();
+        let rows = popup_rows("/workflows new imap events", &commands);
+
+        assert!(rows.iter().any(|row| row.name == "workflows new email"
+            && row.replacement == "/workflows new email-workflow email"
+            && row.description.contains("connection=email")));
+        assert!(rows.iter().all(|row| row.name != "workflows new slack-app"));
+    }
+
+    #[test]
+    fn popup_matches_workflow_append_connector_arguments() {
+        let commands = supported_commands();
+        let rows = popup_rows("/workflows append vote poll", &commands);
+
+        assert!(rows.iter().any(|row| row.name == "workflows append telegram-user"
+            && row.replacement
+                == "/workflows append telegram-user /tmp/telegram-user.log --connector telegram-login"));
+        assert!(rows
+            .iter()
+            .all(|row| row.name != "workflows append telegram-bot"));
+    }
+
+    #[test]
+    fn popup_hides_workflow_connector_arguments_after_complete_command() {
+        let commands = supported_commands();
+
+        assert!(popup_rows("/workflows new email-workflow email", &commands).is_empty());
+        assert!(popup_rows(
+            "/workflows append email /tmp/email.log --connector email",
+            &commands
+        )
+        .is_empty());
+        assert!(!super::popup_accepts_input(
+            "/workflows append email /tmp/email.log --connector email"
         ));
     }
 
