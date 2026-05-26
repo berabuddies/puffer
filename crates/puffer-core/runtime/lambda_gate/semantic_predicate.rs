@@ -14,6 +14,7 @@ enum PredicateKind {
     FilePath,
     Format,
     Fps,
+    GraphqlSuccess,
     Identifier,
     Iso8601WithTz,
     JsonField,
@@ -69,6 +70,7 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
             .as_str()
             .is_some_and(|text| format_matches(name, text)),
         PredicateKind::Fps => json_integer(value).is_some_and(|fps| (1..=60).contains(&fps)),
+        PredicateKind::GraphqlSuccess => graphql_success(value),
         PredicateKind::Identifier => value.as_str().is_some_and(identifier_like),
         PredicateKind::Iso8601WithTz => value.as_str().is_some_and(iso8601_with_tz),
         PredicateKind::JsonField => value.as_str().is_some_and(json_field_path),
@@ -120,6 +122,7 @@ fn predicate_kind(name: &str) -> Option<PredicateKind> {
             PredicateKind::PositiveText
         }
         "fps_in_range" => PredicateKind::Fps,
+        "gql_success" | "graphql_errors_checked" => PredicateKind::GraphqlSuccess,
         "is_audio" => PredicateKind::AudioPath,
         "known_app" => PredicateKind::KnownApp,
         "is_folder"
@@ -503,6 +506,52 @@ fn parsed_paper_value(value: &Value) -> bool {
     has_title && has_valid_id
 }
 
+fn graphql_success(value: &Value) -> bool {
+    let parsed;
+    let value = if let Some(text) = value.as_str() {
+        let Ok(decoded) = serde_json::from_str::<Value>(text.trim()) else {
+            return false;
+        };
+        parsed = decoded;
+        &parsed
+    } else {
+        value
+    };
+    if !(value.is_object() || value.is_array()) {
+        return false;
+    }
+    graph_response_has_no_errors(value)
+}
+
+fn graph_response_has_no_errors(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "errors" | "userErrors") && !empty_error_value(value) {
+                    return false;
+                }
+                if !graph_response_has_no_errors(value) {
+                    return false;
+                }
+            }
+            true
+        }
+        Value::Array(items) => items.iter().all(graph_response_has_no_errors),
+        _ => true,
+    }
+}
+
+fn empty_error_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(object) => object.is_empty(),
+        Value::String(text) => text.trim().is_empty(),
+        Value::Bool(value) => !value,
+        Value::Number(_) => false,
+    }
+}
+
 fn path_like(text: &str) -> bool {
     let text = text.trim();
     !text.is_empty() && !has_control(text)
@@ -589,6 +638,7 @@ mod tests {
     fn recognizes_declared_semantic_predicates() {
         assert!(is_supported_expr("is_repo(r)"));
         assert!(is_supported_expr("iso8601_with_tz(t)"));
+        assert!(is_supported_expr("gql_success(r)"));
         assert!(is_supported_expr("tool_names_normalized(n)"));
         assert!(!is_supported_expr("plan_approved(p)"));
     }
@@ -652,6 +702,24 @@ mod tests {
         );
         assert_eq!(
             matches(&json!("agentmail.send_message"), "tool_names_normalized(n)"),
+            Some(false)
+        );
+        assert_eq!(
+            matches(
+                &json!({"data": {"fulfillmentCreate": {"fulfillment": {"id": "1"}, "userErrors": []}}}),
+                "gql_success(r)"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            matches(
+                &json!({"data": {"fulfillmentCreate": {"userErrors": [{"message": "bad"}]}}}),
+                "gql_success(r)"
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            matches(&json!({"errors": [{"message": "bad"}]}), "gql_success(r)"),
             Some(false)
         );
     }

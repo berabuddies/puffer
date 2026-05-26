@@ -531,6 +531,29 @@ mod tests {
     }
 
     #[test]
+    fn enforces_graphql_success_result_refinements() {
+        let args = Map::new();
+        assert!(lambda_result_matches_type_with_facts(
+            &json!({"data": {"mutation": {"userErrors": []}}}),
+            &args,
+            "Result<GqlResponse{gql_success(r)}, ShopifyErr>",
+            &BTreeSet::new()
+        ));
+        assert!(!lambda_result_matches_type_with_facts(
+            &json!({"data": {"mutation": {"userErrors": [{"message": "bad"}]}}}),
+            &args,
+            "Result<GqlResponse{gql_success(r)}, ShopifyErr>",
+            &BTreeSet::new()
+        ));
+        assert!(!lambda_result_matches_type_with_facts(
+            &json!({"errors": [{"message": "bad"}]}),
+            &args,
+            "Result<GqlResponse{gql_success(r)}, ShopifyErr>",
+            &BTreeSet::new()
+        ));
+    }
+
+    #[test]
     fn treats_positive_custom_result_facts_as_producers() {
         let args = Map::new();
         assert!(lambda_result_matches_type_with_facts(
