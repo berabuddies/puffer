@@ -302,7 +302,7 @@ fn load_lambda_skill_stats(runner: &dyn ToolRunner, path: &Path) -> Option<Lambd
 
 fn render_lambda_skill_content(body: &str, source_path: &Path, generated_path: &Path) -> String {
     format!(
-        "Lambda Skill verification:\n- system: lambda-skill\n- formal source: {}\n- generated descriptor: {}\n- runtime bridge: call LambdaHostCall with host_tool, formal args, concrete tool, and concrete input before the concrete Puffer tool that implements a formal host operation\n\n{}",
+        "Lambda Skill verification:\n- system: lambda-skill\n- formal source: {}\n- generated descriptor: {}\n- runtime bridge: call LambdaHostCall with host_tool, formal args, and concrete tool before the concrete Puffer tool that implements a formal host operation\n- binding: omit LambdaHostCall input unless Puffer explicitly returned an exact input to retry; Puffer materializes concrete input from the verified catalogue contract\n\n{}",
         source_path.display(),
         generated_path.display(),
         body.trim_start()

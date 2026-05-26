@@ -492,6 +492,9 @@ fn api_json(value: &Value) -> bool {
 }
 
 fn parsed_paper_value(value: &Value) -> bool {
+    if let Some(items) = value.as_array() {
+        return !items.is_empty() && items.iter().all(parsed_paper_value);
+    }
     let Some(object) = value.as_object() else {
         return false;
     };

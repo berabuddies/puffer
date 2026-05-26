@@ -205,6 +205,15 @@ fn bash_input(command: String) -> Value {
     })
 }
 
+fn bash_pending_input(command: String) -> Value {
+    json!({
+        "command": command,
+        "run_in_background": false,
+        "timeout": 60000,
+        "tty": false,
+    })
+}
+
 fn resources() -> LoadedResources {
     LoadedResources {
         tools: vec![
@@ -295,7 +304,7 @@ fn arxiv_search_materializes_bash_input_when_omitted() {
         "sort_by": "submittedDate",
         "sort_order": "descending",
     });
-    let expected = bash_input(arxiv_search_command(
+    let expected = bash_pending_input(arxiv_search_command(
         "au:\"Hanzhi Liu\"",
         10,
         "submittedDate",
@@ -305,13 +314,31 @@ fn arxiv_search_materializes_bash_input_when_omitted() {
     let result = run_lambda_host_call(args, None);
 
     assert!(result.success, "{}", result.output.stdout);
-    assert!(result
-        .output
-        .stdout
-        .contains(&serde_json::to_string(&expected).expect("expected Bash input serializes")));
     assert_eq!(
         result.output.metadata["lambda_skill"]["concrete_input"],
         expected
+    );
+}
+
+#[test]
+fn arxiv_search_accepts_noop_bash_ui_fields_in_host_call_input() {
+    let args = json!({
+        "query": "au:\"Hanzhi Liu\"",
+        "max_results": 10,
+        "sort_by": "submittedDate",
+        "sort_order": "descending",
+    });
+    let command = arxiv_search_command("au:\"Hanzhi Liu\"", 10, "submittedDate", "descending");
+    let mut input = bash_input(command.clone());
+    input["description"] = json!("Query arXiv for Hanzhi Liu papers");
+    input["tty"] = json!(false);
+
+    let result = run_lambda_host_call(args, Some(input));
+
+    assert!(result.success, "{}", result.output.stdout);
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["concrete_input"],
+        bash_pending_input(command)
     );
 }
 

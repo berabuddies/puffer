@@ -1,3 +1,4 @@
+use super::claude_tools::bash::ClaudeBashInput;
 use super::lambda_gate::{admitted_host_call_metadata, LambdaGateVerdict, PendingLambdaHostCall};
 use super::tool_executor::blocked_runtime_tool;
 use super::RequestToolFilter;
@@ -5,7 +6,7 @@ use crate::permissions::ToolPermissionBehavior;
 use crate::AppState;
 use puffer_tools::{ToolDefinition, ToolExecutionResult, ToolOutput, ToolRegistry};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Number, Value};
 use std::path::Path;
 
 pub(super) const LAMBDA_HOST_CALL_TOOL_ID: &str = "LambdaHostCall";
@@ -20,7 +21,11 @@ pub(super) fn reject_lambda_skill_gate_preflight(
     input: &Value,
 ) -> Option<ToolExecutionResult> {
     if let Some(pending) = state.pending_lambda_host_call.as_ref() {
-        if pending.permits_concrete_call(tool_id, input) {
+        let canonical_input = registry
+            .definition(tool_id)
+            .map(|definition| lambda_pending_input_for_tool(definition, input))
+            .unwrap_or_else(|| input.clone());
+        if pending.permits_concrete_call(tool_id, &canonical_input) {
             return None;
         }
         return Some(lambda_skill_pending_bridge_denial(
@@ -128,7 +133,16 @@ pub(super) fn commit_successful_lambda_skill_gate_call(
 
 fn lambda_result_value(output: &ToolOutput) -> Value {
     let stdout = output.stdout.trim_end_matches(['\r', '\n']).to_string();
-    serde_json::from_str(&stdout).unwrap_or(Value::String(stdout))
+    let parsed = serde_json::from_str(&stdout).unwrap_or_else(|_| Value::String(stdout.clone()));
+    if let Some(inner_stdout) = parsed
+        .as_object()
+        .and_then(|object| object.get("stdout"))
+        .and_then(Value::as_str)
+    {
+        let inner_stdout = inner_stdout.trim_end_matches(['\r', '\n']).to_string();
+        return serde_json::from_str(&inner_stdout).unwrap_or(Value::String(inner_stdout));
+    }
+    parsed
 }
 
 /// Prepares a verified formal host-call bridge for the next concrete tool call.
@@ -214,16 +228,18 @@ pub(super) fn prepare_lambda_host_call(
                 Err(reason) => return lambda_skill_gate_denial(tool_id, reason),
             };
             let concrete_input = parsed.input.unwrap_or(materialized_input);
+            let contract_input = lambda_contract_input_for_tool(definition, &concrete_input);
             if let LambdaGateVerdict::Reject(reason) = gate.admit_concrete_input_binding(
                 &parsed.host_tool,
                 &parsed.args,
                 &parsed.tool,
-                &concrete_input,
+                &contract_input,
             ) {
                 return lambda_skill_gate_denial(tool_id, reason);
             }
+            let pending_concrete_input = lambda_pending_input_for_tool(definition, &contract_input);
             if let Some(filter) = tool_filter {
-                match filter.allows_call(definition, cwd, &concrete_input) {
+                match filter.allows_call(definition, cwd, &pending_concrete_input) {
                     Ok(true) => {}
                     Ok(false) => {
                         return blocked_runtime_tool(
@@ -252,7 +268,7 @@ pub(super) fn prepare_lambda_host_call(
             let concrete_tool = parsed.tool.clone();
             let metadata_host_args = redacted_lambda_metadata_value(&host_args, definition);
             let metadata_concrete_input =
-                redacted_lambda_metadata_value(&concrete_input, definition);
+                redacted_lambda_metadata_value(&pending_concrete_input, definition);
             let metadata = admitted_host_call_metadata(
                 &host_tool,
                 metadata_host_args.clone(),
@@ -264,10 +280,10 @@ pub(super) fn prepare_lambda_host_call(
                 parsed.args,
                 metadata_host_args,
                 parsed.tool,
-                concrete_input.clone(),
+                pending_concrete_input.clone(),
             ));
-            let concrete_input_text =
-                serde_json::to_string(&concrete_input).unwrap_or_else(|_| "null".to_string());
+            let concrete_input_text = serde_json::to_string(&pending_concrete_input)
+                .unwrap_or_else(|_| "null".to_string());
             successful_runtime_tool_with_metadata(
                 tool_id,
                 format!(
@@ -278,6 +294,58 @@ pub(super) fn prepare_lambda_host_call(
         }
         LambdaGateVerdict::Reject(reason) => lambda_skill_gate_denial(tool_id, reason),
     }
+}
+
+fn lambda_contract_input_for_tool(definition: &ToolDefinition, input: &Value) -> Value {
+    if is_bash_tool(definition) {
+        return canonical_bash_contract_input(input).unwrap_or_else(|| input.clone());
+    }
+    input.clone()
+}
+
+fn lambda_pending_input_for_tool(definition: &ToolDefinition, input: &Value) -> Value {
+    if is_bash_tool(definition) {
+        return canonical_bash_pending_input(input).unwrap_or_else(|| input.clone());
+    }
+    input.clone()
+}
+
+fn is_bash_tool(definition: &ToolDefinition) -> bool {
+    definition.id.eq_ignore_ascii_case("bash")
+        || definition.handler == "bash"
+        || definition.handler == "runtime:claude_bash"
+}
+
+fn canonical_bash_contract_input(input: &Value) -> Option<Value> {
+    let parsed = serde_json::from_value::<ClaudeBashInput>(input.clone()).ok()?;
+    let mut object = Map::new();
+    object.insert("command".to_string(), Value::String(parsed.command));
+    if let Some(timeout) = parsed.timeout {
+        object.insert("timeout".to_string(), Value::Number(Number::from(timeout)));
+    }
+    object.insert(
+        "run_in_background".to_string(),
+        Value::Bool(parsed.run_in_background),
+    );
+    if parsed.tty {
+        object.insert("tty".to_string(), Value::Bool(true));
+    }
+    Some(Value::Object(object))
+}
+
+fn canonical_bash_pending_input(input: &Value) -> Option<Value> {
+    let parsed = serde_json::from_value::<ClaudeBashInput>(input.clone()).ok()?;
+    let mut object = Map::new();
+    object.insert("command".to_string(), Value::String(parsed.command));
+    if let Some(timeout) = parsed.timeout {
+        object.insert("timeout".to_string(), Value::Number(Number::from(timeout)));
+    }
+    object.insert(
+        "run_in_background".to_string(),
+        Value::Bool(parsed.run_in_background),
+    );
+    object.insert("tty".to_string(), Value::Bool(parsed.tty));
+    Some(Value::Object(object))
 }
 
 fn redacted_lambda_metadata_value(value: &Value, definition: &ToolDefinition) -> Value {
@@ -367,7 +435,7 @@ fn lambda_skill_bridge_required_denial(tool_id: &str, reason: String) -> ToolExe
         tool_id,
         reason,
         LAMBDA_HOST_CALL_TOOL_ID,
-        "Retry by calling LambdaHostCall before this concrete tool call. Include the formal host_tool, formal args, this concrete tool name, and the exact concrete input you intended. Puffer will ask the user to approve the concrete tool later if approval is required.",
+        "Retry by calling LambdaHostCall before this concrete tool call. Include the formal host_tool, formal args, and this concrete tool name; omit input so Puffer materializes the exact concrete input from the verified contract. Puffer will ask the user to approve the concrete tool later if approval is required.",
     )
 }
 

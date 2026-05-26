@@ -563,4 +563,15 @@ mod tests {
             &BTreeSet::new()
         ));
     }
+
+    #[test]
+    fn treats_array_result_fact_refinements_as_producers() {
+        let args = Map::new();
+        assert!(lambda_result_matches_type_with_facts(
+            &json!([{"title": "x", "arxiv_id": "2605.13044"}]),
+            &args,
+            "[Paper]{parsed_ok(p)}",
+            &BTreeSet::new()
+        ));
+    }
 }

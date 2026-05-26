@@ -255,7 +255,10 @@ fn lambda_host_call_can_load_bound_verified_skill() {
     )
     .unwrap();
     assert!(loaded_child.success);
-    assert!(loaded_child.output.stdout.contains("<command-name>arxiv</command-name>"));
+    assert!(loaded_child
+        .output
+        .stdout
+        .contains("<command-name>arxiv</command-name>"));
     assert!(state.pending_lambda_host_call.is_none());
 
     let child_gate_admit = execute_tool_call(
@@ -517,6 +520,182 @@ fn lambda_gate_commits_facts_only_after_successful_concrete_tool() {
             Vec::new(),
         )));
     assert!(failed.output.metadata.get("lambda_skill").is_none());
+}
+
+#[test]
+fn lambda_pending_bash_bridge_ignores_description_and_default_tty() {
+    let mut state = temp_state();
+    state.grant_all_tools_for_session();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["proc"],"domains":[],"tools":[{"name":"formal_run","concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"printf lambda-ok","run_in_background":false,"timeout":60000}},"effects":["proc"],"registers":[{"pred":"ran","args":[]}]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+
+    let mut bash = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
+    bash.value.approval_policy = Some("auto".to_string());
+    bash.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool(
+                "LambdaHostCall",
+                "Admit Lambda host call",
+                "runtime:lambda_host_call",
+            ),
+            bash,
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let admitted = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "formal_run",
+            "args": {},
+            "tool": "Bash",
+        }),
+    )
+    .unwrap();
+    assert!(admitted.success, "{}", admitted.output.stdout);
+    assert_eq!(
+        admitted.output.metadata["lambda_skill"]["concrete_input"],
+        json!({
+            "command": "printf lambda-ok",
+            "run_in_background": false,
+            "timeout": 60000,
+            "tty": false,
+        })
+    );
+
+    let completed = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Bash",
+        json!({
+            "command": "printf lambda-ok",
+            "description": "Run the verified command",
+            "run_in_background": false,
+            "timeout": 60000,
+            "tty": false,
+        }),
+    )
+    .unwrap();
+
+    assert!(completed.success, "{}", completed.output.stdout);
+    assert_eq!(
+        completed.output.metadata["lambda_skill"]["event"],
+        json!("host_call_committed")
+    );
+    assert!(state.pending_lambda_host_call.is_none());
+}
+
+#[test]
+fn lambda_bash_result_check_uses_inner_stdout_payload() {
+    let mut state = temp_state();
+    state.grant_all_tools_for_session();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["proc"],"domains":["Paper"],"tools":[{"name":"parse","concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"printf '[{\"title\":\"x\",\"arxiv_id\":\"2605.13044\"}]'","run_in_background":false,"timeout":60000}},"effects":["proc"],"result":"[Paper]{parsed_ok(p)}"}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+
+    let mut bash = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
+    bash.value.approval_policy = Some("auto".to_string());
+    bash.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool(
+                "LambdaHostCall",
+                "Admit Lambda host call",
+                "runtime:lambda_host_call",
+            ),
+            bash,
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let admitted = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "parse",
+            "args": {},
+            "tool": "Bash",
+        }),
+    )
+    .unwrap();
+    assert!(admitted.success, "{}", admitted.output.stdout);
+
+    let completed = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Bash",
+        json!({
+            "command": "printf '[{\"title\":\"x\",\"arxiv_id\":\"2605.13044\"}]'",
+            "run_in_background": false,
+            "timeout": 60000,
+            "tty": false,
+        }),
+    )
+    .unwrap();
+
+    assert!(completed.success, "{}", completed.output.stdout);
+    assert_eq!(
+        completed.output.metadata["lambda_skill"]["event"],
+        json!("host_call_committed")
+    );
+    assert!(state.pending_lambda_host_call.is_none());
 }
 
 #[test]
