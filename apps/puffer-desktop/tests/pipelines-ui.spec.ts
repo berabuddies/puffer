@@ -53,6 +53,105 @@ test("pipeline graph agent nodes expose selected state", async ({ page }) => {
   await expect(page.getByLabel("Agent name")).toHaveValue("Claude reviewer");
 });
 
+test("pipeline workflow list search filters by workflow and run metadata", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setWorkflowSnapshot({
+    workflows: [
+      {
+        schema: "puffer.workflow.v1",
+        slug: "release-pipeline",
+        enabled: true,
+        trigger: { type: "connection", connection_slug: "telegram-user", pattern: "ship" },
+        pipeline: {
+          name: "Release pipeline",
+          working_dir: "/tmp/puffer",
+          concurrency: 1,
+          nodes: [
+            {
+              id: "deploy",
+              type: "codex",
+              agent: "Codex deployer",
+              model: "gpt-5.4-codex",
+              tools: ["bash", "git"],
+              prompt: "Deploy and report release status."
+            }
+          ]
+        }
+      },
+      {
+        schema: "puffer.workflow.v1",
+        slug: "daily-digest",
+        enabled: false,
+        trigger: { type: "cron", cron: "0 9 * * *" },
+        pipeline: {
+          name: "Daily digest",
+          working_dir: "/tmp/puffer",
+          concurrency: 1,
+          nodes: [
+            {
+              id: "summarize",
+              type: "puffer",
+              agent: "Puffer summarizer",
+              model: "puffer-default",
+              tools: ["workflow"],
+              prompt: "Summarize daily connector activity."
+            }
+          ]
+        }
+      }
+    ],
+    runs: [
+      {
+        idx: 12,
+        workflow_slug: "release-pipeline",
+        run_id: "run-release",
+        trigger: { text: "ship this" },
+        status: "failed",
+        started_at_ms: Date.now() - 10_000,
+        ended_at_ms: Date.now(),
+        nodes: [
+          {
+            id: "deploy",
+            status: "failed",
+            started_at_ms: Date.now() - 10_000,
+            ended_at_ms: Date.now(),
+            output: null,
+            error: "deploy failed"
+          }
+        ],
+        error: "deploy failed",
+        trigger_key: "telegram-user:ship"
+      }
+    ],
+    connectors: [],
+    connections: []
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const workflowList = page.locator('[aria-label="Workflow list"]');
+  await expect(page.getByLabel("Workflow search results")).toHaveText("2/2 workflows");
+  await expect(workflowList.getByRole("button", { name: /release-pipeline/ })).toBeVisible();
+  await expect(workflowList.getByRole("button", { name: /daily-digest/ })).toBeVisible();
+
+  await page.getByLabel("Search workflows").fill("failed deploy");
+  await expect(page.getByLabel("Workflow search results")).toHaveText("1/2 workflows");
+  await expect(workflowList.getByRole("button", { name: /release-pipeline/ })).toBeVisible();
+  await expect(workflowList.getByRole("button", { name: /daily-digest/ })).not.toBeVisible();
+
+  await page.getByLabel("Search workflows").fill("cron digest");
+  await expect(page.getByLabel("Workflow search results")).toHaveText("1/2 workflows");
+  await expect(workflowList.getByRole("button", { name: /daily-digest/ })).toBeVisible();
+  await workflowList.getByRole("button", { name: /daily-digest/ }).click();
+  await expect(page.locator(".pf-run-header-label")).toHaveText("Daily digest");
+
+  await page.getByLabel("Search workflows").fill("does-not-exist");
+  await expect(page.getByLabel("Workflow search results")).toHaveText("0/2 workflows");
+  await expect(workflowList.getByText("No matching workflows.")).toBeVisible();
+});
+
 test("pipeline connector search selects a connection trigger", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -77,6 +77,11 @@
     searchText: string;
   };
 
+  type WorkflowSearchRow = {
+    workflow: EditableWorkflow;
+    searchText: string;
+  };
+
   type WorkflowDraftSource = {
     slugBase?: string;
     name?: string;
@@ -164,6 +169,7 @@
   let editorWorkflows = $state<EditableWorkflow[]>([starterWorkflow()]);
   let workflowSlug = $state("agent-review-pipeline");
   let selectedNodeId = $state<string | null>("codex-implement");
+  let workflowQuery = $state("");
   let connectorQuery = $state("");
   let selectedConnectorSlug = $state<string | null>(null);
   let selectedConnectorConnectionName = $state("");
@@ -187,6 +193,9 @@
   let saveNotice = $state("Workflow changes save to the daemon.");
 
   let workflows = $derived(editorWorkflows);
+  let workflowQueryTerms = $derived(searchTerms(workflowQuery));
+  let workflowSearchRows = $derived(indexWorkflows(workflows));
+  let filteredWorkflows = $derived(filterWorkflows(workflowSearchRows, workflowQueryTerms));
   let connectors = $derived(snapshot.connectors ?? []);
   let connections = $derived(snapshot.connections ?? []);
   let workflowBindings = $derived(snapshot.workflow_bindings ?? []);
@@ -469,6 +478,7 @@
     if (source.connectorSlug) selectedConnectorSlug = source.connectorSlug;
     if (source.connectionName ?? connectionSlug) selectedConnectorConnectionName = source.connectionName ?? connectionSlug ?? "";
     dirtyWorkflowSlugs = Array.from(new Set([...dirtyWorkflowSlugs, slug]));
+    workflowQuery = "";
     saveNotice = source.saveMessage ?? `Created ${slug} locally. Save to persist this workflow.`;
   }
 
@@ -1390,6 +1400,65 @@
     return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connector);
   }
 
+  function indexWorkflows(items: EditableWorkflow[]): WorkflowSearchRow[] {
+    return items.map((item) => {
+      const latest = workflowLatestRun(item.slug);
+      return {
+        workflow: item,
+        searchText: buildSearchText([
+          "workflow pipeline",
+          item.slug,
+          item.pipeline.name,
+          item.pipeline.working_dir,
+          item.enabled ? "enabled active" : "disabled paused",
+          dirtyWorkflowSlugs.includes(item.slug) ? "dirty unsaved" : undefined,
+          triggerSearchText(item),
+          item.pipeline.nodes
+            .map((node) =>
+              [
+                node.id,
+                node.type,
+                node.agent,
+                node.model,
+                node.prompt,
+                (node.tools ?? []).join(" "),
+                (node.depends_on ?? []).join(" ")
+              ].join(" ")
+            )
+            .join(" "),
+          latest ? workflowRunSearchText(latest) : undefined
+        ])
+      };
+    });
+  }
+
+  function filterWorkflows(rows: WorkflowSearchRow[], terms: string[]): EditableWorkflow[] {
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.workflow);
+  }
+
+  function triggerSearchText(item: EditableWorkflow | WorkflowDefinition): string {
+    if (item.trigger.type === "cron") return `cron ${item.trigger.cron}`;
+    if (item.trigger.type === "connection") {
+      return buildSearchText(["connection trigger", item.trigger.connection_slug, item.trigger.pattern]);
+    }
+    return buildSearchText(["subscription trigger", item.trigger.source_topic, item.trigger.pattern]);
+  }
+
+  function workflowRunSearchText(item: WorkflowRun): string {
+    return buildSearchText([
+      "run",
+      String(item.idx),
+      item.workflow_slug,
+      item.status,
+      item.error,
+      JSON.stringify(item.trigger),
+      item.trigger_key,
+      item.nodes
+        .map((node) => [node.id, node.status, node.output, node.error].join(" "))
+        .join(" ")
+    ]);
+  }
+
   function updateNode(id: string, patch: Partial<EditablePipelineNode>) {
     updateCurrentWorkflow((item) => ({
       ...item,
@@ -1728,18 +1797,34 @@
   </div>
 
   <div class="pf-pipe-body pf-pipe-editor-body">
-    <div class="pf-pipe-runs pf-pipe-workflows">
+    <div class="pf-pipe-runs pf-pipe-workflows" aria-label="Workflow list">
       <div class="pf-pipe-runs-head">
         <span>Workflows</span>
-        <span class="count">{workflows.length}</span>
+        <span class="count">{filteredWorkflows.length}/{workflows.length}</span>
+      </div>
+      <label class="pf-workflow-search">
+        <span class="pf-connector-searchbox">
+          <Icon name="search" size={12} />
+          <input
+            aria-label="Search workflows"
+            value={workflowQuery}
+            placeholder="Search workflows"
+            oninput={(event) => (workflowQuery = event.currentTarget.value)}
+          />
+        </span>
+      </label>
+      <div class="pf-workflow-result-summary" aria-label="Workflow search results">
+        {filteredWorkflows.length}/{workflows.length} workflows
       </div>
       {#if loading}
         <div class="pf-pipe-empty">Loading workflows...</div>
       {:else if error}
         <div class="pf-pipe-empty">Daemon workflow list unavailable. Editing a local draft.</div>
+      {:else if filteredWorkflows.length === 0}
+        <div class="pf-pipe-empty">No matching workflows.</div>
       {/if}
 
-      {#each workflows as item (item.slug)}
+      {#each filteredWorkflows as item (item.slug)}
         {@const latest = workflowLatestRun(item.slug)}
         <button
           type="button"
@@ -2687,6 +2772,18 @@
 
   .pf-pipe-workflows {
     padding-bottom: 16px;
+  }
+
+  .pf-workflow-search {
+    display: block;
+    padding: 0 10px 4px;
+  }
+
+  .pf-workflow-result-summary {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 1.3;
+    padding: 0 10px 4px;
   }
 
   .pf-provider-palette {
