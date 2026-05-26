@@ -111,7 +111,17 @@ fn enter_completion_fills_partial_connect_catalog_rows() {
     tui.insert_str("/connect telegram personal", &commands);
 
     assert!(tui.complete_on_enter(&commands));
-    assert_eq!(tui.input, "/connect telegram-login telegram-user");
+    assert_eq!(tui.input, "/connect telegram-login personal");
+}
+
+#[test]
+fn enter_completion_preserves_connect_name_after_connector_search() {
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.insert_str("/connect matrix matrix-main", &commands);
+
+    assert!(tui.complete_on_enter(&commands));
+    assert_eq!(tui.input, "/connect matrix-bot matrix-main");
 }
 
 #[test]

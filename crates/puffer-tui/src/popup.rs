@@ -28,9 +28,16 @@ struct WorkflowSubcommand {
     search_terms: &'static [&'static str],
 }
 
+#[derive(Clone)]
 struct ConnectorPopupRow {
     row: PopupRow,
     search_text: String,
+}
+
+struct ConnectCatalogQuery {
+    terms: Vec<String>,
+    fallback_terms: Option<Vec<String>>,
+    connection_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -560,20 +567,92 @@ fn connector_catalog_rows(input: &str) -> Option<Vec<PopupRow>> {
     if connect_has_explicit_connection_name(rest) {
         return None;
     }
-    let terms = search_terms(rest);
-    let mut rows = live_connect_connection_rows()
-        .into_iter()
-        .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
-        .collect::<Vec<_>>();
-    rows.extend(
-        builtin_connector_templates()
+    let query = ConnectCatalogQuery::new(rest);
+    let mut rows = if query.connection_name.is_some() {
+        Vec::new()
+    } else {
+        live_connect_connection_rows()
             .into_iter()
-            .map(connector_popup_row)
-            .filter(|row| terms.iter().all(|term| row.search_text.contains(term))),
-    );
+            .filter(|row| query.matches(row))
+            .collect::<Vec<_>>()
+    };
+    let mut builtin_rows = builtin_connector_rows_matching(&query, false);
+    if builtin_rows.is_empty() && query.fallback_terms.is_some() {
+        builtin_rows = builtin_connector_rows_matching(&query, true);
+    }
+    rows.extend(builtin_rows);
     rows.sort_by_key(|row| connector_row_sort_key(row, rest.trim()));
     rows.truncate(MAX_POPUP_ROWS);
     Some(rows.into_iter().map(|row| row.row).collect())
+}
+
+impl ConnectCatalogQuery {
+    fn new(rest: &str) -> Self {
+        let tokens = rest.split_whitespace().collect::<Vec<_>>();
+        let connection_name = (tokens.len() == 2).then(|| tokens[1].to_string());
+        let fallback_terms = connection_name
+            .as_ref()
+            .map(|_| search_terms(tokens.first().copied().unwrap_or_default()));
+        Self {
+            terms: search_terms(rest),
+            fallback_terms,
+            connection_name,
+        }
+    }
+
+    fn matches(&self, row: &ConnectorPopupRow) -> bool {
+        self.matches_terms(row, &self.terms)
+    }
+
+    fn matches_fallback(&self, row: &ConnectorPopupRow) -> bool {
+        self.fallback_terms
+            .as_deref()
+            .is_some_and(|terms| self.matches_terms(row, terms))
+    }
+
+    fn matches_terms(&self, row: &ConnectorPopupRow, terms: &[String]) -> bool {
+        terms.iter().all(|term| row.search_text.contains(term))
+    }
+
+    fn apply_connection_name(&self, row: ConnectorPopupRow) -> ConnectorPopupRow {
+        let Some(connection_name) = self.connection_name.as_deref() else {
+            return row;
+        };
+        connect_row_with_connection_name(row, connection_name)
+    }
+}
+
+fn builtin_connector_rows_matching(
+    query: &ConnectCatalogQuery,
+    fallback: bool,
+) -> Vec<ConnectorPopupRow> {
+    builtin_connector_templates()
+        .into_iter()
+        .map(connector_popup_row)
+        .filter(|row| {
+            if fallback {
+                query.matches_fallback(row)
+            } else {
+                query.matches(row)
+            }
+        })
+        .map(|row| query.apply_connection_name(row))
+        .collect()
+}
+
+fn connect_row_with_connection_name(
+    mut row: ConnectorPopupRow,
+    connection_name: &str,
+) -> ConnectorPopupRow {
+    let Some(connector_slug) = row.row.name.strip_prefix("connect ").map(str::trim) else {
+        return row;
+    };
+    if connector_slug.is_empty() || connection_name.trim().is_empty() {
+        return row;
+    }
+    row.row.replacement = format!("/connect {connector_slug} {}", connection_name.trim());
+    row.search_text = format!("{} {}", row.search_text, row.row.replacement).to_ascii_lowercase();
+    row
 }
 
 fn connect_has_explicit_connection_name(rest: &str) -> bool {
@@ -780,9 +859,21 @@ mod tests {
         let commands = supported_commands();
         let rows = popup_rows("/connect vote poll", &commands);
 
-        assert!(rows.iter().any(|row| row.name == "connect telegram-login"));
+        assert!(rows.iter().any(|row| row.name == "connect telegram-login"
+            && row.replacement == "/connect telegram-login poll"));
         let event_rows = popup_rows("/connect imap events", &commands);
-        assert!(event_rows.iter().any(|row| row.name == "connect email"));
+        assert!(event_rows
+            .iter()
+            .any(|row| row.name == "connect email" && row.replacement == "/connect email events"));
+    }
+
+    #[test]
+    fn popup_preserves_connect_connection_name_after_search_term() {
+        let commands = supported_commands();
+        let rows = popup_rows("/connect matrix matrix-main", &commands);
+
+        assert!(rows.iter().any(|row| row.name == "connect matrix-bot"
+            && row.replacement == "/connect matrix-bot matrix-main"));
     }
 
     #[test]
