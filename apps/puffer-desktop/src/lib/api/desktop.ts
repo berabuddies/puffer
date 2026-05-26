@@ -443,14 +443,18 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         actor: value.actor ?? null
       };
     case "system_message":
+      const systemText = value.text;
+      const isVerifiedSkillGate = systemText.trim().startsWith("Verified Skill Gate");
+      const verifiedGateFailed = /\bevent:\s*[^\n]*reject/i.test(systemText);
       return {
         id: value.id,
         kind: "system",
         createdAtMs: value.createdAtMs ?? null,
-        title: "System message",
-        summary: preview(value.text),
-        body: value.text,
-        meta: [],
+        title: isVerifiedSkillGate ? "Verified Skill Gate" : "System message",
+        summary: preview(systemText),
+        body: systemText,
+        meta: isVerifiedSkillGate ? ["verified skill"] : [],
+        status: isVerifiedSkillGate ? (verifiedGateFailed ? "error" : "success") : null,
         actor: value.actor ?? null
       };
     case "command":

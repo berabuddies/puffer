@@ -2699,12 +2699,106 @@ test("verified skill gate events render inside agent activity with check details
   await expect(panel).toContainText("Concrete input");
   await expect(panel).toContainText("Compare concrete_tool with the next activity row's tool name");
 
+  daemon.setSessionTimeline("session-gate-activity", [
+    {
+      kind: "user_message",
+      id: "gate-user",
+      text: "Use the arxiv verified skill",
+      createdAtMs: baseTime
+    },
+    {
+      kind: "tool_call",
+      id: "gate-skill-tool",
+      toolId: "Skill",
+      status: "ok",
+      summary: "Skill success",
+      inputText: "{\"skill\":\"arxiv\",\"args\":\"Find the latest arXiv paper.\"}",
+      outputText: "Prepared arxiv_search host call.",
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "tool_call",
+      id: "gate-host-call",
+      toolId: "LambdaHostCall",
+      status: "ok",
+      summary: "Lambda host call admitted: arxiv_search",
+      inputText:
+        "{\"host_tool\":\"arxiv_search\",\"args\":{\"query\":\"au:\\\"Hanzhi Liu\\\"\",\"maxresults\":10},\"tool\":\"Bash\",\"input\":{\"command\":\"python3 arxiv_search.py\"}}",
+      outputText: "",
+      createdAtMs: baseTime + 2,
+      metadata: {
+        lambda_skill: {
+          event: "host_call_admitted",
+          host_tool: "arxiv_search",
+          host_args: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+          concrete_tool: "Bash",
+          concrete_input: { command: "python3 arxiv_search.py" }
+        }
+      }
+    },
+    {
+      kind: "system_message",
+      id: "gate-host-call-lambda-gate",
+      text:
+        "Verified Skill Gate\n" +
+        "event: host_call_admitted\n" +
+        "check: Verified LambdaHostCall may bind formal host tool arxiv_search to concrete tool Bash, and recorded the exact concrete input that must run next.\n" +
+        "host_tool: arxiv_search\n" +
+        "host_args: {\"query\":\"au:\\\"Hanzhi Liu\\\"\",\"maxresults\":10}\n" +
+        "concrete_tool: Bash\n" +
+        "concrete_input: {\"command\":\"python3 arxiv_search.py\"}\n" +
+        "confirmation: Compare concrete_tool with the next activity row's tool name and concrete_input with that tool's input.",
+      createdAtMs: baseTime + 3
+    },
+    {
+      kind: "tool_call",
+      id: "gate-bash-tool",
+      toolId: "Bash",
+      status: "ok",
+      summary: "Command: python3 arxiv_search.py",
+      inputText: "{\"command\":\"python3 arxiv_search.py\"}",
+      outputText: "arxiv result",
+      createdAtMs: baseTime + 4,
+      metadata: {
+        lambda_skill: {
+          event: "host_call_committed",
+          host_tool: "arxiv_search",
+          host_args: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+          concrete_tool: "Bash",
+          concrete_input: { command: "python3 arxiv_search.py" }
+        }
+      }
+    },
+    {
+      kind: "system_message",
+      id: "gate-bash-tool-lambda-gate",
+      text:
+        "Verified Skill Gate\n" +
+        "event: host_call_committed\n" +
+        "check: Confirmed the concrete Bash call matched the pending LambdaHostCall bridge for formal host tool arxiv_search.\n" +
+        "host_tool: arxiv_search\n" +
+        "host_args: {\"query\":\"au:\\\"Hanzhi Liu\\\"\",\"maxresults\":10}\n" +
+        "concrete_tool: Bash\n" +
+        "confirmation: Puffer observed the declared concrete tool succeed, then committed the Lambda gate and any registered facts.",
+      createdAtMs: baseTime + 5
+    },
+    {
+      kind: "assistant_message",
+      id: "gate-assistant",
+      text: "Found the arXiv paper.",
+      createdAtMs: baseTime + 6
+    }
+  ]);
   daemon.emit("session:session-gate-activity:event", {
     type: "turn-complete",
     turnId: "turn-session-gate-activity",
     assistantText: "Found the arXiv paper."
   });
   await expect(page.getByText("Found the arXiv paper.")).toBeVisible();
+  await expect(page.locator('.pf-msg[data-role="system"]').filter({ hasText: "Verified Skill Gate" })).toHaveCount(0);
+  await expect(page.getByText("MCP · Bash")).toHaveCount(0);
+  await expect(page.getByText("No result returned.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Agent activity/ })).toContainText("Checked 2 gates");
 });
 
 test("daemon-running background sessions receive approval events", async ({ page }) => {

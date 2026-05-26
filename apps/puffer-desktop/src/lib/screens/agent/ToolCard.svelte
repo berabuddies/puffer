@@ -237,19 +237,16 @@
     name: string,
     input: Record<string, unknown> | null
   ): { server: string; tool: string } | null {
-    const fromInput = {
-      server: stringField(input, ["server"]),
-      tool: stringField(input, ["tool"])
-    };
-    if (fromInput.server || fromInput.tool) {
-      return {
-        server: fromInput.server ?? "mcp",
-        tool: fromInput.tool ?? "tool"
-      };
-    }
     const match = /^mcp__(.*?)__(.*)$/.exec(name);
-    if (!match) return null;
-    return { server: match[1] || "mcp", tool: match[2] || "tool" };
+    if (match) return { server: match[1] || "mcp", tool: match[2] || "tool" };
+    const server = stringField(input, ["server"]);
+    const tool = stringField(input, ["tool"]);
+    if (server) return { server, tool: tool ?? "tool" };
+    const compactName = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (tool && (compactName === "mcp" || compactName === "mcptoolcall")) {
+      return { server: "mcp", tool };
+    }
+    return null;
   }
 
   function compactToolName(name: string | null | undefined): string {
