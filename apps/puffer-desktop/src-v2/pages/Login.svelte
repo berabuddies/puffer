@@ -52,17 +52,17 @@
     }
   }
 
-  function onSignIn(): void {
+  async function onSignIn(): Promise<void> {
     if (submitting) return;
     submitting = true;
-    // goToLogin navigates the whole document; on the off-chance it returns
-    // without actually navigating (missing env var), reset the spinner so
-    // the user can retry.
+    // goToLogin is async — in Tauri it awaits openUrl (OS browser dispatch);
+    // in web it assigns location.href and the page navigates away. We
+    // re-enable submitting after a short delay so the user can retry if
+    // the OS browser failed to open (no exception thrown, just nothing
+    // visibly happened).
     try {
-      goToLogin();
+      await goToLogin();
     } finally {
-      // Small delay before re-enabling — covers the brief moment between
-      // the click and the browser starting to navigate.
       window.setTimeout(() => {
         submitting = false;
       }, 1500);

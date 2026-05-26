@@ -40,6 +40,21 @@ const CONTROL_API_URL =
   (import.meta.env.VITE_WORLDROUTER_CONTROL_URL as string | undefined) ??
   "https://control-api.worldrouter.ai";
 
+/**
+ * Custom URL scheme the Tauri host registers to receive the OAuth callback.
+ * Must match `src-tauri/tauri.conf.json` plugins.deep-link.desktop.schemes
+ * AND be on Auth Station's ALLOWED_REDIRECT_ORIGINS.
+ */
+const TAURI_OAUTH_REDIRECT_URI = "com.corbina.desktop://oauth/callback";
+
+/** True when running inside the Tauri webview (vs vite-dev in a browser). */
+function isTauri(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    "__TAURI_INTERNALS__" in window
+  );
+}
+
 function safeLocalStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
@@ -445,16 +460,14 @@ async function safeJson(res: Response): Promise<unknown> {
  *
  * Never returns — the document is navigating away.
  */
-export function goToLogin(returnTo?: string): void {
+export async function goToLogin(returnTo?: string): Promise<void> {
   if (typeof window === "undefined") return;
   if (!AUTH_STATION_URL) {
-    // Fail loud in dev so the missing env var doesn't silently no-op.
     // eslint-disable-next-line no-console
     console.error("[auth] VITE_AUTH_STATION_URL is not set");
     return;
   }
   const session = safeSessionStorage();
-  // crypto.randomUUID is available in all Tauri WebKit / Chromium webviews.
   const state =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
@@ -464,17 +477,53 @@ export function goToLogin(returnTo?: string): void {
     if (returnTo) session.setItem(RETURN_TO_KEY, returnTo);
     else session.removeItem(RETURN_TO_KEY);
   }
-  // OAuth 2.0 (RFC 6749 §3.1.2) forbids fragments in redirect_uri, and Auth
-  // Station silently treats fragment-bearing URIs as invalid → loses the user
-  // on the auth domain. We use a plain pathname and let App.svelte's
-  // bootstrap recognize the post-callback landing and bridge it back into
-  // the hash router (see absorbOAuthCallbackInUrl).
-  const redirectUri = `${window.location.origin}/auth/callback`;
+  // Two redirect_uri shapes:
+  //   Tauri: custom URL scheme → OS routes back via tauri-plugin-deep-link.
+  //          OAuth 2.0 RFC 6749 §3.1.2 forbids fragments here, and a
+  //          loopback HTTP URL conflicts with the vite dev server — the
+  //          custom scheme cleanly avoids both.
+  //   Web/playwright: same-origin /auth/callback — App.svelte's
+  //          absorbOAuthCallbackInUrl bridges into the hash router.
+  const redirectUri = isTauri()
+    ? TAURI_OAUTH_REDIRECT_URI
+    : `${window.location.origin}/auth/callback`;
   const params = new URLSearchParams({
     redirect_uri: redirectUri,
     client_state: state
   });
-  window.location.href = `${AUTH_STATION_URL.replace(/\/$/, "")}/login?${params.toString()}`;
+  const authUrl = `${AUTH_STATION_URL.replace(/\/$/, "")}/login?${params.toString()}`;
+
+  if (isTauri()) {
+    // Open in the OS default browser. The webview itself stays on /login;
+    // the deep-link listener (installed in App.svelte onMount) handles
+    // the callback and navigates to /auth/callback so AuthCallback.svelte
+    // runs the same code path the web flow uses.
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(authUrl);
+    return;
+  }
+  // Web path: just navigate the current document.
+  window.location.href = authUrl;
+}
+
+/**
+ * Subscribe to OAuth callback URLs delivered via the OS custom-scheme
+ * deep-link plugin. The Tauri host emits "oauth:deep-link" with
+ * `[url]` payload whenever the user comes back from the system browser.
+ *
+ * Returns an unlisten function. Calling installDeepLinkListener in a
+ * non-Tauri context is a no-op (returns a noop unlisten).
+ */
+export async function installDeepLinkListener(
+  onUrl: (url: string) => void
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<string[]>("oauth:deep-link", (event) => {
+    const url = event.payload?.[0];
+    if (typeof url === "string" && url.length > 0) onUrl(url);
+  });
+  return unlisten;
 }
 
 /**
@@ -600,7 +649,20 @@ export function signOut(): void {
 
   if (typeof window === "undefined") return;
   if (!AUTH_STATION_URL) {
-    // Without a configured Auth Station, just bounce to /login locally.
+    window.location.hash = "#/login";
+    return;
+  }
+  // Logout in Tauri: the auth cookie lives in the OS browser (where
+  // login happened via opener), so we open /logout there too. The
+  // webview itself just bounces back to /login locally without waiting
+  // for the upstream cookie clear — Auth Station's session is best-effort.
+  if (isTauri()) {
+    const params = new URLSearchParams({
+      post_logout_redirect_uri: TAURI_OAUTH_REDIRECT_URI
+    });
+    void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+      openUrl(`${AUTH_STATION_URL.replace(/\/$/, "")}/logout?${params.toString()}`)
+    );
     window.location.hash = "#/login";
     return;
   }

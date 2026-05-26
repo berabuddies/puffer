@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run build:puffer-cli:dev && npm run dev",
     "beforeBuildCommand": "npm run build:puffer-cli:release && npm run build",
-    "devUrl": "http://127.0.0.1:1420",
+    "devUrl": "http://localhost:1456",
     "frontendDist": "../dist"
   },
   "app": {
@@ -31,5 +31,12 @@
     "active": true,
     "targets": ["deb", "appimage"],
     "icon": ["icons/icon.png", "icons/icon.ico"]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["com.corbina.desktop"]
+      }
+    }
   }
 }

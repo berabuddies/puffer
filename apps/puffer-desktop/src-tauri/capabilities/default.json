@@ -7,6 +7,8 @@
     "core:default",
     "core:window:allow-start-dragging",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "opener:default",
+    "deep-link:default"
   ]
 }

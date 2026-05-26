@@ -388,6 +388,26 @@ pub fn run() {
 
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            // Forward incoming custom-scheme URLs (the OAuth callback comes
+            // back to us via `com.corbina.desktop://oauth/callback?token=…`)
+            // to the frontend as a Tauri event. The frontend listens via
+            // wsClient or a Tauri event subscriber and feeds the URL to
+            // handleAuthCallback.
+            use tauri::Emitter;
+            use tauri_plugin_deep_link::DeepLinkExt;
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                let urls: Vec<String> =
+                    event.urls().into_iter().map(|u| u.to_string()).collect();
+                if let Err(err) = handle.emit("oauth:deep-link", &urls) {
+                    eprintln!("[deep-link] failed to emit oauth event: {err}");
+                }
+            });
+            Ok(())
+        })
         .manage(backend)
         .manage(launcher)
         .invoke_handler(tauri::generate_handler![

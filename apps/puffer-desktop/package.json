@@ -18,12 +18,16 @@
   },
   "dependencies": {
     "@tauri-apps/api": "~2.10.1",
+    "@tauri-apps/plugin-deep-link": "^2.4.9",
     "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "fflate": "^0.8.2",
+    "libphonenumber-js": "^1.13.3",
     "lucide-svelte": "^1.0.1",
     "pdfjs-dist": "^5.7.284",
+    "qrcode": "^1.5.4",
     "svelte": "^5.0.0"
   },
   "devDependencies": {
