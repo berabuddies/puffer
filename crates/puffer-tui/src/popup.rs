@@ -93,6 +93,9 @@ pub(crate) fn popup_rows(input: &str, commands: &[CommandSpec]) -> Vec<PopupRow>
     if let Some(rows) = workflow_connector_command_rows(input) {
         return rows;
     }
+    if let Some(rows) = monitor_connector_rows(input) {
+        return rows;
+    }
     if let Some(rows) = workflow_subcommand_rows(input) {
         return rows;
     }
@@ -125,7 +128,7 @@ pub(crate) fn popup_accepts_input(input: &str) -> bool {
         let rest = rest.trim_start();
         return workflow_connector_command_accepts(rest) || !rest.contains(char::is_whitespace);
     }
-    command == "connect" && !connect_has_explicit_connection_name(rest)
+    command == "monitor" || command == "connect" && !connect_has_explicit_connection_name(rest)
 }
 
 /// Returns true when the input already exactly matches the selected popup row.
@@ -276,6 +279,24 @@ fn workflow_connector_command_rows(input: &str) -> Option<Vec<PopupRow>> {
     Some(rows.into_iter().map(|row| row.row).collect())
 }
 
+fn monitor_connector_rows(input: &str) -> Option<Vec<PopupRow>> {
+    let rest = input
+        .strip_prefix('/')?
+        .split_once(' ')
+        .filter(|(command, _)| *command == "monitor")?
+        .1;
+    let terms = search_terms(rest);
+    let mut rows = builtin_connector_templates()
+        .into_iter()
+        .filter(template_supports_event_workflow)
+        .map(monitor_connector_row)
+        .filter(|row| terms.iter().all(|term| row.search_text.contains(term)))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| connector_command_row_sort_key(row, rest.trim(), "monitor"));
+    rows.truncate(MAX_POPUP_ROWS);
+    Some(rows.into_iter().map(|row| row.row).collect())
+}
+
 fn workflow_connector_command_accepts(rest: &str) -> bool {
     workflow_connector_command_query(rest).is_some()
 }
@@ -322,9 +343,13 @@ fn looks_like_workflow_append_path(value: &str) -> bool {
         || value.contains('.')
 }
 
-fn template_supports_workflow_command(template: &ConnectorTemplate) -> bool {
-    template.can_subscribe && (template.command_argv().is_some() || template.subscriber.is_some())
+fn template_supports_event_workflow(template: &ConnectorTemplate) -> bool {
+    (template.can_subscribe && (template.command_argv().is_some() || template.subscriber.is_some()))
         || template.slug == "email"
+}
+
+fn template_supports_workflow_command(template: &ConnectorTemplate) -> bool {
+    template_supports_event_workflow(template)
 }
 
 fn workflow_connector_command_row(
@@ -409,6 +434,53 @@ fn workflow_connector_command_search_text(
         .join(" ");
     format!(
         "{} {} {} {} {} trigger trigger-ready event events workflow draft new append file save {}",
+        template.slug,
+        suggested_connection,
+        template.description,
+        template.skill,
+        template.binary,
+        actions
+    )
+    .to_ascii_lowercase()
+}
+
+fn monitor_connector_row(template: ConnectorTemplate) -> ConnectorPopupRow {
+    let suggested_connection = suggested_connection_slug(&template.slug);
+    let description = monitor_connector_description(&template, &suggested_connection);
+    let search_text = monitor_connector_search_text(&template, &suggested_connection);
+    ConnectorPopupRow {
+        row: PopupRow {
+            name: format!("monitor {suggested_connection}"),
+            description,
+            replacement: format!("/monitor {suggested_connection}"),
+            append_space: false,
+        },
+        search_text,
+    }
+}
+
+fn monitor_connector_description(
+    template: &ConnectorTemplate,
+    suggested_connection: &str,
+) -> String {
+    format!(
+        "Monitor events from {}  connection={suggested_connection}; connector={}",
+        template.description, template.slug
+    )
+}
+
+fn monitor_connector_search_text(
+    template: &ConnectorTemplate,
+    suggested_connection: &str,
+) -> String {
+    let actions = template
+        .actions
+        .keys()
+        .flat_map(|action| [action.to_string(), action.replace('_', " ")])
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{} {} {} {} {} monitor monitoring task tasks triage trigger trigger-ready event events workflow background actionable {}",
         template.slug,
         suggested_connection,
         template.description,
@@ -552,16 +624,24 @@ fn connector_popup_search_text(template: &ConnectorTemplate, suggested_connectio
 }
 
 fn connector_row_sort_key(row: &ConnectorPopupRow, filter: &str) -> (u8, String) {
+    connector_command_row_sort_key(row, filter, "connect")
+}
+
+fn connector_command_row_sort_key(
+    row: &ConnectorPopupRow,
+    filter: &str,
+    command: &str,
+) -> (u8, String) {
     let name = row.row.name.to_ascii_lowercase();
     let description = row.row.description.to_ascii_lowercase();
     let filter = filter.to_ascii_lowercase();
     if filter.is_empty() {
         return (0, name);
     }
-    if name == format!("connect {filter}") || name == filter {
+    if name == format!("{command} {filter}") || name == filter {
         return (0, name);
     }
-    if name.starts_with(&format!("connect {filter}")) || name.starts_with(&filter) {
+    if name.starts_with(&format!("{command} {filter}")) || name.starts_with(&filter) {
         return (1, name);
     }
     if name.contains(&filter) {
@@ -704,6 +784,26 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| row.name != "workflows append telegram-bot"));
+    }
+
+    #[test]
+    fn popup_matches_monitor_connector_arguments() {
+        let commands = supported_commands();
+        let rows = popup_rows("/monitor vote poll", &commands);
+
+        assert!(rows.iter().any(|row| row.name == "monitor telegram-user"
+            && row.replacement == "/monitor telegram-user"
+            && row.description.contains("connection=telegram-user")));
+        assert!(rows.iter().all(|row| row.name != "monitor telegram-bot"));
+        let event_rows = popup_rows("/monitor imap events", &commands);
+        assert!(event_rows
+            .iter()
+            .any(|row| row.name == "monitor email" && row.replacement == "/monitor email"));
+    }
+
+    #[test]
+    fn popup_accepts_monitor_search_terms() {
+        assert!(super::popup_accepts_input("/monitor vote poll"));
     }
 
     #[test]

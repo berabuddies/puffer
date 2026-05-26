@@ -1,6 +1,6 @@
 use crate::runtime::claude_tools::{execute_workflow_tool, workflow::workflow_tools};
 use crate::runtime::subscription_manager;
-use crate::AppState;
+use crate::{AppState, TurnExecution};
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
@@ -31,6 +31,21 @@ pub(crate) fn handle_monitor_command(
         }
     }
     Ok(format!("Monitor setup\n{}", lines.join("\n")))
+}
+
+/// Runs the deterministic `/monitor` flow without a provider turn.
+pub fn execute_monitor_flow(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    args: &str,
+) -> Result<TurnExecution> {
+    Ok(TurnExecution {
+        assistant_text: handle_monitor_command(state, resources, providers, auth_store, args)?,
+        tool_invocations: Vec::new(),
+        reflection_traces: Vec::new(),
+    })
 }
 
 fn resolve_monitor_connections(

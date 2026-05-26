@@ -56,6 +56,7 @@ pub(crate) use goal::handle_goal_command;
 pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
 };
+pub use monitor::execute_monitor_flow;
 pub(crate) use monitor::handle_monitor_command;
 pub use plugins::PluginActionEntry;
 pub(crate) use plugins::{

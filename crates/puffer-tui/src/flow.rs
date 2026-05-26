@@ -40,6 +40,9 @@ pub(crate) use flow_auth::{handle_auth_command, run_embedded_auth_login};
 mod flow_loop;
 use flow_loop::try_handle_loop_command;
 pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
+#[path = "flow_monitor.rs"]
+mod flow_monitor;
+use flow_monitor::execute_monitor_command;
 #[path = "flow_shell.rs"]
 mod flow_shell;
 pub(crate) use flow_shell::parse_shell_shortcut;
@@ -59,6 +62,11 @@ fn parsed_slash_command(submitted: &str) -> (&str, &str) {
 fn is_connect_command_input(submitted: &str) -> bool {
     let (name, _) = parsed_slash_command(submitted);
     canonical_overlay_command_name(name) == "connect"
+}
+
+fn is_monitor_command_input(submitted: &str) -> bool {
+    let (name, _) = parsed_slash_command(submitted);
+    canonical_overlay_command_name(name) == "monitor"
 }
 
 fn canonical_overlay_command_name(name: &str) -> &str {
@@ -293,6 +301,19 @@ pub(crate) fn handle_prompt_submit(
     if is_connect_command_input(&submitted) {
         ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
         execute_connect_command(state, resources, auth_store, session_store, tui, submitted)?;
+        return Ok(());
+    }
+    if is_monitor_command_input(&submitted) {
+        ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
+        execute_monitor_command(
+            state,
+            resources,
+            providers,
+            auth_store,
+            session_store,
+            tui,
+            submitted,
+        )?;
         return Ok(());
     }
     if let Some(shell_command) = parse_shell_shortcut(&submitted) {

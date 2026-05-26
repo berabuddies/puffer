@@ -457,6 +457,57 @@ fn handle_prompt_submit_routes_connect_through_user_question_worker() {
 }
 
 #[test]
+fn handle_prompt_submit_routes_monitor_through_user_question_worker() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/monitor".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.has_pending_submit());
+    assert_eq!(
+        tui.pending_submit
+            .as_ref()
+            .and_then(|pending| pending.status_hint.as_deref()),
+        Some("Setting up monitor...")
+    );
+    assert!(state.transcript.iter().all(|message| {
+        !message
+            .text
+            .contains("interactive AskUserQuestion response is required for /monitor")
+    }));
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::CommandInvoked { name, args, .. }
+                if name == "monitor" && args.is_empty()
+        )
+    }));
+}
+
+#[test]
 fn transient_resume_picker_selection_does_not_create_blank_session() {
     let tempdir = tempdir().unwrap();
     let paths = isolated_paths(&tempdir);

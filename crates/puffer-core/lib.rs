@@ -26,6 +26,7 @@ pub use command::{
 };
 pub use command_helpers::append_trace_events;
 pub use command_helpers::execute_connect_flow;
+pub use command_helpers::execute_monitor_flow;
 pub use command_helpers::CommandActionEntry;
 pub use command_helpers::CopyActionEntry;
 pub use command_helpers::McpActionEntry;
