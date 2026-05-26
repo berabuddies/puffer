@@ -17,6 +17,7 @@ mod pagerduty;
 mod sentry;
 mod shopify;
 mod trello;
+mod vercel;
 
 /// Returns whether an Asana webhook payload is a heartbeat with no events.
 pub(super) fn asana_payload_is_heartbeat(headers: &HeaderMap, payload: &Value) -> bool {
@@ -32,70 +33,21 @@ pub(super) fn asana_inbound(headers: &HeaderMap, payload: &Value) -> Option<Inbo
 pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     asana_inbound(headers, payload)
         .or_else(|| azuredevops::azuredevops_inbound(headers, payload))
-        .or_else(|| bitbucket_inbound(headers, payload))
+        .or_else(|| bitbucket::bitbucket_inbound(headers, payload))
         .or_else(|| figma::figma_inbound(headers, payload))
         .or_else(|| jira_inbound(headers, payload))
-        .or_else(|| grafana_inbound(headers, payload))
-        .or_else(|| alertmanager_inbound(headers, payload))
-        .or_else(|| datadog_inbound(headers, payload))
-        .or_else(|| newrelic_inbound(headers, payload))
-        .or_else(|| opsgenie_inbound(headers, payload))
-        .or_else(|| pagerduty_inbound(headers, payload))
-        .or_else(|| sentry_inbound(headers, payload))
-        .or_else(|| shopify_inbound(headers, payload))
+        .or_else(|| grafana::grafana_inbound(headers, payload))
+        .or_else(|| alertmanager::alertmanager_inbound(headers, payload))
+        .or_else(|| datadog::datadog_inbound(headers, payload))
+        .or_else(|| newrelic::newrelic_inbound(headers, payload))
+        .or_else(|| opsgenie::opsgenie_inbound(headers, payload))
+        .or_else(|| pagerduty::pagerduty_inbound(headers, payload))
+        .or_else(|| sentry::sentry_inbound(headers, payload))
+        .or_else(|| shopify::shopify_inbound(headers, payload))
         .or_else(|| stripe_inbound(headers, payload))
-        .or_else(|| trello_inbound(headers, payload))
+        .or_else(|| trello::trello_inbound(headers, payload))
+        .or_else(|| vercel::vercel_inbound(headers, payload))
         .or_else(|| gitlab_inbound(headers, payload))
-}
-
-/// Converts a Bitbucket Cloud webhook payload into an inbound Puffer message.
-pub(super) fn bitbucket_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    bitbucket::bitbucket_inbound(headers, payload)
-}
-
-/// Converts a Prometheus Alertmanager webhook payload into an inbound Puffer message.
-pub(super) fn alertmanager_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    alertmanager::alertmanager_inbound(headers, payload)
-}
-
-/// Converts a Datadog webhook payload into an inbound Puffer message.
-pub(super) fn datadog_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    datadog::datadog_inbound(headers, payload)
-}
-
-/// Converts a New Relic webhook payload into an inbound Puffer message.
-pub(super) fn newrelic_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    newrelic::newrelic_inbound(headers, payload)
-}
-
-/// Converts an Opsgenie webhook payload into an inbound Puffer message.
-pub(super) fn opsgenie_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    opsgenie::opsgenie_inbound(headers, payload)
-}
-
-/// Converts a Grafana Alerting webhook payload into an inbound Puffer message.
-pub(super) fn grafana_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    grafana::grafana_inbound(headers, payload)
-}
-
-/// Converts a Trello webhook payload into an inbound Puffer message.
-pub(super) fn trello_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    trello::trello_inbound(headers, payload)
-}
-
-/// Converts a PagerDuty webhook payload into an inbound Puffer message.
-pub(super) fn pagerduty_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    pagerduty::pagerduty_inbound(headers, payload)
-}
-
-/// Converts a Sentry webhook payload into an inbound Puffer message.
-pub(super) fn sentry_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    sentry::sentry_inbound(headers, payload)
-}
-
-/// Converts a Shopify webhook payload into an inbound Puffer message.
-pub(super) fn shopify_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    shopify::shopify_inbound(headers, payload)
 }
 
 /// Converts a Jira webhook payload into an inbound Puffer message.

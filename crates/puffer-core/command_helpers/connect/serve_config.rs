@@ -298,6 +298,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/trello",
             method: "Trello event webhook",
         },
+        "vercel-webhook" => WebhookPreset {
+            product: "Vercel",
+            default_path: "/vercel",
+            method: "Vercel event webhook",
+        },
         _ => bail!("unsupported webhook preset `{connector_slug}`"),
     };
     Ok(preset)

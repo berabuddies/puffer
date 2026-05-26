@@ -205,10 +205,22 @@ fn is_meaningful_event(event: &Event) -> bool {
 /// match would silently fail. Matching on a known subdir component is
 /// just as targeted and survives this platform quirk.
 fn is_resource_event(event: &Event, _roots: &[PathBuf]) -> bool {
-    event.paths.iter().any(|p| is_resource_path(p.as_path()))
+    event.paths.iter().any(|p| {
+        matches!(
+            classify_resource_path(p.as_path()),
+            ResourcePathMatch::Concrete
+        )
+    })
 }
 
-fn is_resource_path(path: &Path) -> bool {
+enum ResourcePathMatch {
+    Concrete,
+    ParentOnly,
+    Noise,
+    Unrelated,
+}
+
+fn classify_resource_path(path: &Path) -> ResourcePathMatch {
     // Walk path components forward. Ignore everything up to (and
     // including) the first match against a watched subdir; check only
     // the *trailing* segments for dotfile/swap-file noise. We can't
@@ -231,23 +243,28 @@ fn is_resource_path(path: &Path) -> bool {
         }
     }
     let Some(start) = after_subdir else {
-        return false;
+        return ResourcePathMatch::Unrelated;
     };
+    let mut trailing_components = 0;
     for component in components.iter().skip(start) {
         let std::path::Component::Normal(raw) = component else {
             continue;
         };
         let Some(name) = raw.to_str() else {
-            return false;
+            return ResourcePathMatch::Noise;
         };
         if name.starts_with('.') {
-            return false;
+            return ResourcePathMatch::Noise;
         }
         if name.ends_with('~') || name.ends_with(".swp") || name.ends_with(".tmp") {
-            return false;
+            return ResourcePathMatch::Noise;
         }
+        if trailing_components > 0 {
+            return ResourcePathMatch::Concrete;
+        }
+        trailing_components += 1;
     }
-    true
+    ResourcePathMatch::ParentOnly
 }
 
 fn should_raise_signal(

@@ -35,6 +35,7 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"shopify-webhook".to_string()));
     assert!(slugs.contains(&"stripe-webhook".to_string()));
     assert!(slugs.contains(&"trello-webhook".to_string()));
+    assert!(slugs.contains(&"vercel-webhook".to_string()));
     assert!(slugs.contains(&"webhook".to_string()));
 }
 
@@ -108,6 +109,10 @@ fn suggested_connection_slugs_match_connect_defaults() {
     assert_eq!(
         suggested_connection_slug("trello-webhook"),
         "trello-webhook"
+    );
+    assert_eq!(
+        suggested_connection_slug("vercel-webhook"),
+        "vercel-webhook"
     );
     assert_eq!(suggested_connection_slug("webhook"), "webhook");
     assert_eq!(suggested_connection_slug("custom-feed"), "custom-feed");
@@ -193,6 +198,7 @@ fn serve_mode_connectors_do_not_claim_workflow_runtime_capabilities() {
         "shopify-webhook",
         "stripe-webhook",
         "trello-webhook",
+        "vercel-webhook",
         "webhook",
     ] {
         let template = builtin_connector_template(slug).unwrap();

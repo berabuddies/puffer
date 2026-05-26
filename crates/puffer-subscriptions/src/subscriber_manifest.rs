@@ -142,6 +142,7 @@ fn serve_configured_connector(slug: &str) -> bool {
             | "shopify-webhook"
             | "stripe-webhook"
             | "trello-webhook"
+            | "vercel-webhook"
             | "webhook"
     )
 }

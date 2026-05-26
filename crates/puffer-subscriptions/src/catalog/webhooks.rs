@@ -114,6 +114,12 @@ pub(super) fn builtin_webhook_templates() -> Vec<ConnectorTemplate> {
             "trello-webhook",
             trello_event_output_schema(),
         ),
+        webhook_preset_template(
+            "vercel-webhook",
+            "Vercel deployment, project, domain, and flag webhook preset backed by puffer serve",
+            "vercel-webhook",
+            vercel_event_output_schema(),
+        ),
         generic_webhook_template(),
     ]
 }
@@ -140,6 +146,7 @@ pub(super) fn is_builtin_webhook_slug(slug: &str) -> bool {
             | "shopify-webhook"
             | "stripe-webhook"
             | "trello-webhook"
+            | "vercel-webhook"
             | "webhook"
     )
 }

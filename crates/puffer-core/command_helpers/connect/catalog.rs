@@ -250,6 +250,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "shopify-webhook"
             | "stripe-webhook"
             | "trello-webhook"
+            | "vercel-webhook"
             | "webhook"
     ) {
         hints.push("serve");
@@ -604,6 +605,17 @@ mod tests {
             resolve_connector_slug(&mut state, &resources, "trello board card").expect("slug");
 
         assert_eq!(slug, "trello-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_vercel_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "vercel deployment project")
+            .expect("slug");
+
+        assert_eq!(slug, "vercel-webhook");
     }
 
     #[test]

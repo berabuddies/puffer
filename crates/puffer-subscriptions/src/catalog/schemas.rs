@@ -452,6 +452,28 @@ pub(super) fn linear_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Vercel webhook event output schema.
+pub(super) fn vercel_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "vercel_event"},
+            "type": {"type": "string"},
+            "event_id": {"type": "string"},
+            "deployment_id": {"type": "string"},
+            "project_id": {"type": "string"},
+            "domain": {"type": "string"},
+            "flag": {"type": "string"},
+            "target": {"type": "string"},
+            "actor": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["type", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Stripe webhook event output schema.
 pub(super) fn stripe_event_output_schema() -> Value {
     serde_json::json!({
