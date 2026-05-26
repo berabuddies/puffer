@@ -5180,6 +5180,78 @@ mod tests {
     }
 
     #[test]
+    fn desktop_lambda_skill_library_save_uses_tool_registry_for_concrete_tool_support() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/custom-tool");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool wait() -> Unit {\n    effects: []\n  }\n}\nskill custom_tool {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: custom-tool\ndescription: Custom concrete tool\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": [],
+              "domains": [],
+              "tools": [
+                {"name": "wait", "params": [], "result": "unit", "effects": [], "concreteTools": ["VerifiedSleep"], "concreteInputContracts": {"VerifiedSleep": {"duration_ms": 1}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let tool_dir = paths.workspace_config_dir.join("resources/tools");
+        std::fs::create_dir_all(&tool_dir).expect("tool dir");
+        std::fs::write(
+            tool_dir.join("verified_sleep.yaml"),
+            r#"id: VerifiedSleep
+name: VerifiedSleep
+description: Workspace registered sleep tool.
+handler: runtime:sleep
+approval_policy: never
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    duration_ms:
+      type: integer
+  required:
+    - duration_ms
+  additionalProperties: false
+"#,
+        )
+        .expect("workspace tool");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("workspace registry tool should support verified import");
+
+        assert_eq!(saved["skills"][0]["ready"], true);
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "VerifiedSleep");
+    }
+
+    #[test]
     fn desktop_lambda_skill_library_save_accepts_verified_bridge_tools() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");

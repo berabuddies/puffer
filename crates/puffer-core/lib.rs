@@ -55,6 +55,7 @@ pub use runtime::claude_tools::execute_workflow_tool;
 pub use runtime::execute_tool_action_once;
 pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
+pub use runtime::lambda_gate::LambdaHostConcreteToolBinding;
 pub use runtime::mcp_discovery;
 pub use runtime::quota::{QuotaError, QuotaErrorKind, QUOTA_EXIT_CODE};
 pub use runtime::resource_watcher;
@@ -146,6 +147,13 @@ pub fn lambda_skill_statuses(resources: &LoadedResources) -> Vec<LambdaSkillStat
 /// Validates a precompiled Lambda Skill host catalogue for runtime use.
 pub fn validate_lambda_host_catalogue_runtime(raw: &str) -> Result<()> {
     runtime::lambda_gate::validate_host_catalogue_runtime(raw)
+}
+
+/// Returns the concrete tool bindings declared by a Lambda Skill host catalogue.
+pub fn lambda_host_catalogue_concrete_tool_bindings(
+    raw: &str,
+) -> Result<Vec<LambdaHostConcreteToolBinding>> {
+    runtime::lambda_gate::host_catalogue_concrete_tool_bindings(raw)
 }
 
 /// Renders the current `/context` summary used by interactive overlays.

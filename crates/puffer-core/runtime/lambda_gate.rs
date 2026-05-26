@@ -18,6 +18,15 @@ mod type_check;
 
 pub(crate) use pending_call::PendingLambdaHostCall;
 
+/// One host-to-concrete tool binding declared by a Lambda Skill host catalogue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaHostConcreteToolBinding {
+    /// The formal host tool name.
+    pub host_tool: String,
+    /// The concrete Puffer tools allowed for the host tool.
+    pub concrete_tools: Vec<String>,
+}
+
 /// One structured host fact tracked by the Lambda Skill call gate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LambdaFact {
@@ -866,6 +875,13 @@ pub(crate) fn validate_host_catalogue_runtime(raw: &str) -> Result<()> {
         .context("failed to validate host tool bindings")?;
     host.validate_runtime_contracts()
         .context("failed to validate Lambda Skill runtime contracts")
+}
+
+/// Returns the concrete tool bindings declared in a Lambda Skill host catalogue.
+pub(crate) fn host_catalogue_concrete_tool_bindings(
+    raw: &str,
+) -> Result<Vec<LambdaHostConcreteToolBinding>> {
+    host_json::concrete_tool_bindings_from_json_str(raw)
 }
 
 fn host_catalogue_json_for_verification(

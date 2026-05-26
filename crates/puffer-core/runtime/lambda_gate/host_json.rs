@@ -1,4 +1,6 @@
-use super::{LambdaFact, LambdaInputPattern, LambdaParam, LambdaToolSig};
+use super::{
+    LambdaFact, LambdaHostConcreteToolBinding, LambdaInputPattern, LambdaParam, LambdaToolSig,
+};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
@@ -74,6 +76,21 @@ impl ToolSigJson {
             proof_params: self.proof_params.into_iter().collect(),
         })
     }
+}
+
+pub(super) fn concrete_tool_bindings_from_json_str(
+    raw: &str,
+) -> Result<Vec<LambdaHostConcreteToolBinding>> {
+    let parsed: HostEnvJson =
+        serde_json::from_str(raw).context("failed to parse Lambda Skill host catalogue")?;
+    Ok(parsed
+        .tools
+        .into_iter()
+        .map(|tool| LambdaHostConcreteToolBinding {
+            host_tool: tool.name,
+            concrete_tools: tool.concrete_tools,
+        })
+        .collect())
 }
 
 fn parse_concrete_input_contracts(value: Value) -> Result<BTreeMap<String, LambdaInputPattern>> {

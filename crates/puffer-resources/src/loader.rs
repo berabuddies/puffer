@@ -154,6 +154,36 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
     Ok(loaded)
 }
 
+/// Loads only tool resources needed to construct the executable tool registry.
+pub fn load_tool_resources(
+    paths: &ConfigPaths,
+    runner: &dyn ToolRunner,
+) -> Result<LoadedResources> {
+    let mut loaded = LoadedResources::default();
+    apply_embedded_tool_resources(&mut loaded)?;
+    for (root, kind) in resource_roots(paths) {
+        if !runner_path_exists(runner, &root) {
+            continue;
+        }
+        merge_by_id(
+            &mut loaded.tools,
+            load_yaml_dir::<ToolSpec>(runner, &root.join("tools"), kind)?,
+            |item| MergeKey::simple(item.value.id.clone()),
+            "tool",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.internal_tools,
+            load_yaml_dir::<ToolSpec>(runner, &root.join("internal_tools"), kind)?,
+            |item| MergeKey::simple(item.value.id.clone()),
+            "internal_tool",
+            &mut loaded.diagnostics,
+        );
+    }
+    apply_runtime_resource_filters(&mut loaded);
+    Ok(loaded)
+}
+
 fn apply_runtime_resource_filters(resources: &mut LoadedResources) {
     filter_browser_resources(resources, puffer_builtin_browser_disabled());
 }
@@ -386,18 +416,12 @@ fn resource_roots(paths: &ConfigPaths) -> Vec<(PathBuf, SourceKind)> {
 /// loader. Filesystem layers in `resource_roots` are merged on top.
 fn apply_embedded_resources(loaded: &mut LoadedResources) -> Result<()> {
     let plugins = load_yaml_embedded::<PluginSpec>("plugins")?;
+    apply_embedded_tool_resources(loaded)?;
     merge_by_id(
         &mut loaded.providers,
         load_yaml_embedded::<ProviderPack>("providers")?,
         |item| MergeKey::simple(item.value.id.clone()),
         "provider",
-        &mut loaded.diagnostics,
-    );
-    merge_by_id(
-        &mut loaded.tools,
-        load_yaml_embedded::<ToolSpec>("tools")?,
-        |item| MergeKey::simple(item.value.id.clone()),
-        "tool",
         &mut loaded.diagnostics,
     );
     merge_by_id(
@@ -461,6 +485,17 @@ fn apply_embedded_resources(loaded: &mut LoadedResources) -> Result<()> {
         load_yaml_embedded::<IdeSpec>("ides")?,
         |item| MergeKey::simple(item.value.id.clone()),
         "ide",
+        &mut loaded.diagnostics,
+    );
+    Ok(())
+}
+
+fn apply_embedded_tool_resources(loaded: &mut LoadedResources) -> Result<()> {
+    merge_by_id(
+        &mut loaded.tools,
+        load_yaml_embedded::<ToolSpec>("tools")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "tool",
         &mut loaded.diagnostics,
     );
     Ok(())
@@ -1190,6 +1225,40 @@ mod tests {
         assert!(loaded.hooks.iter().any(|h| h.value.id == "tool-end"));
         assert!(loaded.skills.iter().any(|s| s.value.name == "reviewer"));
         assert!(loaded.plugins.iter().any(|p| p.value.id == "example"));
+    }
+
+    #[test]
+    fn load_tool_resources_reads_tools_without_scanning_skills() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let resources_dir = root.join("resources");
+        fs::create_dir_all(resources_dir.join("tools")).unwrap();
+        fs::create_dir_all(resources_dir.join("skills/reviewer")).unwrap();
+        fs::create_dir_all(resources_dir.join("plugins")).unwrap();
+        fs::write(
+            resources_dir.join("tools/custom.yaml"),
+            "id: CustomTool\nname: CustomTool\ndescription: Custom tool\nhandler: runtime:sleep\n",
+        )
+        .unwrap();
+        fs::write(
+            resources_dir.join("skills/reviewer/SKILL.md"),
+            "---\nname: reviewer\ndescription: Review changes\n---\nBody\n",
+        )
+        .unwrap();
+        fs::write(
+            resources_dir.join("plugins/example.yaml"),
+            "id: example\ndisplay_name: Example\ncommands: []\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_tool_resources(&paths, &FsTestRunner).unwrap();
+        assert!(loaded
+            .tools
+            .iter()
+            .any(|tool| tool.value.id == "CustomTool"));
+        assert!(loaded.skills.is_empty());
+        assert!(loaded.plugins.is_empty());
     }
 
     #[test]

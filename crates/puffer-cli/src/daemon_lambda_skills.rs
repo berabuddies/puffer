@@ -9,7 +9,7 @@ mod import_validation;
 
 use import_validation::{
     infer_allowed_tools_from_default_host_catalogues, validate_host_catalogue_concrete_tools,
-    validate_lambda_skill_library_import,
+    validate_lambda_skill_library_import, LambdaConcreteToolSupport,
 };
 
 #[derive(Deserialize)]
@@ -143,84 +143,6 @@ struct LambdaSkillStatsDto {
     actions: Option<usize>,
 }
 
-const SUPPORTED_LAMBDA_CONCRETE_TOOLS: &[&str] = &[
-    "Agent",
-    "AskUserQuestion",
-    "Bash",
-    "BrowserAction",
-    "ComfyUiAction",
-    "Config",
-    "CronCreate",
-    "CronDelete",
-    "CronList",
-    "DebugpyAction",
-    "DiscordAction",
-    "Edit",
-    "EnterPlanMode",
-    "EnterWorktree",
-    "ExitPlanMode",
-    "ExitWorktree",
-    "Glob",
-    "Grep",
-    "HttpRequest",
-    "LSP",
-    "LambdaInternal",
-    "ListMcpResourcesTool",
-    "McpStatus",
-    "McpToolCall",
-    "Memory",
-    "ModalAction",
-    "NativeMcpAction",
-    "NotebookEdit",
-    "PowerShell",
-    "ProcessControl",
-    "Read",
-    "ReadMcpResourceTool",
-    "SendMessage",
-    "SendUserMessage",
-    "SecretValue",
-    "Skill",
-    "ShopifyAction",
-    "SlackAction",
-    "SpotifyAction",
-    "Sleep",
-    "StructuredOutput",
-    "SubscriberInstall",
-    "SubscriberList",
-    "SubscriberScaffold",
-    "SubscriptionCreate",
-    "SubscriptionDelete",
-    "SubscriptionList",
-    "SubscriptionPause",
-    "TaskCreate",
-    "TaskFlow",
-    "TaskGet",
-    "TaskList",
-    "TaskOutput",
-    "TaskStop",
-    "TaskUpdate",
-    "TeamCreate",
-    "TeamDelete",
-    "TodoWrite",
-    "ToolSearch",
-    "TouchDesignerAction",
-    "WebFetch",
-    "WebSearch",
-    "WorkflowRegister",
-    "Write",
-    "WriteStdin",
-    "create_goal",
-    "get_goal",
-    "list_dir",
-    "move_path",
-    "read_file",
-    "remove_path",
-    "replace_in_file",
-    "search_text",
-    "update_goal",
-    "write_file",
-];
-
 fn default_lambda_skill_user_invocable() -> bool {
     true
 }
@@ -259,7 +181,8 @@ pub(crate) fn handle_save_lambda_skill_library(
         disabled_skills: normalize_lambda_skill_names(params.disabled_skills),
     };
     infer_missing_lambda_skill_manifest_fields(&mut manifest);
-    validate_lambda_skill_library_import(&manifest)?;
+    let tool_support = lambda_concrete_tool_support(state)?;
+    validate_lambda_skill_library_import(&manifest, &tool_support)?;
     let dir = lambda_skill_manifest_dir(state, params.scope.as_deref().unwrap_or("workspace"))?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{id}.yaml"));
@@ -344,7 +267,8 @@ fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
     let user_dir = lambda_skill_manifest_dir(state, "user")?;
     let libraries =
         effective_lambda_skill_libraries(raw_lambda_skill_library_manifest_dtos(state)?);
-    let skills = lambda_verified_skill_dtos(&libraries);
+    let tool_support = lambda_concrete_tool_support(state)?;
+    let skills = lambda_verified_skill_dtos(&libraries, &tool_support);
     let doctor = lambda_desktop_doctor_summary(&skills);
     let warnings = lambda_desktop_warning_lines(&skills);
     Ok(json!({
@@ -357,6 +281,14 @@ fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
         "doctor": doctor,
         "warnings": warnings,
     }))
+}
+
+fn lambda_concrete_tool_support(state: &DaemonState) -> Result<LambdaConcreteToolSupport> {
+    let resources = puffer_resources::load_tool_resources(
+        state.config_paths(),
+        &puffer_runner_local::LocalToolRunner::new(),
+    )?;
+    Ok(LambdaConcreteToolSupport::from_resources(&resources))
 }
 
 fn lambda_skill_manifest_path(state: &DaemonState, source_kind: &str, id: &str) -> Result<PathBuf> {
@@ -537,10 +469,11 @@ fn remove_redundant_lambda_skill_manifests(
 
 fn lambda_verified_skill_dtos(
     libraries: &[LambdaSkillLibraryInfoDto],
+    tool_support: &LambdaConcreteToolSupport,
 ) -> Vec<LambdaVerifiedSkillInfoDto> {
     let mut skills = libraries
         .iter()
-        .flat_map(lambda_verified_skill_dtos_for_library)
+        .flat_map(|library| lambda_verified_skill_dtos_for_library(library, tool_support))
         .collect::<Vec<_>>();
     skills.sort_by(|left, right| {
         left.source_kind
@@ -553,6 +486,7 @@ fn lambda_verified_skill_dtos(
 
 fn lambda_verified_skill_dtos_for_library(
     library: &LambdaSkillLibraryInfoDto,
+    tool_support: &LambdaConcreteToolSupport,
 ) -> Vec<LambdaVerifiedSkillInfoDto> {
     let root = resolved_lambda_skill_library_root(library);
     let mut skill_dirs = Vec::new();
@@ -560,13 +494,16 @@ fn lambda_verified_skill_dtos_for_library(
     skill_dirs.sort();
     skill_dirs
         .into_iter()
-        .filter_map(|skill_dir| lambda_verified_skill_dto_for_dir(library, &skill_dir))
+        .filter_map(|skill_dir| {
+            lambda_verified_skill_dto_for_dir(library, &skill_dir, tool_support)
+        })
         .collect()
 }
 
 fn lambda_verified_skill_dto_for_dir(
     library: &LambdaSkillLibraryInfoDto,
     skill_dir: &Path,
+    tool_support: &LambdaConcreteToolSupport,
 ) -> Option<LambdaVerifiedSkillInfoDto> {
     let source_path = lambda_skill_source_path_for_snapshot(skill_dir)?;
     let generated_path = skill_dir.join(
@@ -595,8 +532,11 @@ fn lambda_verified_skill_dto_for_dir(
         .host_catalogue_subpath
         .as_deref()
         .map(|subpath| skill_dir.join(subpath));
-    let readiness =
-        lambda_desktop_readiness(&library.allowed_tools, host_catalogue_path.as_deref());
+    let readiness = lambda_desktop_readiness(
+        &library.allowed_tools,
+        host_catalogue_path.as_deref(),
+        tool_support,
+    );
     let enabled = !library.disable_model_invocation
         && !library
             .disabled_skills
@@ -630,6 +570,7 @@ struct LambdaDesktopReadiness {
 fn lambda_desktop_readiness(
     allowed_tools: &[String],
     host_catalogue_path: Option<&Path>,
+    tool_support: &LambdaConcreteToolSupport,
 ) -> LambdaDesktopReadiness {
     if let Some(host_catalogue_path) = host_catalogue_path {
         if !host_catalogue_path.is_file() {
@@ -647,7 +588,7 @@ fn lambda_desktop_readiness(
         if let Err(error) = puffer_core::validate_lambda_host_catalogue_runtime(&raw) {
             return lambda_desktop_not_ready(format!("{error:#}"));
         }
-        if let Err(error) = validate_host_catalogue_concrete_tools(&raw) {
+        if let Err(error) = validate_host_catalogue_concrete_tools(&raw, tool_support) {
             return lambda_desktop_not_ready(format!("{error:#}"));
         }
         return lambda_desktop_ready("host catalogue");
@@ -898,20 +839,6 @@ fn is_yaml_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension, "yaml" | "yml"))
-}
-
-#[derive(Deserialize)]
-struct HostCatalogueForInference {
-    #[serde(default)]
-    tools: Vec<HostToolForInference>,
-}
-
-#[derive(Deserialize)]
-struct HostToolForInference {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default, rename = "concreteTools", alias = "concrete_tools")]
-    concrete_tools: Vec<String>,
 }
 
 fn infer_missing_lambda_skill_manifest_fields(manifest: &mut LambdaSkillLibraryManifestDto) {

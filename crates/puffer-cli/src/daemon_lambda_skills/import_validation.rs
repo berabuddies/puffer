@@ -1,13 +1,31 @@
-use super::{
-    collect_lambda_skill_dirs_for_snapshot, HostCatalogueForInference,
-    LambdaSkillLibraryManifestDto, SUPPORTED_LAMBDA_CONCRETE_TOOLS,
-};
+use super::{collect_lambda_skill_dirs_for_snapshot, LambdaSkillLibraryManifestDto};
 use anyhow::{Context, Result};
+use puffer_resources::LoadedResources;
+use puffer_tools::ToolRegistry;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// Registry-backed concrete tool support for Verified Skill imports.
+pub(super) struct LambdaConcreteToolSupport {
+    registry: ToolRegistry,
+}
+
+impl LambdaConcreteToolSupport {
+    /// Builds concrete tool support from the same resources used by runtime execution.
+    pub(super) fn from_resources(resources: &LoadedResources) -> Self {
+        Self {
+            registry: ToolRegistry::from_resources(resources),
+        }
+    }
+
+    fn supports(&self, tool: &str) -> bool {
+        self.registry.definition(tool).is_some()
+    }
+}
+
 pub(super) fn validate_lambda_skill_library_import(
     manifest: &LambdaSkillLibraryManifestDto,
+    tool_support: &LambdaConcreteToolSupport,
 ) -> Result<()> {
     let root = PathBuf::from(&manifest.root);
     if !root.is_dir() {
@@ -50,7 +68,7 @@ pub(super) fn validate_lambda_skill_library_import(
             missing_host.push(display_relative_to(&root, &host_path));
             continue;
         }
-        match validate_host_catalogue_for_import(&host_path) {
+        match validate_host_catalogue_for_import(&host_path, tool_support) {
             Ok(()) => {}
             Err(error) => invalid_host.push(format!(
                 "{} ({error:#})",
@@ -90,30 +108,40 @@ pub(super) fn validate_lambda_skill_library_import(
     Ok(())
 }
 
-fn validate_host_catalogue_for_import(path: &Path) -> Result<()> {
+fn validate_host_catalogue_for_import(
+    path: &Path,
+    tool_support: &LambdaConcreteToolSupport,
+) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    validate_host_catalogue_concrete_tools(&raw)
+    validate_host_catalogue_concrete_tools(&raw, tool_support)
         .with_context(|| format!("parse {}", path.display()))
 }
 
-pub(super) fn validate_host_catalogue_concrete_tools(raw: &str) -> Result<()> {
-    let parsed: HostCatalogueForInference =
-        serde_json::from_str(raw).context("parse host catalogue")?;
-    for (index, tool) in parsed.tools.into_iter().enumerate() {
-        let name = tool.name.unwrap_or_else(|| format!("tool#{index}"));
-        if tool
+pub(super) fn validate_host_catalogue_concrete_tools(
+    raw: &str,
+    tool_support: &LambdaConcreteToolSupport,
+) -> Result<()> {
+    let bindings = puffer_core::lambda_host_catalogue_concrete_tool_bindings(raw)
+        .context("parse host catalogue")?;
+    for (index, binding) in bindings.into_iter().enumerate() {
+        let name = if binding.host_tool.trim().is_empty() {
+            format!("tool#{index}")
+        } else {
+            binding.host_tool
+        };
+        if binding
             .concrete_tools
             .iter()
             .all(|concrete| concrete.trim().is_empty())
         {
             anyhow::bail!("host tool {name} lacks concreteTools bindings");
         }
-        let unsupported = tool
+        let unsupported = binding
             .concrete_tools
             .iter()
             .map(|concrete| concrete.trim())
             .filter(|concrete| !concrete.is_empty())
-            .filter(|concrete| !lambda_concrete_tool_is_supported(concrete))
+            .filter(|concrete| !tool_support.supports(concrete))
             .map(str::to_string)
             .collect::<Vec<_>>();
         if !unsupported.is_empty() {
@@ -124,10 +152,6 @@ pub(super) fn validate_host_catalogue_concrete_tools(raw: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn lambda_concrete_tool_is_supported(tool: &str) -> bool {
-    SUPPORTED_LAMBDA_CONCRETE_TOOLS.contains(&tool)
 }
 
 fn display_relative_to(root: &Path, path: &Path) -> String {
@@ -154,9 +178,9 @@ pub(super) fn infer_allowed_tools_from_default_host_catalogues(root: &Path) -> O
     let mut tools = BTreeSet::new();
     for catalogue in catalogues {
         let raw = std::fs::read_to_string(catalogue).ok()?;
-        let parsed: HostCatalogueForInference = serde_json::from_str(&raw).ok()?;
-        for tool in parsed.tools {
-            for concrete in tool.concrete_tools {
+        let bindings = puffer_core::lambda_host_catalogue_concrete_tool_bindings(&raw).ok()?;
+        for binding in bindings {
+            for concrete in binding.concrete_tools {
                 let concrete = concrete.trim();
                 if !concrete.is_empty() {
                     tools.insert(concrete.to_string());
