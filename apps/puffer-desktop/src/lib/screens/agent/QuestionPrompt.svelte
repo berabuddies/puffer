@@ -107,6 +107,23 @@
     return question.options.filter((option) => optionMatches(option, query));
   }
 
+  function searchSummary(
+    question: AskUserQuestionItem,
+    index: number,
+    visibleCount: number
+  ): string {
+    const total = question.options.length;
+    const query = searchValue(index).trim();
+    if (!query) return total === 1 ? "1 option" : `${total} options`;
+    return visibleCount === 1 ? `1/${total} match` : `${visibleCount}/${total} matches`;
+  }
+
+  function emptySearchMessage(index: number): string {
+    const query = searchValue(index).trim();
+    if (!query) return "No options available.";
+    return `No options match "${query}".`;
+  }
+
   function setSearch(question: AskUserQuestionItem, index: number, value: string) {
     const key = draftKeyFor(index);
     searchText = { ...searchText, [key]: value };
@@ -260,6 +277,7 @@
             {/if}
           </label>
         {:else}
+          {@const visibleOptions = filteredOptions(question, index)}
           {#if question.searchable && !answered}
             <label class="pf-question-search">
               <Icon name="search" size={13} />
@@ -270,9 +288,11 @@
                 oninput={(event) =>
                   setSearch(question, index, (event.currentTarget as HTMLInputElement).value)}
               />
+              <span class="pf-question-search-status">
+                {searchSummary(question, index, visibleOptions.length)}
+              </span>
             </label>
           {/if}
-          {@const visibleOptions = filteredOptions(question, index)}
           <div class="pf-question-options" data-multi={question.multiSelect === true}>
             {#each visibleOptions as option (option.label)}
               <label
@@ -304,7 +324,7 @@
             {/each}
           </div>
           {#if question.searchable && visibleOptions.length === 0 && !answered}
-            <div class="pf-question-empty">No matching options.</div>
+            <div class="pf-question-empty">{emptySearchMessage(index)}</div>
           {/if}
         {/if}
         {#if question.type !== "input" && !question.searchable && (!answered || customAnswers(question, index).length > 0)}
@@ -451,6 +471,14 @@
     align-items: center;
     gap: 8px;
     padding: 0 10px;
+  }
+
+  .pf-question-search-status {
+    flex-shrink: 0;
+    color: var(--muted-foreground);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   .pf-question-search input,

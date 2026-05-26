@@ -3217,7 +3217,16 @@ test("searchable user question choices filter connector options", async ({ page 
   const block = page.locator(".pf-question-block").filter({ hasText: "Which connector should Puffer connect?" });
   await expect(block.getByPlaceholder("Search options")).toBeVisible();
   await expect(block.locator(".pf-question-other")).toHaveCount(0);
+  await expect(block.locator(".pf-question-search-status")).toHaveText("3 options");
+
+  await block.getByPlaceholder("Search options").fill("matrix connector");
+  await expect(block.locator(".pf-question-search-status")).toHaveText("0/3 matches");
+  await expect(block.locator(".pf-question-option")).toHaveCount(0);
+  await expect(block.locator(".pf-question-empty")).toHaveText('No options match "matrix connector".');
+  await expect(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
+
   await block.getByPlaceholder("Search options").fill("personal connector");
+  await expect(block.locator(".pf-question-search-status")).toHaveText("1/3 match");
   const telegram = block.locator(".pf-question-option").filter({ hasText: "telegram-login" });
   await expect(telegram).toBeVisible();
   await expect(block.locator(".pf-question-option").filter({ hasText: "slack-login" })).toHaveCount(0);
