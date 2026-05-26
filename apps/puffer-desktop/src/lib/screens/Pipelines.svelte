@@ -131,6 +131,7 @@
     { label: "All", query: "" },
     { label: "Trigger", query: "trigger-ready" },
     { label: "Draft", query: "draft" },
+    { label: "Append", query: "append" },
     { label: "Monitor", query: "monitor" },
     { label: "Tasks", query: "monitor task" },
     { label: "Repair", query: "repair" },
@@ -233,6 +234,19 @@
   let selectedConnectorDraftCommand = $derived(
     selectedConnector && connectorTriggerSupported(selectedConnector) && !selectedConnectorConnectionInvalid
       ? workflowDraftCommand(selectedConnectorConnectionName.trim(), selectedConnectorDraftPattern)
+      : ""
+  );
+  let selectedConnectorAppendCommand = $derived(
+    selectedConnector
+      && connectorTriggerSupported(selectedConnector)
+      && !selectedConnectorConnectionInvalid
+      && !selectedConnectorAppendPathInvalid
+      ? connectorAppendCommand(
+          selectedConnector,
+          selectedConnectorConnectionName.trim(),
+          selectedConnectorAppendPath,
+          selectedConnectorDraftPattern
+        )
       : ""
   );
   let selectedAppendWorkflowPreview = $derived(selectedConnector ? appendWorkflowPreview() : "");
@@ -798,6 +812,44 @@
     return workflowDraftCommand(plannedConnectionName || existingConnection?.slug || connectorConnectionHint(connector));
   }
 
+  function workflowAppendCommand(
+    connectionSlug: string,
+    path: string,
+    pattern?: string | null,
+    connectorSlug?: string | null
+  ): string {
+    const slug = connectionSlug.trim();
+    const target = path.trim();
+    if (!slug || !target) return "";
+    const normalized = normalizedPattern(pattern);
+    const withTarget = `/workflows append ${slug} ${quoteWorkflowArg(target)}`;
+    const withPattern = normalized ? `${withTarget} ${quoteWorkflowArg(normalized)}` : withTarget;
+    return connectorSlug ? `${withPattern} --connector ${connectorSlug}` : withPattern;
+  }
+
+  function connectionAppendCommand(connection: WorkflowConnection): string {
+    return workflowAppendCommand(connection.slug, `/tmp/${connection.slug}.log`);
+  }
+
+  function connectorAppendCommand(
+    connector: WorkflowConnector,
+    plannedConnectionName?: string,
+    path?: string | null,
+    pattern?: string | null
+  ): string {
+    const connectionName = plannedConnectionName?.trim() || connectorConnectionHint(connector);
+    const existingConnection = connectionsForConnector(connector.connector_slug).find(
+      (connection) => connection.slug === connectionName
+    );
+    const target = path?.trim() || `/tmp/${connectionName}.log`;
+    return workflowAppendCommand(
+      connectionName,
+      target,
+      pattern,
+      existingConnection ? null : connector.connector_slug
+    );
+  }
+
   function connectorConnectionHint(connector: WorkflowConnector): string {
     return connector.suggested_connection_slug || connector.connector_slug;
   }
@@ -881,6 +933,19 @@
     const command = selectedConnectorDraftCommand.trim();
     if (selectedConnectorConnectionInvalid) {
       saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    await copyWorkflowCommand(command);
+  }
+
+  async function copySelectedConnectorAppendCommand() {
+    const command = selectedConnectorAppendCommand.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
+    if (selectedConnectorAppendPathInvalid) {
+      saveNotice = "Append paths must be relative or under /tmp.";
       return;
     }
     await copyWorkflowCommand(command);
@@ -1154,6 +1219,7 @@
           connector.suggested_connection_slug,
           connectorCapabilitySearchText(connector),
           connectorTriggerSupported(connector) ? `${connectorDraftCommand(connector)} draft workflow new` : undefined,
+          connectorTriggerSupported(connector) ? `${connectorAppendCommand(connector)} append file save workflow` : undefined,
           connectorConnections.map((connection) => `${connection.slug} ${connection.description}`).join(" "),
           "connect setup",
           connector.action_slugs.join(" ")
@@ -1169,7 +1235,7 @@
     if (connector.can_proxy_agent) terms.push("proxy", "agent proxy");
     if (connector.action_slugs.length > 0) terms.push("actions", "has-actions");
     if (connectorTriggerSupported(connector)) {
-      terms.push("trigger", "trigger-ready");
+      terms.push("trigger", "trigger-ready", "append", "file", "save");
     } else {
       terms.push("no trigger", "no-trigger", "setup-only");
     }
@@ -1198,6 +1264,7 @@
           connection.connect_command,
           connection.monitor_command,
           connectionTriggerSupported(connection) ? `${connectionDraftCommand(connection)} draft workflow new` : undefined,
+          connectionTriggerSupported(connection) ? `${connectionAppendCommand(connection)} append file save workflow` : undefined,
           "connect repair reconnect",
           connection.has_consumer ? "consumer active active" : "consumer idle idle",
           connectionMonitorSupported(connection) ? "monitor monitorable" : undefined,
@@ -2289,10 +2356,20 @@
                           </button>
                         </div>
                       </div>
-                      <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected append workflow">
-                        <Icon name="file" size={12} />
-                        <code>{selectedAppendWorkflowPreview}</code>
+                      <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected append workflow command">
+                        <Icon name="terminal" size={12} />
+                        <code>{selectedConnectorAppendCommand || selectedAppendWorkflowPreview}</code>
                         <div class="pf-connector-command-actions">
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Copy append workflow command"
+                            title="Copy append workflow command"
+                            disabled={!selectedConnectorAppendCommand}
+                            onclick={copySelectedConnectorAppendCommand}
+                          >
+                            <Icon name="copy" size={12} />
+                          </button>
                           <button
                             type="button"
                             class="pf-icon-btn"

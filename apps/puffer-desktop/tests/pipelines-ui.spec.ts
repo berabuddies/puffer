@@ -898,6 +898,11 @@ test("pipeline connector filter presets apply stable search terms", async ({ pag
   await expect(resultSummary).toHaveText("2/30 connectors; 1/2 connections");
   await expect(filters.getByRole("button", { name: "Draft" })).toHaveAttribute("aria-pressed", "true");
 
+  await filters.getByRole("button", { name: "Append" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("append");
+  await expect(resultSummary).toHaveText("2/30 connectors; 1/2 connections");
+  await expect(filters.getByRole("button", { name: "Append" })).toHaveAttribute("aria-pressed", "true");
+
   await filters.getByRole("button", { name: "Monitor" }).click();
   await expect(page.getByLabel("Search connectors")).toHaveValue("monitor");
   await expect(resultSummary).toHaveText("1/30 connectors; 1/2 connections");
@@ -981,6 +986,21 @@ test("pipeline connector search matches setup-only capability terms", async ({ p
   await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
 });
 
+test("pipeline connector search matches append workflow commands", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("append /tmp/email.log");
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  await expect(page.getByLabel("Connector search results")).toHaveText("1/30 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Plan email workflow trigger" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
+});
+
 test("pipeline connector search shows action matches", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -1016,6 +1036,7 @@ test("pipeline connector catalog stages a deterministic connect command", async 
   await expect(page.getByLabel("Workflow connection")).toHaveValue("email");
   await expect(page.locator(".pf-pipe-graph").getByRole("button", { name: /email/ })).toBeVisible();
   await expect(page.getByLabel("Selected connector command")).toContainText("/connect email email");
+  await expect(page.getByLabel("Selected append workflow command")).toContainText("/workflows append email /tmp/hi --connector email");
   await expect(page.locator(".pf-connector-row", { hasText: "email" })).toHaveAttribute("data-selected", "true");
 });
 
