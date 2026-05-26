@@ -7,6 +7,7 @@ mod events;
 mod files;
 mod fs_watch;
 mod lsp;
+mod oauth_listener;
 mod pty;
 mod remote_client;
 mod repo_actions;
@@ -389,23 +390,19 @@ pub fn run() {
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
-            // Forward incoming custom-scheme URLs (the OAuth callback comes
-            // back to us via `com.corbina.desktop://oauth/callback?token=…`)
-            // to the frontend as a Tauri event. The frontend listens via
-            // wsClient or a Tauri event subscriber and feeds the URL to
-            // handleAuthCallback.
-            use tauri::Emitter;
-            use tauri_plugin_deep_link::DeepLinkExt;
-            let handle = app.handle().clone();
-            app.deep_link().on_open_url(move |event| {
-                let urls: Vec<String> =
-                    event.urls().into_iter().map(|u| u.to_string()).collect();
-                if let Err(err) = handle.emit("oauth:deep-link", &urls) {
-                    eprintln!("[deep-link] failed to emit oauth event: {err}");
-                }
-            });
+            // OAuth callback path: bind a loopback HTTP listener on
+            // 127.0.0.1:OAUTH_CALLBACK_PORT (1457). When the user comes
+            // back from the system browser, AuthStation 302s to
+            // http://localhost:1457/callback?token=… — our listener
+            // captures it and emits "oauth:callback" to the frontend.
+            //
+            // Mirrors the donor branch's puffer-cli pattern; chosen over
+            // tauri-plugin-deep-link because the custom-scheme route
+            // doesn't work in `tauri dev` on macOS (raw target/debug
+            // binary, no .app bundle, no LSSetDefaultHandlerForURLScheme
+            // registration) — the listener works in both dev and prod.
+            oauth_listener::start(app.handle().clone());
             Ok(())
         })
         .manage(backend)

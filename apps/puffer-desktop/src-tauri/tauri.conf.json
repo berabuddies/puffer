@@ -32,11 +32,5 @@
     "targets": ["deb", "appimage"],
     "icon": ["icons/icon.png", "icons/icon.ico"]
   },
-  "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": ["com.corbina.desktop"]
-      }
-    }
-  }
+  "plugins": {}
 }

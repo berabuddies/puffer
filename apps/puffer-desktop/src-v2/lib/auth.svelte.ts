@@ -41,11 +41,19 @@ const CONTROL_API_URL =
   "https://control-api.worldrouter.ai";
 
 /**
- * Custom URL scheme the Tauri host registers to receive the OAuth callback.
- * Must match `src-tauri/tauri.conf.json` plugins.deep-link.desktop.schemes
- * AND be on Auth Station's ALLOWED_REDIRECT_ORIGINS.
+ * Loopback callback URL the Tauri host listens on (see
+ * src-tauri/src/oauth_listener.rs). Must be on Auth Station's
+ * ALLOWED_REDIRECT_ORIGINS allowlist — the entry is matched as an exact
+ * HTTP origin (`http://localhost:1457`), and the listener accepts any
+ * path under it, so the `/callback` here is purely conventional.
+ *
+ * Chosen over a custom URL scheme (e.g. `com.corbina.desktop://`) because
+ * the scheme route only works in `tauri build` .app bundles — `tauri
+ * dev` runs the raw debug binary with no Info.plist and no
+ * LSSetDefaultHandlerForURLScheme registration on macOS. A loopback
+ * port works in both dev and prod identically.
  */
-const TAURI_OAUTH_REDIRECT_URI = "com.corbina.desktop://oauth/callback";
+const TAURI_OAUTH_REDIRECT_URI = "http://localhost:1457/callback";
 
 /** True when running inside the Tauri webview (vs vite-dev in a browser). */
 function isTauri(): boolean {
@@ -507,21 +515,23 @@ export async function goToLogin(returnTo?: string): Promise<void> {
 }
 
 /**
- * Subscribe to OAuth callback URLs delivered via the OS custom-scheme
- * deep-link plugin. The Tauri host emits "oauth:deep-link" with
- * `[url]` payload whenever the user comes back from the system browser.
+ * Subscribe to OAuth callback URLs captured by the Tauri host's loopback
+ * listener (src-tauri/src/oauth_listener.rs). The host emits
+ * "oauth:callback" with the full callback URL as a string payload
+ * whenever the system browser hits http://localhost:1457/callback?…
  *
- * Returns an unlisten function. Calling installDeepLinkListener in a
- * non-Tauri context is a no-op (returns a noop unlisten).
+ * Returns an unlisten function. Calling in a non-Tauri context is a
+ * no-op (returns a noop unlisten).
  */
-export async function installDeepLinkListener(
+export async function installOAuthCallbackListener(
   onUrl: (url: string) => void
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
-  const unlisten = await listen<string[]>("oauth:deep-link", (event) => {
-    const url = event.payload?.[0];
-    if (typeof url === "string" && url.length > 0) onUrl(url);
+  const unlisten = await listen<string>("oauth:callback", (event) => {
+    if (typeof event.payload === "string" && event.payload.length > 0) {
+      onUrl(event.payload);
+    }
   });
   return unlisten;
 }
@@ -655,13 +665,13 @@ export function signOut(): void {
   // Logout in Tauri: the auth cookie lives in the OS browser (where
   // login happened via opener), so we open /logout there too. The
   // webview itself just bounces back to /login locally without waiting
-  // for the upstream cookie clear — Auth Station's session is best-effort.
+  // for the upstream cookie clear — Auth Station's session is
+  // best-effort. We don't pass post_logout_redirect_uri because the
+  // logout flow has no callback to handle; the OS browser tab just
+  // closes / shows the Auth Station logout page.
   if (isTauri()) {
-    const params = new URLSearchParams({
-      post_logout_redirect_uri: TAURI_OAUTH_REDIRECT_URI
-    });
     void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-      openUrl(`${AUTH_STATION_URL.replace(/\/$/, "")}/logout?${params.toString()}`)
+      openUrl(`${AUTH_STATION_URL.replace(/\/$/, "")}/logout`)
     );
     window.location.hash = "#/login";
     return;

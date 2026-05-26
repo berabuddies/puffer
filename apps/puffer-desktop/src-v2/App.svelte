@@ -38,7 +38,7 @@
   import {
     absorbOAuthCallbackInUrl,
     authState,
-    installDeepLinkListener,
+    installOAuthCallbackListener,
     loadAuthFromStorage,
     markOnboarded
   } from "./lib/auth.svelte";
@@ -66,20 +66,22 @@
       }
     });
 
-    // Tauri-only: register the OS deep-link listener. When the OS
-    // routes `com.corbina.desktop://oauth/callback?…` back to us, we
-    // navigate to /auth/callback?… in the hash router and let
-    // AuthCallback.svelte run the same code path the web flow uses.
-    let unlistenDeepLink: (() => void) | null = null;
-    void installDeepLinkListener((url) => {
+    // Tauri-only: subscribe to the loopback OAuth callback listener
+    // (src-tauri/src/oauth_listener.rs). When the system browser hits
+    // http://localhost:1457/callback?token=…, the Rust host emits
+    // "oauth:callback" with the full URL; we lift the query under the
+    // hash router and let AuthCallback.svelte run the same code path
+    // the web flow uses.
+    let unlistenOAuth: (() => void) | null = null;
+    void installOAuthCallbackListener((url) => {
       const idx = url.indexOf("?");
       const query = idx >= 0 ? url.slice(idx + 1) : "";
       navigate(`/auth/callback?${query}`);
     }).then((unlisten) => {
-      unlistenDeepLink = unlisten;
+      unlistenOAuth = unlisten;
     });
     return () => {
-      unlistenDeepLink?.();
+      unlistenOAuth?.();
     };
   });
 
