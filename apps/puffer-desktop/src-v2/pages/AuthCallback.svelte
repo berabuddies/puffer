@@ -19,7 +19,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
-  import { handleAuthCallback, safeReturnTo } from "../lib/auth.svelte";
+  import {
+    getAuthToken,
+    getWorldRouterApiKey,
+    handleAuthCallback,
+    mintWorldRouterApiKey,
+    safeReturnTo
+  } from "../lib/auth.svelte";
   import { navigate } from "../router.svelte";
   import { getRootRedirect } from "../routes";
 
@@ -44,6 +50,25 @@
     const result = handleAuthCallback(query);
     if (result.ok) {
       const target = safeReturnTo(result.returnTo);
+      // Fire-and-forget the API-key mint AFTER navigation kicks off, so
+      // the user lands on /home (or onboarding) immediately and the
+      // ~15s control-api round-trip doesn't block the UI. The key only
+      // matters for chat, which doesn't run until the user composes
+      // something; by then the mint will have settled. We skip if a
+      // key is already cached — donor flagged duplicate-key minting on
+      // every login as a leak to avoid.
+      if (!getWorldRouterApiKey()) {
+        const jwt = getAuthToken();
+        if (jwt) {
+          mintWorldRouterApiKey(jwt).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[auth] worldrouter API key mint failed; chat will be unavailable until retried",
+              err
+            );
+          });
+        }
+      }
       // safeReturnTo returns "/" when nothing was stashed; defer to the
       // root-redirect helper so signed-in users land on /home (or
       // onboarding if they haven't finished it).

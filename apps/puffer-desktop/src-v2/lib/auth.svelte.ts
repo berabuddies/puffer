@@ -31,8 +31,14 @@ const TOKEN_KEY = "puffer.authToken";
 const REFRESH_TOKEN_KEY = "puffer.authRefreshToken";
 const STATE_KEY = "puffer.authState";
 const RETURN_TO_KEY = "puffer.authReturnTo";
+const API_KEY_KEY = "puffer.worldrouterApiKey";
 
 const AUTH_STATION_URL = import.meta.env.VITE_AUTH_STATION_URL as string | undefined;
+// control-api hosts the JWT→API-key two-hop. Mirrors donor's
+// PUFFER_WORLDROUTER_CONTROL_URL env override.
+const CONTROL_API_URL =
+  (import.meta.env.VITE_WORLDROUTER_CONTROL_URL as string | undefined) ??
+  "https://control-api.worldrouter.ai";
 
 function safeLocalStorage(): Storage | null {
   if (typeof window === "undefined") return null;
@@ -187,6 +193,142 @@ export function getAuthToken(): string | null {
   return store.getItem(TOKEN_KEY);
 }
 
+/** Return the cached worldrouter `sk-worldrouter-…` API key (or null). */
+export function getWorldRouterApiKey(): string | null {
+  const store = safeLocalStorage();
+  if (!store) return null;
+  return store.getItem(API_KEY_KEY);
+}
+
+/* ───────── worldrouter API-key minting (two-hop) ───────── */
+
+interface ExchangeResponse {
+  session_token: string;
+  default_team_id: string;
+}
+
+interface MintKeyResponse {
+  key: string;
+  token_id?: string;
+}
+
+function buildKeyAlias(): string {
+  const uuid =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `puffer-desktop-${uuid.toUpperCase()}`;
+}
+
+export class ApiKeyMintError extends Error {
+  constructor(
+    message: string,
+    public readonly step: "exchange" | "mint",
+    public readonly status?: number,
+    public readonly body?: unknown
+  ) {
+    super(message);
+    this.name = "ApiKeyMintError";
+  }
+}
+
+/**
+ * Exchange the Auth Station JWT for an `sk-worldrouter-…` API key via
+ * control-api's two-hop:
+ *   1. POST /auth/exchange  { access_token } → { session_token, default_team_id }
+ *   2. POST /platform/v1/teams/{team_id}/keys (Bearer session_token)
+ *      { key_alias } → { key: "sk-worldrouter-…" }
+ *
+ * On success, persists the key to localStorage and returns it. Re-mints
+ * on every call — caller should check getWorldRouterApiKey() first to
+ * avoid the documented "duplicate key per login" leak the donor flagged.
+ *
+ * Throws ApiKeyMintError on any non-2xx; caller decides UX.
+ *
+ * CORS WARNING (untested as of port date 2026-05-26): control-api is
+ * documented as backend-to-backend; browser fetch may be blocked by
+ * preflight. If it fails with a network/CORS error, the desktop app
+ * will need either a Tauri-side proxy (out of UI-scope) or worldrouter
+ * to allow-list http://localhost:1456 on control-api's CORS policy.
+ */
+export async function mintWorldRouterApiKey(
+  authStationToken: string
+): Promise<string> {
+  // Hop 1: exchange Auth Station JWT for an Infer-session token + team_id.
+  const exchangeRes = await fetch(`${CONTROL_API_URL}/auth/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_token: authStationToken })
+  });
+  if (!exchangeRes.ok) {
+    const body = await safeJson(exchangeRes);
+    throw new ApiKeyMintError(
+      `auth/exchange failed: HTTP ${exchangeRes.status}`,
+      "exchange",
+      exchangeRes.status,
+      body
+    );
+  }
+  const exchange = (await exchangeRes.json()) as ExchangeResponse;
+  if (!exchange.session_token || !exchange.default_team_id) {
+    throw new ApiKeyMintError(
+      "auth/exchange returned incomplete payload",
+      "exchange",
+      exchangeRes.status,
+      exchange
+    );
+  }
+
+  // Hop 2: mint the inference key.
+  const mintRes = await fetch(
+    `${CONTROL_API_URL}/platform/v1/teams/${encodeURIComponent(
+      exchange.default_team_id
+    )}/keys`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${exchange.session_token}`
+      },
+      body: JSON.stringify({ key_alias: buildKeyAlias() })
+    }
+  );
+  if (!mintRes.ok) {
+    const body = await safeJson(mintRes);
+    throw new ApiKeyMintError(
+      `keys mint failed: HTTP ${mintRes.status}`,
+      "mint",
+      mintRes.status,
+      body
+    );
+  }
+  const mint = (await mintRes.json()) as MintKeyResponse;
+  if (typeof mint.key !== "string" || !mint.key.startsWith("sk-")) {
+    throw new ApiKeyMintError(
+      "keys mint returned no key",
+      "mint",
+      mintRes.status,
+      mint
+    );
+  }
+
+  const store = safeLocalStorage();
+  if (store) store.setItem(API_KEY_KEY, mint.key);
+  return mint.key;
+}
+
+async function safeJson(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch {
+    try {
+      return await res.text();
+    } catch {
+      return null;
+    }
+  }
+}
+
 /**
  * Build the Auth Station login URL and navigate the webview to it.
  * Persists a CSRF `state` and (optionally) a `returnTo` path so the
@@ -333,6 +475,7 @@ export function signOut(): void {
     store.removeItem(TOKEN_KEY);
     store.removeItem(REFRESH_TOKEN_KEY);
   }
+  if (store) store.removeItem(API_KEY_KEY);
   authState.status = "signedOut";
   authState.user = null;
 

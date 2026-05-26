@@ -10,6 +10,7 @@
  */
 interface ImportMetaEnv {
   readonly VITE_AUTH_STATION_URL?: string;
+  readonly VITE_WORLDROUTER_CONTROL_URL?: string;
 }
 
 interface ImportMeta {
