@@ -5156,6 +5156,73 @@ mod tests {
     }
 
     #[test]
+    fn desktop_lambda_skill_library_save_accepts_verified_bridge_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/bridge-tools");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool bridge(value: Str, port: Int) -> Str {\n    effects: [proc]\n  }\n}\nskill bridge_tools {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: bridge-tools\ndescription: Bridge tools\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["proc"],
+              "domains": [],
+              "tools": [
+                {"name": "debugpy_attach", "params": [{"name": "port", "ty": "int"}], "result": "unit", "effects": ["proc"], "concreteTools": ["DebugpyAction"], "concreteInputContracts": {"DebugpyAction": {"action": "attach", "port": {"$int_arg": "port"}}}, "registers": [], "contextReq": null},
+                {"name": "mcp_check", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["McpStatus"], "concreteInputContracts": {"McpStatus": {"server": {"$arg": "value"}}}, "registers": [], "contextReq": null},
+                {"name": "modal_run", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ModalAction"], "concreteInputContracts": {"ModalAction": {"action": "createSecret", "value": {"$arg": "value"}}}, "registers": [], "contextReq": null},
+                {"name": "secret_prepare", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["SecretValue"], "concreteInputContracts": {"SecretValue": {"action": "prepare", "value": {"$arg": "value"}}}, "registers": [], "contextReq": null},
+                {"name": "shopify_fulfill", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ShopifyAction"], "concreteInputContracts": {"ShopifyAction": {"action": "fulfillmentCreate", "orderId": {"$arg": "value"}, "inputJson": "{}"}}, "registers": [], "contextReq": null},
+                {"name": "td_validate", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["TouchDesignerAction"], "concreteInputContracts": {"TouchDesignerAction": {"action": "validateScript", "code": {"$arg": "value"}}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("verified bridge tools should import");
+
+        assert_eq!(saved["skills"][0]["ready"], true);
+        assert_eq!(saved["skills"][0]["modelInvocable"], true);
+        assert_eq!(
+            saved["libraries"][0]["allowedTools"],
+            json!([
+                "DebugpyAction",
+                "McpStatus",
+                "ModalAction",
+                "SecretValue",
+                "ShopifyAction",
+                "TouchDesignerAction"
+            ])
+        );
+    }
+
+    #[test]
     fn desktop_lambda_skill_library_save_accepts_not_ready_runtime_contracts() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
