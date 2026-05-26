@@ -1,6 +1,6 @@
 use crate::approval_overlay::ApprovalOverlay;
 use crate::btw_overlay::BtwOverlay;
-use crate::popup::popup_rows;
+use crate::popup::{popup_row_matches_input, popup_rows, PopupRow};
 use crate::session_overlay::SessionOverlay;
 use crate::status_overlay::StatusOverlay;
 use crate::text_overlay::TextOverlay;
@@ -433,11 +433,11 @@ impl TuiState {
 
     /// Applies the currently highlighted slash-command suggestion to the prompt.
     pub(crate) fn apply_selected_command(&mut self, commands: &[CommandSpec]) -> bool {
-        let Some(command) = self.selected_matching_command(commands) else {
+        let Some(row) = self.selected_matching_row(commands) else {
             return false;
         };
-        self.input = format!("/{}", command.name);
-        if command.argument_hint.is_some() {
+        self.input = row.replacement;
+        if row.append_space && !self.input.ends_with(' ') {
             self.input.push(' ');
         }
         self.cursor = self.input.len();
@@ -447,33 +447,30 @@ impl TuiState {
 
     /// Completes a partial slash command when Enter should pick the highlighted result.
     pub(crate) fn complete_on_enter(&mut self, commands: &[CommandSpec]) -> bool {
-        if !self.input.starts_with('/') || self.input.contains(' ') {
+        if !self.input.starts_with('/') {
             return false;
         }
-        let trimmed = self.input.trim_start_matches('/').to_string();
+        let trimmed = self.input.trim_start_matches('/').trim().to_string();
         if trimmed.is_empty() {
             return false;
         }
-        let Some(command) = self.selected_matching_command(commands) else {
+        let Some(row) = self.selected_matching_row(commands) else {
             return false;
         };
-        if command.name == trimmed || command.aliases.iter().any(|alias| alias == &trimmed) {
+        if popup_row_matches_input(&row, &self.input, commands) {
             return false;
         }
         self.apply_selected_command(commands)
     }
 
-    fn selected_matching_command<'a>(
-        &mut self,
-        commands: &'a [CommandSpec],
-    ) -> Option<&'a CommandSpec> {
+    fn selected_matching_row(&mut self, commands: &[CommandSpec]) -> Option<PopupRow> {
         let rows = self.matching_rows(commands);
         if rows.is_empty() {
             self.slash_selection = 0;
             return None;
         }
         self.slash_selection = self.slash_selection.min(rows.len() - 1);
-        rows.get(self.slash_selection).copied()
+        rows.get(self.slash_selection).cloned()
     }
 
     /// Takes the current input, expanding any `[Pasted text #N]` placeholders
@@ -614,12 +611,8 @@ impl TuiState {
         }
     }
 
-    fn matching_rows<'a>(&self, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
-        if self.input.starts_with('/') && !self.input.contains(' ') {
-            popup_rows(&self.input, commands)
-        } else {
-            Vec::new()
-        }
+    fn matching_rows(&self, commands: &[CommandSpec]) -> Vec<PopupRow> {
+        popup_rows(&self.input, commands)
     }
 
     fn sync(&mut self, commands: &[CommandSpec]) {

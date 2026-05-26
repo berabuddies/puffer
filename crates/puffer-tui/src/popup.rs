@@ -2,17 +2,148 @@ use puffer_core::CommandSpec;
 
 const MAX_POPUP_ROWS: usize = 8;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PopupRow {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) replacement: String,
+    pub(crate) append_space: bool,
+}
+
+struct WorkflowSubcommand {
+    name: &'static str,
+    description: &'static str,
+    hint: Option<&'static str>,
+    search_terms: &'static [&'static str],
+}
+
+const WORKFLOW_SUBCOMMANDS: &[WorkflowSubcommand] = &[
+    WorkflowSubcommand {
+        name: "list",
+        description: "Show workflow definitions and latest run status",
+        hint: Some("[query]"),
+        search_terms: &["show", "workflow", "pipeline", "definition", "status"],
+    },
+    WorkflowSubcommand {
+        name: "new",
+        description: "Create a workflow draft for a trigger-ready connection",
+        hint: Some("[slug] [connection-slug] [pattern]"),
+        search_terms: &["create", "draft", "trigger", "pattern", "pipeline"],
+    },
+    WorkflowSubcommand {
+        name: "append",
+        description: "Create a file append action for matching connector events",
+        hint: Some("<connection-slug> <file-path> [pattern]"),
+        search_terms: &["file", "save", "write", "action", "binding"],
+    },
+    WorkflowSubcommand {
+        name: "delete",
+        description: "Remove a workflow action binding",
+        hint: Some("<binding-slug>"),
+        search_terms: &["remove", "rm", "cleanup", "binding", "action"],
+    },
+    WorkflowSubcommand {
+        name: "actions",
+        description: "Search workflow action bindings and delete commands",
+        hint: Some("[query]"),
+        search_terms: &["bindings", "append", "file", "delete", "pattern"],
+    },
+    WorkflowSubcommand {
+        name: "connections",
+        description: "Search connector connections and draft or append commands",
+        hint: Some("[query]"),
+        search_terms: &["connection", "trigger-ready", "repair", "monitor"],
+    },
+    WorkflowSubcommand {
+        name: "connectors",
+        description: "Search connector catalog by app, capability, action, or runtime",
+        hint: Some("[query]"),
+        search_terms: &["connector", "catalog", "apps", "capability", "runtime"],
+    },
+    WorkflowSubcommand {
+        name: "tasks",
+        description: "Search connector monitor tasks and task actions",
+        hint: Some("[query]"),
+        search_terms: &["task", "monitor", "ignored", "actions"],
+    },
+    WorkflowSubcommand {
+        name: "runs",
+        description: "Search workflow runs by id, status, trigger, output, or error",
+        hint: Some("[query]"),
+        search_terms: &["run", "history", "status", "trigger", "output", "error"],
+    },
+];
+
 /// Returns slash-command popup rows for the current slash-input prefix.
-pub(crate) fn popup_rows<'a>(input: &str, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
+pub(crate) fn popup_rows(input: &str, commands: &[CommandSpec]) -> Vec<PopupRow> {
+    if let Some(rows) = workflow_subcommand_rows(input) {
+        return rows;
+    }
+    if !input.starts_with('/') || input.contains(' ') {
+        return Vec::new();
+    }
     let filter = input.trim_start_matches('/').to_ascii_lowercase();
     let mut rows = commands
         .iter()
         .filter(|command| !command.hidden)
         .filter(|command| command_matches(command, &filter))
         .collect::<Vec<_>>();
-    rows.sort_by_key(|command| sort_key(command, &filter));
+    rows.sort_by_key(|command| command_sort_key(command, &filter));
     rows.truncate(MAX_POPUP_ROWS);
-    rows
+    rows.into_iter().map(command_row).collect()
+}
+
+/// Returns true when the current input should render the slash popup.
+pub(crate) fn popup_accepts_input(input: &str) -> bool {
+    if !input.starts_with('/') {
+        return false;
+    }
+    let Some((command, rest)) = input.trim_start_matches('/').split_once(' ') else {
+        return true;
+    };
+    is_workflows_command(command) && !rest.trim_start().contains(char::is_whitespace)
+}
+
+/// Returns true when the input already exactly matches the selected popup row.
+pub(crate) fn popup_row_matches_input(
+    row: &PopupRow,
+    input: &str,
+    commands: &[CommandSpec],
+) -> bool {
+    let normalized = input.trim_end();
+    if normalized == row.replacement {
+        return true;
+    }
+    if !row.name.contains(' ') {
+        let token = normalized.trim_start_matches('/');
+        return commands.iter().any(|command| {
+            command.name == row.name
+                && (command.name == token || command.aliases.iter().any(|alias| alias == token))
+        });
+    }
+    let parts = normalized
+        .trim_start_matches('/')
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    parts.len() == 2
+        && matches!(
+            parts[0],
+            "workflow" | "workflows" | "pipeline" | "pipelines"
+        )
+        && row.name == format!("workflows {}", parts[1])
+}
+
+fn command_row(command: &CommandSpec) -> PopupRow {
+    PopupRow {
+        name: command.name.clone(),
+        description: command
+            .argument_hint
+            .as_deref()
+            .map(|hint| format!("{}  {hint}", command.description))
+            .unwrap_or_else(|| command.description.clone()),
+        replacement: format!("/{}", command.name),
+        append_space: command.argument_hint.is_some(),
+    }
 }
 
 fn command_matches(command: &CommandSpec, filter: &str) -> bool {
@@ -33,7 +164,7 @@ fn command_matches(command: &CommandSpec, filter: &str) -> bool {
             .contains(filter)
 }
 
-fn sort_key(command: &CommandSpec, filter: &str) -> (u8, String) {
+fn command_sort_key(command: &CommandSpec, filter: &str) -> (u8, String) {
     if filter.is_empty() {
         return (0, command.name.to_string());
     }
@@ -60,6 +191,77 @@ fn sort_key(command: &CommandSpec, filter: &str) -> (u8, String) {
         return (5, command.name.to_string());
     }
     (6, command.name.to_string())
+}
+
+fn row_sort_key(row: &PopupRow, filter: &str) -> (u8, String) {
+    if filter.is_empty() {
+        return (0, row.name.to_string());
+    }
+    if row.name == filter {
+        return (0, row.name.to_string());
+    }
+    if row.name.starts_with(filter) {
+        return (1, row.name.to_string());
+    }
+    if row.name.contains(filter) {
+        return (3, row.name.to_string());
+    }
+    if row.description.to_ascii_lowercase().contains(filter) {
+        return (5, row.name.to_string());
+    }
+    (6, row.name.to_string())
+}
+
+fn workflow_subcommand_rows(input: &str) -> Option<Vec<PopupRow>> {
+    let trimmed = input.strip_prefix('/')?;
+    let (command, rest) = trimmed.split_once(' ')?;
+    if !is_workflows_command(command) {
+        return None;
+    }
+    if rest.trim_start().contains(char::is_whitespace) {
+        return Some(Vec::new());
+    }
+    let filter = rest.trim_start().to_ascii_lowercase();
+    let mut rows = WORKFLOW_SUBCOMMANDS
+        .iter()
+        .filter(|subcommand| workflow_subcommand_matches(subcommand, &filter))
+        .map(workflow_subcommand_row)
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row_sort_key(row, &filter));
+    rows.truncate(MAX_POPUP_ROWS);
+    Some(rows)
+}
+
+fn is_workflows_command(command: &str) -> bool {
+    matches!(command, "workflow" | "workflows" | "pipeline" | "pipelines")
+}
+
+fn workflow_subcommand_matches(subcommand: &WorkflowSubcommand, filter: &str) -> bool {
+    filter.is_empty()
+        || subcommand.name.starts_with(filter)
+        || subcommand.name.contains(filter)
+        || subcommand.description.to_ascii_lowercase().contains(filter)
+        || subcommand
+            .hint
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains(filter)
+        || subcommand
+            .search_terms
+            .iter()
+            .any(|term| term.contains(filter))
+}
+
+fn workflow_subcommand_row(subcommand: &WorkflowSubcommand) -> PopupRow {
+    PopupRow {
+        name: format!("workflows {}", subcommand.name),
+        description: subcommand
+            .hint
+            .map(|hint| format!("{}  {hint}", subcommand.description))
+            .unwrap_or_else(|| subcommand.description.to_string()),
+        replacement: format!("/workflows {}", subcommand.name),
+        append_space: true,
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +331,29 @@ mod tests {
         let rows = popup_rows("/connector-slug", &commands);
 
         assert_eq!(rows.first().map(|row| row.name.as_str()), Some("connect"));
+    }
+
+    #[test]
+    fn popup_matches_workflow_subcommands_after_command_space() {
+        let commands = supported_commands();
+        let rows = popup_rows("/workflows con", &commands);
+        let names = rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>();
+
+        assert!(names.contains(&"workflows connections"));
+        assert!(names.contains(&"workflows connectors"));
+        assert!(rows
+            .iter()
+            .any(|row| row.replacement == "/workflows connectors"));
+    }
+
+    #[test]
+    fn popup_hides_workflow_subcommands_after_query_space() {
+        let commands = supported_commands();
+
+        assert!(popup_rows("/workflows connectors telegram", &commands).is_empty());
+        assert!(!super::popup_accepts_input(
+            "/workflows connectors telegram"
+        ));
     }
 
     fn visible_command(name: &str) -> CommandSpec {

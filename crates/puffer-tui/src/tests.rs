@@ -26,6 +26,7 @@ mod overlays;
 mod panels;
 mod pending_submit;
 mod permission_prompt;
+mod slash_popup;
 mod status;
 mod support;
 mod tag;

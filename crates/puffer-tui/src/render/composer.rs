@@ -2,7 +2,7 @@ use super::onboarding_body_lines;
 use super::overlay_content::{overlay_rows, overlay_title};
 use super::overlay_list::{overlay_selection, visible_overlay_rows};
 use crate::markdown::render_markdown;
-use crate::popup::popup_rows;
+use crate::popup::{popup_accepts_input, popup_rows};
 use crate::user_question_overlay::UserQuestionOverlay;
 use crate::OverlayState;
 use puffer_core::CommandSpec;
@@ -284,7 +284,7 @@ fn inline_dropdown_text(
         }
         return None;
     }
-    if input.starts_with('/') && !input.contains(' ') {
+    if popup_accepts_input(input) {
         return Some(Text::from(command_dropdown_lines(
             input,
             slash_selection,
@@ -309,18 +309,9 @@ fn command_dropdown_lines(
     let selected_index = slash_selection.min(rows.len() - 1);
     rows.into_iter()
         .enumerate()
-        .map(|(index, command)| {
+        .map(|(index, row)| {
             let selected = index == selected_index;
-            let argument_hint = command
-                .argument_hint
-                .as_deref()
-                .map(|value| format!("  {value}"))
-                .unwrap_or_default();
-            command_selection_line(
-                &command.name,
-                &format!("{}{}", command.description, argument_hint),
-                selected,
-            )
+            command_selection_line(&row.name, &row.description, selected)
         })
         .collect()
 }
