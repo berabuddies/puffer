@@ -5,6 +5,29 @@ async function bootOnboarded(page: Page, daemon: FakeDaemon): Promise<void> {
   await page.addInitScript(() => {
     try {
       window.localStorage.setItem("puffer.onboarded", "true");
+      // Auth gate (added 2026-05-26): the v2 shell forces unauthenticated
+      // visitors to /login. Stub a not-yet-expired Auth Station-shaped JWT
+      // so loadAuthFromStorage flips status to signedIn. The frontend
+      // doesn't verify the signature — only decodes payload + checks exp.
+      const header = btoa(JSON.stringify({ alg: "RS256", typ: "JWT" }))
+        .replace(/=+$/, "")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_");
+      const payload = btoa(
+        JSON.stringify({
+          sub: "test-user",
+          email: "test@example.com",
+          name: "Test User",
+          exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24
+        })
+      )
+        .replace(/=+$/, "")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_");
+      window.localStorage.setItem(
+        "puffer.authToken",
+        `${header}.${payload}.test-sig`
+      );
     } catch {
       /* private mode — auth.svelte.ts treats absence as not-onboarded; tests that
          care will fail loudly. */

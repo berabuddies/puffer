@@ -26,26 +26,13 @@
   let submitting = $state(false);
 
   /**
-   * Pull `?error=<reason>` off the hash route. With our hash router,
-   * `currentRoute.path` only carries the route portion (`/login`), so any
-   * query string lives further down `location.hash` — we re-parse it on
-   * every render so navigating back to `/login?error=…` updates the chip.
+   * Pull `?error=<reason>` off the hash route. The router splits the query
+   * off the path and exposes it via `currentRoute.query`, so we just parse
+   * that — reactive by construction.
    */
-  function readErrorReason(): string | null {
-    if (typeof window === "undefined") return null;
-    const hash = window.location.hash;
-    const qIndex = hash.indexOf("?");
-    if (qIndex < 0) return null;
-    const params = new URLSearchParams(hash.slice(qIndex + 1));
-    return params.get("error");
-  }
-
-  // Re-evaluated whenever the route changes (we touch currentRoute.path so
-  // the $derived sees the dependency).
   let errorReason = $derived.by(() => {
-    // Touching path keeps this derivation reactive to route changes.
-    void currentRoute.path;
-    return readErrorReason();
+    if (!currentRoute.query) return null;
+    return new URLSearchParams(currentRoute.query).get("error");
   });
 
   /** Translate raw error reasons to copy that makes sense to a human. */

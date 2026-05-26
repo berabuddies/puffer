@@ -23,6 +23,8 @@ export interface RouteMatch<T extends RouteMatchInput> {
 
 export interface CurrentRoute {
   path: string;
+  /** Raw query string after the route's `?`, without the leading `?`. Empty when none. */
+  query: string;
   params: RouteParams;
 }
 
@@ -36,26 +38,37 @@ const DEFAULT_PATH = "/home";
  */
 export const currentRoute = $state<CurrentRoute>({
   path: DEFAULT_PATH,
+  query: "",
   params: {}
 });
 
-/** Read the hash portion of the URL as an app path (without the leading '#'). */
-function readHashPath(): string {
-  if (typeof window === "undefined") return DEFAULT_PATH;
+/**
+ * Parse the hash portion of the URL into a route path + raw query string.
+ * Auth Station's OIDC redirect lands at `#/auth/callback?token=…&state=…`,
+ * so we MUST split the query off the path — otherwise matchRoute can't
+ * find `/auth/callback` and the gate effect would also miss `/login`.
+ */
+function readHash(): { path: string; query: string } {
+  if (typeof window === "undefined") return { path: DEFAULT_PATH, query: "" };
   const raw = window.location.hash.replace(/^#/, "");
-  if (!raw) return DEFAULT_PATH;
-  // Normalize: ensure leading slash, strip trailing slash (except for root).
-  let path = raw.startsWith("/") ? raw : `/${raw}`;
+  if (!raw) return { path: DEFAULT_PATH, query: "" };
+  // Split path from query first; `?` inside the hash separates them.
+  const qIndex = raw.indexOf("?");
+  const rawPath = qIndex >= 0 ? raw.slice(0, qIndex) : raw;
+  const query = qIndex >= 0 ? raw.slice(qIndex + 1) : "";
+  // Normalize path: ensure leading slash, strip trailing slash (except root).
+  let path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
   if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-  return path;
+  return { path, query };
 }
 
 /** Update currentRoute from window.location.hash. */
 function syncFromHash(): void {
-  const path = readHashPath();
+  const { path, query } = readHash();
   // Params are computed at App level against the route table; here we just
   // expose the raw path. App.svelte calls matchRoute() to derive params.
   currentRoute.path = path;
+  currentRoute.query = query;
   currentRoute.params = {};
 }
 

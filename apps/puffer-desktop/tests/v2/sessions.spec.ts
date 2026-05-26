@@ -24,6 +24,24 @@ async function bootOnboarded(
         if (Object.keys(groups).length > 0) {
           window.localStorage.setItem("puffer.sessionGroups", JSON.stringify(groups));
         }
+        // Auth gate (added 2026-05-26): see chat.spec.ts for the rationale —
+        // we stub an Auth Station-shaped JWT so loadAuthFromStorage flips
+        // the gate to signedIn and lets the tests reach /home.
+        const b64url = (s: string) =>
+          btoa(s).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+        const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+        const payload = b64url(
+          JSON.stringify({
+            sub: "test-user",
+            email: "test@example.com",
+            name: "Test User",
+            exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24
+          })
+        );
+        window.localStorage.setItem(
+          "puffer.authToken",
+          `${header}.${payload}.test-sig`
+        );
       } catch {
         /* private mode — see chat.spec.ts comment */
       }
