@@ -35,6 +35,9 @@ members = [
     "crates/puffer-workflow",
 ]
 default-members = ["crates/puffer-cli"]
+# Vendored third-party (MIT) — its own cargo workspace, built separately via
+# scripts/build-cua-driver.sh. Excluded so it never folds into puffer's build.
+exclude = ["vendor/cua-driver"]
 resolver = "2"
 
 [workspace.package]
