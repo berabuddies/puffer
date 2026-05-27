@@ -16,6 +16,8 @@
     Bot,
     Cake,
     Calendar,
+    Check,
+    CircleAlert,
     CreditCard,
     Mail,
     MessageCircle,
@@ -44,7 +46,9 @@
     user: User,
     users: Users,
     briefcase: Briefcase,
-    bot: Bot
+    bot: Bot,
+    check: Check,
+    "circle-alert": CircleAlert
   };
 
   interface Props {
