@@ -10,7 +10,9 @@
 
 **Starting point:** Branch `feat/extract-momo-app` cut from `feat/desktop-ui-v2-login` (post-rebase, master + V2 login + wallet U-card work). Master branch is `master`.
 
-**Total estimated time:** ~3 days (assuming no surprises in Auth Station whitelist updates).
+**Decision (2026-05-27):** OAuth callback port stays at `1457` for both V1 and Momo (no Vercel ALLOWED_REDIRECT_ORIGINS change required). Tradeoff: V1 and Momo cannot run OAuth simultaneously — one must be stopped before the other can bind the listener. Task 5 (Vercel whitelist update) is SKIPPED in this execution.
+
+**Total estimated time:** ~2 days (Vercel deployment task removed).
 
 ---
 
@@ -34,15 +36,6 @@ which puffer && puffer --help | head -2
 ```
 
 Expected: `/Users/shun/.cargo/bin/puffer`, usage line printed. If missing, run `cargo install --path crates/puffer-cli --locked` first.
-
-- [ ] **Verify Auth Station whitelist currently allows `http://localhost:1457/callback`** (sanity baseline)
-
-```bash
-TOKEN=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/Library/Application Support/com.vercel.cli/auth.json')))['token'])")
-curl -s "https://api.vercel.com/v10/projects/prj_4Mi7OqkeMQ5bOaNzzMOiLHsPRDGl/env?teamId=team_EOvpxvSsCupQhXAG3GeG317R" -H "Authorization: Bearer $TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); print([e for e in d.get('envs',[]) if e['key']=='ALLOWED_REDIRECT_ORIGINS'][0].get('value','encrypted')[:200])"
-```
-
-(The value will be encrypted; if needed, use the `auth-deploy` skill's API workflow to read.) If `localhost:1457` is whitelisted, V1 OAuth works today — baseline good.
 
 - [ ] **Create the working branch**
 
@@ -457,25 +450,13 @@ Replace each. Verify only 1-2 hits in this file.
 
 Update `apps/momo/src/lib/wsClient.ts` (the frontend) — find the default URL `ws://127.0.0.1:1421/ws` and change to `1431`. Same for any `VITE_PUFFER_WS_URL` references in test/config.
 
-- [ ] **Step 2: Copy OAuth listener and change port**
+- [ ] **Step 2: Copy OAuth listener (port stays at 1457)**
 
 ```bash
 cp apps/puffer-desktop/src-tauri/src/oauth_listener.rs apps/momo/src-tauri/src/oauth_listener.rs
 ```
 
-Edit `apps/momo/src-tauri/src/oauth_listener.rs`: find `1457` (the loopback port) — replace with `1467`. Search:
-
-```bash
-grep -n "1457" apps/momo/src-tauri/src/oauth_listener.rs
-```
-
-Expect 1-2 hits. Also update the frontend redirect_uri:
-
-```bash
-grep -n "localhost:1457" apps/momo/src/lib/auth.svelte.ts
-```
-
-The line `const TAURI_OAUTH_REDIRECT_URI = "http://localhost:1457/callback";` → change to `1467`.
+**No edits to port 1457.** Per the 2026-05-27 decision, V1 and Momo share OAuth port 1457 (mutually exclusive at runtime; Auth Station whitelist unchanged). No frontend changes needed.
 
 - [ ] **Step 3: Copy dtos.rs and codex_app_server.rs**
 
@@ -736,7 +717,14 @@ git commit -m "feat(momo): print migration hint when ~/.corbina exists but ~/.mo
 
 ---
 
-## Task 5: Add `localhost:1467` to Auth Station whitelist (deployment task)
+## Task 5: ~~Add `localhost:1467` to Auth Station whitelist~~ — **SKIPPED**
+
+Skipped per the 2026-05-27 decision (OAuth port stays at 1457 for both V1 and Momo). No Vercel changes required. Move directly to Task 6.
+
+<details>
+<summary>Original Task 5 content (for reference if the decision is revisited)</summary>
+
+### Task 5 (original): Add `localhost:1467` to Auth Station whitelist (deployment task)
 
 **Files:** None local — this is a Vercel deployment action.
 
@@ -809,6 +797,8 @@ Expected: `200` (auth station accepted the redirect_uri) or `302` to login page.
 Edit `~/.claude/skills/auth-deploy/SKILL.md` and append `http://localhost:1467` to the list. This isn't strictly part of the code change but keeps the skill accurate. (No commit needed; the skill repo handles its own commit.)
 
 - [ ] **Step 7: No code commit for this task** — it's a deployment-side change. Just verify and move on.
+
+</details>
 
 ---
 
