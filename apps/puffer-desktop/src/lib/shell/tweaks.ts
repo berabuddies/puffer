@@ -1,4 +1,4 @@
-export type ScreenId = "workspace" | "pipelines" | "settings";
+export type ScreenId = "workspace" | "workflows" | "settings";
 export type AgentState = "idle" | "thinking" | "running" | "awaiting" | "review";
 export type AccentKey = "violet" | "cyan" | "amber" | "rose" | "lime" | "mono";
 export type DensityKey = "compact" | "comfortable" | "airy";
@@ -54,9 +54,8 @@ export function loadTweaks(): Tweaks {
 }
 
 function normalizeScreen(value: unknown): ScreenId {
-  return value === "workspace" || value === "pipelines" || value === "settings"
-    ? value
-    : defaultTweaks.screen;
+  if (value === "pipelines") return "workflows";
+  return value === "workspace" || value === "workflows" || value === "settings" ? value : defaultTweaks.screen;
 }
 
 export function clampSidebarWidth(value: unknown): number {

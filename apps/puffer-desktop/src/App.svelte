@@ -18,7 +18,7 @@
   import NewSessionModal from "./lib/screens/workspace/NewSessionModal.svelte";
   import WorkspacePicker from "./lib/screens/WorkspacePicker.svelte";
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
-  import Pipelines from "./lib/screens/Pipelines.svelte";
+  import Workflows from "./lib/screens/Workflows.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import Onboarding from "./lib/screens/Onboarding.svelte";
 
@@ -2473,7 +2473,7 @@
     tweaks = { ...tweaks, screen: "workspace" };
   }
 
-  async function runPipelineWorkflowCommand(command: string): Promise<boolean> {
+  async function runWorkflowCommand(command: string): Promise<boolean> {
     const trimmed = command.trim();
     if (!trimmed) return false;
     try {
@@ -3666,8 +3666,8 @@
                 onToggleWorkspacePin={(path, pinned) => void toggleDesktopPin("workspace", path, pinned)}
               />
             {/if}
-          {:else if tweaks.screen === "pipelines"}
-            <Pipelines onRunWorkflowCommand={runPipelineWorkflowCommand} />
+          {:else if tweaks.screen === "workflows"}
+            <Workflows onRunWorkflowCommand={runWorkflowCommand} />
           {:else if tweaks.screen === "settings"}
             <Settings
               snapshot={settingsSnapshot}

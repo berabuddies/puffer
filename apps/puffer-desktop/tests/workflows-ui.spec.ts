@@ -1,12 +1,26 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
 
-test("pipeline agent provider switcher exposes selected provider state", async ({ page }) => {
+async function openWorkflows(page: Page) {
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Workflows" }).click();
+}
+
+async function openWorkflowDetail(page: Page, workflowName: string | RegExp = /agent-review-workflow/) {
+  await openWorkflows(page);
+  const backToOverview = page.getByRole("button", { name: "Back to workflows" });
+  if (await backToOverview.isVisible()) {
+    await backToOverview.click();
+  }
+  await page.getByLabel("Workflow list").getByRole("button", { name: workflowName }).click();
+  await expect(page.getByRole("button", { name: "Back to workflows" })).toBeVisible();
+}
+
+test("workflow agent provider switcher exposes selected provider state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const switcher = page.getByRole("radiogroup", { name: "Agent provider" });
   const codex = switcher.getByRole("radio", { name: "Codex" });
@@ -33,12 +47,12 @@ test("pipeline agent provider switcher exposes selected provider state", async (
   await expect(page.getByLabel("Model")).toHaveValue("gpt-5.4-codex");
 });
 
-test("pipeline graph agent nodes expose selected state", async ({ page }) => {
+test("workflow graph agent nodes expose selected state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const graph = page.locator(".pf-pipe-graph");
   const codexNode = graph.getByRole("button", { name: /Codex implementer/ });
@@ -53,17 +67,17 @@ test("pipeline graph agent nodes expose selected state", async ({ page }) => {
   await expect(page.getByLabel("Agent name")).toHaveValue("Claude reviewer");
 });
 
-test("pipeline workflow list search filters by workflow and run metadata", async ({ page }) => {
+test("workflow list search filters by workflow and run metadata", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowSnapshot({
     workflows: [
       {
         schema: "puffer.workflow.v1",
-        slug: "release-pipeline",
+        slug: "release-workflow",
         enabled: true,
         trigger: { type: "connection", connection_slug: "telegram-user", pattern: "ship" },
         pipeline: {
-          name: "Release pipeline",
+          name: "Release workflow",
           working_dir: "/tmp/puffer",
           concurrency: 1,
           nodes: [
@@ -103,7 +117,7 @@ test("pipeline workflow list search filters by workflow and run metadata", async
     runs: [
       {
         idx: 12,
-        workflow_slug: "release-pipeline",
+        workflow_slug: "release-workflow",
         run_id: "run-release",
         trigger: { text: "ship this" },
         status: "failed",
@@ -129,16 +143,16 @@ test("pipeline workflow list search filters by workflow and run metadata", async
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflows(page);
 
   const workflowList = page.locator('[aria-label="Workflow list"]');
   await expect(page.getByLabel("Workflow search results")).toHaveText("2/2 workflows");
-  await expect(workflowList.getByRole("button", { name: /release-pipeline/ })).toBeVisible();
+  await expect(workflowList.getByRole("button", { name: /release-workflow/ })).toBeVisible();
   await expect(workflowList.getByRole("button", { name: /daily-digest/ })).toBeVisible();
 
   await page.getByLabel("Search workflows").fill("failed deploy");
   await expect(page.getByLabel("Workflow search results")).toHaveText("1/2 workflows");
-  await expect(workflowList.getByRole("button", { name: /release-pipeline/ })).toBeVisible();
+  await expect(workflowList.getByRole("button", { name: /release-workflow/ })).toBeVisible();
   await expect(workflowList.getByRole("button", { name: /daily-digest/ })).not.toBeVisible();
 
   await page.getByLabel("Search workflows").fill("cron digest");
@@ -147,21 +161,23 @@ test("pipeline workflow list search filters by workflow and run metadata", async
   await workflowList.getByRole("button", { name: /daily-digest/ }).click();
   await expect(page.locator(".pf-run-header-label")).toHaveText("Daily digest");
 
+  await page.getByRole("button", { name: "Back to workflows" }).click();
+  await expect(page.getByLabel("Workflow list")).toBeVisible();
   await page.getByLabel("Search workflows").fill("does-not-exist");
   await expect(page.getByLabel("Workflow search results")).toHaveText("0/2 workflows");
   await expect(workflowList.getByText("No matching workflows.")).toBeVisible();
 });
 
-test("pipeline overview and create pages keep focused headers", async ({ page }) => {
+test("workflow overview and create pages keep focused headers", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflows(page);
 
   const title = page.locator(".pf-pipe-top-id");
   await expect(title).toContainText("Workflow dashboard");
-  await expect(title).not.toContainText("agent-review-pipeline");
+  await expect(title).not.toContainText("agent-review-workflow");
 
   await page.getByRole("button", { name: "New workflow" }).click();
 
@@ -173,18 +189,18 @@ test("pipeline overview and create pages keep focused headers", async ({ page })
   await expect(page.getByRole("button", { name: "Add Puffer node" })).toBeVisible();
 });
 
-test("pipeline overview opens workflow and run details on separate pages", async ({ page }) => {
+test("workflow overview opens workflow and run details on separate pages", async ({ page }) => {
   const daemon = new FakeDaemon();
   const now = Date.now();
   daemon.setWorkflowSnapshot({
     workflows: [
       {
         schema: "puffer.workflow.v1",
-        slug: "release-pipeline",
+        slug: "release-workflow",
         enabled: true,
         trigger: { type: "connection", connection_slug: "telegram-user", pattern: "ship" },
         pipeline: {
-          name: "Release pipeline",
+          name: "Release workflow",
           working_dir: "/tmp/puffer",
           concurrency: 1,
           nodes: [
@@ -224,7 +240,7 @@ test("pipeline overview opens workflow and run details on separate pages", async
     runs: [
       {
         idx: 21,
-        workflow_slug: "release-pipeline",
+        workflow_slug: "release-workflow",
         run_id: "run-release-live",
         trigger: { text: "ship this" },
         status: "running",
@@ -271,20 +287,20 @@ test("pipeline overview opens workflow and run details on separate pages", async
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflows(page);
 
   const title = page.locator(".pf-pipe-top-id");
   await expect(title).toContainText("Workflow dashboard");
 
   const ongoing = page.getByLabel("Ongoing workflows");
-  const liveRun = ongoing.getByRole("button", { name: /Release pipeline/ });
+  const liveRun = ongoing.getByRole("button", { name: /Release workflow/ });
   await expect(liveRun).toContainText("#21");
   await expect(liveRun).toContainText("running");
   await liveRun.click();
 
   await expect(title).toContainText("Workflow detail");
-  await expect(title).toContainText("Release pipeline");
-  await expect(title).toContainText("release-pipeline");
+  await expect(title).toContainText("Release workflow");
+  await expect(title).toContainText("release-workflow");
   await expect(page.getByLabel("Workflow runs").getByRole("button", { name: /#21/ })).toHaveAttribute(
     "data-selected",
     "true"
@@ -303,17 +319,17 @@ test("pipeline overview opens workflow and run details on separate pages", async
   await expect(page.getByRole("button", { name: "New workflow" })).toBeVisible();
 });
 
-test("pipeline workflow run search filters selected workflow runs", async ({ page }) => {
+test("workflow run search filters selected workflow runs", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowSnapshot({
     workflows: [
       {
         schema: "puffer.workflow.v1",
-        slug: "release-pipeline",
+        slug: "release-workflow",
         enabled: true,
         trigger: { type: "connection", connection_slug: "telegram-user", pattern: "ship" },
         pipeline: {
-          name: "Release pipeline",
+          name: "Release workflow",
           working_dir: "/tmp/puffer",
           concurrency: 1,
           nodes: [
@@ -332,7 +348,7 @@ test("pipeline workflow run search filters selected workflow runs", async ({ pag
     runs: [
       {
         idx: 12,
-        workflow_slug: "release-pipeline",
+        workflow_slug: "release-workflow",
         run_id: "run-release-failed",
         trigger: { text: "ship this" },
         status: "failed",
@@ -353,7 +369,7 @@ test("pipeline workflow run search filters selected workflow runs", async ({ pag
       },
       {
         idx: 11,
-        workflow_slug: "release-pipeline",
+        workflow_slug: "release-workflow",
         run_id: "run-release-retry",
         trigger: { text: "manual retry" },
         status: "completed",
@@ -379,7 +395,7 @@ test("pipeline workflow run search filters selected workflow runs", async ({ pag
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page, /release-workflow/);
 
   const runList = page.getByLabel("Workflow runs");
   await expect(page.getByLabel("Workflow run search results")).toHaveText("2/2 runs");
@@ -404,12 +420,12 @@ test("pipeline workflow run search filters selected workflow runs", async ({ pag
   await expect(page.locator(".pf-pipe-traj-list")).toContainText("retry deployed");
 });
 
-test("pipeline connector search selects a connection trigger", async ({ page }) => {
+test("workflow connector search selects a connection trigger", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
   await page.getByLabel("Search connectors").fill("telegram");
@@ -422,17 +438,17 @@ test("pipeline connector search selects a connection trigger", async ({ page }) 
   await expect(page.locator(".pf-pipe-graph").getByRole("button", { name: /telegram-user/ })).toBeVisible();
 });
 
-test("pipeline editor saves workflow changes through daemon", async ({ page }) => {
+test("workflow editor saves workflow changes through daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const saveButton = page.getByRole("button", { name: "Save workflow" });
   await expect(saveButton).toBeDisabled();
 
-  await page.locator(".pf-editor-config").getByLabel("Name").fill("Saved monitor pipeline");
+  await page.locator(".pf-editor-config").getByLabel("Name").fill("Saved monitor workflow");
   await expect(saveButton).toBeEnabled();
   await expect(page.locator(".pf-pipe-save-note")).toContainText("Save to persist");
 
@@ -442,19 +458,19 @@ test("pipeline editor saves workflow changes through daemon", async ({ page }) =
     slug?: string;
     pipeline?: { name?: string; nodes?: Array<{ type?: string }> };
   };
-  expect(workflow.slug).toBe("agent-review-pipeline");
-  expect(workflow.pipeline?.name).toBe("Saved monitor pipeline");
+  expect(workflow.slug).toBe("agent-review-workflow");
+  expect(workflow.pipeline?.name).toBe("Saved monitor workflow");
   expect(workflow.pipeline?.nodes?.[0]?.type).toBe("codex");
-  await expect(page.locator(".pf-pipe-save-note")).toContainText("Saved agent-review-pipeline.");
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Saved agent-review-workflow.");
   await expect(saveButton).toBeDisabled();
 });
 
-test("pipeline editor creates new workflow drafts before saving", async ({ page }) => {
+test("workflow editor creates new workflow drafts before saving", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflows(page);
 
   await page.getByRole("button", { name: "New workflow" }).click();
 
@@ -488,12 +504,12 @@ test("pipeline editor creates new workflow drafts before saving", async ({ page 
   await expect(saveButton).toBeDisabled();
 });
 
-test("pipeline editor can pause and resume workflows through daemon", async ({ page }) => {
+test("workflow editor can pause and resume workflows through daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const pauseButton = page.getByRole("button", { name: "Pause workflow" });
   await expect(pauseButton).toBeEnabled();
@@ -501,9 +517,9 @@ test("pipeline editor can pause and resume workflows through daemon", async ({ p
 
   const pauseRequest = await daemon.waitForRequest(
     "workflow_toggle",
-    (candidate) => candidate.params.slug === "agent-review-pipeline" && candidate.params.enabled === false
+    (candidate) => candidate.params.slug === "agent-review-workflow" && candidate.params.enabled === false
   );
-  expect(pauseRequest.params.slug).toBe("agent-review-pipeline");
+  expect(pauseRequest.params.slug).toBe("agent-review-workflow");
   await expect(page.locator(".pf-run-header-state")).toHaveText("disabled");
 
   const resumeButton = page.getByRole("button", { name: "Resume workflow" });
@@ -512,18 +528,18 @@ test("pipeline editor can pause and resume workflows through daemon", async ({ p
 
   const resumeRequest = await daemon.waitForRequest(
     "workflow_toggle",
-    (candidate) => candidate.params.slug === "agent-review-pipeline" && candidate.params.enabled === true
+    (candidate) => candidate.params.slug === "agent-review-workflow" && candidate.params.enabled === true
   );
   expect(resumeRequest.params.enabled).toBe(true);
   await expect(page.locator(".pf-run-header-state")).toHaveText("enabled");
 });
 
-test("pipeline connector search matches multiple metadata terms", async ({ page }) => {
+test("workflow connector search matches multiple metadata terms", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   await page.getByLabel("Search connectors").fill("personal mtproto");
@@ -535,12 +551,12 @@ test("pipeline connector search matches multiple metadata terms", async ({ page 
   await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
 });
 
-test("pipeline connector catalog can create a workflow draft for a connector", async ({ page }) => {
+test("workflow connector catalog can create a workflow draft for a connector", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("telegram personal");
   const draftButton = page.getByRole("button", { name: "Create workflow draft for telegram-login" });
@@ -570,12 +586,12 @@ test("pipeline connector catalog can create a workflow draft for a connector", a
   });
 });
 
-test("pipeline connector search matches workflow draft commands", async ({ page }) => {
+test("workflow connector search matches draft commands", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   const connections = page.locator('[aria-label="Connections"]');
@@ -595,7 +611,7 @@ test("pipeline connector search matches workflow draft commands", async ({ page 
   await expect(catalog.getByRole("button", { name: "Plan email workflow trigger" })).toBeVisible();
 });
 
-test("pipeline selected connector exposes a copyable workflow draft command", async ({ page }) => {
+test("workflow selected connector exposes a copyable workflow draft command", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -611,7 +627,7 @@ test("pipeline selected connector exposes a copyable workflow draft command", as
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("email events");
   await page.locator('[aria-label="Connector catalog"]').getByRole("button", { name: "Plan email workflow trigger" }).click();
@@ -629,12 +645,12 @@ test("pipeline selected connector exposes a copyable workflow draft command", as
   expect(copied).toBe("/workflows new email-personal-workflow email-personal 'hello world'");
 });
 
-test("pipeline selected connector can create a planned workflow draft", async ({ page }) => {
+test("workflow selected connector can create a planned workflow draft", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   await page.getByLabel("Search connectors").fill("email events");
@@ -667,12 +683,12 @@ test("pipeline selected connector can create a planned workflow draft", async ({
   });
 });
 
-test("pipeline selected connector can create an append workflow binding", async ({ page }) => {
+test("workflow selected connector can create an append workflow binding", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   await page.getByLabel("Search connectors").fill("email events");
@@ -714,12 +730,12 @@ test("pipeline selected connector can create an append workflow binding", async 
   await expect(page.locator(".pf-pipe-save-note")).toContainText("Deleted append-email-personal-hi.");
 });
 
-test("pipeline connection rows can create append workflow bindings", async ({ page }) => {
+test("workflow connection rows can create append workflow bindings", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
   await page.getByLabel("Search connectors").fill("append telegram-user");
 
   const connections = page.getByLabel("Connections");
@@ -754,12 +770,12 @@ test("pipeline connection rows can create append workflow bindings", async ({ pa
   await expect(actions).toContainText("/tmp/telegram-user.log");
 });
 
-test("pipeline connection append rows use search path and pattern", async ({ page }) => {
+test("workflow connection append rows use search path and pattern", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
   await page.getByLabel("Search connectors").fill("append telegram-user hi /tmp/hi");
 
   const appendButton = page.getByRole("button", { name: "Create append workflow for telegram-user" });
@@ -790,12 +806,12 @@ test("pipeline connection append rows use search path and pattern", async ({ pag
   await expect(actions).toContainText("hi");
 });
 
-test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
+test("workflow connector catalog shows built-in coverage and result counts", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   const resultSummary = page.getByLabel("Connector search results");
@@ -830,12 +846,12 @@ test("pipeline connector catalog shows built-in coverage and result counts", asy
   await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
 });
 
-test("pipeline connector catalog shows and searches existing connection names", async ({ page }) => {
+test("workflow connector catalog shows and searches existing connection names", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   const resultSummary = page.getByLabel("Connector search results");
@@ -853,12 +869,12 @@ test("pipeline connector catalog shows and searches existing connection names", 
   await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
 });
 
-test("pipeline connector catalog shows and searches runtime source hints", async ({ page }) => {
+test("workflow connector catalog shows and searches runtime source hints", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   const connections = page.locator('[aria-label="Connections"]');
@@ -877,12 +893,12 @@ test("pipeline connector catalog shows and searches runtime source hints", async
   await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).toContainText("subscriber");
 });
 
-test("pipeline connector filter presets apply stable search terms", async ({ page }) => {
+test("workflow connector filter presets apply stable search terms", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const filters = page.getByLabel("Connector filters");
   const resultSummary = page.getByLabel("Connector search results");
@@ -940,12 +956,12 @@ test("pipeline connector filter presets apply stable search terms", async ({ pag
   await expect(resultSummary).toHaveText("10/10 connectors; 2/2 connections");
 });
 
-test("pipeline connector search matches setup-only capability terms", async ({ page }) => {
+test("workflow connector search matches setup-only capability terms", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const catalog = page.locator('[aria-label="Connector catalog"]');
   const connections = page.locator('[aria-label="Connections"]');
@@ -960,12 +976,12 @@ test("pipeline connector search matches setup-only capability terms", async ({ p
   await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).not.toBeVisible();
 });
 
-test("pipeline connector search matches append workflow commands", async ({ page }) => {
+test("workflow connector search matches append workflow commands", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("append /tmp/email.log");
 
@@ -975,12 +991,12 @@ test("pipeline connector search matches append workflow commands", async ({ page
   await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
 });
 
-test("pipeline connector catalog rows can create append workflow bindings", async ({ page }) => {
+test("workflow connector catalog rows can create append workflow bindings", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
   await page.getByLabel("Search connectors").fill("append email hi /tmp/email.log");
 
   const appendButton = page.getByRole("button", { name: "Create append workflow for email" });
@@ -1014,12 +1030,12 @@ test("pipeline connector catalog rows can create append workflow bindings", asyn
   await expect(actions).toContainText("hi");
 });
 
-test("pipeline connector search shows action matches", async ({ page }) => {
+test("workflow connector search shows action matches", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("send message");
 
@@ -1035,12 +1051,12 @@ test("pipeline connector search shows action matches", async ({ page }) => {
   await expect(slack).not.toBeVisible();
 });
 
-test("pipeline connector catalog expands action chips for unique connector searches", async ({ page }) => {
+test("workflow connector catalog expands action chips for unique connector searches", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("telegram-login");
 
@@ -1055,12 +1071,12 @@ test("pipeline connector catalog expands action chips for unique connector searc
   await expect(telegram).not.toContainText("+1 actions");
 });
 
-test("pipeline selected connector detail shows all connector actions", async ({ page }) => {
+test("workflow selected connector detail shows all connector actions", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("telegram-login");
   await page
@@ -1075,12 +1091,12 @@ test("pipeline selected connector detail shows all connector actions", async ({ 
   await expect(detail).toContainText("vote_poll");
 });
 
-test("pipeline connector catalog stages a deterministic connect command", async ({ page }) => {
+test("workflow connector catalog stages a deterministic connect command", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("email");
   await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
@@ -1093,12 +1109,12 @@ test("pipeline connector catalog stages a deterministic connect command", async 
   await expect(page.locator(".pf-connector-row", { hasText: "email" })).toHaveAttribute("data-selected", "true");
 });
 
-test("pipeline connector command can start setup from the picker", async ({ page }) => {
+test("workflow connector command can start setup from the picker", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("email");
   await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
@@ -1122,12 +1138,12 @@ test("pipeline connector command can start setup from the picker", async ({ page
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
-test("pipeline connector search preserves custom connection names", async ({ page }) => {
+test("workflow connector search preserves custom connection names", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("connect matrix matrix-main");
   await expect(page.getByLabel("Connector search results")).toHaveText("1/10 connectors; 0/2 connections");
@@ -1154,13 +1170,13 @@ test("pipeline connector search preserves custom connection names", async ({ pag
   );
 });
 
-test("pipeline selected connector can run workflow commands", async ({ page }) => {
+test("workflow selected connector can run commands", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
   const stageEmailConnector = async () => {
-    await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+    await openWorkflowDetail(page);
     await page.getByLabel("Search connectors").fill("email");
     await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
     await page.getByLabel("Connector connection name").fill("email-personal");
@@ -1193,12 +1209,12 @@ test("pipeline selected connector can run workflow commands", async ({ page }) =
   expect(String(appendRequest.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
-test("pipeline connector catalog can run default setup from a connector row", async ({ page }) => {
+test("workflow connector catalog can run default setup from a connector row", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("discord bot");
   const connector = page
@@ -1218,12 +1234,12 @@ test("pipeline connector catalog can run default setup from a connector row", as
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
-test("pipeline connection picker can start connector task monitors", async ({ page }) => {
+test("workflow connection picker can start connector task monitors", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("monitor telegram");
   const monitorButton = page.getByRole("button", { name: "Run /monitor telegram-user" });
@@ -1238,12 +1254,12 @@ test("pipeline connection picker can start connector task monitors", async ({ pa
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
-test("pipeline monitor workflow panel can pause and resume monitor bindings", async ({ page }) => {
+test("workflow monitor workflow panel can pause and resume monitor bindings", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const monitors = page.getByLabel("Monitor workflows");
   await expect(monitors).toContainText("monitor-telegram-user");
@@ -1278,12 +1294,12 @@ test("pipeline monitor workflow panel can pause and resume monitor bindings", as
   await expect(page.getByLabel("Monitor workflows")).toHaveCount(0);
 });
 
-test("pipeline monitor task panel exposes task actions", async ({ page }) => {
+test("workflow monitor task panel exposes task actions", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const tasks = page.getByLabel("Monitor tasks");
   await expect(tasks).toContainText("Reply to Telegram support ping");
@@ -1311,12 +1327,12 @@ test("pipeline monitor task panel exposes task actions", async ({ page }) => {
   expect(String(actionRequest.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
-test("pipeline monitor task panel can start ignore flows", async ({ page }) => {
+test("workflow monitor task panel can start ignore flows", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const tasks = page.getByLabel("Monitor tasks");
   await page.getByLabel("Search connectors").fill("already answered");
@@ -1333,12 +1349,12 @@ test("pipeline monitor task panel can start ignore flows", async ({ page }) => {
   expect(String(ignoreRequest.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
-test("pipeline connection picker can start connection repair setup", async ({ page }) => {
+test("workflow connection picker can start connection repair setup", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("repair slack");
   const repairButton = page.getByRole("button", { name: "Run /connect slack-app slack-app" });
@@ -1353,12 +1369,12 @@ test("pipeline connection picker can start connection repair setup", async ({ pa
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
-test("pipeline connector picker keeps non-trigger connections disabled while setup rows stay selectable", async ({ page }) => {
+test("workflow connector picker keeps non-trigger connections disabled while setup rows stay selectable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("slack");
 
@@ -1377,12 +1393,12 @@ test("pipeline connector picker keeps non-trigger connections disabled while set
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
-test("pipeline connector catalog stages telegram bot setup", async ({ page }) => {
+test("workflow connector catalog stages telegram bot setup", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("telegram bot");
 
@@ -1400,12 +1416,12 @@ test("pipeline connector catalog stages telegram bot setup", async ({ page }) =>
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
-test("pipeline connector catalog can search serve-mode connectors as unavailable triggers", async ({ page }) => {
+test("workflow connector catalog can search serve-mode connectors as unavailable triggers", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Search connectors").fill("discord");
 
@@ -1422,12 +1438,12 @@ test("pipeline connector catalog can search serve-mode connectors as unavailable
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
-test("pipeline connection dropdown skips connections that cannot trigger workflows", async ({ page }) => {
+test("workflow connection dropdown skips connections that cannot trigger workflows", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   await page.getByLabel("Trigger type").selectOption("connection");
 
@@ -1439,13 +1455,13 @@ test("pipeline connection dropdown skips connections that cannot trigger workflo
   await expect(slackOption).toContainText("no trigger");
 });
 
-test("pipeline refresh is disabled while the workflow snapshot loads", async ({ page }) => {
+test("workflow refresh is disabled while the workflow snapshot loads", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayFailure("workflow_list", () => true, "slow workflow snapshot", 250);
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflows(page);
 
   const refresh = page.getByRole("button", { name: "Refresh workflows" });
   await expect(refresh).toBeDisabled();
@@ -1456,12 +1472,12 @@ test("pipeline refresh is disabled while the workflow snapshot loads", async ({ 
   expect(daemon.requests.filter((request) => request.method === "workflow_list")).toHaveLength(1);
 });
 
-test("pipeline wiring disables already connected output targets", async ({ page }) => {
+test("workflow wiring disables already connected output targets", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const wiring = page.locator(".pf-editor-wiring");
   const claudeTarget = wiring.getByRole("button", { name: /Claude reviewer/ });
@@ -1478,12 +1494,12 @@ test("pipeline wiring disables already connected output targets", async ({ page 
   await expect(pufferTarget).toHaveAttribute("aria-pressed", "true");
 });
 
-test("pipeline refresh preserves unsaved node drafts", async ({ page }) => {
+test("workflow refresh preserves unsaved node drafts", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+  await openWorkflowDetail(page);
 
   const prompt = page.getByLabel("Prompt");
   await expect(prompt).toHaveValue("Implement the requested change.");
@@ -1493,11 +1509,11 @@ test("pipeline refresh preserves unsaved node drafts", async ({ page }) => {
     workflows: [
       {
         schema: "puffer.workflow.v1",
-        slug: "agent-review-pipeline",
+        slug: "agent-review-workflow",
         enabled: true,
         trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review" },
         pipeline: {
-          name: "Agent review pipeline",
+          name: "Agent review workflow",
           working_dir: "/tmp/puffer",
           concurrency: 1,
           nodes: [

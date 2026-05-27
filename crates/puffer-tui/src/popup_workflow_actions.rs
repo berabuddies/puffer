@@ -137,7 +137,7 @@ fn search_terms(query: &str) -> Vec<String> {
 }
 
 fn is_workflows_command(command: &str) -> bool {
-    matches!(command, "workflow" | "workflows" | "pipeline" | "pipelines")
+    matches!(command, "workflow" | "workflows")
 }
 
 fn workflow_status_label(status: WorkflowBindingStatus) -> &'static str {

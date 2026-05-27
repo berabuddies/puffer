@@ -1,5 +1,5 @@
 <script lang="ts">
-  import "../design/pipeline.css";
+  import "../design/workflow.css";
 
   import { onMount } from "svelte";
   import {
@@ -180,8 +180,6 @@
     "message",
     "messages",
     "on",
-    "pipeline",
-    "pipelines",
     "save",
     "that",
     "to",
@@ -235,7 +233,7 @@
     monitor_task_error: null
   });
   let editorWorkflows = $state<EditableWorkflow[]>([starterWorkflow()]);
-  let workflowSlug = $state("agent-review-pipeline");
+  let workflowSlug = $state("agent-review-workflow");
   let selectedNodeId = $state<string | null>("codex-implement");
   let workflowQuery = $state("");
   let connectorQuery = $state("");
@@ -370,8 +368,8 @@
   let scale = $state(0.8);
 
   function starterWorkflow(
-    slug = "agent-review-pipeline",
-    name = "Agent review pipeline",
+    slug = "agent-review-workflow",
+    name = "Agent review workflow",
     enabled = true
   ): EditableWorkflow {
     return {
@@ -458,9 +456,9 @@
   }
 
   function defaultPrompt(provider: AgentProvider): string {
-    if (provider === "claude") return "Review the upstream result and call out risks before the pipeline proceeds.";
+    if (provider === "claude") return "Review the upstream result and call out risks before the workflow proceeds.";
     if (provider === "puffer") return "Coordinate local runtime state and produce a clean handoff summary.";
-    return "Implement the assigned pipeline step with a focused patch and verification notes.";
+    return "Implement the assigned workflow step with a focused patch and verification notes.";
   }
 
   function measure() {
@@ -542,7 +540,7 @@
     };
     editorWorkflows = merged;
     if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
-      workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
+      workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-workflow";
     }
     const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
     if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
@@ -641,7 +639,7 @@
     if (!workflow) return;
     const oldSlug = workflow.slug;
     updateCurrentWorkflow((item) => {
-      if (field === "slug") return { ...item, slug: String(value || "pipeline") };
+      if (field === "slug") return { ...item, slug: String(value || "workflow") };
       if (field === "enabled") return { ...item, enabled: Boolean(value) };
       if (field === "name") return { ...item, pipeline: { ...item.pipeline, name: String(value) } };
       if (field === "working_dir") return { ...item, pipeline: { ...item.pipeline, working_dir: String(value) } };
@@ -1806,7 +1804,7 @@
       return {
         workflow: item,
         searchText: buildSearchText([
-          "workflow pipeline",
+          "workflow",
           item.slug,
           item.pipeline.name,
           item.pipeline.working_dir,
@@ -2147,7 +2145,7 @@
       <span class="pf-pipe-chip">
         {workflowPage === "overview" ? "Workflows" : workflowPage === "create" ? "Create workflow" : "Workflow detail"}
       </span>
-      <strong>{workflowPage === "overview" ? "Workflow dashboard" : workflow?.pipeline.name ?? "No pipeline"}</strong>
+      <strong>{workflowPage === "overview" ? "Workflow dashboard" : workflow?.pipeline.name ?? "No workflow"}</strong>
       {#if workflow && workflowPage !== "overview"}
         <span class="pf-pipe-hash">{workflow.slug}</span>
       {/if}
@@ -2459,7 +2457,7 @@
           <section class="pf-editor-panel pf-editor-config">
             <div class="pf-editor-panel-head">
               <Icon name="settings" size={13} />
-              <span>Pipeline</span>
+              <span>Workflow</span>
             </div>
             <label>
               <span>Name</span>
@@ -3324,7 +3322,7 @@
           </div>
         {/if}
       {:else}
-        <div class="pf-pipe-empty">Create a pipeline to start wiring agents.</div>
+        <div class="pf-pipe-empty">Create a workflow to start wiring agents.</div>
       {/if}
     </div>
   </div>

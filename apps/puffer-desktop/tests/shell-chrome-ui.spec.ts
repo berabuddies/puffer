@@ -66,7 +66,7 @@ test("desktop minimum width keeps primary navigation visible", async ({ page }) 
   const sidebar = page.locator(".pf-sidebar");
   await expect(sidebar).toBeVisible();
   await expect(sidebar.getByRole("button", { name: "Project" })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "Pipelines" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Workflows" })).toBeVisible();
   await expect(sidebar.getByRole("button", { name: "Deployments" })).toHaveCount(0);
   await expect(sidebar.getByRole("button", { name: "Settings" })).toBeVisible();
 });
@@ -78,18 +78,18 @@ test("sidebar primary navigation exposes the current page", async ({ page }) => 
 
   const sidebar = page.locator(".pf-sidebar");
   const project = sidebar.getByRole("button", { name: "Project" });
-  const pipelines = sidebar.getByRole("button", { name: "Pipelines" });
+  const workflows = sidebar.getByRole("button", { name: "Workflows" });
   const settings = sidebar.getByRole("button", { name: "Settings" });
 
   await expect(project).toHaveAttribute("aria-current", "page");
-  await expect(pipelines).not.toHaveAttribute("aria-current", "page");
+  await expect(workflows).not.toHaveAttribute("aria-current", "page");
 
-  await pipelines.click();
+  await workflows.click();
   await expect(project).not.toHaveAttribute("aria-current", "page");
-  await expect(pipelines).toHaveAttribute("aria-current", "page");
+  await expect(workflows).toHaveAttribute("aria-current", "page");
 
   await settings.click();
-  await expect(pipelines).not.toHaveAttribute("aria-current", "page");
+  await expect(workflows).not.toHaveAttribute("aria-current", "page");
   await expect(settings).toHaveAttribute("aria-current", "page");
 });
 

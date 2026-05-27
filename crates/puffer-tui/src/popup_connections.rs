@@ -20,8 +20,6 @@ const APPEND_QUERY_STOP_WORDS: &[&str] = &[
     "message",
     "messages",
     "on",
-    "pipeline",
-    "pipelines",
     "save",
     "that",
     "to",

@@ -1,4 +1,4 @@
-/* Pipeline screen — ported from /puffer/project/app/pipeline.css */
+/* Workflow screen — ported from original desktop screen CSS */
 :root {
   --pf-run-running: oklch(0.72 0.17 70);
   --pf-run-done:    oklch(0.62 0.15 145);

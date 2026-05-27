@@ -62,9 +62,11 @@ fn workflows_command_is_registered_as_local_command() {
         Some("[list|new|append|delete|actions|connections|connectors|tasks|runs] [query]")
     );
     assert_eq!(
-        find_command(&commands, "pipelines").map(|command| command.name.as_str()),
+        find_command(&commands, "workflow").map(|command| command.name.as_str()),
         Some("workflows")
     );
+    assert!(find_command(&commands, "pipelines").is_none());
+    assert!(find_command(&commands, "pipeline").is_none());
 }
 
 #[test]

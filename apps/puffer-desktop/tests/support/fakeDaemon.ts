@@ -334,11 +334,11 @@ export class FakeDaemon {
     workflows: [
       {
         schema: "puffer.workflow.v1",
-        slug: "agent-review-pipeline",
+        slug: "agent-review-workflow",
         enabled: true,
         trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review" },
         pipeline: {
-          name: "Agent review pipeline",
+          name: "Agent review workflow",
           working_dir: "/tmp/puffer",
           concurrency: 1,
           nodes: [

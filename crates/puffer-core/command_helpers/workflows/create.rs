@@ -42,7 +42,7 @@ pub(super) fn create_workflow(paths: &ConfigPaths, args: &str) -> Result<String>
     let _ = writeln!(out, "nodes: {}", created.pipeline.nodes.len());
     let _ = writeln!(
         out,
-        "next: edit it in Corbina Pipelines, then resume it when ready."
+        "next: edit it in the Workflows screen, then resume it when ready."
     );
     Ok(out)
 }

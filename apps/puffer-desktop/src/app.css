@@ -594,7 +594,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   .pf-titlebar-tabs { display: none; }
 }
 
-/* Collapse pipeline runs rail on narrow widths */
+/* Collapse workflow runs rail on narrow widths */
 @media (max-width: 1080px) {
   .pf-pipe-body { grid-template-columns: 160px minmax(0, 1fr); }
 }
