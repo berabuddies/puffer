@@ -490,7 +490,7 @@ fn handle_prompt_submit_routes_monitor_through_user_question_worker() {
         tui.pending_submit
             .as_ref()
             .and_then(|pending| pending.status_hint.as_deref()),
-        Some("Setting up monitor...")
+        Some("Creating monitor workflow...")
     );
     assert!(state.transcript.iter().all(|message| {
         !message
