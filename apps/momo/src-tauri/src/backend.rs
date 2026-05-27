@@ -1478,7 +1478,17 @@ fn app_home() -> Result<PathBuf> {
     if let Ok(path) = env::var("MOMO_HOME") {
         return Ok(PathBuf::from(path));
     }
-    Ok(home_dir().join(".momo"))
+    let primary = home_dir().join(".momo");
+    if !primary.exists() {
+        let legacy = home_dir().join(".corbina");
+        if legacy.exists() {
+            eprintln!(
+                "momo: found legacy ~/.corbina but no ~/.momo; \
+                run `cp -r ~/.corbina ~/.momo` to import sessions, then restart"
+            );
+        }
+    }
+    Ok(primary)
 }
 
 fn home_dir() -> PathBuf {
