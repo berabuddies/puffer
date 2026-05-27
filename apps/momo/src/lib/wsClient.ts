@@ -1,11 +1,10 @@
 /**
- * Tiny JSON-RPC-over-WebSocket client for the puffer Tauri backend.
+ * Tiny JSON-RPC-over-WebSocket client for the Momo Tauri backend.
  *
- * The puffer host exposes its agent API on `ws://127.0.0.1:1421/ws` (see
- * `src-tauri/src/websocket.rs`). V2 talks to that wire protocol and nothing
- * else — we deliberately do NOT import from v1 (`src/lib/api/*`) or call
- * `@tauri-apps/api` invoke. The V2 surface is meant to be extractable into
- * its own repo with this client as the only bridge.
+ * The Momo host exposes its agent API on `ws://127.0.0.1:1431/ws` (see
+ * `src-tauri/src/websocket.rs`). Momo talks to that wire protocol and
+ * nothing else — we deliberately do NOT call `@tauri-apps/api` invoke.
+ * This client is the only bridge to the backend.
  *
  * Protocol (mirrors `src-tauri/src/websocket.rs::handle_request`):
  *   client → server:  { id, method, params }                          (JSON)
@@ -28,7 +27,7 @@ type PendingRequest = {
 
 type EventHandler = (payload: unknown) => void;
 
-const DEFAULT_URL = "ws://127.0.0.1:1421/ws";
+const DEFAULT_URL = "ws://127.0.0.1:1431/ws";
 
 function resolveUrl(): string {
   const envUrl = (import.meta as unknown as { env?: Record<string, string | undefined> }).env
