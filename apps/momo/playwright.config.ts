@@ -5,7 +5,7 @@ const shouldReuseExistingServer = !process.env.CI && !process.env.CODEX_CI;
 
 export default defineConfig({
   testDir: "tests",
-  // v1 specs target the legacy Puffer UI; the current entry is src-v2 (Momo).
+  // v1 specs target the legacy Puffer UI and only run in apps/puffer-desktop.
   testIgnore: ["v1/**"],
   timeout: 120_000,
   expect: {
@@ -21,7 +21,7 @@ export default defineConfig({
     // default URL ws://127.0.0.1:17777/ws) instead of the real Tauri host
     // (ws://127.0.0.1:1421/ws), which isn't running under `playwright test`.
     // Caveat: with reuseExistingServer=true a stale `vite dev` already on
-    // 1420 without this env will silently bypass the override — restart vite
+    // 1466 without this env will silently bypass the override — restart vite
     // if you see V2 tests hanging on connect.
     env: { VITE_PUFFER_WS_URL: "ws://127.0.0.1:17777/ws", VITE_USE_MOCK_WALLET: "true" }
   },
