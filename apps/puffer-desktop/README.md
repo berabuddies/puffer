@@ -1,5 +1,9 @@
 # Corbina
 
+> **Note:** A separate desktop app, Momo, lives at `apps/momo/` and
+> targets puffer-only chat + wallet flows. Corbina (this app) remains
+> the multi-provider coding agent.
+
 Standalone Tauri desktop app for running local coding agents from one workspace UI.
 
 Corbina was forked from the Puffer desktop shell, but it no longer depends on the
