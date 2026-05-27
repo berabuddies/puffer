@@ -54,7 +54,7 @@ async function ensureCachedApiKey(): Promise<void> {
   const page = await ctx.newPage();
   await page.goto("http://localhost:1456/");
   const minted = await page.evaluate(async () => {
-    const mod = await import("/src-v2/lib/auth.svelte.ts");
+    const mod = await import("/src/lib/auth.svelte.ts");
     await mod.loadAuthFromStorage();
     const token = mod.getAuthToken();
     if (!token) return { ok: false, reason: "no token in cached state" };
@@ -299,7 +299,7 @@ test.describe("login persistence", () => {
     });
 
     const result = await page.evaluate(async () => {
-      const mod = await import("/src-v2/lib/auth.svelte.ts");
+      const mod = await import("/src/lib/auth.svelte.ts");
       const b64url = (s: string) =>
         btoa(s).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
       const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
@@ -365,7 +365,7 @@ test.describe("login persistence", () => {
       timeout: 15_000
     });
     const outcome = await page.evaluate(async () => {
-      const mod = await import("/src-v2/lib/auth.svelte.ts");
+      const mod = await import("/src/lib/auth.svelte.ts");
       // Force authState into a state where it CAN'T match a "ghost-user"
       // JWT: wipe storage, re-load → status=signedOut, user=null.
       localStorage.removeItem("puffer.authToken");
@@ -424,7 +424,7 @@ test.describe("login persistence", () => {
     // a separate page.evaluate() afterwards races and 50% errors with
     // SecurityError.
     const after = await page.evaluate(async () => {
-      const mod = await import("/src-v2/lib/auth.svelte.ts");
+      const mod = await import("/src/lib/auth.svelte.ts");
       // Stub location.href so signOut's bounce to Auth Station /logout is
       // a no-op for the purpose of this test — we only care that the
       // synchronous local-clear happened.

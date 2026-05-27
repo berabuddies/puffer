@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { FakeDaemon } from "../v1/support/fakeDaemon";
+import { FakeDaemon } from "./support/fakeDaemon";
 
 async function bootOnboarded(page: Page, daemon: FakeDaemon): Promise<void> {
   await page.addInitScript(() => {

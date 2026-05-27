@@ -4,7 +4,7 @@
  * Ported from worldclaw-app/lib/backend.ts. Adapted for the desktop
  * environment:
  *   - Auth token is read from localStorage key `puffer.authToken`
- *     (the convention used by src-v2/lib/auth.svelte.ts).
+ *     (the convention used by src/lib/auth.svelte.ts).
  *   - The RN-specific refresh-on-1007 flow from the donor is dropped:
  *     it depended on `useAuthStore` / `refreshBackendSession` which
  *     don't exist in the desktop app. On any of the auth-failure codes

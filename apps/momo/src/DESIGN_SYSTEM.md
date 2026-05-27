@@ -4,8 +4,8 @@ Source of truth: Paper file **Momo**, artboard **WorldAgent Home Design System**
 
 Code surfaces:
 
-- `apps/puffer-desktop/src-v2/styles/tokens.css` — every value below as a CSS custom property.
-- `apps/puffer-desktop/src-v2/styles/base.css` — reset, web fonts, and `.text-*` utility classes.
+- `apps/momo/src/styles/tokens.css` — every value below as a CSS custom property.
+- `apps/momo/src/styles/base.css` — reset, web fonts, and `.text-*` utility classes.
 
 > All page agents should consume the tokens. **Do not** hard-code hex values, font names, or pixel sizes. If you need something that isn't here, ask the design-system agent to extend `tokens.css` rather than introducing a one-off.
 

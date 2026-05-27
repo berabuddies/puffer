@@ -5,7 +5,7 @@
  * helper. Each toast auto-dismisses after `TOAST_TTL_MS` (3s); callers can
  * also remove one early via `dismissToast(id)`.
  *
- * Renderer: src-v2/components/common/Toast.svelte (mounted once in App.svelte).
+ * Renderer: src/components/common/Toast.svelte (mounted once in App.svelte).
  */
 
 export type ToastKind = "info" | "success" | "error";

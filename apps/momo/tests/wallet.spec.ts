@@ -13,7 +13,7 @@
  */
 
 import { expect, test, type Page, type ConsoleMessage } from "@playwright/test";
-import type { KycStatus } from "../../src-v2/lib/walletTypes";
+import type { KycStatus } from "../src/lib/walletTypes";
 
 // Shape of window.__wallet exposed by the mock. Kept in sync manually with
 // walletClient.svelte.ts; if you add a knob there add it here.

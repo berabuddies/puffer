@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { FakeDaemon, type FakeDaemonSessionInput } from "../v1/support/fakeDaemon";
+import { FakeDaemon, type FakeDaemonSessionInput } from "./support/fakeDaemon";
 
 /**
  * V2 sidebar session management — the per-group "+", the inline rename,
