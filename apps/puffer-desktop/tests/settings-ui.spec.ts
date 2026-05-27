@@ -24,6 +24,22 @@ test("empty provider registry still offers built-in setup options", async ({ pag
   await expect(page.getByRole("button", { name: "Project", exact: true })).toBeVisible();
 });
 
+test("web preview auto-connects to local dev backend websocket", async ({ page }) => {
+  const daemon = new FakeDaemon({ url: "ws://127.0.0.1:1421/ws" });
+  await daemon.install(page);
+
+  await page.goto("/?skipOnboarding=1");
+  await daemon.waitForRequest("load_settings_snapshot");
+
+  expect(daemon.socketUrls.some((url) => url.startsWith("ws://127.0.0.1:1421/ws"))).toBe(true);
+  await page.getByRole("button", { name: "Settings" }).click();
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.locator(".pf-settings-row").filter({ hasText: "Daemon" })).toContainText(
+    "ws://127.0.0.1:1421/ws"
+  );
+  await expect(pane.getByText("Preview mode")).toHaveCount(0);
+});
+
 test("default model cannot be saved before provider models load", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
