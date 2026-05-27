@@ -42,6 +42,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Ui,
         ),
         cmd(
+            "autodream",
+            &["dream"],
+            "Consolidate durable project memory and suggest skill-worthy traces",
+            Some("[status]"),
+            CommandKind::Local,
+        ),
+        cmd(
             "branch",
             &["fork"],
             "Create a branch of the current conversation at this point",

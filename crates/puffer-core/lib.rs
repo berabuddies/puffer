@@ -1,4 +1,5 @@
 mod agent_catalog;
+mod autodream;
 mod command;
 mod command_helpers;
 mod command_summary;
@@ -23,6 +24,11 @@ pub mod ultrareview;
 mod workspace_paths;
 
 pub use agent_catalog::{load_agent_catalog, AgentCatalogEntry};
+pub use autodream::{
+    autodream_status, autodream_status_with_store, autodream_suggestions_with_store,
+    autodream_turn_completed, autodream_turn_completed_with_store, run_autodream_review,
+    spawn_autodream_review, spawn_autodream_review_with_store, AutoDreamOutcome,
+};
 pub use command::{
     command_surface, dispatch_command, find_command, supported_commands, CommandKind, CommandSpec,
 };

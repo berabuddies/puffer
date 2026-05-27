@@ -2,6 +2,7 @@ mod actions;
 mod agents;
 pub(crate) mod artifacts;
 mod auth;
+mod autodream;
 mod branch;
 mod common;
 mod config;
@@ -33,6 +34,7 @@ pub(crate) use auth::with_login_flow_handler;
 pub(crate) use auth::{
     remove_provider_credentials, render_login_guidance, run_provider_login_flow, supports_auth_mode,
 };
+pub(crate) use autodream::handle_autodream_command;
 pub(crate) use branch::handle_branch_command;
 pub(crate) use common::{
     describe_context, describe_files_in_context, describe_git_diff, emit_system,

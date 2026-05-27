@@ -393,6 +393,7 @@ pub(crate) fn handle_prompt_submit(
     let worker_resources = resources.clone();
     let worker_providers = providers.clone();
     let worker_prompt = submitted.clone();
+    let worker_session_store = session_store.clone();
     let mut worker_auth_store = auth_store.clone();
     let (sender, receiver) = mpsc::channel();
     // Cancel handle: cloned into the worker thread, original kept on
@@ -486,6 +487,18 @@ pub(crate) fn handle_prompt_submit(
                     &worker_auth_store,
                 );
             }
+            if puffer_core::autodream_turn_completed_with_store(
+                &mut worker_state,
+                &worker_session_store,
+            ) {
+                puffer_core::spawn_autodream_review_with_store(
+                    &worker_state,
+                    &worker_resources,
+                    &worker_providers,
+                    &worker_auth_store,
+                    &worker_session_store,
+                );
+            }
         }
         let _ = sender.send(PendingSubmitEvent::Finished(PendingSubmitResult {
             outcome,
@@ -493,6 +506,7 @@ pub(crate) fn handle_prompt_submit(
             session_permission_state: worker_state.session_permission_state().clone(),
             session_allow_all: worker_state.session_permission_state().allow_all_tools(),
             project_memory_review_turns: worker_state.project_memory_review_turns,
+            autodream_review_turns: worker_state.autodream_review_turns,
         }));
     });
     tui.pending_submit = Some(PendingSubmit {
@@ -762,6 +776,7 @@ pub(crate) fn poll_pending_submit(
                 session_permission_state: state.session_permission_state().clone(),
                 session_allow_all: false,
                 project_memory_review_turns: state.project_memory_review_turns,
+                autodream_review_turns: state.autodream_review_turns,
             }),
         };
         match event {
@@ -868,6 +883,7 @@ pub(crate) fn poll_pending_submit(
                 // round-trip exactly.
                 state.replace_session_permission_state(result.session_permission_state);
                 state.project_memory_review_turns = result.project_memory_review_turns;
+                state.autodream_review_turns = result.autodream_review_turns;
                 match result.outcome {
                     Ok(turn) => {
                         if rendered_tool_invocations < turn.tool_invocations.len() {
@@ -1045,6 +1061,15 @@ pub(crate) fn handle_submit(
             finalize_assistant_text(state, session_store, &turn.assistant_text)?;
             if puffer_core::project_memory_turn_completed(state) {
                 puffer_core::spawn_project_memory_review(state, resources, providers, auth_store);
+            }
+            if puffer_core::autodream_turn_completed_with_store(state, session_store) {
+                puffer_core::spawn_autodream_review_with_store(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    session_store,
+                );
             }
         }
         Err(error) => {

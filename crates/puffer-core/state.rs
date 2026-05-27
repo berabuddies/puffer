@@ -200,6 +200,8 @@ pub struct AppState {
     pub status_line_text: Option<String>,
     pub project_memory: Option<ProjectMemoryContext>,
     pub project_memory_review_turns: usize,
+    pub autodream_review_turns: usize,
+    pub autodream_last_skip_reason: Option<String>,
     pub vim_mode: bool,
     /// Session-scoped reflection policy toggled via `/reflect`; `None` means off.
     pub reflection_config: Option<ReflectionConfig>,
@@ -320,6 +322,8 @@ impl AppState {
             status_line_text: None,
             project_memory,
             project_memory_review_turns: 0,
+            autodream_review_turns: 0,
+            autodream_last_skip_reason: None,
             vim_mode,
             reflection_config: None,
             lambda_gate: None,
@@ -582,6 +586,31 @@ impl AppState {
 
     pub fn memory_flush_min_turns(&self) -> usize {
         self.config.memory.flush_min_turns
+    }
+
+    /// Returns whether automatic AutoDream background review is enabled.
+    pub fn autodream_enabled(&self) -> bool {
+        self.config.memory.autodream_enabled
+    }
+
+    /// Returns the number of completed turns between AutoDream reviews.
+    pub fn autodream_interval(&self) -> usize {
+        self.config.memory.autodream_interval
+    }
+
+    /// Returns the number of hours between automatic AutoDream reviews.
+    pub fn autodream_min_hours(&self) -> u64 {
+        self.config.memory.autodream_min_hours
+    }
+
+    /// Returns the number of updated sessions required for automatic AutoDream.
+    pub fn autodream_min_sessions(&self) -> usize {
+        self.config.memory.autodream_min_sessions
+    }
+
+    /// Returns whether AutoDream should suggest `/genskill` for worthy traces.
+    pub fn autodream_genskill_suggestions_enabled(&self) -> bool {
+        self.config.memory.autodream_genskill_suggestions
     }
 
     pub fn refresh_project_memory(&mut self) {

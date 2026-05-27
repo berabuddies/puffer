@@ -1,17 +1,17 @@
 use crate::command_helpers::{
     append_tool_invocations, append_trace_events, describe_context, describe_files_in_context,
     describe_git_diff, emit_system, execute_connect_flow, execute_skill_command,
-    handle_agents_command, handle_branch_command, handle_config_command, handle_copy_command,
-    handle_effort_command, handle_export_command, handle_fast_command, handle_genskill_command,
-    handle_goal_command, handle_hooks_command, handle_ide_command, handle_keybindings_command,
-    handle_mcp_command, handle_memory_command, handle_model_command, handle_monitor_command,
-    handle_permissions_command, handle_plan_command, handle_plugin_command, handle_recap_command,
-    handle_reflect_command, handle_remote_control_command, handle_remote_env_command,
-    handle_resume_command, handle_sandbox_command, handle_session_command, handle_tag_command,
-    handle_tasks_command, handle_terminal_setup_command, handle_workflows_command, list_skills,
-    persist_user_settings, record_command_checkpoint, reload_config_from_disk,
-    remove_provider_credentials, render_login_guidance, rewind_transcript, run_doctor,
-    run_provider_login_flow, supports_auth_mode,
+    handle_agents_command, handle_autodream_command, handle_branch_command, handle_config_command,
+    handle_copy_command, handle_effort_command, handle_export_command, handle_fast_command,
+    handle_genskill_command, handle_goal_command, handle_hooks_command, handle_ide_command,
+    handle_keybindings_command, handle_mcp_command, handle_memory_command, handle_model_command,
+    handle_monitor_command, handle_permissions_command, handle_plan_command, handle_plugin_command,
+    handle_recap_command, handle_reflect_command, handle_remote_control_command,
+    handle_remote_env_command, handle_resume_command, handle_sandbox_command,
+    handle_session_command, handle_tag_command, handle_tasks_command, handle_terminal_setup_command,
+    handle_workflows_command, list_skills, persist_user_settings, record_command_checkpoint,
+    reload_config_from_disk, remove_provider_credentials, render_login_guidance, rewind_transcript,
+    run_doctor, run_provider_login_flow, supports_auth_mode,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_status_summary, render_usage_summary,
@@ -415,6 +415,17 @@ fn execute_local_command(
         }
         "effort" => handle_effort_command(state, providers, session_store, args),
         "fast" => handle_fast_command(state, session_store, args),
+        "autodream" => {
+            let message = handle_autodream_command(
+                state,
+                session_store,
+                resources,
+                providers,
+                auth_store,
+                args,
+            )?;
+            emit_system(state, session_store, message)
+        }
         "genskill" => {
             let message = handle_genskill_command(state, resources, providers, auth_store, args)?;
             emit_system(state, session_store, message)

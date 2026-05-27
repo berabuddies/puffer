@@ -137,6 +137,16 @@ pub struct MemoryConfig {
     pub background_review: bool,
     #[serde(default = "default_flush_on_compact")]
     pub flush_on_compact: bool,
+    #[serde(default = "default_autodream_enabled")]
+    pub autodream_enabled: bool,
+    #[serde(default = "default_autodream_interval")]
+    pub autodream_interval: usize,
+    #[serde(default = "default_autodream_min_hours")]
+    pub autodream_min_hours: u64,
+    #[serde(default = "default_autodream_min_sessions")]
+    pub autodream_min_sessions: usize,
+    #[serde(default = "default_autodream_genskill_suggestions")]
+    pub autodream_genskill_suggestions: bool,
 }
 
 impl Default for MemoryConfig {
@@ -148,6 +158,11 @@ impl Default for MemoryConfig {
             flush_min_turns: default_flush_min_turns(),
             background_review: default_background_review(),
             flush_on_compact: default_flush_on_compact(),
+            autodream_enabled: default_autodream_enabled(),
+            autodream_interval: default_autodream_interval(),
+            autodream_min_hours: default_autodream_min_hours(),
+            autodream_min_sessions: default_autodream_min_sessions(),
+            autodream_genskill_suggestions: default_autodream_genskill_suggestions(),
         }
     }
 }
@@ -276,6 +291,26 @@ fn default_background_review() -> bool {
 }
 
 fn default_flush_on_compact() -> bool {
+    true
+}
+
+fn default_autodream_enabled() -> bool {
+    false
+}
+
+fn default_autodream_interval() -> usize {
+    16
+}
+
+fn default_autodream_min_hours() -> u64 {
+    24
+}
+
+fn default_autodream_min_sessions() -> usize {
+    5
+}
+
+fn default_autodream_genskill_suggestions() -> bool {
     true
 }
 
