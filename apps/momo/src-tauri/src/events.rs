@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
-pub(crate) const EVENT_BRIDGE: &str = "corbina:event";
+pub(crate) const EVENT_BRIDGE: &str = "momo:event";
 
 static WS_EVENT_SUBSCRIBERS: OnceLock<Mutex<Vec<Sender<String>>>> = OnceLock::new();
 
@@ -35,10 +35,6 @@ pub(crate) struct EventEmitter {
 }
 
 impl EventEmitter {
-    pub(crate) fn new(app: AppHandle) -> Self {
-        Self { app: Some(app) }
-    }
-
     pub(crate) fn websocket_only() -> Self {
         Self { app: None }
     }

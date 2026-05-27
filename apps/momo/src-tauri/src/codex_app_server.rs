@@ -144,8 +144,8 @@ impl AppServerClient {
             "initialize",
             json!({
                 "clientInfo": {
-                    "name": "corbina",
-                    "title": "Corbina",
+                    "name": "momo",
+                    "title": "Momo",
                     "version": "0.0.0",
                 },
                 "capabilities": {
