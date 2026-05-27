@@ -1,20 +1,30 @@
 /**
- * Connected Apps catalogue. Logos use the existing /service-icons paths
- * where available, otherwise an empty string — page agents will swap to
- * the real asset (svg/png) as they implement the page.
+ * Connected Apps catalogue. Only the apps Momo can actually authenticate
+ * end-to-end live here — Telegram (personal-account login) and Email
+ * (IMAP/SMTP). Both flows are driven by `puffer internal-tool …` via the
+ * Tauri RPCs in `src-tauri/src/connectors.rs`.
+ *
+ * The original Paper artboard 1B6-0 had ten brands. We intentionally hide
+ * the eight puffer doesn't support yet (Google Calendar, Meet, Lark,
+ * Twitter, Facebook, Instagram, GitHub, Notion, iMessage) instead of
+ * showing them as placeholders the user can't click through.
  */
 
 import type { AppEntry } from "./types";
 
 export const apps: AppEntry[] = [
-  { id: "google-calendar", name: "Google Calendar", status: "connected", logo: "/service-icons/google-calendar.svg" },
-  { id: "gmail", name: "Gmail", status: "not_connected", logo: "/service-icons/gmail.svg" },
-  { id: "google-meet", name: "Google Meet", status: "not_connected", logo: "/service-icons/google-meet.svg" },
-  { id: "lark", name: "Lark", status: "not_connected", logo: "/service-icons/lark.svg" },
-  { id: "twitter", name: "Twitter / X", status: "not_connected", logo: "/service-icons/twitter.svg" },
-  { id: "facebook", name: "Facebook", status: "not_connected", logo: "/service-icons/facebook.svg" },
-  { id: "instagram", name: "Instagram", status: "not_connected", logo: "/service-icons/instagram.svg" },
-  { id: "github", name: "GitHub", status: "not_connected", logo: "/service-icons/github.svg" },
-  { id: "notion", name: "Notion", status: "not_connected", logo: "/service-icons/notion.svg" },
-  { id: "imessage", name: "iMessage", status: "not_connected", logo: "/service-icons/imessage.svg" }
+  {
+    id: "telegram",
+    name: "Telegram",
+    status: "not_connected",
+    logo: "/service-icons/telegram.svg",
+    connectorSlug: "telegram-login",
+  },
+  {
+    id: "email",
+    name: "Email",
+    status: "not_connected",
+    logo: "/service-icons/email.svg",
+    connectorSlug: "email",
+  },
 ];

@@ -66,6 +66,9 @@ impl BackendState {
         method: &str,
         params: Value,
     ) -> Result<Value> {
+        if let Some(result) = crate::connectors::handle(method, &params) {
+            return result;
+        }
         match method {
             "list_projects" => serde_value(self.list_projects()?),
             "list_grouped_sessions" => serde_value(self.list_grouped_sessions()?),
@@ -869,7 +872,17 @@ fn run_agent_turn_inner(
                 raw_stdout.push('\n');
                 if launch.json_stream {
                     if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                        if let Some(delta) = extract_text_delta(&value) {
+                        if let Some(invocation) = extract_puffer_tool_invocation(&value) {
+                            emit_backend_event(
+                                events,
+                                &channel,
+                                json!({
+                                    "type": "tool-invocations",
+                                    "turnId": turn_id,
+                                    "invocations": [invocation],
+                                }),
+                            );
+                        } else if let Some(delta) = extract_text_delta(&value) {
                             assistant_text.push_str(&delta);
                             emit_backend_event(
                                 events,
@@ -1020,8 +1033,13 @@ fn build_provider_command(
             Ok(ProviderLaunch {
                 label: "Puffer".to_string(),
                 command,
-                args: vec!["--no-alt-screen".to_string(), message.to_string()],
-                json_stream: false,
+                args: vec![
+                    "non-interactive".to_string(),
+                    "--user-message".to_string(),
+                    message.to_string(),
+                    "--json-events".to_string(),
+                ],
+                json_stream: true,
             })
         }
         other => bail!("unknown provider `{other}`"),
@@ -1081,6 +1099,47 @@ fn read_config() -> Result<StoredConfig> {
         config.default_provider = Some(DEFAULT_PROVIDER.to_string());
     }
     Ok(config)
+}
+
+/// Maps a `puffer non-interactive --json-events` `tool-invocation` line
+/// into the `invocations[]` shape `chat.svelte.ts::tool-invocations`
+/// expects. The puffer event carries the real `tool_id` and `call_id`,
+/// plus a structured `input` object and stringified `output`. Without
+/// this dedicated extractor the generic `is_tool_event` fallback below
+/// would set `toolId = "tool-invocation"` (the event's `type` field)
+/// and lose the success flag.
+fn extract_puffer_tool_invocation(value: &Value) -> Option<Value> {
+    let event_type = value.get("type").and_then(Value::as_str)?;
+    if event_type != "tool-invocation" {
+        return None;
+    }
+    let tool_id = value
+        .get("tool_id")
+        .and_then(Value::as_str)
+        .unwrap_or("tool")
+        .to_string();
+    let call_id = value
+        .get("call_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let input = value.get("input").cloned().unwrap_or(Value::Null);
+    let output = value
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let success = value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    Some(json!({
+        "callId": call_id,
+        "toolId": tool_id,
+        "input": input,
+        "output": output,
+        "success": success,
+    }))
 }
 
 fn extract_text_delta(value: &Value) -> Option<String> {
@@ -1450,7 +1509,7 @@ fn provider_command(provider: &str) -> String {
     }
 }
 
-fn ensure_provider_command(provider: &str) -> Result<String> {
+pub(crate) fn ensure_provider_command(provider: &str) -> Result<String> {
     let command = provider_command(provider);
     if command_exists(&command) {
         Ok(command)
@@ -1512,7 +1571,7 @@ fn title_from_message(message: &str) -> String {
     }
 }
 
-fn string_param(params: &Value, names: &[&str]) -> Result<String> {
+pub(crate) fn string_param(params: &Value, names: &[&str]) -> Result<String> {
     for name in names {
         if let Some(value) = params.get(*name).and_then(Value::as_str) {
             return Ok(value.to_string());
@@ -1530,7 +1589,7 @@ fn optional_string_param(params: &Value, names: &[&str]) -> Option<String> {
     })
 }
 
-fn optional_trimmed_string_param(params: &Value, names: &[&str]) -> Option<String> {
+pub(crate) fn optional_trimmed_string_param(params: &Value, names: &[&str]) -> Option<String> {
     optional_string_param(params, names).and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -1648,7 +1707,7 @@ fn app_home() -> Result<PathBuf> {
     Ok(primary)
 }
 
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))

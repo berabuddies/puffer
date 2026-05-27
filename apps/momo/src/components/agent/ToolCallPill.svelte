@@ -24,10 +24,14 @@
     toolId: string;
     callId: string;
     status: "running" | "success" | "failed";
+    /** Tool input payload — lets `Bash` mask as `Telegram` when its
+     * `command` starts with `telegram …`. Optional for compatibility
+     * with synthesized pills that have no input on hand. */
+    input?: unknown;
   }
-  let { toolId, callId, status }: Props = $props();
+  let { toolId, callId, status, input }: Props = $props();
 
-  let mapped = $derived(lookupToolLabel(toolId));
+  let mapped = $derived(lookupToolLabel(toolId, input));
 
   // Per-status icon. Mapped tools keep their domain icon while running and
   // swap to status icons (✓ / ⚠) on resolve so the state is obvious at a

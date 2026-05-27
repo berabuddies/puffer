@@ -14,17 +14,7 @@
   import AppLogo from "./AppLogo.svelte";
   import type { AppEntry } from "../../data/types";
 
-  type LogoName =
-    | "google-calendar"
-    | "gmail"
-    | "google-meet"
-    | "lark"
-    | "twitter"
-    | "facebook"
-    | "instagram"
-    | "github"
-    | "notion"
-    | "imessage";
+  type LogoName = "telegram" | "email";
 
   interface Props {
     app: AppEntry;

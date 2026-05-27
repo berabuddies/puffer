@@ -83,6 +83,11 @@ export interface AppEntry {
   status: "connected" | "not_connected";
   /** Asset path for the logo (page agent may swap with a vector). */
   logo: string;
+  /**
+   * Puffer connector slug this card maps to (e.g. `telegram-login`, `email`).
+   * Drives which non-interactive `puffer internal-tool` flow the modal runs.
+   */
+  connectorSlug: "telegram-login" | "email";
 }
 
 export interface WalletActivity {

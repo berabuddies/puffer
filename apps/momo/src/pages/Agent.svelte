@@ -162,6 +162,7 @@
               toolId={message.toolId}
               callId={message.callId}
               status={message.status}
+              input={message.input}
             />
           {:else if message.role === "question"}
             <AnswerForm

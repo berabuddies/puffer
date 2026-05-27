@@ -1,5 +1,6 @@
 mod backend;
 mod codex_app_server;
+mod connectors;
 mod dtos;
 mod events;
 mod oauth_listener;
