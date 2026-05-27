@@ -497,11 +497,26 @@
     font-size: 1.04rem;
   }
 
-  .list {
+  /* Restore bullet/number markers — the app's global base.css line 88-90
+   * resets `ul, ol { list-style: none }`. `display: grid` also suppresses
+   * markers, so we use block + margin for row spacing. */
+  ul.list {
     margin: 0;
     padding-left: 1.35rem;
-    display: grid;
-    gap: 0.3rem;
+    display: block;
+    list-style: disc outside;
+  }
+  ol.list {
+    margin: 0;
+    padding-left: 1.6rem;
+    display: block;
+    list-style: decimal outside;
+  }
+  .list li {
+    margin-top: 0.3rem;
+  }
+  .list li:first-child {
+    margin-top: 0;
   }
 
   li.task {
