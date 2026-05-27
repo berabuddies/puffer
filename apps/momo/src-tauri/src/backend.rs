@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,12 +27,30 @@ const DEFAULT_PUFFER_MODEL: &str = "default";
 
 pub(crate) struct BackendState {
     turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Per-request senders for `askUserQuestion` round-trips. Keyed by
+    /// `requestId` (session-unique by construction). When the agent runtime
+    /// emits a `user-question-request` event it inserts a sender here and
+    /// blocks on the matching receiver; `resolve_user_question` pops the
+    /// sender and forwards the user's answers back to the worker.
+    ///
+    /// Mirrors `apps/puffer-desktop/src-tauri/src/turn.rs:48-49`
+    /// (`pending_questions: Arc<Mutex<HashMap<String, mpsc::Sender<...>>>>`)
+    /// but lives on the global backend rather than per-turn because momo's
+    /// turn registry doesn't carry an entry struct — one map covers all
+    /// concurrent turns since request ids are unique session-wide.
+    ///
+    /// Today nothing inserts into this map — see
+    /// `codex_app_server.rs::tool_request_user_input_response` for the
+    /// extension point. The frontend works against this RPC regardless
+    /// (tests synthesise the event via `daemon.emit`).
+    pending_questions: Mutex<HashMap<String, std_mpsc::Sender<Value>>>,
 }
 
 impl BackendState {
     pub(crate) fn new() -> Self {
         Self {
             turns: Mutex::new(HashMap::new()),
+            pending_questions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -82,6 +101,7 @@ impl BackendState {
                 }
                 Ok(json!({}))
             }
+            "resolve_user_question" => self.resolve_user_question(params),
             other => bail!("unknown method: {other}"),
         }
     }
@@ -443,6 +463,78 @@ impl BackendState {
         let mut credentials = self.load_credentials()?;
         credentials.api_keys.remove(&provider_id);
         self.save_credentials(&credentials)
+    }
+
+    /// Resolves a pending `askUserQuestion` prompt for an in-flight turn.
+    /// Pops the sender registered under `requestId` and forwards the user's
+    /// answers via the mpsc channel; the agent-runtime worker that emitted
+    /// the question is blocked on `rx.recv()` and resumes once the value
+    /// arrives. Mirrors `apps/puffer-desktop/src-tauri/src/turn.rs:295-315`
+    /// adapted for momo's single global pending map (rather than per-turn).
+    ///
+    /// `turnId` is accepted for parity with v1's RPC shape — momo doesn't
+    /// key the map by turnId today (requestIds are session-unique), but
+    /// future runtime emission may want it.
+    fn resolve_user_question(&self, params: Value) -> Result<Value> {
+        let _turn_id = string_param(&params, &["turnId", "turn_id"])?;
+        let request_id = string_param(&params, &["requestId", "request_id"])?;
+        let answers = params
+            .get("answers")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let sender = self
+            .pending_questions
+            .lock()
+            .unwrap()
+            .remove(&request_id);
+        let Some(sender) = sender else {
+            // No pending request — tests synthesise events without a real
+            // runtime waiting, so this is the common path today. Return
+            // success rather than 500ing the round-trip.
+            return Ok(json!({}));
+        };
+        sender
+            .send(answers)
+            .map_err(|_| anyhow!("agent worker already released the user question channel"))?;
+        Ok(json!({}))
+    }
+
+    /// Extension point for the agent runtime: register a pending sender
+    /// and emit `user-question-request` on the session event channel.
+    /// Returns the receiver — the caller blocks on `rx.recv()` until the
+    /// frontend POSTs `resolve_user_question`.
+    ///
+    /// Today nothing calls this; see
+    /// `codex_app_server.rs::tool_request_user_input_response` for the
+    /// site where future ask-user-question routing should land. The
+    /// `#[allow(dead_code)]` is intentional — this is a public hook
+    /// kept warm so tests + the frontend stay aligned with a future
+    /// runtime.
+    #[allow(dead_code)]
+    pub(crate) fn request_user_question(
+        &self,
+        events: &EventEmitter,
+        session_id: &str,
+        turn_id: &str,
+        request_id: &str,
+        questions: Value,
+    ) -> std_mpsc::Receiver<Value> {
+        let (tx, rx) = std_mpsc::channel::<Value>();
+        self.pending_questions
+            .lock()
+            .unwrap()
+            .insert(request_id.to_string(), tx);
+        let channel = format!("session:{session_id}:event");
+        events.emit(
+            channel,
+            json!({
+                "type": "user-question-request",
+                "turnId": turn_id,
+                "requestId": request_id,
+                "questions": questions,
+            }),
+        );
+        rx
     }
 
     fn run_agent_turn(&self, events: EventEmitter, params: Value) -> Result<Value> {

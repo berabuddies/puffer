@@ -24,6 +24,7 @@
   import ChatBubble from "../components/agent/ChatBubble.svelte";
   import ThinkingBlock from "../components/agent/ThinkingBlock.svelte";
   import ToolCallPill from "../components/agent/ToolCallPill.svelte";
+  import AnswerForm from "../components/agent/AnswerForm.svelte";
   import Mascot from "../components/common/Mascot.svelte";
   import MessageBody from "../components/common/MessageBody.svelte";
   import { formatTime } from "../lib/timeFormat";
@@ -35,6 +36,7 @@
     retryHydration,
     runningTurnBySessionId,
     cancelRunningTurn,
+    answerQuestion,
     type ChatMessage
   } from "../lib/chat.svelte";
 
@@ -79,6 +81,8 @@
         void m.text;
       } else if (m.role === "tool") {
         void m.status;
+      } else if (m.role === "question") {
+        void m.answered;
       }
     });
     if (!threadEl) return;
@@ -152,15 +156,25 @@
               callId={message.callId}
               status={message.status}
             />
+          {:else if message.role === "question"}
+            <AnswerForm
+              questions={message.questions}
+              answered={message.answered}
+              onSubmit={(answers) =>
+                taskId && answerQuestion(taskId, message.requestId, answers)}
+            />
           {:else}
             <!--
               Suppress the empty pending assistant row whenever some other
               "agent is working" signal for the same turn is on screen —
-              either a thinking block or a running tool pill. Both already
-              convey activity, so the typing-dot stand-in is redundant.
+              a thinking block, a running tool pill, OR an unanswered
+              question form. Each already conveys activity, so the typing-
+              dot stand-in is redundant.
               Resolved tool pills (success/failed) DO NOT count: between
               tool steps the agent may be silently composing, and the
-              typing dots are the only signal of life.
+              typing dots are the only signal of life. Answered question
+              forms DO NOT count either — the agent is now actively
+              composing its follow-up.
             -->
             {@const hasActivitySibling = Boolean(
               message.turnId &&
@@ -169,7 +183,10 @@
                     (m.role === "thinking" && m.turnId === message.turnId) ||
                     (m.role === "tool" &&
                       m.turnId === message.turnId &&
-                      m.status === "running")
+                      m.status === "running") ||
+                    (m.role === "question" &&
+                      m.turnId === message.turnId &&
+                      !m.answered)
                 )
             )}
             {@const hideEmptyPending =

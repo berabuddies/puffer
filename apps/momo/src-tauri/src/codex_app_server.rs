@@ -284,6 +284,26 @@ fn permissions_approval_response(params: &Value, permission_mode: &str) -> Value
     json!({"permissions": Value::Object(permissions), "scope": "turn"})
 }
 
+// EXTENSION POINT — user-facing askUserQuestion routing.
+//
+// Today this handler auto-answers `mcp_tool_call_approval_*` questions and
+// returns an empty `answers` map for everything else, which silently denies
+// every non-approval prompt. The user-facing askUserQuestion flow lives in
+// the frontend (`apps/momo/src/components/agent/AnswerForm.svelte`) wired
+// to the `user-question-request` event + `resolve_user_question` RPC on
+// `BackendState`. To light up that flow:
+//
+//   1. detect a "real" user question here (i.e. the non-MCP-approval case)
+//   2. mint a `requestId` (UUID), call
+//      `BackendState::request_user_question(events, session_id, turn_id,
+//      &request_id, params["questions"])` — that registers the pending
+//      sender and emits `user-question-request`
+//   3. block on the returned receiver (`rx.recv_timeout(...)`) and shape
+//      the result into the codex `{ answers: { ... } }` response.
+//
+// Doing that requires plumbing `BackendState` + the active session_id /
+// turn_id into this fn; it's deferred until the runtime actually needs
+// it. The frontend works against tests today via `daemon.emit`.
 fn tool_request_user_input_response(params: &Value, permission_mode: &str) -> Value {
     let mut answers = serde_json::Map::new();
     if permission_mode == "read-only" {

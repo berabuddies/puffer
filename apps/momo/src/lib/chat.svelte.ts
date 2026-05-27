@@ -16,7 +16,7 @@
  */
 
 import * as agent from "./agentClient";
-import type { SessionEventPayload } from "./agentClient";
+import type { AskUserQuestionItem, SessionEventPayload } from "./agentClient";
 import { pushToast } from "./toast.svelte";
 
 /**
@@ -80,6 +80,21 @@ export type ChatMessage =
       createdAt: number;
       /** The turn this tool call belongs to. Used for ordering + cleanup. */
       turnId: string;
+    }
+  | {
+      id: string;
+      role: "question";
+      /** Backend-minted id for this prompt; routed through resolve_user_question. */
+      requestId: string;
+      /** The turn this question belongs to — used for ordering before the assistant bubble. */
+      turnId: string;
+      /** Originally an array (multi-question batch). MVP renders only the first; rest deferred. */
+      questions: AskUserQuestionItem[];
+      /** Flipped to true on optimistic submit; rolled back if the RPC rejects. */
+      answered: boolean;
+      /** Picked answers keyed by question index (stringified). */
+      answers?: Record<string, string | string[]>;
+      createdAt: number;
     };
 
 /** Map of sessionId → ordered message list. */
@@ -323,6 +338,35 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
             list.push(synth);
           }
         }
+      }
+      break;
+    }
+    case "user-question-request": {
+      const turnId = (payload as { turnId: string }).turnId;
+      const requestId = (payload as { requestId: string }).requestId;
+      const questions = ((payload as { questions?: unknown }).questions ?? []) as AskUserQuestionItem[];
+      // De-dupe by requestId — the backend may re-emit on reconnect and we
+      // mustn't double-render the form.
+      if (list.some((m) => m.role === "question" && m.requestId === requestId)) break;
+      const newQuestion: Extract<ChatMessage, { role: "question" }> = {
+        id: nextMessageId(),
+        role: "question",
+        requestId,
+        turnId,
+        questions,
+        answered: false,
+        createdAt: Date.now()
+      };
+      // Slot BEFORE the pending assistant bubble for this turn — same
+      // pattern as thinking-delta and tool-calls-requested. The agent
+      // composes its final answer AFTER the user picks, so the form
+      // belongs ahead of the assistant bubble in reading order.
+      const ref = pendingByTurn.get(turnId);
+      const assistantIdx = ref ? list.findIndex((m) => m.id === ref.messageId) : -1;
+      if (assistantIdx >= 0) {
+        list.splice(assistantIdx, 0, newQuestion);
+      } else {
+        list.push(newQuestion);
       }
       break;
     }
@@ -586,6 +630,46 @@ function fireTurn(sessionId: string, bubbleId: string, message: string): void {
       }
       pushToast(`Turn failed: ${msg}`, "error");
     });
+}
+
+/**
+ * Submit the user's answer for an inline question form. Optimistically
+ * flips `answered=true` so the form locks immediately; on RPC rejection
+ * rolls `answered` back so the user can retry. The daemon-side worker
+ * thread is blocked on `rx.recv()` until this round-trip lands (see
+ * `apps/momo/src-tauri/src/backend.rs::resolve_user_question`).
+ *
+ * No-op if the requestId doesn't resolve to a known question message
+ * or it's already answered — protects against double-submits when the
+ * user double-clicks the submit button before the RPC settles.
+ */
+export async function answerQuestion(
+  sessionId: string,
+  requestId: string,
+  answers: Record<string, string | string[]>,
+): Promise<void> {
+  const list = chatSessions[sessionId];
+  if (!list) return;
+  const target = list.find(
+    (m): m is Extract<ChatMessage, { role: "question" }> =>
+      m.role === "question" && m.requestId === requestId
+  );
+  if (!target || target.answered) return;
+  // Optimistic lock — form re-renders disabled, double-clicks are ignored
+  // upstream because answerQuestion returns early on `target.answered`.
+  target.answered = true;
+  target.answers = answers;
+  try {
+    await agent.resolveUserQuestion(target.turnId, requestId, answers);
+  } catch (err) {
+    // Roll back so the user can retry. We don't roll back `target.answers`
+    // because the selection (which the form reads via the `answered` flag)
+    // is meaningful next-attempt context — but the form keys disabled state
+    // off `answered`, so reverting that alone is enough.
+    target.answered = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    pushToast(`Could not send answer: ${msg}`, "error");
+  }
 }
 
 /**
