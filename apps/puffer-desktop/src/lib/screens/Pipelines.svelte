@@ -2148,7 +2148,7 @@
         {workflowPage === "overview" ? "Workflows" : workflowPage === "create" ? "Create workflow" : "Workflow detail"}
       </span>
       <strong>{workflowPage === "overview" ? "Workflow dashboard" : workflow?.pipeline.name ?? "No pipeline"}</strong>
-      {#if workflow}
+      {#if workflow && workflowPage !== "overview"}
         <span class="pf-pipe-hash">{workflow.slug}</span>
       {/if}
       <span class="pf-pipe-save-note">{saveNotice}</span>
@@ -2166,19 +2166,28 @@
           <Icon name="chevL" size={12} />Back
         </button>
       {/if}
-      <button
-        type="button"
-        class="sc-btn"
-        data-variant="ghost"
-        data-size="sm"
-        aria-label="Create workflow"
-        onclick={() => createWorkflowDraft()}
-      >
-        <Icon name="plus" size={12} />Create
-      </button>
+      {#if workflowPage !== "create"}
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="ghost"
+          data-size="sm"
+          aria-label="New workflow"
+          onclick={() => createWorkflowDraft()}
+        >
+          <Icon name="plus" size={12} />New workflow
+        </button>
+      {/if}
       {#if workflowPage !== "overview"}
         {#each providerOptions as provider (provider.id)}
-          <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={() => addAgent(provider.id)}>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="ghost"
+            data-size="sm"
+            aria-label={`Add ${provider.short} node`}
+            onclick={() => addAgent(provider.id)}
+          >
             <Icon name="plus" size={12} />{provider.short}
           </button>
         {/each}

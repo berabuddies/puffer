@@ -152,6 +152,27 @@ test("pipeline workflow list search filters by workflow and run metadata", async
   await expect(workflowList.getByText("No matching workflows.")).toBeVisible();
 });
 
+test("pipeline overview and create pages keep focused headers", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const title = page.locator(".pf-pipe-top-id");
+  await expect(title).toContainText("Workflow dashboard");
+  await expect(title).not.toContainText("agent-review-pipeline");
+
+  await page.getByRole("button", { name: "New workflow" }).click();
+
+  await expect(title).toContainText("Create workflow");
+  await expect(title).toContainText("workflow-draft");
+  await expect(page.getByRole("button", { name: "New workflow" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add Codex node" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add Claude node" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add Puffer node" })).toBeVisible();
+});
+
 test("pipeline workflow run search filters selected workflow runs", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowSnapshot({

@@ -25,6 +25,7 @@
   background: color-mix(in oklab, var(--puffer-accent) 14%, var(--background));
   color: var(--puffer-accent);
   border: 1px solid color-mix(in oklab, var(--puffer-accent) 30%, transparent);
+  white-space: nowrap;
 }
 .pf-pipe-hash {
   font-size: 11px; color: var(--muted-foreground);

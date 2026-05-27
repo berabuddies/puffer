@@ -363,3 +363,78 @@
   font-size: 11px;
   white-space: nowrap;
 }
+
+@media (max-width: 760px) {
+  .pf-settings {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .pf-settings-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px;
+  }
+
+  .pf-settings-nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    min-height: 32px;
+    white-space: nowrap;
+  }
+
+  .pf-settings-pane {
+    min-width: 0;
+    padding: 20px;
+  }
+
+  .pf-settings-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .pf-mcp-form,
+  .pf-connector-form {
+    justify-self: stretch;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .pf-mcp-card,
+  .pf-connector-card-settings,
+  .pf-verified-folder-card {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .pf-mcp-card .pf-status-pill,
+  .pf-mcp-card .pf-connector-source,
+  .pf-connector-card-settings .pf-status-pill,
+  .pf-connector-card-settings .pf-connector-source {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .pf-connector-selected {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pf-connector-question-head {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pf-connector-question-actions {
+    justify-content: stretch;
+  }
+
+  .pf-connector-question-actions .sc-btn {
+    width: 100%;
+  }
+}

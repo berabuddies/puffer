@@ -1494,3 +1494,28 @@ test("connector settings renders dynamic AskUserQuestion inputs", async ({ page 
   await expect(pane.getByText("Created connector connection telegram-test.")).toBeVisible();
   await expect(pane.locator(".pf-mcp-card").filter({ hasText: "telegram-test" })).toBeVisible();
 });
+
+test("connector settings remain readable on narrow screens", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connectors" }).click();
+  await daemon.waitForRequest("workflow_list");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const navBox = await page.locator(".pf-settings-nav").boundingBox();
+  const paneBox = await page.locator(".pf-settings-pane").boundingBox();
+  const setupBox = await page.locator(".pf-connector-setup-row").boundingBox();
+  const formBox = await page.locator(".pf-connector-form").boundingBox();
+
+  expect(navBox?.height).toBeLessThan(90);
+  expect(paneBox?.width).toBeGreaterThan(340);
+  expect(setupBox?.width).toBeGreaterThan(330);
+  expect(formBox?.width).toBeGreaterThan(320);
+  expect(formBox?.x).toBeLessThan(40);
+  await expect(page.getByRole("heading", { name: "Connectors" })).toBeVisible();
+  await expect(page.getByLabel("Connector connection slug")).toBeVisible();
+});
