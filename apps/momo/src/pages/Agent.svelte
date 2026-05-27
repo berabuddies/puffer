@@ -23,6 +23,8 @@
   import Composer from "../components/shell/Composer.svelte";
   import ChatBubble from "../components/agent/ChatBubble.svelte";
   import Mascot from "../components/common/Mascot.svelte";
+  import MessageBody from "../components/common/MessageBody.svelte";
+  import { formatTime } from "../lib/timeFormat";
   import { navigate } from "../router.svelte";
   import {
     chatSessions,
@@ -128,9 +130,9 @@
         {/if}
         {#each chatMessages as message (message.id)}
           {#if message.role === "user"}
-            <ChatBubble text={message.text} />
+            <ChatBubble text={message.text} createdAt={message.createdAt} />
           {:else}
-            <div class="assistant-row">
+            <div class="assistant-row" data-error={message.error ? "true" : undefined}>
               <div class="assistant-avatar"><Mascot size="sm" /></div>
               <div class="assistant-bubble">
                 {#if message.pending}
@@ -140,7 +142,12 @@
                     <span class="typing__dot"></span>
                   </span>
                 {:else}
-                  <p class="assistant-bubble__text">{message.text}</p>
+                  <div class="assistant-bubble__text">
+                    <MessageBody body={message.text} />
+                  </div>
+                {/if}
+                {#if !message.pending && message.createdAt}
+                  <span class="assistant-bubble__time">{formatTime(message.createdAt)}</span>
                 {/if}
               </div>
             </div>
@@ -291,6 +298,29 @@
     color: var(--color-text-primary);
     white-space: pre-wrap;
     word-wrap: break-word;
+  }
+
+  .assistant-bubble__time {
+    display: block;
+    margin-top: 4px;
+    font-family: var(--font-system);
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--color-text-secondary);
+    text-align: right;
+  }
+
+  /* Error variant — `data-error="true"` is set by Agent.svelte when the
+   * assistant bubble represents a turn-error or session-fetch failure
+   * (see chat.svelte.ts:handleSessionEvent turn-error). Cascades into the
+   * Markdown subtree via :global(*) so paragraph text inside MessageBody
+   * picks up the danger color too. */
+  .assistant-row[data-error="true"] .assistant-bubble :global(*) {
+    color: var(--color-danger-text, #c0392b);
+  }
+  .assistant-row[data-error="true"] .assistant-bubble::before {
+    content: "⚠ ";
+    color: var(--color-danger-text, #c0392b);
   }
 
   /* ── Hydration loading / error overlays ──────────────────────────
