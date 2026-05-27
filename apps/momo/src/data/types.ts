@@ -22,7 +22,8 @@ export type IconName =
   | "credit-card"
   | "user"
   | "users"
-  | "briefcase";
+  | "briefcase"
+  | "bot";
 
 export interface TaskAction {
   /** Visible label. */

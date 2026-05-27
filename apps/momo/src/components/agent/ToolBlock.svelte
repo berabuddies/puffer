@@ -43,7 +43,8 @@
     "credit-card": CreditCard,
     user: User,
     users: Users,
-    briefcase: Briefcase
+    briefcase: Briefcase,
+    bot: Bot
   };
 
   interface Props {
