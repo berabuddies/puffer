@@ -37,6 +37,7 @@
     runningTurnBySessionId,
     cancelRunningTurn,
     answerQuestion,
+    activitySiblingMap,
     type ChatMessage
   } from "../lib/chat.svelte";
 
@@ -61,6 +62,12 @@
   // its Send button for a red Stop. Cleared from chat.svelte.ts on
   // turn-complete / turn-error.
   let isRunning = $derived(taskId ? Boolean(runningTurnBySessionId[taskId]) : false);
+  // Single O(n) scan of the message list, returning a Map<turnId, true>
+  // for turns currently showing a "working" indicator (thinking, running
+  // tool, unanswered question). The template asks "does my turnId have an
+  // activity sibling?" via Map lookup, keeping the render O(n) total
+  // rather than O(n²) (each assistant message used to re-scan inline).
+  let activityMap = $derived(taskId ? activitySiblingMap(taskId) : new Map<string, true>());
   let hydrationPhase = $derived(taskId ? getHydrationState(taskId) : "idle");
   let showLoadingState = $derived(hydrationPhase === "loading" && chatMessages.length === 0);
   let showErrorState = $derived(hydrationPhase === "error" && chatMessages.length === 0);
@@ -176,19 +183,7 @@
               forms DO NOT count either — the agent is now actively
               composing its follow-up.
             -->
-            {@const hasActivitySibling = Boolean(
-              message.turnId &&
-                chatMessages.some(
-                  (m) =>
-                    (m.role === "thinking" && m.turnId === message.turnId) ||
-                    (m.role === "tool" &&
-                      m.turnId === message.turnId &&
-                      m.status === "running") ||
-                    (m.role === "question" &&
-                      m.turnId === message.turnId &&
-                      !m.answered)
-                )
-            )}
+            {@const hasActivitySibling = Boolean(message.turnId && activityMap.get(message.turnId))}
             {@const hideEmptyPending =
               message.pending && message.text.length === 0 && hasActivitySibling}
             {#if !hideEmptyPending}
