@@ -141,15 +141,38 @@
           {:else if message.role === "thinking"}
             <ThinkingBlock text={message.text} pending={message.pending} />
           {:else}
+            <!--
+              Suppress the empty pending assistant row entirely while a
+              thinking block for the same turn is already on screen —
+              the thinking text already conveys "agent is working", so
+              the typing-dot stand-in is redundant and visually noisy.
+              Once a text-delta arrives the bubble has text and renders.
+            -->
+            {@const hasThinkingSibling = Boolean(
+              message.turnId &&
+                chatMessages.some(
+                  (m) => m.role === "thinking" && m.turnId === message.turnId
+                )
+            )}
+            {@const hideEmptyPending =
+              message.pending && message.text.length === 0 && hasThinkingSibling}
+            {#if !hideEmptyPending}
             <div class="assistant-row" data-error={message.error ? "true" : undefined}>
               <div class="assistant-avatar"><Mascot size="sm" /></div>
               <div class="assistant-bubble">
-                {#if message.pending}
+                {#if message.pending && !hasThinkingSibling}
                   <span class="typing" aria-label="Momo is typing">
                     <span class="typing__dot"></span>
                     <span class="typing__dot"></span>
                     <span class="typing__dot"></span>
                   </span>
+                {:else if message.pending}
+                  <!-- Thinking sibling covers the "working" indicator; render
+                       the in-flight text as it streams (may be empty briefly
+                       before the first text-delta lands). -->
+                  <div class="assistant-bubble__text">
+                    <MessageBody body={message.text} />
+                  </div>
                 {:else}
                   <div class="assistant-bubble__text">
                     <MessageBody body={message.text} />
@@ -160,6 +183,7 @@
                 {/if}
               </div>
             </div>
+            {/if}
           {/if}
         {/each}
       </div>

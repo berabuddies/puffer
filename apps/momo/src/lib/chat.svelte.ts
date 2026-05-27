@@ -49,6 +49,13 @@ export type ChatMessage =
       createdAt: number;
       /** Set when the assistant bubble represents an error (e.g. turn-error). */
       error?: boolean;
+      /**
+       * Bound in fireTurn.then() once the daemon returns a turnId. Lets the
+       * renderer match an assistant bubble to its sibling thinking bubble so
+       * we can suppress redundant typing-dot indicators while the thinking
+       * block already conveys "agent is working".
+       */
+      turnId?: string;
     }
   | {
       id: string;
@@ -144,8 +151,13 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
           text: "",
           pending: true,
           createdAt: Date.now(),
+          turnId
         };
         list.push(bubble);
+      } else if (bubble.role === "assistant") {
+        // Claim path — stamp the turnId so the renderer can match it
+        // against thinking siblings for typing-dot suppression.
+        bubble.turnId = turnId;
       }
       pendingByTurn.set(turnId, { sessionId, messageId: bubble.id });
       break;
@@ -228,7 +240,18 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
           createdAt: Date.now(),
           turnId
         };
-        list.push(bubble);
+        // Insert BEFORE the assistant bubble for this turn (if any) so the
+        // chronological reading order matches the cognitive order
+        // (think → answer). If there's no assistant bubble yet, append.
+        const ref = pendingByTurn.get(turnId);
+        const assistantIdx = ref
+          ? list.findIndex((m) => m.id === ref.messageId)
+          : -1;
+        if (assistantIdx >= 0) {
+          list.splice(assistantIdx, 0, bubble);
+        } else {
+          list.push(bubble);
+        }
       }
       bubble.text = (bubble.text ?? "") + delta;
       break;
@@ -426,6 +449,15 @@ function fireTurn(sessionId: string, bubbleId: string, message: string): void {
         // turn-complete / turn-error above (or by the .catch below if the
         // RPC itself fails before any turn id was assigned).
         runningTurnBySessionId[sessionId] = res.turnId;
+        // Tag the optimistic bubble with its turnId so the renderer can
+        // match it against thinking siblings.
+        const list = chatSessions[sessionId];
+        if (list) {
+          const target = list.find((m) => m.id === bubbleId);
+          if (target && target.role === "assistant") {
+            target.turnId = res.turnId;
+          }
+        }
       }
     })
     .catch((err) => {
