@@ -2680,12 +2680,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .events
             .iter()
             .any(|event| matches!(event, TranscriptEvent::UserMessage { .. }));
-        let auto_title = if !setup_state.disable_auto_title
-            && crate::daemon_title::should_auto_title(
-                record.metadata.display_name.as_deref(),
-                record.metadata.generated_title.as_deref(),
-                has_user_message,
-            ) {
+        let auto_title = if crate::daemon_title::should_generate_title_for_turn(
+            &inputs.resources,
+            record.metadata.display_name.as_deref(),
+            record.metadata.generated_title.as_deref(),
+            has_user_message,
+            setup_state.disable_auto_title,
+            &message_for_thread,
+        ) {
             match crate::daemon_title::generate_title_with_model(
                 &AppState::from_session_record(
                     setup_state.config.lock().unwrap().clone(),

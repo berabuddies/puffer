@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use puffer_core::{execute_user_turn_streaming, AppState};
+use puffer_core::{
+    command_surface, execute_user_turn_streaming, find_command, AppState, CommandKind,
+};
 use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use serde_json::Value;
@@ -23,6 +25,29 @@ pub(crate) fn should_auto_title(
             .map(str::is_empty)
             .unwrap_or(true)
         && !has_user_message
+}
+
+/// Returns whether this daemon turn should call the model-backed title path.
+pub(crate) fn should_generate_title_for_turn(
+    resources: &LoadedResources,
+    display_name: Option<&str>,
+    generated_title: Option<&str>,
+    has_user_message: bool,
+    disable_auto_title: bool,
+    message: &str,
+) -> bool {
+    if disable_auto_title || !should_auto_title(display_name, generated_title, has_user_message) {
+        return false;
+    }
+
+    match slash_command_name(message) {
+        Some(name) => {
+            let commands = command_surface(resources);
+            find_command(&commands, name)
+                .is_some_and(|command| matches!(command.kind, CommandKind::Prompt))
+        }
+        None => true,
+    }
 }
 
 /// Generates a Claude-style session title using a small provider-family title model.
@@ -196,6 +221,11 @@ fn sanitize_title(value: &str) -> Option<String> {
     Some(title)
 }
 
+fn slash_command_name(message: &str) -> Option<&str> {
+    let without_slash = message.trim_start().strip_prefix('/')?;
+    Some(without_slash.split_whitespace().next().unwrap_or(""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +237,54 @@ mod tests {
         assert!(!should_auto_title(Some("Named"), None, false));
         assert!(!should_auto_title(None, Some("Generated"), false));
         assert!(!should_auto_title(None, None, true));
+    }
+
+    #[test]
+    fn title_generation_skips_local_connector_command() {
+        assert!(!should_generate_title_for_turn(
+            &LoadedResources::default(),
+            None,
+            None,
+            false,
+            false,
+            "/connect telegram-login personal"
+        ));
+    }
+
+    #[test]
+    fn title_generation_allows_prompt_command() {
+        assert!(should_generate_title_for_turn(
+            &LoadedResources::default(),
+            None,
+            None,
+            false,
+            false,
+            "/commit"
+        ));
+    }
+
+    #[test]
+    fn title_generation_skips_unknown_slash_command() {
+        assert!(!should_generate_title_for_turn(
+            &LoadedResources::default(),
+            None,
+            None,
+            false,
+            false,
+            "/unknown value"
+        ));
+    }
+
+    #[test]
+    fn title_generation_allows_regular_user_message() {
+        assert!(should_generate_title_for_turn(
+            &LoadedResources::default(),
+            None,
+            None,
+            false,
+            false,
+            "Explain this repository"
+        ));
     }
 
     #[test]
