@@ -4,6 +4,7 @@
   import { onDestroy } from "svelte";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
+  import { focusTrap } from "../focusTrap";
   import {
     providerIdCanRunAgent,
     providerIsAvailableForAgent,
@@ -1370,7 +1371,7 @@
       <div class="pf-settings-row pf-connector-setup-row">
         <div class="meta">
           <div class="label">Create connection</div>
-          <div class="desc">Runs the selected connector setup command and renders its dynamic questions here.</div>
+          <div class="desc">Runs the selected connector setup command and opens its dynamic questions in a dialog.</div>
         </div>
         <div class="pf-connector-form">
           <label>
@@ -1434,82 +1435,113 @@
       </div>
 
       {#if connectorQuestionRequest}
-        <section class="pf-connector-question-panel" aria-label="Connector setup questions">
-          <div class="pf-connector-question-head">
-            <div>
-              <h3>Setup questions</h3>
-              <p>{selectedConnector?.connector_slug ?? "connector"} - {connectorConnectionSlug.trim()}</p>
-            </div>
-            <span class="pf-status-pill">{connectorQuestionRequest.questions.length} question{connectorQuestionRequest.questions.length === 1 ? "" : "s"}</span>
-          </div>
-          <div class="pf-connector-question-list">
-            {#each connectorQuestionRequest.questions as question (connectorQuestionKey(question))}
-              {@const key = connectorQuestionKey(question)}
-              <fieldset class="pf-connector-question">
-                <legend>
-                  <span>{question.header}</span>
-                  <strong>{question.question}</strong>
-                </legend>
-                {#if question.type === "input"}
-                  <input
-                    class="sc-input"
-                    type={connectorQuestionInputType(question)}
-                    value={connectorAnswerText(question)}
-                    oninput={(e) => updateConnectorAnswer(question, (e.currentTarget as HTMLInputElement).value)}
-                  />
-                {:else if question.multiSelect}
-                  <div class="pf-connector-options">
-                    {#each question.options as option (option.label)}
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={connectorAnswerIncludes(question, option.label)}
-                          onchange={(e) => toggleConnectorMultiAnswer(question, option.label, (e.currentTarget as HTMLInputElement).checked)}
-                        />
-                        <span>
-                          <strong>{option.label}</strong>
-                          {#if option.description}<small>{option.description}</small>{/if}
-                          {#if option.preview}<code>{option.preview}</code>{/if}
-                        </span>
-                      </label>
-                    {/each}
-                  </div>
-                {:else}
-                  <div class="pf-connector-options">
-                    {#each question.options as option (option.label)}
-                      <label>
-                        <input
-                          type="radio"
-                          name={`connector-${connectorQuestionRequest.requestId}-${key}`}
-                          checked={connectorAnswerIncludes(question, option.label)}
-                          onchange={() => updateConnectorAnswer(question, option.label)}
-                        />
-                        <span>
-                          <strong>{option.label}</strong>
-                          {#if option.description}<small>{option.description}</small>{/if}
-                          {#if option.preview}<code>{option.preview}</code>{/if}
-                        </span>
-                      </label>
-                    {/each}
-                  </div>
-                {/if}
-              </fieldset>
-            {/each}
-          </div>
-          <div class="pf-connector-question-actions">
-            <button
-              type="button"
-              class="sc-btn"
-              data-variant="default"
-              data-size="sm"
-              disabled={!connectorAnswersComplete() || connectorCreating}
-              aria-busy={connectorCreating}
-              onclick={submitConnectorAnswers}
+        <div class="pf-modal-scrim pf-connector-question-scrim" role="presentation" onkeydown={() => {}}>
+          <div
+            class="pf-modal pf-connector-question-modal"
+            role="dialog"
+            aria-label="Connector setup questions"
+            aria-modal="true"
+            tabindex="-1"
+            use:focusTrap
+            onclick={(event) => event.stopPropagation()}
+            onkeydown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+              }
+            }}
+          >
+            <form
+              class="pf-connector-question-form"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void submitConnectorAnswers();
+              }}
             >
-              <Icon name="check" size={12} />{connectorCreating ? "Submitting..." : "Submit answers"}
-            </button>
+              <div class="pf-modal-head pf-connector-question-head">
+                <div class="pf-modal-title-group">
+                  <div class="pf-modal-eyebrow">{selectedConnector?.connector_slug ?? "connector"}</div>
+                  <div class="pf-modal-title">Setup questions</div>
+                  <p>{connectorConnectionSlug.trim()}</p>
+                </div>
+                <span class="pf-status-pill">{connectorQuestionRequest.questions.length} question{connectorQuestionRequest.questions.length === 1 ? "" : "s"}</span>
+              </div>
+              <div class="pf-modal-body pf-connector-question-list">
+                {#each connectorQuestionRequest.questions as question, questionIndex (connectorQuestionKey(question))}
+                  {@const key = connectorQuestionKey(question)}
+                  <fieldset class="pf-connector-question">
+                    <legend>
+                      <span>{question.header}</span>
+                      <strong>{question.question}</strong>
+                    </legend>
+                    {#if question.type === "input"}
+                      <input
+                        class="sc-input"
+                        type={connectorQuestionInputType(question)}
+                        value={connectorAnswerText(question)}
+                        data-autofocus={questionIndex === 0 ? "true" : undefined}
+                        oninput={(e) => updateConnectorAnswer(question, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    {:else if question.multiSelect}
+                      <div class="pf-connector-options">
+                        {#each question.options as option, optionIndex (option.label)}
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={connectorAnswerIncludes(question, option.label)}
+                              data-autofocus={questionIndex === 0 && optionIndex === 0 ? "true" : undefined}
+                              onchange={(e) => toggleConnectorMultiAnswer(question, option.label, (e.currentTarget as HTMLInputElement).checked)}
+                            />
+                            <span>
+                              <strong>{option.label}</strong>
+                              {#if option.description}<small>{option.description}</small>{/if}
+                              {#if option.preview}<code>{option.preview}</code>{/if}
+                            </span>
+                          </label>
+                        {/each}
+                      </div>
+                    {:else}
+                      <div class="pf-connector-options">
+                        {#each question.options as option, optionIndex (option.label)}
+                          <label>
+                            <input
+                              type="radio"
+                              name={`connector-${connectorQuestionRequest.requestId}-${key}`}
+                              checked={connectorAnswerIncludes(question, option.label)}
+                              data-autofocus={questionIndex === 0 && optionIndex === 0 ? "true" : undefined}
+                              onchange={() => updateConnectorAnswer(question, option.label)}
+                            />
+                            <span>
+                              <strong>{option.label}</strong>
+                              {#if option.description}<small>{option.description}</small>{/if}
+                              {#if option.preview}<code>{option.preview}</code>{/if}
+                            </span>
+                          </label>
+                        {/each}
+                      </div>
+                    {/if}
+                  </fieldset>
+                {/each}
+              </div>
+              <div class="pf-modal-foot pf-connector-question-actions">
+                <div class="pf-modal-foot-hint">
+                  <span class="pf-mono">{connectorCommandPreview}</span>
+                </div>
+                <div class="pf-modal-foot-btns">
+                  <button
+                    type="submit"
+                    class="sc-btn"
+                    data-variant="default"
+                    data-size="sm"
+                    disabled={!connectorAnswersComplete() || connectorCreating}
+                    aria-busy={connectorCreating}
+                  >
+                    <Icon name="check" size={12} />{connectorCreating ? "Submitting..." : "Submit answers"}
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
-        </section>
+        </div>
       {/if}
 
       {#if connectorAssistantText}

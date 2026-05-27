@@ -1478,10 +1478,13 @@ test("connector settings renders dynamic AskUserQuestion inputs", async ({ page 
     message: "/connect telegram-login telegram-test"
   });
 
-  await expect(pane.getByRole("heading", { name: "Setup questions" })).toBeVisible();
-  await pane.locator(".pf-connector-question").filter({ hasText: "Connector credential" }).locator("input").fill("secret-test");
-  await expect(pane.getByLabel("Default")).toBeChecked();
-  await pane.getByRole("button", { name: "Submit answers" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connector setup questions" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAttribute("aria-modal", "true");
+  await expect(dialog.getByText("Setup questions")).toBeVisible();
+  await dialog.locator(".pf-connector-question").filter({ hasText: "Connector credential" }).locator("input").fill("secret-test");
+  await expect(dialog.getByLabel("Default")).toBeChecked();
+  await dialog.getByRole("button", { name: "Submit answers" }).click();
 
   const resolved = await daemon.waitForRequest("resolve_user_question");
   expect(resolved.params).toMatchObject({
@@ -1542,7 +1545,8 @@ test("connector settings submits dynamic password, radio, and multiselect answer
     message: "/connect slack-app team-slack"
   });
 
-  const questions = pane.getByLabel("Connector setup questions");
+  const questions = page.getByRole("dialog", { name: "Connector setup questions" });
+  await expect(questions).toHaveAttribute("aria-modal", "true");
   await expect(questions).toContainText("3 questions");
   const tokenQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Workspace token" });
   const scopeQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Enabled scopes" });

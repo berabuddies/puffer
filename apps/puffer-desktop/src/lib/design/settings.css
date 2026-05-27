@@ -229,6 +229,22 @@
   padding: 14px;
 }
 
+.pf-connector-question-scrim {
+  padding: 28px 16px;
+}
+
+.pf-connector-question-modal {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 56px));
+}
+
+.pf-connector-question-form {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
 .pf-connector-question-head {
   display: flex;
   align-items: start;
@@ -249,10 +265,27 @@
   font-size: 11.5px;
 }
 
+.pf-connector-question-modal .pf-connector-question-head {
+  padding-bottom: 14px;
+}
+
+.pf-connector-question-modal .pf-connector-question-head p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pf-connector-question-list {
   display: grid;
   gap: 12px;
   margin-top: 12px;
+}
+
+.pf-connector-question-modal .pf-connector-question-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 0;
+  padding: 14px 16px;
 }
 
 .pf-connector-question {
@@ -330,6 +363,15 @@
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+.pf-connector-question-modal .pf-connector-question-actions {
+  justify-content: initial;
+  margin-top: 0;
+}
+
+.pf-connector-question-modal .pf-modal-foot-hint {
+  min-width: 0;
 }
 
 .pf-connector-output {
@@ -435,6 +477,25 @@
   }
 
   .pf-connector-question-actions .sc-btn {
+    width: 100%;
+  }
+
+  .pf-connector-question-scrim {
+    align-items: stretch;
+    padding: 18px 12px;
+  }
+
+  .pf-connector-question-modal {
+    width: 100%;
+    max-height: calc(100vh - 36px);
+  }
+
+  .pf-connector-question-modal .pf-modal-foot {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pf-connector-question-modal .pf-modal-foot-btns {
     width: 100%;
   }
 }
