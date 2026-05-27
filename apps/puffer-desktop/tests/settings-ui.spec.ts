@@ -1485,9 +1485,18 @@ test("connector settings renders dynamic AskUserQuestion inputs", async ({ page 
   await daemon.waitForRequest("workflow_list");
 
   const pane = page.locator(".pf-settings-pane");
-  await expect(pane.locator(".pf-connector-form select")).toHaveValue("telegram-login");
-  await pane.getByLabel("Connector connection slug").fill("telegram-test");
-  await pane.getByRole("button", { name: "Start setup" }).click();
+  await expect(pane.getByRole("tab", { name: /Connections/ })).toHaveAttribute("aria-selected", "true");
+  await pane.getByRole("tab", { name: /Catalog/ }).click();
+  await expect(pane.getByLabel("Connector catalog")).toBeVisible();
+  await pane.getByRole("tab", { name: /Connections/ }).click();
+  await expect(pane.getByLabel("Connector connections")).toBeVisible();
+  await expect(pane.getByRole("button", { name: "New connection" })).toBeVisible();
+  await pane.getByRole("button", { name: "New connection" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create connector connection" });
+  await expect(createDialog).toBeVisible();
+  await expect(createDialog.locator(".pf-connector-form select")).toHaveValue("telegram-login");
+  await createDialog.getByLabel("Connector connection slug").fill("telegram-test");
+  await createDialog.getByRole("button", { name: "Start setup" }).click();
 
   const turn = await daemon.waitForRequest("run_agent_turn");
   expect(turn.params).toMatchObject({
@@ -1551,10 +1560,12 @@ test("connector settings submits dynamic password, radio, and multiselect answer
   await daemon.waitForRequest("workflow_list");
 
   const pane = page.locator(".pf-settings-pane");
-  await pane.locator(".pf-connector-form select").selectOption("slack-app");
-  await pane.getByLabel("Connector connection slug").fill("team-slack");
-  await expect(pane.getByLabel("Connector setup command")).toContainText("/connect slack-app team-slack");
-  await pane.getByRole("button", { name: "Start setup" }).click();
+  await pane.getByRole("button", { name: "New connection" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create connector connection" });
+  await createDialog.locator(".pf-connector-form select").selectOption("slack-app");
+  await createDialog.getByLabel("Connector connection slug").fill("team-slack");
+  await expect(createDialog.getByLabel("Connector setup command")).toContainText("/connect slack-app team-slack");
+  await createDialog.getByRole("button", { name: "Start setup" }).click();
 
   const turn = await daemon.waitForRequest("run_agent_turn");
   expect(turn.params).toMatchObject({
@@ -1607,14 +1618,20 @@ test("connector settings remain readable on narrow screens", async ({ page }) =>
 
   const navBox = await page.locator(".pf-settings-nav").boundingBox();
   const paneBox = await page.locator(".pf-settings-pane").boundingBox();
-  const setupBox = await page.locator(".pf-connector-setup-row").boundingBox();
-  const formBox = await page.locator(".pf-connector-form").boundingBox();
+  const toolbarBox = await page.locator(".pf-connector-toolbar").boundingBox();
+  const tabsBox = await page.locator(".pf-connector-tabs").boundingBox();
 
   expect(navBox?.height).toBeLessThan(90);
   expect(paneBox?.width).toBeGreaterThan(340);
-  expect(setupBox?.width).toBeGreaterThan(330);
-  expect(formBox?.width).toBeGreaterThan(320);
-  expect(formBox?.x).toBeLessThan(40);
+  expect(toolbarBox?.width).toBeGreaterThan(330);
+  expect(tabsBox?.width).toBeGreaterThan(330);
   await expect(page.getByRole("heading", { name: "Connectors" })).toBeVisible();
-  await expect(page.getByLabel("Connector connection slug")).toBeVisible();
+  await expect(page.getByRole("button", { name: "New connection" })).toBeVisible();
+
+  await page.getByRole("button", { name: "New connection" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create connector connection" });
+  await expect(createDialog).toBeVisible();
+  const dialogBox = await createDialog.boundingBox();
+  expect(dialogBox?.width).toBeGreaterThan(340);
+  await expect(createDialog.getByLabel("Connector connection slug")).toBeVisible();
 });

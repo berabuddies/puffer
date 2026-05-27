@@ -129,6 +129,8 @@
     questions: ConnectorQuestion[];
   };
 
+  type ConnectorTab = "connections" | "catalog";
+
   // Live permissions loaded from the daemon. `permissionRows` is the
   // editable working copy — changes are staged in memory and flushed on
   // Save. Loading state and generation guards keep late responses from
@@ -167,6 +169,8 @@
   let connectorLoadGeneration = 0;
   let connectorError = $state<string | null>(null);
   let connectorSaved = $state<string | null>(null);
+  let connectorCreateOpen = $state(false);
+  let connectorTab = $state<ConnectorTab>("connections");
   let connectorSlug = $state("");
   let connectorConnectionSlug = $state("");
   let connectorCreating = $state(false);
@@ -344,6 +348,18 @@
     lastConnectorSlug = slug;
   }
 
+  function openConnectorCreate() {
+    if (!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0) return;
+    ensureConnectorSelection();
+    connectorError = null;
+    connectorSaved = null;
+    connectorCreateOpen = true;
+  }
+
+  function closeConnectorCreate() {
+    connectorCreateOpen = false;
+  }
+
   function connectorConnectionHint(connector: WorkflowConnector): string {
     return connector.suggested_connection_slug || connector.connector_slug;
   }
@@ -465,20 +481,24 @@
       };
       connectorQuestionAnswers = defaultConnectorAnswers(questions);
       connectorCreating = false;
+      connectorCreateOpen = false;
       connectorSaved = "Answer the connector setup questions to continue.";
       return;
     }
     if (event.type === "turn-complete") {
       connectorCreating = false;
+      connectorCreateOpen = false;
       connectorQuestionRequest = null;
       connectorQuestionAnswers = {};
       connectorAssistantText = event.assistantText;
       connectorSaved = `Connector setup finished for ${connectorConnectionSlug.trim()}.`;
+      connectorTab = "connections";
       void loadConnectorSnapshot();
       return;
     }
     if (event.type === "turn-error") {
       connectorCreating = false;
+      connectorCreateOpen = false;
       connectorQuestionRequest = null;
       connectorError = event.error;
     }
@@ -492,6 +512,7 @@
     connectorAssistantText = "";
     connectorQuestionRequest = null;
     connectorQuestionAnswers = {};
+    connectorCreateOpen = false;
     try {
       connectorUnlisten?.();
       connectorUnlisten = null;
@@ -1008,6 +1029,8 @@
     connectorLoadGeneration += 1;
     connectorError = null;
     connectorSaved = null;
+    connectorCreateOpen = false;
+    connectorTab = "connections";
     connectorSlug = "";
     connectorConnectionSlug = "";
     connectorCreating = false;
@@ -1340,7 +1363,7 @@
     {:else if section === "connectors"}
       <h2>Connectors</h2>
       <p class="lead">Connector catalog, saved connections, and setup flows backed by AskUserQuestion.</p>
-      <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
+      <div class="pf-connector-toolbar">
         <button
           type="button"
           class="sc-btn"
@@ -1350,6 +1373,16 @@
           onclick={refreshIfIdle}
         >
           <Icon name="refresh" size={13} />Refresh connectors
+        </button>
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="default"
+          data-size="sm"
+          disabled={!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0}
+          onclick={openConnectorCreate}
+        >
+          <Icon name="plug" size={13} />New connection
         </button>
       </div>
       {#if connectorError}
@@ -1368,71 +1401,124 @@
         {/if}
       </div>
 
-      <div class="pf-settings-row pf-connector-setup-row">
-        <div class="meta">
-          <div class="label">Create connection</div>
-          <div class="desc">Runs the selected connector setup command and opens its dynamic questions in a dialog.</div>
-        </div>
-        <div class="pf-connector-form">
-          <label>
-            Connector
-            <select
-              class="sc-input"
-              value={connectorSlug}
-              disabled={!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0}
-              onchange={(e) => selectConnector((e.currentTarget as HTMLSelectElement).value)}
-            >
-              {#if connectors.length === 0}
-                <option value="">No connectors</option>
-              {/if}
-              {#each connectors as connector (connector.connector_slug)}
-                <option value={connector.connector_slug}>{connector.connector_slug}</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            Connection slug
-            <input
-              class="sc-input"
-              aria-label="Connector connection slug"
-              aria-invalid={connectorConnectionSlugInvalid}
-              value={connectorConnectionSlug}
-              disabled={!daemonReachable || connectorLoading || connectorCreating || !selectedConnector}
-              oninput={(e) => {
-                connectorConnectionSlug = (e.currentTarget as HTMLInputElement).value;
-                connectorSaved = null;
-              }}
-            />
-          </label>
-          {#if connectorConnectionSlugInvalid && connectorConnectionSlug.trim()}
-            <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
-          {/if}
-          {#if selectedConnector}
-            <div class="pf-connector-selected">
-              <div>
-                <strong>{selectedConnector.connector_slug}</strong>
-                <span>{selectedConnector.description}</span>
-              </div>
-              <span class="pf-status-pill ready">{connectorStatusLabel(selectedConnector)}</span>
-            </div>
-          {/if}
-          <div class="pf-connector-command" aria-label="Connector setup command">
-            <Icon name="terminal" size={12} />
-            <code>{connectorCommandPreview || "Enter a valid connection slug."}</code>
-          </div>
-          <button
-            type="button"
-            class="sc-btn"
-            data-variant="default"
-            data-size="sm"
-            disabled={!canStartConnectorSetup}
-            aria-busy={connectorCreating && !connectorQuestionRequest}
-            onclick={startConnectorSetup}
+      {#if connectorCreateOpen && !connectorQuestionRequest}
+        <div
+          class="pf-modal-scrim pf-connector-create-scrim"
+          role="presentation"
+          onclick={closeConnectorCreate}
+          onkeydown={() => {}}
+        >
+          <div
+            class="pf-modal pf-connector-create-modal"
+            role="dialog"
+            aria-label="Create connector connection"
+            aria-modal="true"
+            tabindex="-1"
+            use:focusTrap
+            onclick={(event) => event.stopPropagation()}
+            onkeydown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeConnectorCreate();
+              }
+            }}
           >
-            <Icon name="plug" size={12} />{connectorCreating && !connectorQuestionRequest ? "Starting..." : "Start setup"}
-          </button>
+            <form
+              class="pf-connector-create-form"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void startConnectorSetup();
+              }}
+            >
+              <div class="pf-modal-head">
+                <div class="pf-modal-title-group">
+                  <div class="pf-modal-eyebrow">Connector</div>
+                  <div class="pf-modal-title">Create connection</div>
+                </div>
+                <button type="button" class="pf-modal-close" onclick={closeConnectorCreate} aria-label="Close">
+                  <Icon name="x" size={14} />
+                </button>
+              </div>
+              <div class="pf-modal-body pf-connector-create-body">
+                <div class="pf-connector-form">
+                  <label>
+                    Connector
+                    <select
+                      class="sc-input"
+                      value={connectorSlug}
+                      disabled={!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0}
+                      data-autofocus
+                      onchange={(e) => selectConnector((e.currentTarget as HTMLSelectElement).value)}
+                    >
+                      {#if connectors.length === 0}
+                        <option value="">No connectors</option>
+                      {/if}
+                      {#each connectors as connector (connector.connector_slug)}
+                        <option value={connector.connector_slug}>{connector.connector_slug}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label>
+                    Connection slug
+                    <input
+                      class="sc-input"
+                      aria-label="Connector connection slug"
+                      aria-invalid={connectorConnectionSlugInvalid}
+                      value={connectorConnectionSlug}
+                      disabled={!daemonReachable || connectorLoading || connectorCreating || !selectedConnector}
+                      oninput={(e) => {
+                        connectorConnectionSlug = (e.currentTarget as HTMLInputElement).value;
+                        connectorSaved = null;
+                      }}
+                    />
+                  </label>
+                  {#if connectorConnectionSlugInvalid && connectorConnectionSlug.trim()}
+                    <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
+                  {/if}
+                  {#if selectedConnector}
+                    <div class="pf-connector-selected">
+                      <div>
+                        <strong>{selectedConnector.connector_slug}</strong>
+                        <span>{selectedConnector.description}</span>
+                        <span>{selectedConnectorConnections.length} existing connection{selectedConnectorConnections.length === 1 ? "" : "s"}</span>
+                      </div>
+                      <span class="pf-status-pill ready">{connectorStatusLabel(selectedConnector)}</span>
+                    </div>
+                  {/if}
+                  <div class="pf-connector-command" aria-label="Connector setup command">
+                    <Icon name="terminal" size={12} />
+                    <code>{connectorCommandPreview || "Enter a valid connection slug."}</code>
+                  </div>
+                </div>
+              </div>
+              <div class="pf-modal-foot">
+                <div class="pf-modal-foot-hint">Setup questions open in a separate dialog.</div>
+                <div class="pf-modal-foot-btns">
+                  <button
+                    type="button"
+                    class="sc-btn"
+                    data-variant="outline"
+                    data-size="sm"
+                    onclick={closeConnectorCreate}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    class="sc-btn"
+                    data-variant="default"
+                    data-size="sm"
+                    disabled={!canStartConnectorSetup}
+                    aria-busy={connectorCreating && !connectorQuestionRequest}
+                  >
+                    <Icon name="plug" size={12} />{connectorCreating && !connectorQuestionRequest ? "Starting..." : "Start setup"}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
         </div>
-      </div>
+      {/if}
 
       {#if connectorQuestionRequest}
         <div class="pf-modal-scrim pf-connector-question-scrim" role="presentation" onkeydown={() => {}}>
@@ -1548,48 +1634,78 @@
         <pre class="pf-connector-output">{connectorAssistantText}</pre>
       {/if}
 
-      <h3 class="pf-settings-subhead">Connections</h3>
-      <div class="pf-mcp-list">
-        {#each connections as connection (connection.slug)}
-          <div class="pf-mcp-card pf-connector-card-settings">
-            <span class="ico"><Icon name="plug" size={16} /></span>
-            <div>
-              <div class="title">{connection.slug}</div>
-              <div class="desc">{connection.description || connection.connector_slug}</div>
-            </div>
-            <span class:ready={connection.state === "active" || connection.state === "authenticated"} class="pf-status-pill">
-              {connection.state}
-            </span>
-            <span class="pf-connector-source">{connection.connector_slug}</span>
-          </div>
-        {/each}
-        {#if !connectorLoading && connections.length === 0}
-          <div class="pf-empty">No connector connections configured.</div>
-        {/if}
+      <div class="pf-connector-tabs" role="tablist" aria-label="Connector views">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={connectorTab === "connections"}
+          data-active={connectorTab === "connections"}
+          onclick={() => connectorTab = "connections"}
+        >
+          Connections
+          <span>{connections.length}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={connectorTab === "catalog"}
+          data-active={connectorTab === "catalog"}
+          onclick={() => connectorTab = "catalog"}
+        >
+          Catalog
+          <span>{connectors.length}</span>
+        </button>
       </div>
 
-      <h3 class="pf-settings-subhead">Catalog</h3>
-      <div class="pf-mcp-list">
-        {#each connectors as connector (connector.connector_slug)}
-          <button
-            type="button"
-            class="pf-mcp-card pf-connector-card-settings pf-connector-catalog-button"
-            data-selected={connector.connector_slug === connectorSlug}
-            onclick={() => selectConnector(connector.connector_slug)}
-          >
-            <span class="ico"><Icon name="server" size={16} /></span>
-            <div>
-              <div class="title">{connector.connector_slug}</div>
-              <div class="desc">{connector.description}</div>
-            </div>
-            <span class:ready={connector.requires_auth} class="pf-status-pill">{connectorStatusLabel(connector)}</span>
-            <span class="pf-connector-source">{connector.skill}</span>
-          </button>
-        {/each}
-        {#if !connectorLoading && connectors.length === 0}
-          <div class="pf-empty">No connectors discovered.</div>
-        {/if}
-      </div>
+      {#if connectorTab === "connections"}
+        <section class="pf-connector-panel" aria-label="Connector connections">
+          <div class="pf-mcp-list">
+            {#each connections as connection (connection.slug)}
+              <div class="pf-mcp-card pf-connector-card-settings">
+                <span class="ico"><Icon name="plug" size={16} /></span>
+                <div>
+                  <div class="title">{connection.slug}</div>
+                  <div class="desc">{connection.description || connection.connector_slug}</div>
+                </div>
+                <span class:ready={connection.state === "active" || connection.state === "authenticated"} class="pf-status-pill">
+                  {connection.state}
+                </span>
+                <span class="pf-connector-source">{connection.connector_slug}</span>
+              </div>
+            {/each}
+            {#if !connectorLoading && connections.length === 0}
+              <div class="pf-empty">No connector connections configured.</div>
+            {/if}
+          </div>
+        </section>
+      {:else}
+        <section class="pf-connector-panel" aria-label="Connector catalog">
+          <div class="pf-mcp-list">
+            {#each connectors as connector (connector.connector_slug)}
+              <button
+                type="button"
+                class="pf-mcp-card pf-connector-card-settings pf-connector-catalog-button"
+                data-selected={connector.connector_slug === connectorSlug}
+                onclick={() => {
+                  selectConnector(connector.connector_slug);
+                  openConnectorCreate();
+                }}
+              >
+                <span class="ico"><Icon name="server" size={16} /></span>
+                <div>
+                  <div class="title">{connector.connector_slug}</div>
+                  <div class="desc">{connector.description}</div>
+                </div>
+                <span class:ready={connector.requires_auth} class="pf-status-pill">{connectorStatusLabel(connector)}</span>
+                <span class="pf-connector-source">{connector.skill}</span>
+              </button>
+            {/each}
+            {#if !connectorLoading && connectors.length === 0}
+              <div class="pf-empty">No connectors discovered.</div>
+            {/if}
+          </div>
+        </section>
+      {/if}
 
     {:else if section === "permissions"}
       <h2>Permissions</h2>

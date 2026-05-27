@@ -154,6 +154,39 @@
   align-items: start;
 }
 
+.pf-connector-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.pf-connector-create-scrim {
+  padding: 28px 16px;
+}
+
+.pf-connector-create-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 56px));
+}
+
+.pf-connector-create-form {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.pf-connector-create-body {
+  padding: 14px 16px;
+}
+
+.pf-connector-create-modal .pf-connector-form {
+  width: 100%;
+  min-width: 0;
+}
+
 .pf-connector-form {
   display: flex;
   flex-direction: column;
@@ -383,6 +416,58 @@
   white-space: pre-wrap;
 }
 
+.pf-connector-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  margin: 18px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--muted) 56%, var(--background));
+}
+
+.pf-connector-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.pf-connector-tabs button:hover {
+  background: var(--pf-selected-bg-hover);
+  color: var(--foreground);
+}
+
+.pf-connector-tabs button[data-active="true"] {
+  background: var(--pf-selected-bg);
+  color: var(--foreground);
+  font-weight: 700;
+}
+
+.pf-connector-tabs span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--background) 70%, var(--muted));
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.pf-connector-panel {
+  min-width: 0;
+}
+
 .pf-connector-card-settings {
   grid-template-columns: 32px minmax(0, 1fr) auto auto;
 }
@@ -449,6 +534,20 @@
     width: 100%;
   }
 
+  .pf-connector-toolbar {
+    justify-content: stretch;
+  }
+
+  .pf-connector-toolbar .sc-btn {
+    flex: 1 1 0;
+  }
+
+  .pf-connector-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+
   .pf-mcp-card,
   .pf-connector-card-settings,
   .pf-verified-folder-card {
@@ -483,6 +582,25 @@
   .pf-connector-question-scrim {
     align-items: stretch;
     padding: 18px 12px;
+  }
+
+  .pf-connector-create-scrim {
+    align-items: stretch;
+    padding: 18px 12px;
+  }
+
+  .pf-connector-create-modal {
+    width: 100%;
+    max-height: calc(100vh - 36px);
+  }
+
+  .pf-connector-create-modal .pf-modal-foot {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pf-connector-create-modal .pf-modal-foot-btns {
+    width: 100%;
   }
 
   .pf-connector-question-modal {
