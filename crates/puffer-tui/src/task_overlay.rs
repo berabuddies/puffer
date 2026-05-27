@@ -324,6 +324,8 @@ mod tests {
             serde_json::json!({
                 "subject": "Answer Slack thread",
                 "description": "A teammate asked for release status in #ship.",
+                "receivedAt": "2026-05-27T12:00:00Z",
+                "expiresAt": "2026-05-28T12:00:00Z",
                 "actions": [
                     {
                         "actionName": "Draft update",
