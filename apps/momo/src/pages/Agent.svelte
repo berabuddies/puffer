@@ -31,6 +31,8 @@
     ensureSession,
     getHydrationState,
     retryHydration,
+    runningTurnBySessionId,
+    cancelRunningTurn,
     type ChatMessage
   } from "../lib/chat.svelte";
 
@@ -51,6 +53,10 @@
   let chatMessages = $derived<ChatMessage[]>(
     taskId ? (chatSessions[taskId] ?? []) : []
   );
+  // Track whether this session has a live turn so the Composer can swap
+  // its Send button for a red Stop. Cleared from chat.svelte.ts on
+  // turn-complete / turn-error.
+  let isRunning = $derived(taskId ? Boolean(runningTurnBySessionId[taskId]) : false);
   let hydrationPhase = $derived(taskId ? getHydrationState(taskId) : "idle");
   let showLoadingState = $derived(hydrationPhase === "loading" && chatMessages.length === 0);
   let showErrorState = $derived(hydrationPhase === "error" && chatMessages.length === 0);
@@ -159,8 +165,15 @@
     <div class="agent__composer">
       <div class="agent__composer-inner">
         <!-- No onsubmit: Composer's default branch sees /agent/<id> and
-             appends to the active session via the chat store. -->
-        <Composer placeholder="Hi, Tomo. How's my luck today?" />
+             appends to the active session via the chat store. Pass
+             `running` so the Composer renders a red Stop button while a
+             turn is in flight; click routes through `cancelRunningTurn`
+             which fires `cancel_turn` via the WS client. -->
+        <Composer
+          placeholder="Hi, Tomo. How's my luck today?"
+          running={isRunning}
+          onCancel={() => taskId && cancelRunningTurn(taskId)}
+        />
       </div>
     </div>
   {/if}

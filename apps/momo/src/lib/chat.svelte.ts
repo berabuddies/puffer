@@ -34,6 +34,13 @@ export interface ChatMessage {
 export const chatSessions = $state<Record<string, ChatMessage[]>>({});
 
 /**
+ * Per-session id of the in-flight turn (if any). Set when `run_agent_turn`
+ * resolves with a turnId; cleared on `turn-complete` / `turn-error`. The
+ * Composer reads this to decide whether to render its Stop button.
+ */
+export const runningTurnBySessionId = $state<Record<string, string>>({});
+
+/**
  * Visible hydration phase for `/agent/<sessionId>`:
  *   - "idle":    session was never opened in this webview lifetime
  *   - "loading": `load_session_detail` is in flight
@@ -135,6 +142,9 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
         target.pending = false;
       }
       pendingByTurn.delete(turnId);
+      if (runningTurnBySessionId[sessionId] === turnId) {
+        delete runningTurnBySessionId[sessionId];
+      }
       break;
     }
     case "turn-error": {
@@ -149,6 +159,9 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
           target.error = true;
         }
         pendingByTurn.delete(turnId);
+      }
+      if (runningTurnBySessionId[sessionId] === turnId) {
+        delete runningTurnBySessionId[sessionId];
       }
       pushToast(error, "error");
       break;
@@ -342,6 +355,10 @@ function fireTurn(sessionId: string, bubbleId: string, message: string): void {
       // event for this turn.
       if (res.turnId) {
         pendingByTurn.set(res.turnId, { sessionId, messageId: bubbleId });
+        // Composer reads this to swap Send → Stop. Cleared on
+        // turn-complete / turn-error above (or by the .catch below if the
+        // RPC itself fails before any turn id was assigned).
+        runningTurnBySessionId[sessionId] = res.turnId;
       }
     })
     .catch((err) => {
@@ -355,6 +372,28 @@ function fireTurn(sessionId: string, bubbleId: string, message: string): void {
           target.error = true;
         }
       }
+      // No turnId is available here — the RPC rejected before the daemon
+      // assigned one. Defensive cleanup in case a prior turn left state.
+      if (runningTurnBySessionId[sessionId]) {
+        delete runningTurnBySessionId[sessionId];
+      }
       pushToast(`Turn failed: ${msg}`, "error");
     });
+}
+
+/**
+ * Cancel the in-flight turn for `sessionId` if any. Surfaces a toast on
+ * RPC failure but does NOT roll back local state — `turn-complete` /
+ * `turn-error` from the daemon is the authoritative cleanup signal.
+ * Returns once the cancel RPC settles.
+ */
+export async function cancelRunningTurn(sessionId: string): Promise<void> {
+  const turnId = runningTurnBySessionId[sessionId];
+  if (!turnId) return;
+  try {
+    await agent.cancelTurn(turnId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    pushToast(`Cancel failed: ${msg}`, "error");
+  }
 }

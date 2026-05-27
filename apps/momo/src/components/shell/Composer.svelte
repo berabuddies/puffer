@@ -19,7 +19,7 @@
       `pushToast('Attach: coming soon', 'info')` on every click.
 -->
 <script lang="ts">
-  import { Plus, ArrowUp } from "lucide-svelte";
+  import { Plus, ArrowUp, Square } from "lucide-svelte";
 
   import { pushToast } from "../../lib/toast.svelte";
   import { appendUserMessage, createSessionFromText } from "../../lib/chat.svelte";
@@ -29,9 +29,23 @@
     placeholder: string;
     value?: string;
     onsubmit?: (text: string) => void;
+    /**
+     * When true, swap the trailing Send button for a red Stop button that
+     * calls `onCancel`. Default false so non-agent surfaces (Home, etc.)
+     * keep their existing Send behavior unchanged.
+     */
+    running?: boolean;
+    /** Invoked when the Stop button is clicked. No-op when `running` is false. */
+    onCancel?: () => void;
   }
 
-  let { placeholder, value = $bindable(""), onsubmit }: Props = $props();
+  let {
+    placeholder,
+    value = $bindable(""),
+    onsubmit,
+    running = false,
+    onCancel
+  }: Props = $props();
 
   /**
    * Pull the session id out of `/agent/<id>` when we're already inside
@@ -107,14 +121,26 @@
       onkeydown={handleKey}
       aria-label="Message"
     />
-    <button
-      class="composer__send"
-      type="submit"
-      aria-label="Send"
-      disabled={!value || !value.trim()}
-    >
-      <ArrowUp size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
+    {#if running}
+      <button
+        class="composer__stop"
+        type="button"
+        aria-label="Stop"
+        data-stop
+        onclick={() => onCancel?.()}
+      >
+        <Square size={14} strokeWidth={0} fill="currentColor" aria-hidden="true" />
+      </button>
+    {:else}
+      <button
+        class="composer__send"
+        type="submit"
+        aria-label="Send"
+        disabled={!value || !value.trim()}
+      >
+        <ArrowUp size={16} strokeWidth={2} aria-hidden="true" />
+      </button>
+    {/if}
   </div>
 </form>
 
@@ -193,5 +219,27 @@
   .composer__send:disabled {
     opacity: 0.6;
     cursor: default;
+  }
+
+  /* Stop button — red fill, white icon. Matches `.composer__send`'s
+   * dimensions so swapping in/out doesn't cause layout shift. Reuses the
+   * design-system `--color-danger` token where defined; falls back to a
+   * Tailwind-style red-600 hex for parity with the v1 reference. */
+  .composer__stop {
+    width: var(--height-button-composer);
+    height: var(--height-button-composer);
+    border-radius: var(--radius-pill);
+    background: var(--color-danger, #dc2626);
+    color: #fff;
+    border: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: filter 120ms ease, opacity 120ms ease;
+  }
+  .composer__stop:hover {
+    filter: brightness(0.95);
   }
 </style>
