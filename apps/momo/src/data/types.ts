@@ -23,7 +23,9 @@ export type IconName =
   | "user"
   | "users"
   | "briefcase"
-  | "bot";
+  | "bot"
+  | "check"
+  | "circle-alert";
 
 export interface TaskAction {
   /** Visible label. */

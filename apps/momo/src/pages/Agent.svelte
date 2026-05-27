@@ -154,34 +154,41 @@
             />
           {:else}
             <!--
-              Suppress the empty pending assistant row entirely while a
-              thinking block for the same turn is already on screen —
-              the thinking text already conveys "agent is working", so
-              the typing-dot stand-in is redundant and visually noisy.
-              Once a text-delta arrives the bubble has text and renders.
+              Suppress the empty pending assistant row whenever some other
+              "agent is working" signal for the same turn is on screen —
+              either a thinking block or a running tool pill. Both already
+              convey activity, so the typing-dot stand-in is redundant.
+              Resolved tool pills (success/failed) DO NOT count: between
+              tool steps the agent may be silently composing, and the
+              typing dots are the only signal of life.
             -->
-            {@const hasThinkingSibling = Boolean(
+            {@const hasActivitySibling = Boolean(
               message.turnId &&
                 chatMessages.some(
-                  (m) => m.role === "thinking" && m.turnId === message.turnId
+                  (m) =>
+                    (m.role === "thinking" && m.turnId === message.turnId) ||
+                    (m.role === "tool" &&
+                      m.turnId === message.turnId &&
+                      m.status === "running")
                 )
             )}
             {@const hideEmptyPending =
-              message.pending && message.text.length === 0 && hasThinkingSibling}
+              message.pending && message.text.length === 0 && hasActivitySibling}
             {#if !hideEmptyPending}
             <div class="assistant-row" data-error={message.error ? "true" : undefined}>
               <div class="assistant-avatar"><Mascot size="sm" /></div>
               <div class="assistant-bubble">
-                {#if message.pending && !hasThinkingSibling}
+                {#if message.pending && !hasActivitySibling}
                   <span class="typing" aria-label="Momo is typing">
                     <span class="typing__dot"></span>
                     <span class="typing__dot"></span>
                     <span class="typing__dot"></span>
                   </span>
                 {:else if message.pending}
-                  <!-- Thinking sibling covers the "working" indicator; render
-                       the in-flight text as it streams (may be empty briefly
-                       before the first text-delta lands). -->
+                  <!-- Activity sibling (thinking / running tool) covers the
+                       "working" indicator; render the in-flight text as it
+                       streams (may be empty briefly before the first
+                       text-delta lands). -->
                   <div class="assistant-bubble__text">
                     <MessageBody body={message.text} />
                   </div>
