@@ -1,0 +1,180 @@
+/**
+ * Puffer Desktop UI v2 — Base styles
+ *
+ * Modern reset + global typography defaults + text-style utility classes.
+ * Depends on ./tokens.css for all values — never hard-code colors or sizes here.
+ */
+
+/* Web fonts. IBM Plex Sans was inspected but the design system uses only
+ * Source Serif 4, Inter, and the OS system stack, so only those two are loaded.
+ * Source Serif 4: 400, 500 — display + subtitle.
+ * Inter: 400, 500, 600 — button labels + section eyebrows (12px caps).
+ */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Source+Serif+4:wght@400;500&display=swap");
+
+@import "./tokens.css";
+
+/* ───────────────────────────────────────────────────────────
+   Modern reset
+   ─────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+}
+
+/* The Tauri window owns the outer scroll. Lock html/body/#app to the
+ * viewport so the only scrollable surfaces are the ones the Shell opts in
+ * to (page column, sidebar rail). Without this an overflowing page would
+ * scroll the entire chrome — including the sidebar — instead of just the
+ * page region. */
+html,
+body,
+#app {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: var(--font-system);
+  color: var(--color-text-primary);
+  background: var(--color-surface-app);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+}
+
+body {
+  text-rendering: optimizeLegibility;
+}
+
+img,
+picture,
+video,
+canvas,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: inherit;
+  font-size: inherit;
+}
+
+/* Default focus ring uses the cream accent at low alpha so it reads as part
+ * of the family. Pages that need a stronger ring (form errors, etc.) should
+ * override locally. */
+:focus-visible {
+  outline: 2px solid var(--color-action-cream-border);
+  outline-offset: 2px;
+}
+
+/* ───────────────────────────────────────────────────────────
+   Text style utilities
+   Mirror the named styles in the Paper design system.
+   ─────────────────────────────────────────────────────────── */
+
+/* Display — greetings, page hero. e.g. "Good morning, Yuna." */
+.text-display {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-display);
+  line-height: var(--line-height-display);
+  font-weight: var(--font-weight-regular);
+  color: var(--color-text-primary);
+}
+
+/* Subtitle — soft secondary heading next to the display. */
+.text-subtitle {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-subtitle);
+  line-height: var(--line-height-subtitle);
+  font-weight: var(--font-weight-regular);
+  color: var(--color-text-muted);
+}
+
+/* Section — larger serif heading for in-page sections (24px). */
+.text-section {
+  font-family: var(--font-serif);
+  font-size: var(--font-size-section);
+  line-height: var(--line-height-section);
+  font-weight: var(--font-weight-regular);
+  color: var(--color-text-primary);
+}
+
+/* Task title — card titles, list-row primary text. */
+.text-task-title {
+  font-family: var(--font-system);
+  font-size: var(--font-size-task);
+  line-height: var(--line-height-task);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+/* Body compact — operational/meta text inside cards. */
+.text-body-compact {
+  font-family: var(--font-system);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  font-weight: var(--font-weight-regular);
+  color: var(--color-text-secondary);
+}
+
+/* Button label — all buttons. Cream-on-cream variant inherits color. */
+.text-button-label {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-button);
+  line-height: var(--line-height-button);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+/* Eyebrow — 12px semibold caps used for section labels in the spec sheet
+ * ("SIDEBAR NAV", "TASK CARD", etc.). Pages may use it for similar section labels. */
+.text-eyebrow {
+  font-family: var(--font-system);
+  font-size: var(--font-size-button);
+  line-height: var(--line-height-button);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

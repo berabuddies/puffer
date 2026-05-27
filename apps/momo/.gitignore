@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.svelte-kit/
+.vite/
+src-tauri/target/
+target/
+*.log
+.DS_Store
+coverage/
+playwright-report/
+test-results/
+references/
+.env
+.env.*
+!.env.example
+tests/v2/.auth-storage.json
