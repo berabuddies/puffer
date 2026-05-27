@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "types": ["svelte"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "src-v2/**/*.ts",
+    "src-v2/**/*.svelte",
+    "vite.config.ts"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Momo",
+  "version": "0.1.0",
+  "identifier": "ai.tomo.momo",
+  "build": {
+    "beforeDevCommand": "npm run build:puffer-cli:dev && npm run dev",
+    "beforeBuildCommand": "npm run build:puffer-cli:release && npm run build",
+    "devUrl": "http://localhost:1466",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Momo",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 720,
+        "minHeight": 480,
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "acceptFirstMouse": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "icon": ["icons/icon.png", "icons/icon.ico"]
+  },
+  "plugins": {}
+}
