@@ -1,9 +1,11 @@
 //! Workflow daemon RPC helpers.
 
 mod binding_delete;
+mod connection_delete;
 mod planned;
 
 pub(crate) use binding_delete::handle_workflow_binding_delete;
+pub(crate) use connection_delete::handle_workflow_connection_delete;
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;

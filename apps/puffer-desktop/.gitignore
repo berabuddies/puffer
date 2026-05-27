@@ -11,6 +11,8 @@ coverage/
 playwright-report/
 test-results/
 references/
+.agents/
+skills-lock.json
 .env
 .env.*
 !.env.example

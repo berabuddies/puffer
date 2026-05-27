@@ -986,6 +986,8 @@ export class FakeDaemon {
         return this.createSession(request.params);
       case "run_agent_turn":
         return this.runAgentTurn(request.params);
+      case "dispatch_slash_command":
+        return this.runAgentTurn(request.params);
       case "cancel_turn": {
         const turnId = String(request.params.turnId ?? "");
         if (this.activeTurnIds.has(turnId)) {

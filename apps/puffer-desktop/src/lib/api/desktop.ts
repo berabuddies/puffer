@@ -1114,6 +1114,12 @@ export async function deleteWorkflowBinding(slug: string): Promise<WorkflowSnaps
   return client.request<WorkflowSnapshot>("workflow_binding_delete", { slug });
 }
 
+/** Delete one connector connection. */
+export async function deleteWorkflowConnection(slug: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_connection_delete", { slug });
+}
+
 /** Toggle a native workflow or subscription workflow binding. */
 export async function toggleWorkflow(slug: string, enabled: boolean): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
@@ -1168,6 +1174,22 @@ export async function runAgentTurn(
     // Fallback: the in-process Tauri command (same behavior, just no daemon).
     return invoke<string>("run_agent_turn", { sessionId, message, ...options });
   }
+}
+
+/** Runs a slash command (e.g. `/connect <slug> <conn>`) through the
+ *  deterministic command dispatcher. No provider/LLM is contacted. Streams
+ *  `user-question-request`, `turn-complete`, and `turn-error` events on the
+ *  same session channel as a regular turn. */
+export async function dispatchSlashCommand(
+  sessionId: string,
+  message: string
+): Promise<string> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ turnId: string }>("dispatch_slash_command", {
+    sessionId,
+    message
+  });
+  return result.turnId;
 }
 
 /** Resolves a pending permission prompt for an in-flight turn. */

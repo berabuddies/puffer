@@ -14,15 +14,17 @@
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
     addMcpServer,
+    cancelTurn,
+    deleteWorkflowConnection,
     isDaemonReachable,
     listLambdaSkillLibraries,
     listMcpServers,
+    dispatchSlashCommand,
     listPermissions,
     listProviderModels,
     loadWorkflowSnapshot,
     removeLambdaSkillLibrary,
     resolveUserQuestion,
-    runAgentTurn,
     createSession,
     saveLambdaSkillLibrary,
     savePermissions,
@@ -178,8 +180,9 @@
   let connectorTurnId = $state<string | null>(null);
   let connectorQuestionRequest = $state<ConnectorQuestionRequest | null>(null);
   let connectorQuestionAnswers = $state<Record<string, string | string[]>>({});
-  let connectorAssistantText = $state("");
   let connectorUnlisten: (() => void) | null = null;
+  let connectorCancelledTurnIds = new Set<string>();
+  let connectorDeleting = $state<string | null>(null);
   let lastConnectorSlug = "";
 
   let lambdaSnapshot = $state<LambdaSkillLibrariesSnapshot | null>(null);
@@ -344,7 +347,6 @@
     connectorQuestionRequest = null;
     connectorQuestionAnswers = {};
     connectorSaved = null;
-    connectorAssistantText = "";
     lastConnectorSlug = slug;
   }
 
@@ -490,7 +492,6 @@
       connectorCreateOpen = false;
       connectorQuestionRequest = null;
       connectorQuestionAnswers = {};
-      connectorAssistantText = event.assistantText;
       connectorSaved = `Connector setup finished for ${connectorConnectionSlug.trim()}.`;
       connectorTab = "connections";
       void loadConnectorSnapshot();
@@ -500,6 +501,10 @@
       connectorCreating = false;
       connectorCreateOpen = false;
       connectorQuestionRequest = null;
+      if ("turnId" in event && connectorCancelledTurnIds.has(event.turnId)) {
+        connectorCancelledTurnIds.delete(event.turnId);
+        return;
+      }
       connectorError = event.error;
     }
   }
@@ -509,7 +514,6 @@
     connectorCreating = true;
     connectorError = null;
     connectorSaved = `Starting ${connectorCommandPreview}...`;
-    connectorAssistantText = "";
     connectorQuestionRequest = null;
     connectorQuestionAnswers = {};
     connectorCreateOpen = false;
@@ -523,7 +527,7 @@
       );
       connectorCreateSessionId = created.sessionId;
       connectorUnlisten = await subscribeSessionEvents(created.sessionId, handleConnectorSessionEvent);
-      connectorTurnId = await runAgentTurn(created.sessionId, connectorCommandPreview);
+      connectorTurnId = await dispatchSlashCommand(created.sessionId, connectorCommandPreview);
     } catch (e) {
       connectorCreating = false;
       connectorError = (e as Error).message ?? String(e);
@@ -546,6 +550,39 @@
     } catch (e) {
       connectorCreating = false;
       connectorError = (e as Error).message ?? String(e);
+    }
+  }
+
+  async function cancelConnectorSetup() {
+    const turnId = connectorTurnId;
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    connectorCreating = false;
+    connectorSaved = "Connector setup cancelled.";
+    if (turnId) {
+      connectorCancelledTurnIds.add(turnId);
+      try {
+        await cancelTurn(turnId);
+      } catch (e) {
+        connectorError = (e as Error).message ?? String(e);
+      }
+    }
+    connectorTurnId = null;
+  }
+
+  async function removeConnectorConnection(slug: string) {
+    if (!daemonReachable || !slug || connectorDeleting) return;
+    connectorDeleting = slug;
+    connectorError = null;
+    try {
+      const snap = await deleteWorkflowConnection(slug);
+      connectorSnapshot = snap;
+      ensureConnectorSelection(snap.connectors ?? []);
+      connectorSaved = `Removed connection ${slug}.`;
+    } catch (e) {
+      connectorError = (e as Error).message ?? String(e);
+    } finally {
+      connectorDeleting = null;
     }
   }
 
@@ -1038,7 +1075,6 @@
     connectorTurnId = null;
     connectorQuestionRequest = null;
     connectorQuestionAnswers = {};
-    connectorAssistantText = "";
     lastConnectorSlug = "";
 
     providerModels = {};
@@ -1387,19 +1423,15 @@
       </div>
       {#if connectorError}
         <div class="pf-settings-note warn">{connectorError}</div>
-      {/if}
-      {#if connectorSaved}
+      {:else if connectorSaved}
         <div class="pf-settings-note">{connectorSaved}</div>
+      {:else if !daemonReachable}
+        <div class="pf-settings-note">Preview mode - launch Puffer in the desktop app to configure connectors.</div>
+      {:else if connectorLoading}
+        <div class="pf-settings-note">Loading connector catalog...</div>
+      {:else}
+        <div class="pf-settings-note">{connectors.length} connector{connectors.length === 1 ? "" : "s"} and {connections.length} connection{connections.length === 1 ? "" : "s"}.</div>
       {/if}
-      <div class="pf-settings-note">
-        {#if !daemonReachable}
-          Preview mode - launch Puffer in the desktop app to configure connectors.
-        {:else if connectorLoading}
-          Loading connector catalog...
-        {:else}
-          {connectors.length} connector{connectors.length === 1 ? "" : "s"} and {connections.length} connection{connections.length === 1 ? "" : "s"}.
-        {/if}
-      </div>
 
       {#if connectorCreateOpen && !connectorQuestionRequest}
         <div
@@ -1533,6 +1565,7 @@
             onkeydown={(event) => {
               if (event.key === "Escape") {
                 event.preventDefault();
+                void cancelConnectorSetup();
               }
             }}
           >
@@ -1614,6 +1647,15 @@
                 </div>
                 <div class="pf-modal-foot-btns">
                   <button
+                    type="button"
+                    class="sc-btn"
+                    data-variant="outline"
+                    data-size="sm"
+                    onclick={() => void cancelConnectorSetup()}
+                  >
+                    Cancel
+                  </button>
+                  <button
                     type="submit"
                     class="sc-btn"
                     data-variant="default"
@@ -1628,10 +1670,6 @@
             </form>
           </div>
         </div>
-      {/if}
-
-      {#if connectorAssistantText}
-        <pre class="pf-connector-output">{connectorAssistantText}</pre>
       {/if}
 
       <div class="pf-connector-tabs" role="tablist" aria-label="Connector views">
@@ -1671,6 +1709,18 @@
                   {connection.state}
                 </span>
                 <span class="pf-connector-source">{connection.connector_slug}</span>
+                <button
+                  type="button"
+                  class="sc-btn"
+                  data-variant="outline"
+                  data-size="sm"
+                  aria-label={`Remove connection ${connection.slug}`}
+                  disabled={!daemonReachable || connectorDeleting !== null}
+                  aria-busy={connectorDeleting === connection.slug}
+                  onclick={() => void removeConnectorConnection(connection.slug)}
+                >
+                  <Icon name="x" size={12} />{connectorDeleting === connection.slug ? "Removing..." : "Remove"}
+                </button>
               </div>
             {/each}
             {#if !connectorLoading && connections.length === 0}

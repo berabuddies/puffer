@@ -320,24 +320,29 @@ fn validate_slug(slug: &str) -> Result<()> {
     Ok(())
 }
 
+/// Recognized node kinds. Everything that is not `Agent` is **deterministic** —
+/// executed inline by the runner, no provider/LLM involved.
+fn node_kind_str(node: &PipelineNode) -> &str {
+    if let Some(value) = node
+        .extra
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        return value;
+    }
+    node.node_type.as_deref().unwrap_or("agent")
+}
+
+const KNOWN_KINDS: &[&str] = &["agent", "tool", "merge", "fanout"];
+
 fn validate_node(node: &PipelineNode) -> Result<()> {
     if node.id.trim().is_empty() {
         return Err(anyhow!("node id must not be empty"));
     }
-    if matches!(
-        node.node_type.as_deref(),
-        Some("python" | "shell" | "sync" | "fanout" | "merge")
-    ) {
-        return Err(anyhow!(
-            "unsupported AgentFlow node `{}` type `{}`",
-            node.id,
-            node.node_type.as_deref().unwrap_or_default()
-        ));
-    }
-    if let Some(kind) = node.extra.get("kind").and_then(Value::as_str) {
-        if kind != "agent" && kind != "local_agent" {
-            return Err(anyhow!("unsupported node `{}` kind `{kind}`", node.id));
-        }
+    let kind = node_kind_str(node);
+    if !KNOWN_KINDS.contains(&kind) {
+        return Err(anyhow!("unsupported node `{}` kind `{kind}`", node.id));
     }
     if let Some(target) = node.extra.get("target") {
         if !is_local_target(target) {
@@ -347,16 +352,7 @@ fn validate_node(node: &PipelineNode) -> Result<()> {
             ));
         }
     }
-    for key in [
-        "fanout",
-        "merge",
-        "optimizer",
-        "schedule",
-        "on_failure_restart",
-        "python",
-        "shell",
-        "sync",
-    ] {
+    for key in ["optimizer", "schedule", "on_failure_restart", "sync"] {
         if node.extra.contains_key(key) {
             return Err(anyhow!(
                 "node `{}` uses unsupported feature `{key}`",
@@ -364,7 +360,9 @@ fn validate_node(node: &PipelineNode) -> Result<()> {
             ));
         }
     }
-    if node.prompt.trim().is_empty() {
+    // Agent nodes must carry a prompt; deterministic nodes use `prompt` as
+    // their argument input and may legitimately leave it empty (e.g. merge).
+    if kind == "agent" && node.prompt.trim().is_empty() {
         return Err(anyhow!("node `{}` prompt must not be empty", node.id));
     }
     Ok(())

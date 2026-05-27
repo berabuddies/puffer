@@ -35,9 +35,10 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    default_effort_level, enter_plan_mode, execute_user_turn_streaming_with_permissions_and_cancel,
-    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
-    AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
+    command_surface, default_effort_level, dispatch_command, enter_plan_mode,
+    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
+    supported_effort_levels, with_user_question_prompt_handler, AppState,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
     PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
     TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
@@ -891,6 +892,9 @@ async fn dispatch_request(
         "workflow_binding_delete" => respond!(
             crate::daemon_workflows::handle_workflow_binding_delete(&state.paths, &params)
         ),
+        "workflow_connection_delete" => respond!(
+            crate::daemon_workflows::handle_workflow_connection_delete(&state.paths, &params)
+        ),
         "workflow_toggle" => respond!(crate::daemon_workflows::handle_workflow_toggle(
             &state.paths,
             &params
@@ -921,6 +925,31 @@ async fn dispatch_request(
                         result: None,
                         error: Some(RpcError {
                             code: "turn-start-error".to_string(),
+                            message: format!("{e:#}"),
+                        }),
+                    },
+                };
+                let _ = send_envelope(&tx_clone, &env).await;
+            });
+        }
+
+        "dispatch_slash_command" => {
+            let tx_clone = tx.clone();
+            let state_clone = state.clone();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                let result = start_slash_command_turn(state_clone, params).await;
+                let env = match result {
+                    Ok(v) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: Some(v),
+                        error: None,
+                    },
+                    Err(e) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "slash-dispatch-error".to_string(),
                             message: format!("{e:#}"),
                         }),
                     },
@@ -3169,6 +3198,222 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .lock()
             .unwrap()
             .remove(&turn_id_thread);
+    });
+
+    Ok(json!({"turnId": turn_id_resp}))
+}
+
+/// Runs a slash command (`/connect ...`, `/workflows ...`, etc.) through
+/// `puffer_core::dispatch_command` without contacting any provider. AskUser-
+/// Question prompts emitted by deterministic flows like `/connect` reach the
+/// UI via the same `session:{id}:event` channel as a regular turn.
+async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?
+        .to_string();
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .context("missing message")?
+        .to_string();
+    if !message.trim_start().starts_with('/') {
+        anyhow::bail!("dispatch_slash_command expects a leading '/' command");
+    }
+
+    let session_uuid = Uuid::parse_str(&session_id).context("invalid sessionId")?;
+    let turn_id = Uuid::new_v4().to_string();
+    let channel = format!("session:{session_id}:event");
+    let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: Arc<
+        Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let cancel = CancelToken::new();
+    let cancel_reported = Arc::new(AtomicBool::new(false));
+    let user_prompt_persisted = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(TurnProgress::default()));
+
+    {
+        let mut turns = state.turns.lock().unwrap();
+        if let Some((existing_turn_id, _)) = turns
+            .iter()
+            .find(|(_, handle)| handle.session_uuid == session_uuid)
+        {
+            anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
+        }
+        turns.insert(
+            turn_id.clone(),
+            TurnHandle {
+                session_id: session_id.clone(),
+                session_uuid,
+                channel: channel.clone(),
+                message: message.clone(),
+                cancel: cancel.clone(),
+                cancel_reported: cancel_reported.clone(),
+                user_prompt_persisted: user_prompt_persisted.clone(),
+                pending: pending.clone(),
+                pending_questions: pending_questions.clone(),
+                progress: progress.clone(),
+            },
+        );
+    }
+
+    let setup_state = state.clone();
+    let turn_id_thread = turn_id.clone();
+    let turn_id_resp = turn_id.clone();
+    let channel_thread = channel.clone();
+    let next_req_id = state.next_request_id.clone();
+    let session_id_for_thread = session_id.clone();
+    let message_for_thread = message.clone();
+
+    std::thread::spawn(move || {
+        setup_state.publish_event(ServerEnvelope::Event {
+            event: channel_thread.clone(),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread}),
+        });
+
+        let mut inputs = match setup_state.build_runtime_inputs_without_discovery() {
+            Ok(v) => v,
+            Err(err) => {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("build_runtime_inputs: {err:#}"),
+                    None,
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        };
+        let record = match inputs.session_store.load_session(session_uuid) {
+            Ok(v) => v,
+            Err(err) => {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("load_session: {err:#}"),
+                    None,
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        };
+        let cfg_for_turn = setup_state.config.lock().unwrap().clone();
+        let mut app_state = AppState::from_session_record(cfg_for_turn, record);
+        let stream_actor = app_state.assistant_actor();
+
+        let question_state = setup_state.clone();
+        let question_channel = channel_thread.clone();
+        let question_turn = turn_id_thread.clone();
+        let question_pending = pending_questions.clone();
+        let question_next_id = next_req_id.clone();
+        let question_actor = stream_actor.clone();
+        let on_user_question = move |req: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
+            let request_id = question_next_id.fetch_add(1, Ordering::SeqCst).to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            question_pending
+                .lock()
+                .unwrap()
+                .insert(request_id.clone(), tx);
+
+            question_state.publish_event(ServerEnvelope::Event {
+                event: question_channel.clone(),
+                payload: event_payload_with_actor(
+                    json!({
+                        "type": "user-question-request",
+                        "turnId": question_turn.clone(),
+                        "requestId": request_id,
+                        "questions": req.questions,
+                    }),
+                    &question_actor,
+                ),
+            });
+
+            rx.recv().unwrap_or(UserQuestionPromptResponse {
+                answers: serde_json::Map::new(),
+                annotations: serde_json::Map::new(),
+            })
+        };
+
+        let mut auth_store = inputs.auth_store.clone();
+        let commands = command_surface(&inputs.resources);
+        let outcome = with_user_question_prompt_handler(on_user_question, || {
+            dispatch_command(
+                &mut app_state,
+                &commands,
+                &inputs.resources,
+                &mut inputs.providers,
+                &mut auth_store,
+                &inputs.session_store,
+                &message_for_thread,
+            )
+        });
+
+        match outcome {
+            Ok(()) => {
+                let assistant_text = app_state
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m.role, MessageRole::System | MessageRole::Assistant))
+                    .map(|m| m.text.clone())
+                    .unwrap_or_default();
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: channel_thread.clone(),
+                    payload: event_payload_with_actor(
+                        json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread,
+                            "assistantText": assistant_text,
+                        }),
+                        &stream_actor,
+                    ),
+                });
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: "workspace:sessions:changed".to_string(),
+                    payload: json!({
+                        "reason": "turn_complete",
+                        "sessionId": session_id_for_thread.clone(),
+                    }),
+                });
+            }
+            Err(err) => {
+                eprintln!("slash command {turn_id_thread} failed: {err:#}");
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("{err:#}"),
+                    None,
+                    None,
+                );
+            }
+        }
+
+        let _ = (
+            cancel.clone(),
+            cancel_reported.clone(),
+            user_prompt_persisted.clone(),
+            progress.clone(),
+            pending.clone(),
+        );
+        setup_state.turns.lock().unwrap().remove(&turn_id_thread);
     });
 
     Ok(json!({"turnId": turn_id_resp}))

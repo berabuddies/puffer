@@ -1498,7 +1498,7 @@ test("connector settings renders dynamic AskUserQuestion inputs", async ({ page 
   await createDialog.getByLabel("Connector connection slug").fill("telegram-test");
   await createDialog.getByRole("button", { name: "Start setup" }).click();
 
-  const turn = await daemon.waitForRequest("run_agent_turn");
+  const turn = await daemon.waitForRequest("dispatch_slash_command");
   expect(turn.params).toMatchObject({
     message: "/connect telegram-login telegram-test"
   });
@@ -1567,7 +1567,7 @@ test("connector settings submits dynamic password, radio, and multiselect answer
   await expect(createDialog.getByLabel("Connector setup command")).toContainText("/connect slack-app team-slack");
   await createDialog.getByRole("button", { name: "Start setup" }).click();
 
-  const turn = await daemon.waitForRequest("run_agent_turn");
+  const turn = await daemon.waitForRequest("dispatch_slash_command");
   expect(turn.params).toMatchObject({
     message: "/connect slack-app team-slack"
   });
