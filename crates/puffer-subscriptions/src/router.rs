@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{self, JoinHandle};
 
 /// Aggregate counters surfaced by workflow and connection status views.
 #[derive(Debug, Default)]
@@ -130,18 +130,52 @@ async fn run(
                     continue;
                 }
                 stats.events_seen.fetch_add(1, Ordering::Relaxed);
-                let result = process_envelope_result(
-                    &envelope,
-                    &store,
-                    history_store.as_deref(),
-                    &dispatcher,
-                    &classifier,
-                    Some(&stats),
-                );
+                let result = process_envelope_blocking(
+                    envelope,
+                    store.clone(),
+                    history_store.clone(),
+                    dispatcher.clone(),
+                    classifier.clone(),
+                    stats.clone(),
+                )
+                .await;
                 if result.matched {
                     stats.events_matched.fetch_add(1, Ordering::Relaxed);
                 }
             }
+        }
+    }
+}
+
+async fn process_envelope_blocking(
+    envelope: EventEnvelope,
+    store: Arc<WorkflowBindingStore>,
+    history_store: Option<Arc<WorkflowHistoryStore>>,
+    dispatcher: Arc<dyn ActionDispatcher>,
+    classifier: Arc<dyn Classifier>,
+    stats: Arc<RouterStats>,
+) -> EnvelopeProcessResult {
+    let stats_for_processing = stats.clone();
+    match task::spawn_blocking(move || {
+        process_envelope_result(
+            &envelope,
+            &store,
+            history_store.as_deref(),
+            &dispatcher,
+            &classifier,
+            Some(stats_for_processing.as_ref()),
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            stats.events_failed.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                %error,
+                "workflow binding event processing task failed"
+            );
+            EnvelopeProcessResult::default()
         }
     }
 }
@@ -292,7 +326,7 @@ pub fn prefilter_passes(filter: Option<&FilterSpec>, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::BuiltinActionDispatcher;
+    use crate::action::{ActionResult, BuiltinActionDispatcher};
     use crate::classify::NullClassifier;
     use crate::spec::{ActionSpec, FileAppendFormat, TaggedFilterSpec, WorkflowBindingSpec};
     use puffer_subscriber_runtime::{Event, EventBus, EventEnvelope};
@@ -574,6 +608,82 @@ mod tests {
         }
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("hello"));
+        router.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn router_runs_actions_on_blocking_thread() {
+        struct RuntimeDroppingDispatcher;
+
+        impl ActionDispatcher for RuntimeDroppingDispatcher {
+            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                drop(runtime);
+                ActionResult {
+                    success: true,
+                    summary: "runtime dropped".into(),
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "triage".into(),
+                description: "triage".into(),
+                connection_slug: "email-live".into(),
+                connector_slug: Some("email".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::ForwardMessage {
+                    platform: "email".into(),
+                    target: "ops@example.com".into(),
+                    template: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let history =
+            Arc::new(WorkflowHistoryStore::load(dir.path().join("history.json")).unwrap());
+        let bus = EventBus::new();
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(RuntimeDroppingDispatcher);
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let router = SubscriptionRouter::spawn(
+            bus.clone(),
+            Arc::new(store),
+            Some(history.clone()),
+            dispatcher,
+            classifier,
+        );
+
+        bus.publish(EventEnvelope {
+            envelope_id: "env-runtime".into(),
+            subscriber_id: "email".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "email".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "hello".into(),
+                payload: serde_json::json!({"message":"hello"}),
+            },
+        });
+
+        for _ in 0..50 {
+            if router.stats().snapshot_tuple() == (1, 1, 1, 0) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(router.stats().snapshot_tuple(), (1, 1, 1, 0));
+        assert_eq!(history.list_for("triage").len(), 1);
         router.shutdown().await;
     }
 }

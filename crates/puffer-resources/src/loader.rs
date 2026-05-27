@@ -498,6 +498,13 @@ fn apply_embedded_tool_resources(loaded: &mut LoadedResources) -> Result<()> {
         "tool",
         &mut loaded.diagnostics,
     );
+    merge_by_id(
+        &mut loaded.internal_tools,
+        load_yaml_embedded::<ToolSpec>("internal_tools")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "internal_tool",
+        &mut loaded.diagnostics,
+    );
     Ok(())
 }
 

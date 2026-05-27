@@ -33,3 +33,22 @@ mod reply;
 mod state;
 
 pub use crate::client::run;
+
+/// Narrow re-exports for external callers that drive the login flow
+/// directly (see `puffer-cli`'s `connect` subcommand). The internal
+/// `login` and `state` modules stay private so unrelated helpers
+/// (`PersistedCredentials`, `default_init_params`, …) don't leak.
+pub use crate::login::{
+    submit_code as login_submit_code, submit_password as login_submit_password, CodeSubmitOutcome,
+};
+pub use crate::state::{LoginState, SkillEnv};
+
+/// Re-export of the underlying `grammers_client::Client`. Public so
+/// callers driving the login flow can hold the in-flight client between
+/// successive command calls without depending on `grammers-client`
+/// themselves.
+pub use grammers_client::Client;
+
+/// Starts a Telegram login attempt. Renamed re-export of
+/// `login::start` to avoid the bare `start` symbol leaking through.
+pub use crate::login::start as login_start;

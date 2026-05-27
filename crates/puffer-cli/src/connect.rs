@@ -1,0 +1,325 @@
+//! `puffer connect` — connector authentication without a parent REPL.
+//!
+//! GUI hosts (Tauri/Electron) need to authenticate Telegram personal
+//! accounts and configure IMAP/SMTP credentials from outside an
+//! interactive puffer agent session. The TUI does this via
+//! `/connect telegram-login …` which routes through the internal-tool
+//! permission broker — that path requires a long-running parent process
+//! and is not reachable from a one-shot CLI invocation.
+//!
+//! This module exposes the same primitives as a top-level subcommand by
+//! calling the subscriber crates' public APIs directly. Telegram runs as
+//! a JSON-stdio REPL because grammers' `LoginToken` and `PasswordToken`
+//! are opaque in-memory values that must survive between phone/code/2FA
+//! steps. Email is a one-shot config-file write.
+//!
+//! Wire protocol for Telegram (newline-delimited JSON on stdin/stdout):
+//!
+//! Stdin:
+//!   {"action":"login_start","phone":"+1...","api_id":<i32?>,"api_hash":<str?>}
+//!   {"action":"submit_code","code":"12345"}
+//!   {"action":"submit_password","password":"..."}
+//!   {"action":"exit"}
+//!
+//! Stdout: control events emitted by `puffer-subscriber-telegram-user`
+//! (kinds `login_awaiting_code`, `login_awaiting_password`,
+//! `login_complete`, `login_error`) plus any malformed-input errors as
+//! `kind:"connect_error"` events.
+
+use crate::cli_args::{ConnectCommand, ConnectEmailCommand};
+use anyhow::{Context, Result};
+use puffer_config::ConfigPaths;
+use puffer_subscriber_email::{save_email_config, EmailConfig};
+use puffer_subscriber_runtime::Event;
+use puffer_subscriber_telegram_user::{
+    login_start, login_submit_code, login_submit_password, Client, CodeSubmitOutcome, LoginState,
+    SkillEnv,
+};
+use puffer_subscriptions::{ConnectionRecord, ConnectionStore};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+
+const TELEGRAM_CONNECTOR_SLUG: &str = "telegram-login";
+const EMAIL_CONNECTOR_SLUG: &str = "email";
+const DEFAULT_EMAIL_CONNECTION_SLUG: &str = "email";
+
+/// Dispatches a `puffer connect …` invocation to the matching handler.
+pub(crate) fn run_connect_command(paths: &ConfigPaths, command: ConnectCommand) -> Result<()> {
+    match command {
+        ConnectCommand::Telegram { connection_slug } => {
+            run_telegram_repl(paths, &connection_slug)
+        }
+        ConnectCommand::Email { command } => run_email_command(paths, command),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum TelegramAction {
+    LoginStart {
+        phone: String,
+        #[serde(default)]
+        api_id: Option<i32>,
+        #[serde(default)]
+        api_hash: Option<String>,
+    },
+    SubmitCode {
+        code: String,
+    },
+    SubmitPassword {
+        password: String,
+    },
+    Exit,
+}
+
+fn run_telegram_repl(paths: &ConfigPaths, connection_slug: &str) -> Result<()> {
+    let state_dir = telegram_state_dir(paths, connection_slug);
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("create telegram state dir {}", state_dir.display()))?;
+    let env = SkillEnv {
+        session_path: state_dir.join("telegram.session"),
+        state_dir,
+        topic: connection_slug.to_string(),
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("puffer-connect-telegram")
+        .build()
+        .context("failed to build connect runtime")?;
+    runtime.block_on(telegram_repl_loop(env, paths.clone()))
+}
+
+async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
+    let mut state = LoginState::new();
+    let mut client: Option<Client> = None;
+    let stdin = std::io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .context("read telegram connect command")?;
+        if bytes == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed: TelegramAction = match serde_json::from_str(trimmed) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                emit_local_error(&env.topic, &format!("invalid command JSON: {err}"))?;
+                continue;
+            }
+        };
+        match parsed {
+            TelegramAction::LoginStart {
+                phone,
+                api_id,
+                api_hash,
+            } => match login_start(&env, &mut state, phone, api_id, api_hash).await {
+                Ok(Some(c)) => client = Some(c),
+                Ok(None) => client = None,
+                Err(err) => emit_local_error(&env.topic, &format!("login_start error: {err}"))?,
+            },
+            TelegramAction::SubmitCode { code } => {
+                let Some(c) = client.as_ref() else {
+                    emit_local_error(&env.topic, "no active client; send login_start first")?;
+                    continue;
+                };
+                match login_submit_code(&env, &mut state, c, code).await {
+                    Ok(CodeSubmitOutcome::Complete) => {
+                        register_telegram_connection(&paths, &env.topic)?;
+                        break;
+                    }
+                    // The subscriber already emitted `login_awaiting_password`
+                    // / `login_error` / a retry hint on stdout for these
+                    // outcomes — keep the REPL alive so the caller can send
+                    // the next command (submit_password, or another
+                    // submit_code retry).
+                    Ok(CodeSubmitOutcome::AwaitingPassword)
+                    | Ok(CodeSubmitOutcome::Failed)
+                    | Ok(CodeSubmitOutcome::RetryableTransportError { .. }) => {}
+                    Err(err) => {
+                        emit_local_error(&env.topic, &format!("submit_code error: {err}"))?
+                    }
+                }
+            }
+            TelegramAction::SubmitPassword { password } => {
+                let Some(c) = client.as_ref() else {
+                    emit_local_error(&env.topic, "no active client; send login_start first")?;
+                    continue;
+                };
+                match login_submit_password(&env, &mut state, c, password).await {
+                    Ok(true) => {
+                        register_telegram_connection(&paths, &env.topic)?;
+                        break;
+                    }
+                    // Subscriber emitted the matching control event already.
+                    Ok(false) => {}
+                    Err(err) => {
+                        emit_local_error(&env.topic, &format!("submit_password error: {err}"))?
+                    }
+                }
+            }
+            TelegramAction::Exit => break,
+        }
+    }
+    Ok(())
+}
+
+fn emit_local_error(topic: &str, msg: &str) -> Result<()> {
+    let event = Event {
+        topic: topic.to_string(),
+        kind: "connect_error".to_string(),
+        control: true,
+        dedup_key: None,
+        text: String::new(),
+        payload: json!({ "error": msg }),
+    };
+    let rendered = serde_json::to_string(&event).context("serialize connect error event")?;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    handle
+        .write_all(rendered.as_bytes())
+        .context("write connect error event")?;
+    handle.write_all(b"\n").context("write event newline")?;
+    handle.flush().context("flush connect error event")?;
+    Ok(())
+}
+
+fn run_email_command(paths: &ConfigPaths, command: ConnectEmailCommand) -> Result<()> {
+    match command {
+        ConnectEmailCommand::Configure {
+            imap_host,
+            imap_port,
+            smtp_host,
+            smtp_port,
+            username,
+            password,
+            password_stdin,
+            from_address,
+            allowed_senders,
+        } => {
+            let password = if password_stdin {
+                read_secret_from_stdin("Email password")?
+            } else {
+                password.context("--password or --password-stdin is required")?
+            };
+            let config = EmailConfig::from_command_fields(
+                imap_host,
+                imap_port,
+                smtp_host,
+                smtp_port,
+                username,
+                password,
+                from_address,
+                allowed_senders,
+            );
+            let state_dir = email_state_dir(paths);
+            std::fs::create_dir_all(&state_dir)
+                .with_context(|| format!("create email state dir {}", state_dir.display()))?;
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to build connect runtime")?;
+            runtime
+                .block_on(save_email_config(&state_dir, &config))
+                .context("write email config")?;
+            register_email_connection(paths, DEFAULT_EMAIL_CONNECTION_SLUG)?;
+
+            let response: Value = json!({
+                "status": "configured",
+                "state_dir": state_dir.to_string_lossy(),
+                "connection_slug": DEFAULT_EMAIL_CONNECTION_SLUG,
+            });
+            println!("{response}");
+            Ok(())
+        }
+    }
+}
+
+fn email_state_dir(paths: &ConfigPaths) -> PathBuf {
+    paths
+        .user_config_dir
+        .join("subscribers")
+        .join("email")
+        .join("state")
+}
+
+fn read_secret_from_stdin(label: &str) -> Result<String> {
+    let mut value = String::new();
+    std::io::stdin()
+        .read_line(&mut value)
+        .with_context(|| format!("read {label} from stdin"))?;
+    Ok(value.trim().to_string())
+}
+
+fn connections_store_path(paths: &ConfigPaths) -> PathBuf {
+    paths.user_config_dir.join("connections.json")
+}
+
+fn telegram_state_dir(paths: &ConfigPaths, connection_slug: &str) -> PathBuf {
+    const TELEGRAM_DEFAULT_TOPIC: &str = "telegram-user";
+    if connection_slug == TELEGRAM_DEFAULT_TOPIC {
+        paths
+            .user_config_dir
+            .join("subscribers")
+            .join(TELEGRAM_DEFAULT_TOPIC)
+            .join("state")
+    } else {
+        paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join(connection_slug)
+    }
+}
+
+fn register_connection(
+    paths: &ConfigPaths,
+    slug: &str,
+    connector_slug: &str,
+    description: &str,
+) -> Result<()> {
+    let path = connections_store_path(paths);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("create connections store parent {}", parent.display())
+        })?;
+    }
+    let store =
+        ConnectionStore::load(&path).with_context(|| format!("load {}", path.display()))?;
+    if let Some(existing) = store.get(slug) {
+        if existing.connector_slug == connector_slug {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "connection `{slug}` already exists for connector `{}`",
+            existing.connector_slug
+        );
+    }
+    let record = ConnectionRecord::authenticated(slug, connector_slug, description);
+    store
+        .create(record)
+        .with_context(|| format!("register connection `{slug}` in {}", path.display()))?;
+    Ok(())
+}
+
+fn register_telegram_connection(paths: &ConfigPaths, slug: &str) -> Result<()> {
+    register_connection(
+        paths,
+        slug,
+        TELEGRAM_CONNECTOR_SLUG,
+        "Telegram personal account",
+    )
+}
+
+fn register_email_connection(paths: &ConfigPaths, slug: &str) -> Result<()> {
+    register_connection(paths, slug, EMAIL_CONNECTOR_SLUG, "Email (IMAP/SMTP)")
+}

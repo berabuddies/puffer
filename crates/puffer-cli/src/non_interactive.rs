@@ -68,6 +68,12 @@ pub(crate) struct NonInteractiveArgs {
     /// Replay arm to record in artifacts.
     #[arg(long = "artifact-arm", default_value = "no-skill")]
     pub(crate) artifact_arm: ArtifactArm,
+    /// Stream the turn as newline-delimited JSON events on stdout
+    /// instead of raw assistant text. Targets GUI hosts (Tauri/Electron)
+    /// that need structured events. Emits `{"type":"text-delta",…}`,
+    /// `{"type":"tool-invocation",…}`, and `{"type":"turn-complete",…}`.
+    #[arg(long = "json-events", default_value_t = false)]
+    pub(crate) json_events: bool,
 }
 
 /// Runs one non-interactive command or prompt turn.
@@ -222,12 +228,28 @@ fn run_user_turn(
                 &cancel,
                 |event| match event {
                     TurnStreamEvent::TextDelta(delta) => {
-                        print!("{delta}");
-                        let _ = std::io::stdout().flush();
+                        if args.json_events {
+                            emit_json_event(
+                                &serde_json::json!({ "type": "text-delta", "delta": delta }),
+                            );
+                        } else {
+                            print!("{delta}");
+                            let _ = std::io::stdout().flush();
+                        }
                     }
                     TurnStreamEvent::ToolInvocations(invocations) => {
                         tool_count += invocations.len() as u64;
                         for invocation in invocations {
+                            if args.json_events {
+                                emit_json_event(&serde_json::json!({
+                                    "type": "tool-invocation",
+                                    "tool_id": invocation.tool_id,
+                                    "call_id": invocation.call_id,
+                                    "input": parse_tool_input(&invocation.input),
+                                    "output": invocation.output,
+                                    "success": invocation.success,
+                                }));
+                            }
                             artifact.tool_call_log.push(ToolCallArtifact {
                                 name: invocation.tool_id,
                                 input: parse_tool_input(&invocation.input),
@@ -285,6 +307,12 @@ fn run_user_turn(
             } else {
                 ArtifactOutcome::Pass
             };
+            if args.json_events {
+                emit_json_event(&serde_json::json!({
+                    "type": "turn-complete",
+                    "assistant": turn.assistant_text,
+                }));
+            }
             Ok(turn.assistant_text)
         }
         Err(error) => {
@@ -636,6 +664,16 @@ fn hydrate_codex_openai_auth(
 
 fn parse_tool_input(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ "value": raw }))
+}
+
+/// Writes one structured event to stdout as a newline-delimited JSON
+/// line and flushes. Used by `--json-events` so GUI hosts can stream a
+/// non-interactive turn without parsing TUI output.
+fn emit_json_event(value: &Value) {
+    if let Ok(line) = serde_json::to_string(value) {
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+    }
 }
 
 fn git_diff(cwd: &Path) -> String {
