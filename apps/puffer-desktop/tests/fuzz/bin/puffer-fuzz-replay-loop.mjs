@@ -17,8 +17,9 @@ const defaultSeeds = [
   "modal-focus-race",
   "browser-tab-race",
   "files-terminal-race",
+  "settings-connector-race",
   "settings-mcp-permission-race",
-  "pipelines-draft-race"
+  "workflows-draft-race"
 ];
 
 const seedDefaults = {
@@ -28,8 +29,9 @@ const seedDefaults = {
   "modal-focus-race": { iterations: 12, steps: 3 },
   "browser-tab-race": { iterations: 10, steps: 16 },
   "files-terminal-race": { iterations: 8, steps: 16 },
+  "settings-connector-race": { iterations: 8, steps: 14 },
   "settings-mcp-permission-race": { iterations: 8, steps: 14 },
-  "pipelines-draft-race": { iterations: 8, steps: 14 }
+  "workflows-draft-race": { iterations: 8, steps: 14 }
 };
 
 function parseArgs(argv) {

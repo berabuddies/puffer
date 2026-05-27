@@ -162,7 +162,7 @@ deterministic fallback instead of skipping shard execution.
 - Prioritize core user loops first: chat composer, turn lifecycle, session
   switching, permission/question flows, transcript reload, new-agent creation,
   and provider/model selection.
-- Secondary panes such as Browser, Files, Terminal, Settings, Pipelines, and
+- Secondary panes such as Browser, Files, Terminal, Settings, Workflows, and
   Workspace are valid when the scheduler assigns them.
 
 ## False-Positive Filters

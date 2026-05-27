@@ -1895,7 +1895,7 @@
   }
 
   function focusProviderButton(provider: AgentProvider) {
-    document.querySelector<HTMLButtonElement>(`[data-pipeline-provider="${provider}"]`)?.focus();
+    document.querySelector<HTMLButtonElement>(`[data-workflow-provider="${provider}"]`)?.focus();
   }
 
   function moveProviderSelection(provider: AgentProvider, offset: number) {
@@ -3127,7 +3127,7 @@
                     type="button"
                     role="radio"
                     data-selected={selectedNode.type === provider.id}
-                    data-pipeline-provider={provider.id}
+                    data-workflow-provider={provider.id}
                     aria-checked={selectedNode.type === provider.id}
                     tabindex={selectedNode.type === provider.id ? 0 : -1}
                     onclick={() => selectNodeProvider(provider.id)}

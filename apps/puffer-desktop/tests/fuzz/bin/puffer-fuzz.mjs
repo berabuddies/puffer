@@ -797,10 +797,11 @@ function isShardSetupStep(step) {
       "open-agent-detail",
       "open-workspace",
       "open-settings-providers",
+      "open-settings-connectors",
       "open-settings-mcp",
       "open-permissions",
       "open-new-agent",
-      "open-pipelines"
+      "open-workflows"
     ].includes(step.action);
 }
 

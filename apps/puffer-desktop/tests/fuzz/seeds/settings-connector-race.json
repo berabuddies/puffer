@@ -1,0 +1,75 @@
+{
+  "id": "settings-connector-race",
+  "title": "Settings connector setup races",
+  "focus": "Connector setup commands, dynamic AskUserQuestion inputs, stale workflow snapshots, and narrow responsive layout.",
+  "severityTarget": "P1 duplicate connector setup, lost connector answers, stale connection rows, or unreadable connector forms.",
+  "primaryRoutes": ["settings-connectors"],
+  "defaultIterations": 6,
+  "defaultSteps": 12,
+  "setup": [
+    {
+      "id": "setup-open-settings-connectors",
+      "action": "open-settings-connectors",
+      "kind": "ui",
+      "target": "settings-connectors",
+      "coverage": ["route:settings-connectors", "state:daemon.connected"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "start-connector-setup",
+      "kind": "ui",
+      "target": "settings.connector-setup",
+      "weight": 8,
+      "params": { "connectionSlug": { "oneOf": ["fuzz-connector", "team-email", "telegram-fuzz"] } },
+      "expectedDaemon": "run_agent_turn",
+      "coverage": ["control:settings.connector-setup", "state:settings.saving", "async:duplicate-submit"]
+    },
+    {
+      "id": "answer-connector-questions",
+      "kind": "ui",
+      "target": "settings.connector-answer",
+      "weight": 8,
+      "params": { "connectionSlug": { "oneOf": ["fuzz-connector", "team-email", "telegram-fuzz"] } },
+      "expectedDaemon": "resolve_user_question",
+      "coverage": ["control:settings.connector-answer", "state:settings.saving", "async:stale-session-event"]
+    },
+    {
+      "id": "open-settings-connectors",
+      "kind": "ui",
+      "target": "settings-connectors",
+      "weight": 4,
+      "coverage": ["route:settings-connectors"]
+    },
+    {
+      "id": "emit-workflow-refresh",
+      "kind": "daemon",
+      "target": "workflow_list",
+      "weight": 6,
+      "coverage": ["async:server-push-update", "async:delayed-list-refresh"]
+    },
+    {
+      "id": "resize-narrow",
+      "kind": "ui",
+      "target": "viewport",
+      "weight": 4,
+      "params": { "width": { "oneOf": [390, 480, 640] }, "height": { "oneOf": [720, 844] } },
+      "coverage": ["state:viewport.narrow"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 5,
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "one-request-per-intent",
+    "controls-disabled-while-pending",
+    "draft-preserved-on-failure",
+    "stale-error-scoped",
+    "no-permanent-loading"
+  ]
+}
