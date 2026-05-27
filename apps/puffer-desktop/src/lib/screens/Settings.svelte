@@ -1,6 +1,7 @@
 <script lang="ts">
   import "../design/settings.css";
 
+  import { onDestroy } from "svelte";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
   import {
@@ -17,7 +18,11 @@
     listMcpServers,
     listPermissions,
     listProviderModels,
+    loadWorkflowSnapshot,
     removeLambdaSkillLibrary,
+    resolveUserQuestion,
+    runAgentTurn,
+    createSession,
     saveLambdaSkillLibrary,
     savePermissions,
     setLambdaSkillApproval,
@@ -31,11 +36,14 @@
     type PermissionsSnapshot
   } from "../api/desktop";
   import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
+  import { subscribeSessionEvents, type SessionStreamEvent } from "../api/sessionEvents";
   import type {
     DesktopPreferences,
     ExternalCredential,
     RemoteOperation,
-    SettingsSnapshot
+    SettingsSnapshot,
+    WorkflowConnector,
+    WorkflowSnapshot
   } from "../types";
 
   type Props = {
@@ -79,15 +87,19 @@
     if (section === "skills" && daemonReachable && !lambdaLoading && !lambdaSaving && lambdaRemovingLibrary === null) {
       void loadLambdaSkillLibraries();
     }
+    if (section === "connectors" && daemonReachable && !connectorLoading && !connectorCreating) {
+      void loadConnectorSnapshot();
+    }
     props.onRefresh();
   }
 
-  type Section = "general" | "providers" | "permissions" | "skills" | "mcp" | "git" | "appearance" | "shortcuts";
+  type Section = "general" | "providers" | "connectors" | "permissions" | "skills" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
 
   const navItems: { id: Section; label: string; icon: IconName }[] = [
     { id: "general",     label: "General",    icon: "settings" },
     { id: "providers",   label: "Providers",  icon: "plug" },
+    { id: "connectors",  label: "Connectors", icon: "server" },
     { id: "permissions", label: "Permissions", icon: "bolt" },
     { id: "skills",      label: "Verified Skills", icon: "shield" },
     { id: "mcp",         label: "MCP Servers", icon: "plug" },
@@ -95,6 +107,26 @@
     { id: "appearance",  label: "Appearance", icon: "layers" },
     { id: "shortcuts",   label: "Shortcuts",  icon: "panel" }
   ];
+
+  type ConnectorQuestionOption = {
+    label: string;
+    description?: string;
+    preview?: string;
+  };
+
+  type ConnectorQuestion = {
+    header: string;
+    question: string;
+    type: "input" | "choice";
+    options: ConnectorQuestionOption[];
+    multiSelect: boolean;
+  };
+
+  type ConnectorQuestionRequest = {
+    turnId: string;
+    requestId: string;
+    questions: ConnectorQuestion[];
+  };
 
   // Live permissions loaded from the daemon. `permissionRows` is the
   // editable working copy — changes are staged in memory and flushed on
@@ -128,6 +160,23 @@
     scope: "local" as "local" | "user"
   });
 
+  let connectorSnapshot = $state<WorkflowSnapshot | null>(null);
+  let connectorLoaded = $state(false);
+  let connectorLoading = $state(false);
+  let connectorLoadGeneration = 0;
+  let connectorError = $state<string | null>(null);
+  let connectorSaved = $state<string | null>(null);
+  let connectorSlug = $state("");
+  let connectorConnectionSlug = $state("");
+  let connectorCreating = $state(false);
+  let connectorCreateSessionId = $state<string | null>(null);
+  let connectorTurnId = $state<string | null>(null);
+  let connectorQuestionRequest = $state<ConnectorQuestionRequest | null>(null);
+  let connectorQuestionAnswers = $state<Record<string, string | string[]>>({});
+  let connectorAssistantText = $state("");
+  let connectorUnlisten: (() => void) | null = null;
+  let lastConnectorSlug = "";
+
   let lambdaSnapshot = $state<LambdaSkillLibrariesSnapshot | null>(null);
   let lambdaLoaded = $state(false);
   let lambdaLoading = $state(false);
@@ -147,6 +196,22 @@
   let modelPickerModel = $state<string>("");
   let modelSaving = $state(false);
   let modelError = $state<string | null>(null);
+  let connectors = $derived(connectorSnapshot?.connectors ?? []);
+  let connections = $derived(connectorSnapshot?.connections ?? []);
+  let selectedConnector = $derived(
+    connectors.find((connector) => connector.connector_slug === connectorSlug) ?? connectors[0] ?? null
+  );
+  let selectedConnectorConnections = $derived(
+    selectedConnector
+      ? connections.filter((connection) => connection.connector_slug === selectedConnector.connector_slug)
+      : []
+  );
+  let connectorConnectionSlugInvalid = $derived(!connectionSlugValid(connectorConnectionSlug));
+  let connectorCommandPreview = $derived(
+    selectedConnector && !connectorConnectionSlugInvalid
+      ? `/connect ${selectedConnector.connector_slug} ${connectorConnectionSlug.trim()}`
+      : ""
+  );
 
   function ruleIcon(tool: string): IconName {
     if (tool === "read_file") return "file";
@@ -227,6 +292,238 @@
       mcpError = (e as Error).message ?? String(e);
     } finally {
       mcpSaving = false;
+    }
+  }
+
+  async function loadConnectorSnapshot() {
+    const generation = ++connectorLoadGeneration;
+    connectorLoading = true;
+    connectorError = null;
+    try {
+      const snap = await loadWorkflowSnapshot();
+      if (generation !== connectorLoadGeneration) return;
+      connectorSnapshot = snap;
+      connectorLoaded = true;
+      ensureConnectorSelection(snap.connectors ?? []);
+    } catch (e) {
+      if (generation === connectorLoadGeneration) {
+        connectorError = (e as Error).message ?? String(e);
+      }
+    } finally {
+      if (generation === connectorLoadGeneration) {
+        connectorLoading = false;
+      }
+    }
+  }
+
+  function ensureConnectorSelection(list = connectors) {
+    const selected = list.find((connector) => connector.connector_slug === connectorSlug) ?? list[0] ?? null;
+    if (!selected) {
+      connectorSlug = "";
+      connectorConnectionSlug = "";
+      return;
+    }
+    if (connectorSlug !== selected.connector_slug) {
+      connectorSlug = selected.connector_slug;
+    }
+    if (!connectorConnectionSlug.trim() || lastConnectorSlug !== connectorSlug) {
+      connectorConnectionSlug = connectorConnectionHint(selected);
+    }
+    lastConnectorSlug = connectorSlug;
+  }
+
+  function selectConnector(slug: string) {
+    const next = connectors.find((connector) => connector.connector_slug === slug) ?? null;
+    connectorSlug = slug;
+    connectorConnectionSlug = next ? connectorConnectionHint(next) : "";
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    connectorSaved = null;
+    connectorAssistantText = "";
+    lastConnectorSlug = slug;
+  }
+
+  function connectorConnectionHint(connector: WorkflowConnector): string {
+    return connector.suggested_connection_slug || connector.connector_slug;
+  }
+
+  function connectionSlugValid(value: string): boolean {
+    return /^[a-z0-9][a-z0-9-]*$/.test(value.trim());
+  }
+
+  function connectorStatusLabel(connector: WorkflowConnector): string {
+    if (connector.can_trigger_workflow ?? connector.can_subscribe) return "workflow";
+    if (connector.can_proxy_agent) return "proxy";
+    return connector.requires_auth ? "auth" : "available";
+  }
+
+  function connectorQuestionKey(question: ConnectorQuestion): string {
+    return question.question;
+  }
+
+  function normalizeConnectorQuestions(rawQuestions: unknown[]): ConnectorQuestion[] {
+    return rawQuestions
+      .map((raw): ConnectorQuestion | null => {
+        if (typeof raw !== "object" || raw === null) return null;
+        const record = raw as Record<string, unknown>;
+        const question = typeof record.question === "string" ? record.question : "";
+        if (!question.trim()) return null;
+        const options = Array.isArray(record.options)
+          ? record.options
+              .map((option): ConnectorQuestionOption | null => {
+                if (typeof option !== "object" || option === null) return null;
+                const optionRecord = option as Record<string, unknown>;
+                const label = typeof optionRecord.label === "string" ? optionRecord.label : "";
+                if (!label.trim()) return null;
+                return {
+                  label,
+                  description: typeof optionRecord.description === "string" ? optionRecord.description : undefined,
+                  preview: typeof optionRecord.preview === "string" ? optionRecord.preview : undefined
+                };
+              })
+              .filter((option): option is ConnectorQuestionOption => option !== null)
+          : [];
+        const type = record.type === "input" || options.length === 0 ? "input" : "choice";
+        return {
+          header: typeof record.header === "string" && record.header.trim() ? record.header : "Question",
+          question,
+          type,
+          options,
+          multiSelect: record.multiSelect === true
+        };
+      })
+      .filter((question): question is ConnectorQuestion => question !== null);
+  }
+
+  function defaultConnectorAnswers(questions: ConnectorQuestion[]): Record<string, string | string[]> {
+    const answers: Record<string, string | string[]> = {};
+    for (const question of questions) {
+      const key = connectorQuestionKey(question);
+      answers[key] = question.multiSelect
+        ? []
+        : question.type === "choice"
+          ? question.options[0]?.label ?? ""
+          : "";
+    }
+    return answers;
+  }
+
+  function connectorQuestionInputType(question: ConnectorQuestion): "text" | "password" {
+    const text = `${question.header} ${question.question}`.toLowerCase();
+    return /password|secret|token|cookie|key|code|xox|credential/.test(text) ? "password" : "text";
+  }
+
+  function updateConnectorAnswer(question: ConnectorQuestion, value: string) {
+    connectorQuestionAnswers = {
+      ...connectorQuestionAnswers,
+      [connectorQuestionKey(question)]: value
+    };
+  }
+
+  function connectorAnswerText(question: ConnectorQuestion): string {
+    const value = connectorQuestionAnswers[connectorQuestionKey(question)];
+    return typeof value === "string" ? value : "";
+  }
+
+  function connectorAnswerIncludes(question: ConnectorQuestion, value: string): boolean {
+    const current = connectorQuestionAnswers[connectorQuestionKey(question)];
+    return Array.isArray(current) ? current.includes(value) : current === value;
+  }
+
+  function toggleConnectorMultiAnswer(question: ConnectorQuestion, value: string, checked: boolean) {
+    const key = connectorQuestionKey(question);
+    const current = Array.isArray(connectorQuestionAnswers[key])
+      ? connectorQuestionAnswers[key] as string[]
+      : [];
+    const next = checked
+      ? Array.from(new Set([...current, value]))
+      : current.filter((item) => item !== value);
+    connectorQuestionAnswers = {
+      ...connectorQuestionAnswers,
+      [key]: next
+    };
+  }
+
+  function connectorAnswersComplete(): boolean {
+    if (!connectorQuestionRequest) return false;
+    return connectorQuestionRequest.questions.every((question) => {
+      const value = connectorQuestionAnswers[connectorQuestionKey(question)];
+      if (Array.isArray(value)) return question.options.length === 0 || value.length > 0;
+      return question.type === "choice" || Boolean(value?.trim());
+    });
+  }
+
+  function handleConnectorSessionEvent(event: SessionStreamEvent) {
+    if (connectorTurnId && "turnId" in event && event.turnId !== connectorTurnId) return;
+    if (event.type === "user-question-request") {
+      const questions = normalizeConnectorQuestions(event.questions);
+      connectorQuestionRequest = {
+        turnId: event.turnId,
+        requestId: event.requestId,
+        questions
+      };
+      connectorQuestionAnswers = defaultConnectorAnswers(questions);
+      connectorCreating = false;
+      connectorSaved = "Answer the connector setup questions to continue.";
+      return;
+    }
+    if (event.type === "turn-complete") {
+      connectorCreating = false;
+      connectorQuestionRequest = null;
+      connectorQuestionAnswers = {};
+      connectorAssistantText = event.assistantText;
+      connectorSaved = `Connector setup finished for ${connectorConnectionSlug.trim()}.`;
+      void loadConnectorSnapshot();
+      return;
+    }
+    if (event.type === "turn-error") {
+      connectorCreating = false;
+      connectorQuestionRequest = null;
+      connectorError = event.error;
+    }
+  }
+
+  async function startConnectorSetup() {
+    if (!canStartConnectorSetup) return;
+    connectorCreating = true;
+    connectorError = null;
+    connectorSaved = `Starting ${connectorCommandPreview}...`;
+    connectorAssistantText = "";
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    try {
+      connectorUnlisten?.();
+      connectorUnlisten = null;
+      const created = await createSession(
+        props.snapshot?.workspaceRoot ?? undefined,
+        props.snapshot?.config.defaultProvider ?? undefined,
+        props.snapshot?.config.defaultModel ?? undefined
+      );
+      connectorCreateSessionId = created.sessionId;
+      connectorUnlisten = await subscribeSessionEvents(created.sessionId, handleConnectorSessionEvent);
+      connectorTurnId = await runAgentTurn(created.sessionId, connectorCommandPreview);
+    } catch (e) {
+      connectorCreating = false;
+      connectorError = (e as Error).message ?? String(e);
+    }
+  }
+
+  async function submitConnectorAnswers() {
+    if (!connectorQuestionRequest || !connectorAnswersComplete()) return;
+    connectorCreating = true;
+    connectorSaved = "Continuing connector setup...";
+    try {
+      await resolveUserQuestion(
+        connectorQuestionRequest.turnId,
+        connectorQuestionRequest.requestId,
+        connectorQuestionAnswers,
+        {}
+      );
+      connectorQuestionRequest = null;
+      connectorQuestionAnswers = {};
+    } catch (e) {
+      connectorCreating = false;
+      connectorError = (e as Error).message ?? String(e);
     }
   }
 
@@ -702,6 +999,24 @@
     mcpError = null;
     mcpSaved = null;
 
+    connectorUnlisten?.();
+    connectorUnlisten = null;
+    connectorSnapshot = null;
+    connectorLoaded = false;
+    connectorLoading = false;
+    connectorLoadGeneration += 1;
+    connectorError = null;
+    connectorSaved = null;
+    connectorSlug = "";
+    connectorConnectionSlug = "";
+    connectorCreating = false;
+    connectorCreateSessionId = null;
+    connectorTurnId = null;
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    connectorAssistantText = "";
+    lastConnectorSlug = "";
+
     providerModels = {};
     modelLoadingByProvider = {};
     const nextProvider = defaultRouteProviderId();
@@ -753,6 +1068,16 @@
         !credentialBusy
     )
   );
+  let canStartConnectorSetup = $derived(
+    Boolean(
+      daemonReachable &&
+        selectedConnector &&
+        !connectorLoading &&
+        !connectorCreating &&
+        !connectorConnectionSlugInvalid &&
+        connectorCommandPreview
+    )
+  );
 
   // Lazy-load per-pane data when the user actually opens the tab so the
   // initial settings render stays a single RPC (the snapshot).
@@ -770,9 +1095,17 @@
     if (section === "mcp" && !mcpLoaded && !mcpLoading) {
       void loadMcpServers();
     }
+    if (section === "connectors" && !connectorLoaded && !connectorLoading) {
+      void loadConnectorSnapshot();
+    }
     if (section === "providers" && modelPickerProvider) {
       void loadModelsForProvider(modelPickerProvider);
     }
+  });
+
+  onDestroy(() => {
+    connectorUnlisten?.();
+    connectorUnlisten = null;
   });
 </script>
 
@@ -1002,6 +1335,229 @@
         onImportExternal={props.onImportExternal ?? (() => {})}
         onRefresh={props.onRefresh}
       />
+
+    {:else if section === "connectors"}
+      <h2>Connectors</h2>
+      <p class="lead">Connector catalog, saved connections, and setup flows backed by AskUserQuestion.</p>
+      <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="outline"
+          data-size="sm"
+          disabled={!daemonReachable || connectorLoading || connectorCreating}
+          onclick={refreshIfIdle}
+        >
+          <Icon name="refresh" size={13} />Refresh connectors
+        </button>
+      </div>
+      {#if connectorError}
+        <div class="pf-settings-note warn">{connectorError}</div>
+      {/if}
+      {#if connectorSaved}
+        <div class="pf-settings-note">{connectorSaved}</div>
+      {/if}
+      <div class="pf-settings-note">
+        {#if !daemonReachable}
+          Preview mode - launch Puffer in the desktop app to configure connectors.
+        {:else if connectorLoading}
+          Loading connector catalog...
+        {:else}
+          {connectors.length} connector{connectors.length === 1 ? "" : "s"} and {connections.length} connection{connections.length === 1 ? "" : "s"}.
+        {/if}
+      </div>
+
+      <div class="pf-settings-row pf-connector-setup-row">
+        <div class="meta">
+          <div class="label">Create connection</div>
+          <div class="desc">Runs the selected connector setup command and renders its dynamic questions here.</div>
+        </div>
+        <div class="pf-connector-form">
+          <label>
+            Connector
+            <select
+              class="sc-input"
+              value={connectorSlug}
+              disabled={!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0}
+              onchange={(e) => selectConnector((e.currentTarget as HTMLSelectElement).value)}
+            >
+              {#if connectors.length === 0}
+                <option value="">No connectors</option>
+              {/if}
+              {#each connectors as connector (connector.connector_slug)}
+                <option value={connector.connector_slug}>{connector.connector_slug}</option>
+              {/each}
+            </select>
+          </label>
+          <label>
+            Connection slug
+            <input
+              class="sc-input"
+              aria-label="Connector connection slug"
+              aria-invalid={connectorConnectionSlugInvalid}
+              value={connectorConnectionSlug}
+              disabled={!daemonReachable || connectorLoading || connectorCreating || !selectedConnector}
+              oninput={(e) => {
+                connectorConnectionSlug = (e.currentTarget as HTMLInputElement).value;
+                connectorSaved = null;
+              }}
+            />
+          </label>
+          {#if connectorConnectionSlugInvalid && connectorConnectionSlug.trim()}
+            <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
+          {/if}
+          {#if selectedConnector}
+            <div class="pf-connector-selected">
+              <div>
+                <strong>{selectedConnector.connector_slug}</strong>
+                <span>{selectedConnector.description}</span>
+              </div>
+              <span class="pf-status-pill ready">{connectorStatusLabel(selectedConnector)}</span>
+            </div>
+          {/if}
+          <div class="pf-connector-command" aria-label="Connector setup command">
+            <Icon name="terminal" size={12} />
+            <code>{connectorCommandPreview || "Enter a valid connection slug."}</code>
+          </div>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="default"
+            data-size="sm"
+            disabled={!canStartConnectorSetup}
+            aria-busy={connectorCreating && !connectorQuestionRequest}
+            onclick={startConnectorSetup}
+          >
+            <Icon name="plug" size={12} />{connectorCreating && !connectorQuestionRequest ? "Starting..." : "Start setup"}
+          </button>
+        </div>
+      </div>
+
+      {#if connectorQuestionRequest}
+        <section class="pf-connector-question-panel" aria-label="Connector setup questions">
+          <div class="pf-connector-question-head">
+            <div>
+              <h3>Setup questions</h3>
+              <p>{selectedConnector?.connector_slug ?? "connector"} - {connectorConnectionSlug.trim()}</p>
+            </div>
+            <span class="pf-status-pill">{connectorQuestionRequest.questions.length} question{connectorQuestionRequest.questions.length === 1 ? "" : "s"}</span>
+          </div>
+          <div class="pf-connector-question-list">
+            {#each connectorQuestionRequest.questions as question (connectorQuestionKey(question))}
+              {@const key = connectorQuestionKey(question)}
+              <fieldset class="pf-connector-question">
+                <legend>
+                  <span>{question.header}</span>
+                  <strong>{question.question}</strong>
+                </legend>
+                {#if question.type === "input"}
+                  <input
+                    class="sc-input"
+                    type={connectorQuestionInputType(question)}
+                    value={connectorAnswerText(question)}
+                    oninput={(e) => updateConnectorAnswer(question, (e.currentTarget as HTMLInputElement).value)}
+                  />
+                {:else if question.multiSelect}
+                  <div class="pf-connector-options">
+                    {#each question.options as option (option.label)}
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={connectorAnswerIncludes(question, option.label)}
+                          onchange={(e) => toggleConnectorMultiAnswer(question, option.label, (e.currentTarget as HTMLInputElement).checked)}
+                        />
+                        <span>
+                          <strong>{option.label}</strong>
+                          {#if option.description}<small>{option.description}</small>{/if}
+                          {#if option.preview}<code>{option.preview}</code>{/if}
+                        </span>
+                      </label>
+                    {/each}
+                  </div>
+                {:else}
+                  <div class="pf-connector-options">
+                    {#each question.options as option (option.label)}
+                      <label>
+                        <input
+                          type="radio"
+                          name={`connector-${connectorQuestionRequest.requestId}-${key}`}
+                          checked={connectorAnswerIncludes(question, option.label)}
+                          onchange={() => updateConnectorAnswer(question, option.label)}
+                        />
+                        <span>
+                          <strong>{option.label}</strong>
+                          {#if option.description}<small>{option.description}</small>{/if}
+                          {#if option.preview}<code>{option.preview}</code>{/if}
+                        </span>
+                      </label>
+                    {/each}
+                  </div>
+                {/if}
+              </fieldset>
+            {/each}
+          </div>
+          <div class="pf-connector-question-actions">
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="default"
+              data-size="sm"
+              disabled={!connectorAnswersComplete() || connectorCreating}
+              aria-busy={connectorCreating}
+              onclick={submitConnectorAnswers}
+            >
+              <Icon name="check" size={12} />{connectorCreating ? "Submitting..." : "Submit answers"}
+            </button>
+          </div>
+        </section>
+      {/if}
+
+      {#if connectorAssistantText}
+        <pre class="pf-connector-output">{connectorAssistantText}</pre>
+      {/if}
+
+      <h3 class="pf-settings-subhead">Connections</h3>
+      <div class="pf-mcp-list">
+        {#each connections as connection (connection.slug)}
+          <div class="pf-mcp-card pf-connector-card-settings">
+            <span class="ico"><Icon name="plug" size={16} /></span>
+            <div>
+              <div class="title">{connection.slug}</div>
+              <div class="desc">{connection.description || connection.connector_slug}</div>
+            </div>
+            <span class:ready={connection.state === "active" || connection.state === "authenticated"} class="pf-status-pill">
+              {connection.state}
+            </span>
+            <span class="pf-connector-source">{connection.connector_slug}</span>
+          </div>
+        {/each}
+        {#if !connectorLoading && connections.length === 0}
+          <div class="pf-empty">No connector connections configured.</div>
+        {/if}
+      </div>
+
+      <h3 class="pf-settings-subhead">Catalog</h3>
+      <div class="pf-mcp-list">
+        {#each connectors as connector (connector.connector_slug)}
+          <button
+            type="button"
+            class="pf-mcp-card pf-connector-card-settings pf-connector-catalog-button"
+            data-selected={connector.connector_slug === connectorSlug}
+            onclick={() => selectConnector(connector.connector_slug)}
+          >
+            <span class="ico"><Icon name="server" size={16} /></span>
+            <div>
+              <div class="title">{connector.connector_slug}</div>
+              <div class="desc">{connector.description}</div>
+            </div>
+            <span class:ready={connector.requires_auth} class="pf-status-pill">{connectorStatusLabel(connector)}</span>
+            <span class="pf-connector-source">{connector.skill}</span>
+          </button>
+        {/each}
+        {#if !connectorLoading && connectors.length === 0}
+          <div class="pf-empty">No connectors discovered.</div>
+        {/if}
+      </div>
 
     {:else if section === "permissions"}
       <h2>Permissions</h2>

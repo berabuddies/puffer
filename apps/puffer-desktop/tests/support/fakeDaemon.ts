@@ -300,6 +300,11 @@ export class FakeDaemon {
   ];
   private readonly protocol: "legacy" | "real";
   private readonly activeTurnIds = new Set<string>();
+  private readonly pendingConnectorTurns = new Map<string, {
+    sessionId: string;
+    connectorSlug: string;
+    connectionSlug: string;
+  }>();
   private workflowSnapshot: WorkflowSnapshotFixture = {
     workflows: [
       {
@@ -957,8 +962,9 @@ export class FakeDaemon {
         return { ok: false, error: "turn not found" };
       }
       case "resolve_permission":
-      case "resolve_user_question":
         return {};
+      case "resolve_user_question":
+        return this.resolveUserQuestion(request.params);
       case "list_provider_models":
         return {
           providerId: String(request.params.providerId ?? "codex"),
@@ -1222,6 +1228,7 @@ export class FakeDaemon {
   private runAgentTurn(params: JsonRecord): JsonRecord {
     const sessionId = String(params.sessionId ?? session.sessionId);
     const turnId = `turn-${sessionId}`;
+    const message = String(params.message ?? "").trim();
     const metadata = this.sessions.get(sessionId);
     if (metadata) {
       const providerId = typeof params.providerId === "string" ? params.providerId.trim() : "";
@@ -1232,7 +1239,72 @@ export class FakeDaemon {
       this.sessions.set(sessionId, metadata);
     }
     this.activeTurnIds.add(turnId);
+    const connectMatch = /^\/connect\s+([a-z0-9-]+)\s+([a-z0-9-]+)$/i.exec(message);
+    if (connectMatch) {
+      const [, connectorSlug, connectionSlug] = connectMatch;
+      this.pendingConnectorTurns.set(turnId, { sessionId, connectorSlug, connectionSlug });
+      setTimeout(() => {
+        this.emit(`session:${sessionId}:event`, {
+          type: "user-question-request",
+          turnId,
+          requestId: "connector-setup",
+          questions: [
+            {
+              type: "input",
+              header: "Credential",
+              question: "Connector credential",
+              options: []
+            },
+            {
+              type: "choice",
+              header: "Mode",
+              question: "Setup mode",
+              options: [
+                { label: "Default", description: "Standard setup" },
+                { label: "Strict", description: "Extra validation" }
+              ]
+            }
+          ]
+        });
+      }, 0);
+    }
     return { turnId };
+  }
+
+  private resolveUserQuestion(params: JsonRecord): JsonRecord {
+    const turnId = String(params.turnId ?? "");
+    const pending = this.pendingConnectorTurns.get(turnId);
+    if (!pending) return {};
+    this.pendingConnectorTurns.delete(turnId);
+    const connector = (this.workflowSnapshot.connectors ?? []).find(
+      (candidate) => candidate.connector_slug === pending.connectorSlug
+    );
+    const connection = {
+      slug: pending.connectionSlug,
+      connector_slug: pending.connectorSlug,
+      description: connector?.description ?? `${pending.connectorSlug} connection`,
+      state: "authenticated",
+      has_consumer: false,
+      auth_failure_notified: false,
+      can_trigger_workflow: connector?.can_trigger_workflow ?? connector?.can_subscribe ?? false,
+      connect_command: `/connect ${pending.connectorSlug} ${pending.connectionSlug}`,
+      monitor_command: connector?.can_subscribe ? `/monitor ${pending.connectionSlug}` : null
+    };
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      connections: [
+        ...(this.workflowSnapshot.connections ?? []).filter((candidate) => candidate.slug !== pending.connectionSlug),
+        connection
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
+    };
+    setTimeout(() => {
+      this.emit(`session:${pending.sessionId}:event`, {
+        type: "turn-complete",
+        turnId,
+        assistantText: `Created connector connection ${pending.connectionSlug}.`
+      });
+    }, 0);
+    return {};
   }
 
   private renameSession(params: JsonRecord): JsonRecord {

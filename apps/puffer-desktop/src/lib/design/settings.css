@@ -149,3 +149,217 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
+
+.pf-connector-setup-row {
+  align-items: start;
+}
+
+.pf-connector-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-self: end;
+  min-width: min(420px, 100%);
+}
+
+.pf-connector-form label,
+.pf-connector-question label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
+
+.pf-connector-selected,
+.pf-connector-command,
+.pf-connector-question-panel,
+.pf-connector-output {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--background) 94%, var(--muted));
+}
+
+.pf-connector-selected {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+}
+
+.pf-connector-selected strong {
+  display: block;
+  font-size: 12.5px;
+}
+
+.pf-connector-selected span {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+.pf-connector-command {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 9px 10px;
+  color: var(--muted-foreground);
+}
+
+.pf-connector-command code {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-connector-validation {
+  color: var(--destructive, #c03232);
+  font-size: 11.5px;
+}
+
+.pf-connector-question-panel {
+  margin: 18px 0;
+  padding: 14px;
+}
+
+.pf-connector-question-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pf-connector-question-head h3 {
+  margin: 0;
+}
+
+.pf-connector-question-head p {
+  margin: 3px 0 0;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.pf-connector-question-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.pf-connector-question {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0;
+  background: var(--background);
+}
+
+.pf-connector-question legend {
+  display: grid;
+  gap: 2px;
+  padding: 0 4px;
+}
+
+.pf-connector-question legend span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pf-connector-question legend strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pf-connector-options {
+  display: grid;
+  gap: 8px;
+}
+
+.pf-connector-options label {
+  flex-direction: row;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.pf-connector-options input {
+  margin-top: 2px;
+}
+
+.pf-connector-options strong,
+.pf-connector-options small,
+.pf-connector-options code {
+  display: block;
+}
+
+.pf-connector-options strong {
+  color: var(--foreground);
+  font-size: 12.5px;
+}
+
+.pf-connector-options small {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
+.pf-connector-options code {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.pf-connector-question-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.pf-connector-output {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.pf-connector-card-settings {
+  grid-template-columns: 32px minmax(0, 1fr) auto auto;
+}
+
+.pf-connector-catalog-button {
+  width: 100%;
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pf-connector-catalog-button[data-selected="true"] {
+  border-color: color-mix(in oklab, var(--puffer-accent) 34%, var(--border));
+  background: var(--pf-selected-bg);
+}
+
+.pf-connector-source {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}

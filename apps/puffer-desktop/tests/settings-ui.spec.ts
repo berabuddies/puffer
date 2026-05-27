@@ -1458,3 +1458,39 @@ test("MCP settings do not reload-loop when no servers are configured", async ({ 
   await page.waitForTimeout(300);
   expect(daemon.requests.filter((request) => request.method === "list_mcp_servers")).toHaveLength(1);
 });
+
+test("connector settings renders dynamic AskUserQuestion inputs", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connectors" }).click();
+  await daemon.waitForRequest("workflow_list");
+
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.locator(".pf-connector-form select")).toHaveValue("telegram-login");
+  await pane.getByLabel("Connector connection slug").fill("telegram-test");
+  await pane.getByRole("button", { name: "Start setup" }).click();
+
+  const turn = await daemon.waitForRequest("run_agent_turn");
+  expect(turn.params).toMatchObject({
+    message: "/connect telegram-login telegram-test"
+  });
+
+  await expect(pane.getByRole("heading", { name: "Setup questions" })).toBeVisible();
+  await pane.locator(".pf-connector-question").filter({ hasText: "Connector credential" }).locator("input").fill("secret-test");
+  await expect(pane.getByLabel("Default")).toBeChecked();
+  await pane.getByRole("button", { name: "Submit answers" }).click();
+
+  const resolved = await daemon.waitForRequest("resolve_user_question");
+  expect(resolved.params).toMatchObject({
+    requestId: "connector-setup",
+    answers: {
+      "Connector credential": "secret-test",
+      "Setup mode": "Default"
+    }
+  });
+  await expect(pane.getByText("Created connector connection telegram-test.")).toBeVisible();
+  await expect(pane.locator(".pf-mcp-card").filter({ hasText: "telegram-test" })).toBeVisible();
+});

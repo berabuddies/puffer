@@ -102,7 +102,8 @@
 
 .pf-run-pip { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .pf-run-pip.running { background: var(--pf-run-running); box-shadow: 0 0 0 3px color-mix(in oklab, var(--pf-run-running) 25%, transparent); animation: pf-run-pulse 1.6s infinite; }
-.pf-run-pip.done    { background: var(--pf-run-done); }
+.pf-run-pip.done,
+.pf-run-pip.completed { background: var(--pf-run-done); }
 .pf-run-pip.failed  { background: var(--pf-run-failed); }
 .pf-run-pip.blocked { background: var(--pf-run-blocked); }
 .pf-run-pip.skipped { background: var(--pf-run-skipped); opacity: 0.6; }

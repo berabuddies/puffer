@@ -1,4 +1,4 @@
-export type ScreenId = "workspace" | "pipelines" | "deployments" | "settings";
+export type ScreenId = "workspace" | "pipelines" | "settings";
 export type AgentState = "idle" | "thinking" | "running" | "awaiting" | "review";
 export type AccentKey = "violet" | "cyan" | "amber" | "rose" | "lime" | "mono";
 export type DensityKey = "compact" | "comfortable" | "airy";
@@ -43,10 +43,20 @@ export function loadTweaks(): Tweaks {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...defaultTweaks };
     const loaded = { ...defaultTweaks, ...JSON.parse(raw) };
-    return { ...loaded, sidebarWidth: clampSidebarWidth(loaded.sidebarWidth) };
+    return {
+      ...loaded,
+      screen: normalizeScreen(loaded.screen),
+      sidebarWidth: clampSidebarWidth(loaded.sidebarWidth)
+    };
   } catch {
     return { ...defaultTweaks };
   }
+}
+
+function normalizeScreen(value: unknown): ScreenId {
+  return value === "workspace" || value === "pipelines" || value === "settings"
+    ? value
+    : defaultTweaks.screen;
 }
 
 export function clampSidebarWidth(value: unknown): number {

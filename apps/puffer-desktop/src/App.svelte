@@ -19,7 +19,6 @@
   import WorkspacePicker from "./lib/screens/WorkspacePicker.svelte";
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
   import Pipelines from "./lib/screens/Pipelines.svelte";
-  import Deployments from "./lib/screens/Deployments.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import Onboarding from "./lib/screens/Onboarding.svelte";
 
@@ -3669,8 +3668,6 @@
             {/if}
           {:else if tweaks.screen === "pipelines"}
             <Pipelines onRunWorkflowCommand={runPipelineWorkflowCommand} />
-          {:else if tweaks.screen === "deployments"}
-            <Deployments />
           {:else if tweaks.screen === "settings"}
             <Settings
               snapshot={settingsSnapshot}
