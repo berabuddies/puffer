@@ -349,3 +349,105 @@ fn string_value(value: Option<&Value>) -> Option<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_tasks_render_actions_and_ignore_commands() {
+        let context = MonitorTaskContext {
+            tasks: vec![
+                MonitorTaskRow {
+                    task_id: "monitor-1".to_string(),
+                    subject: "Reply to support ping".to_string(),
+                    description: "Alice asked whether deploy finished.".to_string(),
+                    status: "pending".to_string(),
+                    monitor_connection: Some("telegram-user".to_string()),
+                    monitor_connector: Some("telegram-login".to_string()),
+                    monitor_memory_path: Some("/tmp/telegram-user.md".to_string()),
+                    ignored: false,
+                    actions: vec![
+                        MonitorTaskAction {
+                            name: "Draft reply".to_string(),
+                            prompt: "Draft the latest deployment status.".to_string(),
+                        },
+                        MonitorTaskAction {
+                            name: "Escalate owner".to_string(),
+                            prompt: "Escalate to the on-call owner.".to_string(),
+                        },
+                    ],
+                    possible_ignore_reasons: vec![
+                        "already answered".to_string(),
+                        "not actionable".to_string(),
+                    ],
+                },
+                MonitorTaskRow {
+                    task_id: "monitor-2".to_string(),
+                    subject: "Ignored duplicate".to_string(),
+                    description: "A duplicate notification.".to_string(),
+                    status: "done".to_string(),
+                    monitor_connection: Some("telegram-user".to_string()),
+                    monitor_connector: Some("telegram-login".to_string()),
+                    monitor_memory_path: None,
+                    ignored: true,
+                    actions: Vec::new(),
+                    possible_ignore_reasons: Vec::new(),
+                },
+            ],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_monitor_tasks(&mut out, &context, "support escalate");
+
+        assert!(out
+            .contains("filters: active | ignored | action | ignore | /tasks show | /tasks ignore"));
+        assert!(out.contains("showing 1/2 monitor tasks for query=\"support escalate\""));
+        assert!(out.contains("- monitor-1 [pending] connection=telegram-user connector=telegram-login memory=/tmp/telegram-user.md subject=Reply to support ping actions=Draft reply,Escalate owner"));
+        assert!(out.contains(
+            "commands: show=/tasks show monitor-1 | ignore=/tasks ignore monitor-1 already answered"
+        ));
+        assert!(!out.contains("monitor-2"));
+    }
+
+    #[test]
+    fn monitor_tasks_filter_ignored_and_empty_states() {
+        let mut out = String::new();
+        write_monitor_tasks(&mut out, &MonitorTaskContext::default(), "");
+
+        assert!(out.contains("showing 0/0 monitor tasks"));
+        assert!(out.contains("- none recorded"));
+
+        let context = MonitorTaskContext {
+            tasks: vec![MonitorTaskRow {
+                task_id: "monitor-ignored".to_string(),
+                subject: "Duplicate ping".to_string(),
+                description: String::new(),
+                status: String::new(),
+                monitor_connection: None,
+                monitor_connector: None,
+                monitor_memory_path: None,
+                ignored: true,
+                actions: Vec::new(),
+                possible_ignore_reasons: Vec::new(),
+            }],
+            error: None,
+        };
+        out.clear();
+
+        write_monitor_tasks(&mut out, &context, "ignored");
+
+        assert!(out.contains("showing 1/1 monitor tasks for query=\"ignored\""));
+        assert!(out.contains("- monitor-ignored [ignored] connection=<unknown> connector=<unknown> subject=Duplicate ping"));
+        assert!(out.contains(
+            "commands: show=/tasks show monitor-ignored | ignore=/tasks ignore monitor-ignored"
+        ));
+
+        out.clear();
+        write_monitor_tasks(&mut out, &context, "active");
+
+        assert!(out.contains("showing 0/1 monitor tasks for query=\"active\""));
+        assert!(out.contains("- no matching monitor tasks"));
+    }
+}

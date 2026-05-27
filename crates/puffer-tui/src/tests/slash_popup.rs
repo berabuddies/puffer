@@ -155,6 +155,36 @@ fn render_shows_workflow_subcommand_popup_after_command_space() {
 }
 
 #[test]
+fn render_shows_workflow_monitor_task_subcommand_popup() {
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/workflows ta",
+                13,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("/workflows tasks"));
+    assert!(rendered.contains("Search connector monitor tasks and task actions"));
+    assert!(rendered.contains("[query]"));
+}
+
+#[test]
 fn render_shows_connect_catalog_popup_after_command_space() {
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();

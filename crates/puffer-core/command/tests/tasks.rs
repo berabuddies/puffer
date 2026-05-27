@@ -285,6 +285,8 @@ fn monitor_tasks_offer_actions_and_ignore_choices() {
         serde_json::json!({
             "subject": "Answer Telegram support ping",
             "description": "Alice asked whether the deployment is finished.",
+            "receivedAt": "2026-05-27T00:00:00Z",
+            "expiresAt": "2026-05-28T00:00:00Z",
             "actions": [
                 {
                     "actionName": "Draft reply",
@@ -363,6 +365,8 @@ fn tasks_ignore_marks_monitor_task_and_hides_actions() {
         serde_json::json!({
             "subject": "Ignore noisy Telegram ping",
             "description": "A duplicate deployment reminder appeared.",
+            "receivedAt": "2026-05-27T00:00:00Z",
+            "expiresAt": "2026-05-28T00:00:00Z",
             "actions": [
                 {
                     "actionName": "Open chat",
