@@ -50,7 +50,8 @@
     "credit-card": CreditCard,
     user: User,
     users: Users,
-    briefcase: Briefcase
+    briefcase: Briefcase,
+    bot: Bot
   };
 
   let leadingIcon = $derived(iconMap[task.icon] ?? Calendar);

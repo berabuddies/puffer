@@ -19,16 +19,47 @@ import * as agent from "./agentClient";
 import type { SessionEventPayload } from "./agentClient";
 import { pushToast } from "./toast.svelte";
 
-export interface ChatMessage {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  /** True while the assistant bubble is rendering its "typing…" indicator. */
-  pending?: boolean;
-  createdAt: number;
-  /** Set when the assistant bubble represents an error (e.g. turn-error). */
-  error?: boolean;
-}
+/**
+ * Discriminated union over chat bubble kinds. New roles get added here as
+ * the chat UI grows primitives for them — keep the union flat so each
+ * variant carries exactly the fields it needs:
+ *
+ *   - "user"      — composer-submitted prompt
+ *   - "assistant" — streaming/resolved model output (also error variant)
+ *   - "thinking"  — streamed `thinking-delta` content; collapsed to a
+ *                   fixed pill in prod, shown verbatim in dev
+ */
+export type ChatMessage =
+  | {
+      id: string;
+      role: "user";
+      text: string;
+      /** True while the assistant bubble is rendering its "typing…" indicator. */
+      pending?: boolean;
+      createdAt: number;
+      /** Set when the assistant bubble represents an error (e.g. turn-error). */
+      error?: boolean;
+    }
+  | {
+      id: string;
+      role: "assistant";
+      text: string;
+      /** True while the assistant bubble is rendering its "typing…" indicator. */
+      pending?: boolean;
+      createdAt: number;
+      /** Set when the assistant bubble represents an error (e.g. turn-error). */
+      error?: boolean;
+    }
+  | {
+      id: string;
+      role: "thinking";
+      text: string;
+      /** True until turn-complete / turn-error lands for this turn. */
+      pending: boolean;
+      createdAt: number;
+      /** The turn this thinking bubble belongs to. Used to flip pending on completion. */
+      turnId: string;
+    };
 
 /** Map of sessionId → ordered message list. */
 export const chatSessions = $state<Record<string, ChatMessage[]>>({});
@@ -133,15 +164,23 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       const turnId = (payload as { turnId: string }).turnId;
       const assistantText = (payload as { assistantText?: string }).assistantText;
       const ref = pendingByTurn.get(turnId);
-      if (!ref) return;
-      const target = list.find((m) => m.id === ref.messageId);
-      if (target) {
-        if (typeof assistantText === "string" && assistantText.length > 0) {
-          target.text = assistantText;
+      if (ref) {
+        const target = list.find((m) => m.id === ref.messageId);
+        if (target && target.role === "assistant") {
+          if (typeof assistantText === "string" && assistantText.length > 0) {
+            target.text = assistantText;
+          }
+          target.pending = false;
         }
-        target.pending = false;
+        pendingByTurn.delete(turnId);
       }
-      pendingByTurn.delete(turnId);
+      // Also flip any thinking bubble for this turn out of pending. Loop
+      // unconditionally (not gated on `ref`) because a thinking-only turn
+      // never registers in `pendingByTurn` — there was no assistant bubble
+      // to bind.
+      for (const m of list) {
+        if (m.role === "thinking" && m.turnId === turnId) m.pending = false;
+      }
       if (runningTurnBySessionId[sessionId] === turnId) {
         delete runningTurnBySessionId[sessionId];
       }
@@ -153,12 +192,16 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       const ref = pendingByTurn.get(turnId);
       if (ref) {
         const target = list.find((m) => m.id === ref.messageId);
-        if (target) {
+        if (target && target.role === "assistant") {
           target.text = `Error: ${error}`;
           target.pending = false;
           target.error = true;
         }
         pendingByTurn.delete(turnId);
+      }
+      // Same as turn-complete: also flip any thinking bubble for this turn.
+      for (const m of list) {
+        if (m.role === "thinking" && m.turnId === turnId) m.pending = false;
       }
       if (runningTurnBySessionId[sessionId] === turnId) {
         delete runningTurnBySessionId[sessionId];
@@ -166,10 +209,34 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       pushToast(error, "error");
       break;
     }
-    // thinking-delta, tool-calls-requested, tool-invocations,
-    // permission-request, user-question-request, plan-*, usage,
-    // reflection-checkpoint, retry-attempt — intentionally no-op for the
-    // first cut. Will be surfaced once the V2 UI has primitives for them.
+    case "thinking-delta": {
+      const turnId = (payload as { turnId: string }).turnId;
+      const delta = (payload as { delta: string }).delta ?? "";
+      // Find or create the thinking bubble for this turn. Attach by turnId
+      // (not callId) because thinking-delta events have no callId — one
+      // bubble per turn accumulates every delta in submission order.
+      let bubble = list.find(
+        (m): m is Extract<ChatMessage, { role: "thinking" }> =>
+          m.role === "thinking" && m.turnId === turnId
+      );
+      if (!bubble) {
+        bubble = {
+          id: nextMessageId(),
+          role: "thinking",
+          text: "",
+          pending: true,
+          createdAt: Date.now(),
+          turnId
+        };
+        list.push(bubble);
+      }
+      bubble.text = (bubble.text ?? "") + delta;
+      break;
+    }
+    // tool-calls-requested, tool-invocations, permission-request,
+    // user-question-request, plan-*, usage, reflection-checkpoint,
+    // retry-attempt — intentionally no-op for the first cut. Will be
+    // surfaced once the V2 UI has primitives for them.
     default:
       break;
   }
@@ -366,7 +433,10 @@ function fireTurn(sessionId: string, bubbleId: string, message: string): void {
       const list = chatSessions[sessionId];
       if (list) {
         const target = list.find((m) => m.id === bubbleId);
-        if (target) {
+        // Only assistant bubbles carry the `error` field — the pending
+        // bubble created in pushPendingAssistant is always the assistant
+        // variant, so this narrow is exact.
+        if (target && target.role === "assistant") {
           target.text = `Error: ${msg}`;
           target.pending = false;
           target.error = true;

@@ -22,6 +22,7 @@
 <script lang="ts">
   import Composer from "../components/shell/Composer.svelte";
   import ChatBubble from "../components/agent/ChatBubble.svelte";
+  import ThinkingBlock from "../components/agent/ThinkingBlock.svelte";
   import Mascot from "../components/common/Mascot.svelte";
   import MessageBody from "../components/common/MessageBody.svelte";
   import { formatTime } from "../lib/timeFormat";
@@ -137,6 +138,8 @@
         {#each chatMessages as message (message.id)}
           {#if message.role === "user"}
             <ChatBubble text={message.text} createdAt={message.createdAt} />
+          {:else if message.role === "thinking"}
+            <ThinkingBlock text={message.text} pending={message.pending} />
           {:else}
             <div class="assistant-row" data-error={message.error ? "true" : undefined}>
               <div class="assistant-avatar"><Mascot size="sm" /></div>

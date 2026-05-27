@@ -11,6 +11,12 @@
 interface ImportMetaEnv {
   readonly VITE_AUTH_STATION_URL?: string;
   readonly VITE_WORLDROUTER_CONTROL_URL?: string;
+  /** Vite-injected. True under `vite dev`, false under `vite build`. */
+  readonly DEV?: boolean;
+  /** Vite-injected. Inverse of DEV. */
+  readonly PROD?: boolean;
+  /** Vite-injected. Other VITE_-prefixed env vars are surfaced as strings. */
+  readonly [key: string]: string | boolean | undefined;
 }
 
 interface ImportMeta {
