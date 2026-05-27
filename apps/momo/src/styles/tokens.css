@@ -1,0 +1,154 @@
+/**
+ * Puffer Desktop UI v2 — Design Tokens
+ *
+ * Source of truth: Paper file "Momo", artboard "WorldAgent Home Design System" (2-0).
+ * Numeric values verified via mcp__paper__get_computed_styles.
+ *
+ * Mood: quiet desktop productivity — light surfaces, restrained borders,
+ * serif warmth, cream-toned actions.
+ *
+ * Do not introduce new colors or fonts in page code; extend this file instead.
+ */
+
+:root {
+  /* ───────────────────────────────────────────────────────────
+     Color — Surfaces
+     ─────────────────────────────────────────────────────────── */
+  --color-surface-app: #ffffff;          /* page background */
+  --color-surface-rail: #f4f4f4;         /* left rail + neutral controls (icon buttons, secondary pills) */
+  --color-surface-input: #fefefe;        /* composer input, attach buttons */
+  --color-input-border: #e0e0e0;         /* input pill border */
+  --color-input-border-soft: #e1e1e1;    /* attach button border (composer +) */
+
+  /* ───────────────────────────────────────────────────────────
+     Color — Action accent (the only warm color in the system)
+     ─────────────────────────────────────────────────────────── */
+  --color-action-cream: #f8eedc;         /* primary action fill */
+  --color-action-cream-soft: #f7eedc;    /* composer send button fill (1px warmer in design) */
+  --color-action-cream-border: #f0e2c7;  /* hairline border on swatches / hover states */
+  --color-action-cream-text: #795600;    /* label on cream */
+
+  /* ───────────────────────────────────────────────────────────
+     Color — Text
+     ─────────────────────────────────────────────────────────── */
+  --color-text-primary: #161616;         /* headings, primary content */
+  --color-text-secondary: #525252;       /* body, secondary content */
+  --color-text-muted: #6f6f6f;           /* captions, eyebrow labels, supporting copy */
+
+  /* ───────────────────────────────────────────────────────────
+     Color — Borders & selection
+     ─────────────────────────────────────────────────────────── */
+  --color-card-border: #ececec;          /* card hairline; also composer top divider */
+  --color-selected-fill: rgba(0, 0, 0, 0.06); /* selected nav row (#0000000F) — never use a saturated brand color */
+
+  /* ───────────────────────────────────────────────────────────
+     Typography — Families
+     ─────────────────────────────────────────────────────────── */
+  --font-serif:
+    "Source Serif 4", "Source Serif Pro", ui-serif, Georgia, Cambria,
+    "Times New Roman", Times, serif;
+  --font-system:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-sans:
+    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+
+  /* ───────────────────────────────────────────────────────────
+     Typography — Sizes & line-heights
+     Pair size + line-height so consumers can use either or both.
+     ─────────────────────────────────────────────────────────── */
+  /* Display — Source Serif 4, regular. Used for greeting / page hero. */
+  --font-size-display: 28px;
+  --line-height-display: 34px;
+
+  /* Subtitle — Source Serif 4, regular. Section headings inside the page. */
+  --font-size-subtitle: 20px;
+  --line-height-subtitle: 24px;
+
+  /* Section heading (Color tokens / Typography / Layout labels) — Serif 24px. */
+  --font-size-section: 24px;
+  --line-height-section: 30px;
+
+  /* Task title — system sans, medium. Card titles, list-row primary text. */
+  --font-size-task: 15px;
+  --line-height-task: 22px;
+
+  /* Body compact — system sans, regular. Meeting details, summaries. */
+  --font-size-body: 13px;
+  --line-height-body: 18px;
+
+  /* Button label — Inter, medium. All buttons + small eyebrow labels (12px caps). */
+  --font-size-button: 12px;
+  --line-height-button: 16px;
+
+  /* ───────────────────────────────────────────────────────────
+     Typography — Weights
+     ─────────────────────────────────────────────────────────── */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* ───────────────────────────────────────────────────────────
+     Spacing scale — multiples of 4, with 8 / 16 / 24 as the
+     dominant rhythm called out by the design system.
+     ─────────────────────────────────────────────────────────── */
+  --space-1: 4px;   /* hairline gaps inside a token (e.g. swatch label stack) */
+  --space-2: 8px;   /* micro spacing between related elements */
+  --space-3: 12px;  /* composer internal gaps */
+  --space-4: 16px;  /* card padding, card-to-card gap, button horizontal padding */
+  --space-5: 24px;  /* section rhythm, page side padding */
+  --space-6: 32px;  /* large section break */
+  --space-7: 48px;  /* hero spacing */
+
+  /* ───────────────────────────────────────────────────────────
+     Radii
+     ─────────────────────────────────────────────────────────── */
+  --radius-control: 8px;   /* nav rows, inputs */
+  --radius-card: 16px;     /* task cards, panels */
+  --radius-pill: 999px;    /* composer pill, icon buttons, action pills, avatars */
+
+  /* Token swatch radius observed at 10px — not used in product UI, kept for completeness. */
+  --radius-swatch: 10px;
+
+  /* ───────────────────────────────────────────────────────────
+     Control heights
+     ─────────────────────────────────────────────────────────── */
+  --height-button-card: 32px;     /* card action cluster */
+  --height-button-composer: 36px; /* composer send affordance */
+  --height-button-utility: 48px;  /* large utility / attach button */
+  --height-nav-row: 32px;         /* sidebar nav row */
+  --height-composer-input: 50px;  /* composer pill */
+  --height-icon-block: 40px;      /* circular neutral icon block on task card */
+
+  /* ───────────────────────────────────────────────────────────
+     Shell layout
+     The Tauri window is resizable; only the inner content column
+     stays bounded (760px max, centered). 1093 × 994 was the
+     original design frame and is kept only as documentation —
+     do not pin Shell to those dimensions.
+
+     --shell-traffic-spacer: vertical room reserved at the top of
+       the sidebar so the native macOS traffic lights (drawn by
+       the OS over titleBarStyle="Overlay") don't overlap any
+       sidebar content. macOS traffic lights sit at ~x=12, y=14
+       with ~78px width; 44px clears them comfortably while
+       leaving room for the toggle button on the right.
+     --shell-rail-collapsed: width of the icon-only rail when the
+       sidebar is collapsed. 56px fits a 32px icon button with
+       12px side padding.
+     ─────────────────────────────────────────────────────────── */
+  --shell-width: 1093px;
+  --shell-height: 994px;
+  --shell-rail-width: 248px;
+  --shell-rail-collapsed: 56px;
+  --shell-traffic-spacer: 44px;
+  --shell-page-max: 760px;
+  --shell-page-padding: 24px;
+
+  /* ───────────────────────────────────────────────────────────
+     Borders
+     ─────────────────────────────────────────────────────────── */
+  --border-hairline: 1px solid var(--color-card-border);
+  --border-input: 1px solid var(--color-input-border);
+}

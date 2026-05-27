@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/momo/src-tauri",
     "benchmark/genskill/ladybird",
     "crates/puffer-cli",
     "crates/puffer-config",
