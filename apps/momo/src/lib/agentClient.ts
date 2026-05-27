@@ -61,6 +61,12 @@ export type SessionEventPayload =
         success: boolean;
       }>;
     }
+  | {
+      type: "user-question-request";
+      turnId: string;
+      requestId: string;
+      questions: unknown[];
+    }
   | { type: string; [key: string]: unknown };
 
 export async function createSession(
@@ -88,6 +94,44 @@ export async function runAgentTurn(
 
 export async function cancelTurn(turnId: string): Promise<void> {
   await ws.request<unknown>("cancel_turn", { turnId });
+}
+
+/**
+ * Shape of a single option in an askUserQuestion prompt. Mirrors the
+ * v1 `UserQuestionPromptRequest` option struct verbatim — we keep the
+ * frontend decoupled from the Rust types but the field names match.
+ */
+export interface AskUserQuestionOption {
+  label: string;
+  description?: string;
+  preview?: string | null;
+}
+
+/**
+ * A single question within an askUserQuestion prompt. The agent may ask
+ * several at once (multi-question batches); v2 ships a single-question
+ * single-select MVP so only the first one renders today.
+ */
+export interface AskUserQuestionItem {
+  question: string;
+  header?: string;
+  options: AskUserQuestionOption[];
+  multiSelect?: boolean;
+}
+
+/**
+ * Resolve a pending askUserQuestion prompt. `answers` is keyed by the
+ * question index (stringified) so a future multi-question form can
+ * post all answers atomically. Backend pops the pending sender for
+ * `requestId` and forwards the value to the blocked worker thread —
+ * see `apps/momo/src-tauri/src/backend.rs::resolve_user_question`.
+ */
+export async function resolveUserQuestion(
+  turnId: string,
+  requestId: string,
+  answers: Record<string, string | string[]>,
+): Promise<void> {
+  await ws.request<unknown>("resolve_user_question", { turnId, requestId, answers });
 }
 
 /* ── Session list / rename ───────────────────────────────────────
