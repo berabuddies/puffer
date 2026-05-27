@@ -7,22 +7,32 @@
     - Bubble: max-width 500px, background var(--color-surface-rail), asymmetric
       radius 16/4/16/16 (top-right corner sharper to suggest the speech tail
       on the user side), padding 11px / 15px.
-    - Text: 14px / 20px system, weight 400, color --color-text-primary.
+    - Text: rendered through MessageBody (Markdown-aware). Plain prose stays
+      visually identical to the old `<p>` because MessageBody emits a
+      single paragraph for non-Markdown input.
 
-  Only the user variant exists today — the agent's plain text is rendered by
-  AgentText.svelte, not as a bubble, per the design.
+  Optional `createdAt` (ms epoch) renders an HH:MM meta row underneath
+  the body. Hidden when unset / 0 / undefined (e.g. historical bubbles
+  from `load_session_detail` where the DTO has no timestamp).
 -->
 <script lang="ts">
+  import MessageBody from "../common/MessageBody.svelte";
+  import { formatTime } from "../../lib/timeFormat";
+
   interface Props {
     text: string;
+    createdAt?: number;
   }
 
-  let { text }: Props = $props();
+  let { text, createdAt }: Props = $props();
 </script>
 
 <div class="bubble-row">
   <div class="bubble">
-    <p class="bubble__text">{text}</p>
+    <MessageBody body={text} />
+    {#if createdAt}
+      <span class="chat-bubble__time">{formatTime(createdAt)}</span>
+    {/if}
   </div>
 </div>
 
@@ -38,16 +48,17 @@
     background: var(--color-surface-rail);
     border-radius: 16px 4px 16px 16px;
     padding: 11px 15px;
+    display: flex;
+    flex-direction: column;
   }
 
-  .bubble__text {
+  .chat-bubble__time {
+    display: block;
+    margin-top: 4px;
     font-family: var(--font-system);
-    font-size: 14px;
-    line-height: 20px;
-    font-weight: var(--font-weight-regular);
-    color: var(--color-text-primary);
-    margin: 0;
-    white-space: pre-wrap;
-    word-wrap: break-word;
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--color-text-secondary);
+    text-align: right;
   }
 </style>
