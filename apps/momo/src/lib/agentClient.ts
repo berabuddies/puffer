@@ -45,6 +45,22 @@ export type SessionEventPayload =
   | { type: "thinking-delta"; turnId: string; delta: string }
   | { type: "turn-complete"; turnId: string; assistantText?: string }
   | { type: "turn-error"; turnId: string; error: string }
+  | {
+      type: "tool-calls-requested";
+      turnId: string;
+      requests: Array<{ callId: string; toolId: string; input?: unknown }>;
+    }
+  | {
+      type: "tool-invocations";
+      turnId: string;
+      invocations: Array<{
+        callId: string;
+        toolId: string;
+        input?: unknown;
+        output?: unknown;
+        success: boolean;
+      }>;
+    }
   | { type: string; [key: string]: unknown };
 
 export async function createSession(

@@ -23,6 +23,7 @@
   import Composer from "../components/shell/Composer.svelte";
   import ChatBubble from "../components/agent/ChatBubble.svelte";
   import ThinkingBlock from "../components/agent/ThinkingBlock.svelte";
+  import ToolCallPill from "../components/agent/ToolCallPill.svelte";
   import Mascot from "../components/common/Mascot.svelte";
   import MessageBody from "../components/common/MessageBody.svelte";
   import { formatTime } from "../lib/timeFormat";
@@ -70,10 +71,15 @@
   $effect(() => {
     // Read length so this effect tracks `chatMessages` reactively.
     chatMessages.length;
-    // Also re-run when a pending bubble flips to resolved (text fills in).
+    // Also re-run when a pending bubble flips to resolved (text fills in)
+    // or when a tool pill flips status (running → success/failed).
     chatMessages.forEach((m) => {
-      void m.pending;
-      void m.text;
+      if (m.role === "user" || m.role === "assistant" || m.role === "thinking") {
+        void m.pending;
+        void m.text;
+      } else if (m.role === "tool") {
+        void m.status;
+      }
     });
     if (!threadEl) return;
     // Defer one frame so freshly inserted nodes are measured first.
@@ -140,6 +146,12 @@
             <ChatBubble text={message.text} createdAt={message.createdAt} />
           {:else if message.role === "thinking"}
             <ThinkingBlock text={message.text} pending={message.pending} />
+          {:else if message.role === "tool"}
+            <ToolCallPill
+              toolId={message.toolId}
+              callId={message.callId}
+              status={message.status}
+            />
           {:else}
             <!--
               Suppress the empty pending assistant row entirely while a
