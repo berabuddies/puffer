@@ -15,6 +15,7 @@ use puffer_core::{
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, SessionSummary, TranscriptEvent};
+use serde_json::json;
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
@@ -49,6 +50,8 @@ pub(crate) use flow_shell::parse_shell_shortcut;
 use flow_shell::{
     execute_shell_shortcut, execute_shell_shortcut_inline, finalize_shell_shortcut_result,
 };
+
+const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
 
 fn parsed_slash_command(submitted: &str) -> (&str, &str) {
     let trimmed = submitted.trim();
@@ -566,12 +569,13 @@ pub(crate) fn cancel_pending_submit(
     session_store: &SessionStore,
     tui: &mut TuiState,
 ) -> Result<bool> {
-    let Some(pending) = tui.pending_submit.take() else {
+    let Some(mut pending) = tui.pending_submit.take() else {
         return Ok(false);
     };
     pending.cancel.cancel();
+    persist_pending_submit_progress_on_cancel(state, session_store, &mut pending)?;
     drop(pending);
-    let message = "Interrupted by user.".to_string();
+    let message = CANCELLED_TURN_MESSAGE.to_string();
     state.push_message(MessageRole::System, message.clone());
     session_store.append_event(
         state.session.id,
@@ -581,6 +585,92 @@ pub(crate) fn cancel_pending_submit(
         },
     )?;
     Ok(true)
+}
+
+fn persist_pending_submit_progress_on_cancel(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    pending: &mut PendingSubmit,
+) -> Result<()> {
+    loop {
+        let event = match pending.receiver.try_recv() {
+            Ok(event) => event,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        };
+        match event {
+            PendingSubmitEvent::ThinkingDelta(delta) => append_thinking_delta(state, &delta),
+            PendingSubmitEvent::TextDelta(delta) => append_assistant_delta(state, &delta),
+            PendingSubmitEvent::ToolCallsRequested(requests) => {
+                pending.pending_tool_calls.extend(requests);
+            }
+            PendingSubmitEvent::ToolInvocations(invocations) => {
+                persist_pending_assistant_drafts(
+                    state,
+                    session_store,
+                    pending.transcript_persisted_len,
+                )?;
+                let completed = invocations.len().min(pending.pending_tool_calls.len());
+                pending.pending_tool_calls.drain(0..completed);
+                pending.rendered_tool_invocations += invocations.len();
+                append_tool_messages(state, session_store, &invocations)?;
+                pending.transcript_persisted_len = state.transcript.len();
+            }
+            PendingSubmitEvent::PermissionRequest(_, response_tx) => {
+                let _ = response_tx.send(PermissionPromptAction::Deny);
+            }
+            PendingSubmitEvent::UserQuestionRequest(_, response_tx) => {
+                let _ = response_tx.send(empty_user_question_response());
+            }
+            PendingSubmitEvent::ShellShortcutFinished(result) => {
+                finalize_shell_shortcut_result(state, session_store, result)?;
+                pending.transcript_persisted_len = state.transcript.len();
+            }
+            PendingSubmitEvent::Finished(result) => {
+                if let Ok(turn) = result.outcome {
+                    if pending.rendered_tool_invocations < turn.tool_invocations.len() {
+                        persist_pending_assistant_drafts(
+                            state,
+                            session_store,
+                            pending.transcript_persisted_len,
+                        )?;
+                        append_tool_messages(
+                            state,
+                            session_store,
+                            &turn.tool_invocations[pending.rendered_tool_invocations..],
+                        )?;
+                        pending.transcript_persisted_len = state.transcript.len();
+                    }
+                    finalize_assistant_text(state, session_store, &turn.assistant_text)?;
+                    pending.transcript_persisted_len = state.transcript.len();
+                }
+            }
+            PendingSubmitEvent::ReflectionCheckpoint(_)
+            | PendingSubmitEvent::RetryAttempt { .. }
+            | PendingSubmitEvent::Usage(_) => {}
+        }
+    }
+
+    persist_pending_assistant_drafts(state, session_store, pending.transcript_persisted_len)?;
+    let cancelled = pending
+        .pending_tool_calls
+        .drain(..)
+        .map(|request| ToolInvocation {
+            call_id: request.call_id,
+            tool_id: request.tool_id,
+            input: request.input,
+            output: CANCELLED_TURN_MESSAGE.to_string(),
+            success: false,
+            metadata: json!({
+                "cancelled": true,
+                "reason": "interrupted_by_user"
+            }),
+            terminate: false,
+        })
+        .collect::<Vec<_>>();
+    if !cancelled.is_empty() {
+        append_tool_messages(state, session_store, &cancelled)?;
+    }
+    Ok(())
 }
 
 /// Starts the next queued prompt when no turn or overlay is currently active.

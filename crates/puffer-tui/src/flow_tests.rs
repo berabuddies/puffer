@@ -4,7 +4,7 @@ use crate::state::{LoopKind, PendingSubmit, PendingSubmitEvent, PendingSubmitRes
 use puffer_config::{
     ensure_workspace_dirs, save_user_config, ConfigPaths, MemoryConfig, PufferConfig,
 };
-use puffer_core::{ToolInvocation, TurnExecution};
+use puffer_core::{ToolCallRequest, ToolInvocation, TurnExecution};
 use puffer_provider_registry::{AuthMode, ModelDescriptor, ProviderDescriptor};
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
 use puffer_session_store::{SessionMetadata, TranscriptEvent};
@@ -1070,6 +1070,84 @@ fn cancel_pending_submit_records_interrupt_and_starts_next_queued_prompt() {
         .transcript
         .iter()
         .any(|message| { message.role == MessageRole::User && message.text == "second" }));
+}
+
+#[test]
+fn cancel_pending_submit_preserves_streamed_progress() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut tui = TuiState::default();
+    let (sender, receiver) = mpsc::channel();
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: "work".to_string(),
+        receiver,
+        transcript_persisted_len: state.transcript.len(),
+        pending_tool_calls: Vec::new(),
+        rendered_tool_invocations: 0,
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: None,
+        cancel: puffer_core::CancelToken::new(),
+    });
+
+    sender
+        .send(PendingSubmitEvent::TextDelta("partial answer".to_string()))
+        .unwrap();
+    sender
+        .send(PendingSubmitEvent::ToolCallsRequested(vec![
+            ToolCallRequest {
+                call_id: "call-pending".to_string(),
+                tool_id: "Bash".to_string(),
+                input: "{\"command\":\"sleep 10\"}".to_string(),
+            },
+        ]))
+        .unwrap();
+
+    assert!(cancel_pending_submit(&mut state, &session_store, &mut tui).unwrap());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.text == "partial answer"
+    }));
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::ToolResult && message.text == "Interrupted by user."
+    }));
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::System && message.text == "Interrupted by user."
+    }));
+
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::AssistantMessage { text, .. } if text == "partial answer"
+        )
+    }));
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::ToolInvocation {
+                call_id,
+                tool_id,
+                success,
+                output,
+                ..
+            } if call_id == "call-pending"
+                && tool_id == "Bash"
+                && !*success
+                && output == "Interrupted by user."
+        )
+    }));
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::SystemMessage { text, .. } if text == "Interrupted by user."
+        )
+    }));
 }
 
 #[test]

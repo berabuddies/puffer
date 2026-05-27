@@ -39,8 +39,8 @@ use puffer_core::{
     provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
     AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
-    PermissionPromptAction, PermissionPromptRequest, ToolInvocation, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
+    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -306,6 +306,15 @@ struct TurnHandle {
     pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>>,
     pending_questions:
         Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>>,
+    progress: Arc<Mutex<TurnProgress>>,
+}
+
+#[derive(Default)]
+struct TurnProgress {
+    assistant_text: String,
+    tool_invocations: Vec<ToolInvocation>,
+    pending_tool_calls: Vec<ToolCallRequest>,
+    persisted_on_cancel: bool,
 }
 
 impl DaemonState {
@@ -2398,6 +2407,7 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
             &handle.message,
             &handle.cancel_reported,
             &handle.user_prompt_persisted,
+            &handle.progress,
         )?;
         state.turns.lock().unwrap().remove(turn_id);
         Ok(json!({"ok": true}))
@@ -2417,6 +2427,7 @@ fn report_cancelled_turn(
     message: &str,
     cancel_reported: &AtomicBool,
     user_prompt_persisted: &AtomicBool,
+    progress: &Arc<Mutex<TurnProgress>>,
 ) -> Result<bool> {
     if cancel_reported.swap(true, Ordering::SeqCst) {
         return Ok(false);
@@ -2431,6 +2442,7 @@ fn report_cancelled_turn(
             },
         )?;
     }
+    persist_cancelled_turn_progress(&session_store, session_uuid, progress)?;
     session_store.append_event(
         session_uuid,
         TranscriptEvent::SystemMessage {
@@ -2448,6 +2460,69 @@ fn report_cancelled_turn(
         Some("cancelled"),
     );
     Ok(true)
+}
+
+fn persist_cancelled_turn_progress(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    progress: &Arc<Mutex<TurnProgress>>,
+) -> Result<()> {
+    let (assistant_text, tool_invocations, pending_tool_calls) = {
+        let mut progress = progress.lock().unwrap();
+        if progress.persisted_on_cancel {
+            return Ok(());
+        }
+        progress.persisted_on_cancel = true;
+        (
+            std::mem::take(&mut progress.assistant_text),
+            std::mem::take(&mut progress.tool_invocations),
+            std::mem::take(&mut progress.pending_tool_calls),
+        )
+    };
+
+    if !assistant_text.is_empty() {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::AssistantMessage {
+                text: assistant_text,
+                actor: None,
+            },
+        )?;
+    }
+    for invocation in tool_invocations {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::ToolInvocation {
+                call_id: invocation.call_id,
+                tool_id: invocation.tool_id,
+                input: invocation.input,
+                output: invocation.output,
+                success: invocation.success,
+                metadata: (!invocation.metadata.is_null()).then_some(invocation.metadata),
+                actor: None,
+                subject: None,
+            },
+        )?;
+    }
+    for request in pending_tool_calls {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::ToolInvocation {
+                call_id: request.call_id,
+                tool_id: request.tool_id,
+                input: request.input,
+                output: CANCELLED_TURN_MESSAGE.to_string(),
+                success: false,
+                metadata: Some(json!({
+                    "cancelled": true,
+                    "reason": "interrupted_by_user"
+                })),
+                actor: None,
+                subject: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2513,6 +2588,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let cancel = CancelToken::new();
     let cancel_reported = Arc::new(AtomicBool::new(false));
     let user_prompt_persisted = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(TurnProgress::default()));
 
     {
         let mut turns = state.turns.lock().unwrap();
@@ -2534,6 +2610,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 user_prompt_persisted: user_prompt_persisted.clone(),
                 pending: pending.clone(),
                 pending_questions: pending_questions.clone(),
+                progress: progress.clone(),
             },
         );
     }
@@ -2545,6 +2622,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let next_req_id = state.next_request_id.clone();
     let cancel_reported_thread = cancel_reported.clone();
     let user_prompt_persisted_thread = user_prompt_persisted.clone();
+    let progress_thread = progress.clone();
 
     // Run the synchronous agent loop on a fresh OS thread, *completely
     // detached* from tokio. `ProviderRegistry::discover_and_merge_all` +
@@ -2713,6 +2791,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 &message_for_thread,
                 &cancel_reported_thread,
                 &user_prompt_persisted_thread,
+                &progress_thread,
             );
             setup_state.turns.lock().unwrap().remove(&turn_id_thread);
             return;
@@ -2777,24 +2856,43 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let ev_channel = channel_thread.clone();
         let ev_turn = turn_id_thread.clone();
         let ev_actor = stream_actor.clone();
+        let ev_progress = progress_thread.clone();
+        let ev_cancel_reported = cancel_reported_thread.clone();
         let on_event = move |event: TurnStreamEvent| {
+            if ev_cancel_reported.load(Ordering::SeqCst) {
+                return;
+            }
             let payload = match event {
                 TurnStreamEvent::TextDelta(delta) => {
+                    ev_progress.lock().unwrap().assistant_text.push_str(&delta);
                     json!({"type": "text-delta", "turnId": ev_turn, "delta": delta})
                 }
                 TurnStreamEvent::ThinkingDelta(delta) => {
                     json!({"type": "thinking-delta", "turnId": ev_turn, "delta": delta})
                 }
-                TurnStreamEvent::ToolCallsRequested(reqs) => json!({
-                    "type": "tool-calls-requested",
-                    "turnId": ev_turn,
-                    "requests": reqs.iter().map(|r| json!({
-                        "callId": r.call_id,
-                        "toolId": r.tool_id,
-                        "input": r.input,
-                    })).collect::<Vec<_>>(),
-                }),
+                TurnStreamEvent::ToolCallsRequested(reqs) => {
+                    ev_progress
+                        .lock()
+                        .unwrap()
+                        .pending_tool_calls
+                        .extend(reqs.clone());
+                    json!({
+                        "type": "tool-calls-requested",
+                        "turnId": ev_turn,
+                        "requests": reqs.iter().map(|r| json!({
+                            "callId": r.call_id,
+                            "toolId": r.tool_id,
+                            "input": r.input,
+                        })).collect::<Vec<_>>(),
+                    })
+                }
                 TurnStreamEvent::ToolInvocations(invs) => {
+                    {
+                        let mut progress = ev_progress.lock().unwrap();
+                        let completed = invs.len().min(progress.pending_tool_calls.len());
+                        progress.pending_tool_calls.drain(0..completed);
+                        progress.tool_invocations.extend(invs.clone());
+                    }
                     let mut before_gates = Vec::new();
                     let mut after_gates = Vec::new();
                     for gate_payload in invs
@@ -2967,6 +3065,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
         match outcome {
             Ok(turn) => {
+                if cancel_reported_thread.load(Ordering::SeqCst) {
+                    state_for_thread
+                        .turns
+                        .lock()
+                        .unwrap()
+                        .remove(&turn_id_thread);
+                    return;
+                }
                 for inv in &turn.tool_invocations {
                     let _ = inputs.session_store.append_event(
                         session_uuid,
@@ -3023,12 +3129,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 });
             }
             Err(err) => {
-                eprintln!("turn {turn_id_thread} failed: {err:#}");
-                let _ = inputs
-                    .session_store
-                    .append_event(session_uuid, app_state.snapshot_event());
-                let (friendly, category) = classify_turn_error(&err);
-                if category == "cancelled" && cancel_reported_thread.load(Ordering::SeqCst) {
+                if cancel_reported_thread.load(Ordering::SeqCst) {
                     state_for_thread
                         .turns
                         .lock()
@@ -3036,6 +3137,11 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         .remove(&turn_id_thread);
                     return;
                 }
+                eprintln!("turn {turn_id_thread} failed: {err:#}");
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
+                let (friendly, category) = classify_turn_error(&err);
                 let raw = format!("{err:#}");
                 let _ = inputs.session_store.append_event(
                     session_uuid,
@@ -3400,17 +3506,20 @@ mod tests {
         handle_login_with_api_key, handle_logout_provider, handle_remove_lambda_skill_library,
         handle_save_lambda_skill_library, handle_save_permissions,
         handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled, model_descriptor_dto,
-        permission_review_payload_json, requires_explicit_subscription,
-        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
+        permission_review_payload_json, report_cancelled_turn, requires_explicit_subscription,
+        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnProgress,
+        TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-    use puffer_core::{AppState, ModelPreferenceFamily, ToolInvocation};
+    use puffer_core::{AppState, ModelPreferenceFamily, ToolCallRequest, ToolInvocation};
     use puffer_provider_registry::{
         AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
-    use puffer_session_store::{SessionMetadata, SessionStore};
+    use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use uuid::Uuid;
 
@@ -3713,6 +3822,126 @@ mod tests {
         let session_id = uuid::Uuid::parse_str(session_id).expect("valid session id");
         let session = store.load_session(session_id).expect("stored session");
         assert_eq!(session.metadata.cwd, missing);
+    }
+
+    #[test]
+    fn report_cancelled_turn_persists_streamed_progress_before_interrupt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let session = store
+            .create_session(workspace_root.clone())
+            .expect("create session");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        let progress = Arc::new(Mutex::new(TurnProgress {
+            assistant_text: "partial answer".to_string(),
+            tool_invocations: vec![ToolInvocation {
+                call_id: "call-done".to_string(),
+                tool_id: "Bash".to_string(),
+                input: "{\"command\":\"pwd\"}".to_string(),
+                output: "/tmp\n".to_string(),
+                success: true,
+                metadata: serde_json::Value::Null,
+                terminate: false,
+            }],
+            pending_tool_calls: vec![ToolCallRequest {
+                call_id: "call-pending".to_string(),
+                tool_id: "Bash".to_string(),
+                input: "{\"command\":\"sleep 10\"}".to_string(),
+            }],
+            persisted_on_cancel: false,
+        }));
+        let cancel_reported = AtomicBool::new(false);
+        let user_prompt_persisted = AtomicBool::new(false);
+
+        assert!(report_cancelled_turn(
+            &state,
+            session.id,
+            &session.id.to_string(),
+            "session:test:event",
+            "turn-1",
+            "question",
+            &cancel_reported,
+            &user_prompt_persisted,
+            &progress,
+        )
+        .expect("report cancelled"));
+
+        let record = store.load_session(session.id).expect("stored session");
+        let user_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(event, TranscriptEvent::UserMessage { text, .. } if text == "question")
+            })
+            .expect("user message");
+        let assistant_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::AssistantMessage { text, .. } if text == "partial answer"
+                )
+            })
+            .expect("assistant progress");
+        let done_tool_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::ToolInvocation { call_id, success, .. }
+                        if call_id == "call-done" && *success
+                )
+            })
+            .expect("completed tool");
+        let pending_tool_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::ToolInvocation {
+                        call_id,
+                        success,
+                        output,
+                        ..
+                    } if call_id == "call-pending"
+                        && !*success
+                        && output == "Interrupted by user."
+                )
+            })
+            .expect("cancelled pending tool");
+        let interrupt_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::SystemMessage { text, .. } if text == "Interrupted by user."
+                )
+            })
+            .expect("interrupt");
+        assert!(user_index < assistant_index);
+        assert!(assistant_index < done_tool_index);
+        assert!(done_tool_index < pending_tool_index);
+        assert!(pending_tool_index < interrupt_index);
     }
 
     #[test]
