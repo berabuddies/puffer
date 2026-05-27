@@ -2,78 +2,37 @@
  * Sidebar session store (Svelte 5 runes).
  *
  * Owns the flat list of puffer-backed sessions surfaced under the
- * Work / Life groups in the rail. Group membership is a frontend-only
- * concept persisted in localStorage — Corbina's session record has no
- * "group" field yet (see the wishlist note below).
+ * Work / Life projects in the rail. Project membership is derived from
+ * `session.cwd` matching one of the two fixed project cwds returned by
+ * `list_projects` (see `projectStore.svelte.ts`). Sessions whose cwd
+ * doesn't match either project are hidden from the rail.
  *
  * Surface:
  *   - `sessionList` ($state) — flat list of all sessions, sorted by
  *     `updatedAtMs` desc.
- *   - `workSessions` / `lifeSessions` ($derived) — filtered slices.
+ *   - `workSessions` / `lifeSessions` — filtered slices.
  *   - `loadSessions()` — refetch from the backend.
- *   - `createSessionInGroup(group)` — mint a new session via puffer and
- *     remember which group it belongs to.
+ *   - `createSessionForProject(projectId)` — mint a new session via puffer
+ *     with the project's fixed cwd.
  *   - `renameSession(id, title)` — server rename + local mutation so
  *     the row updates without a refetch.
  *
- * Wishlist for puffer backend (out of scope here, see Report):
- *   - First-class "group" / "tag" on `SessionMetadata` so we don't have
- *     to mirror it in localStorage and lose it across machines.
+ * Wishlist for puffer backend (out of scope here):
  *   - `delete_session(sessionId)` RPC so the Trash icon can actually
  *     do something (today it's disabled with a tooltip).
  */
 
 import * as agent from "./agentClient";
 import type { SessionListItem } from "./agentClient";
+import {
+  getProjectCwd,
+  projectIdForCwd,
+  type ProjectId,
+} from "./projectStore.svelte";
 import { pushToast } from "./toast.svelte";
-
-export type SessionGroup = "work" | "life";
-
-const STORAGE_KEY = "puffer.sessionGroups";
 
 /** Flat, reactive list of every session known to the sidebar. */
 export const sessionList = $state<SessionListItem[]>([]);
-
-/**
- * Group membership map. We mirror it into a `$state` so derived filters
- * re-run whenever it changes; the localStorage write is a side effect.
- */
-const groupMap = $state<Record<string, SessionGroup>>(readGroupMap());
-
-function readGroupMap(): Record<string, SessionGroup> {
-  if (typeof localStorage === "undefined") return {};
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const out: Record<string, SessionGroup> = {};
-    for (const [id, value] of Object.entries(parsed)) {
-      if (value === "work" || value === "life") out[id] = value;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function writeGroupMap(): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(groupMap));
-  } catch {
-    // Quota / serialization failure is non-fatal — group membership just
-    // won't persist across reloads.
-  }
-}
-
-/**
- * Sessions not yet tracked in `puffer.sessionGroups` (created before
- * this code shipped, or via the puffer CLI) default to "work" as a
- * graceful fallback so the user can see them.
- */
-function groupFor(sessionId: string): SessionGroup {
-  return groupMap[sessionId] ?? "work";
-}
 
 /**
  * Svelte 5 forbids `export const x = $derived(...)` from `.svelte.ts`
@@ -84,11 +43,15 @@ function groupFor(sessionId: string): SessionGroup {
  * normal Svelte 5 tracking they would get from `$derived`.
  */
 export function workSessions(): SessionListItem[] {
-  return sessionList.filter((s) => groupFor(s.sessionId) === "work");
+  return sessionsForProject("work");
 }
 
 export function lifeSessions(): SessionListItem[] {
-  return sessionList.filter((s) => groupFor(s.sessionId) === "life");
+  return sessionsForProject("life");
+}
+
+export function sessionsForProject(projectId: ProjectId): SessionListItem[] {
+  return sessionList.filter((s) => projectIdForCwd(s.cwd) === projectId);
 }
 
 function sortByUpdatedDesc(list: SessionListItem[]): SessionListItem[] {
@@ -97,7 +60,7 @@ function sortByUpdatedDesc(list: SessionListItem[]): SessionListItem[] {
 
 function replaceList(next: SessionListItem[]): void {
   // Preserve local-only entries (e.g. an optimistic stub from
-  // createSessionInGroup whose create_session response landed before this
+  // createSessionForProject whose create_session response landed before this
   // listGroupedSessions snapshot) so we don't drop them on reconcile.
   const nextIds = new Set(next.map((s) => s.sessionId));
   const localOnly = sessionList.filter((s) => !nextIds.has(s.sessionId));
@@ -127,24 +90,27 @@ export async function loadSessions(): Promise<void> {
 }
 
 /**
- * Mint a fresh empty session via puffer and remember which group it
- * belongs to. Returns the new sessionId so the caller can navigate to
+ * Mint a fresh empty session via puffer under the given project's fixed
+ * cwd. Returns the new sessionId so the caller can navigate to
  * `/agent/<id>`. The new row is pushed onto the local list immediately
  * so the sidebar updates without waiting for a reload — the next
  * `loadSessions()` reconciles any drift.
  */
-export async function createSessionInGroup(group: SessionGroup): Promise<string> {
+export async function createSessionForProject(projectId: ProjectId): Promise<string> {
+  const cwd = getProjectCwd(projectId);
+  if (!cwd) {
+    pushToast("Project not ready yet — try again in a moment.", "error");
+    throw new Error(`project ${projectId} cwd not loaded`);
+  }
   let result: agent.CreateSessionResult;
   try {
-    result = await agent.createSession({ providerId: "puffer" });
+    result = await agent.createSession({ cwd, providerId: "puffer" });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     pushToast(`Could not start session: ${msg}`, "error");
     throw err;
   }
   const id = result.sessionId;
-  groupMap[id] = group;
-  writeGroupMap();
   // Synthesize a SessionListItem so the sidebar can render the row before
   // the next loadSessions() returns. The fields not supplied by
   // create_session default to safe placeholders; loadSessions() will
