@@ -59,18 +59,19 @@ export interface ToolPillOptions {
   toolId?: string;
   status?: "running" | "success" | "failed";
 }
+/**
+ * Targets `ToolCallPill.svelte`'s root element — `.tool-call-pill` carries
+ * `data-status`, `data-tool-id`, and `data-call-id` directly (not on a
+ * child), so we chain attribute selectors on the same element instead of
+ * `filter({ has })` which expects descendants. Backwards-compatible with
+ * the prior signature.
+ */
 export function locateToolPill(page: Page, options: ToolPillOptions = {}): Locator {
-  let base =
-    options.status !== undefined
-      ? page.locator(`.tool-call-pill[data-status="${options.status}"]`)
-      : page.locator(".tool-call-pill");
-  if (options.callId !== undefined) {
-    base = base.filter({ has: page.locator(`[data-call-id="${options.callId}"]`) });
-  }
-  if (options.toolId !== undefined) {
-    base = base.filter({ has: page.locator(`[data-tool-id="${options.toolId}"]`) });
-  }
-  return base;
+  const attrs: string[] = [];
+  if (options.status !== undefined) attrs.push(`[data-status="${options.status}"]`);
+  if (options.callId !== undefined) attrs.push(`[data-call-id="${options.callId}"]`);
+  if (options.toolId !== undefined) attrs.push(`[data-tool-id="${options.toolId}"]`);
+  return page.locator(`.tool-call-pill${attrs.join("")}`);
 }
 
 export interface QuestionFormOptions {

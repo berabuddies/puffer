@@ -66,6 +66,20 @@ export type ChatMessage =
       createdAt: number;
       /** The turn this thinking bubble belongs to. Used to flip pending on completion. */
       turnId: string;
+    }
+  | {
+      id: string;
+      role: "tool";
+      toolId: string;
+      callId: string;
+      status: "running" | "success" | "failed";
+      /** Optional input (JSON-ish) for dev-mode inspection. */
+      input?: unknown;
+      /** Optional output payload from tool-invocations. */
+      output?: unknown;
+      createdAt: number;
+      /** The turn this tool call belongs to. Used for ordering + cleanup. */
+      turnId: string;
     };
 
 /** Map of sessionId → ordered message list. */
@@ -142,7 +156,7 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
           .map((r) => r.messageId)
       );
       let bubble = list.find(
-        (m) => m.pending && m.role === "assistant" && !claimed.has(m.id)
+        (m) => m.role === "assistant" && m.pending && !claimed.has(m.id)
       );
       if (!bubble) {
         bubble = {
@@ -169,6 +183,9 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       if (!ref) return;
       const target = list.find((m) => m.id === ref.messageId);
       if (!target) return;
+      // pendingByTurn only ever binds to assistant bubbles, but narrow
+      // anyway so the tool variant (which has no `text`) typechecks.
+      if (target.role !== "assistant") return;
       target.text = (target.text ?? "") + delta;
       break;
     }
@@ -221,6 +238,94 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       pushToast(error, "error");
       break;
     }
+    case "tool-calls-requested": {
+      const turnId = (payload as { turnId: string }).turnId;
+      const requests = ((payload as { requests?: unknown }).requests ?? []) as Array<{
+        callId: string;
+        toolId: string;
+        input?: unknown;
+      }>;
+      for (const r of requests) {
+        // De-dupe (callId, turnId) — a re-emit within the same turn
+        // shouldn't double-render a pill (real backends may resend on
+        // reconnect). But callId is only unique per-turn (see v1
+        // chat-session-ui.spec.ts:1112): the same id appearing in a
+        // later turn must produce a fresh pill so the user can see
+        // both calls in the timeline.
+        if (list.some((m) => m.role === "tool" && m.callId === r.callId && m.turnId === turnId)) continue;
+        const newPill: Extract<ChatMessage, { role: "tool" }> = {
+          id: nextMessageId(),
+          role: "tool",
+          toolId: r.toolId,
+          callId: r.callId,
+          status: "running",
+          input: r.input,
+          createdAt: Date.now(),
+          turnId
+        };
+        // Insert BEFORE the pending assistant bubble for this turn (if any),
+        // mirroring the thinking-delta pattern — tools should read before the
+        // final answer they fed, not after.
+        const ref = pendingByTurn.get(turnId);
+        const assistantIdx = ref
+          ? list.findIndex((m) => m.id === ref.messageId)
+          : -1;
+        if (assistantIdx >= 0) {
+          list.splice(assistantIdx, 0, newPill);
+        } else {
+          list.push(newPill);
+        }
+      }
+      break;
+    }
+    case "tool-invocations": {
+      const turnId = (payload as { turnId: string }).turnId;
+      const invocations = ((payload as { invocations?: unknown }).invocations ?? []) as Array<{
+        callId: string;
+        toolId: string;
+        input?: unknown;
+        output?: unknown;
+        success: boolean;
+      }>;
+      for (const i of invocations) {
+        // Look up by (callId, turnId) — callId is only unique per-turn.
+        // A later turn that reuses the same callId must not retroactively
+        // update an old turn's pill (see v1 chat-session-ui.spec.ts:1112).
+        const target = list.find(
+          (m): m is Extract<ChatMessage, { role: "tool" }> =>
+            m.role === "tool" && m.callId === i.callId && m.turnId === turnId
+        );
+        if (target) {
+          target.status = i.success ? "success" : "failed";
+          target.output = i.output;
+        } else {
+          // Edge: some backends batch the result without firing
+          // tool-calls-requested first. Synthesize the pill at terminal
+          // status, still slotted before the assistant bubble for this turn.
+          const synth: Extract<ChatMessage, { role: "tool" }> = {
+            id: nextMessageId(),
+            role: "tool",
+            toolId: i.toolId,
+            callId: i.callId,
+            status: i.success ? "success" : "failed",
+            input: i.input,
+            output: i.output,
+            createdAt: Date.now(),
+            turnId
+          };
+          const ref = pendingByTurn.get(turnId);
+          const assistantIdx = ref
+            ? list.findIndex((m) => m.id === ref.messageId)
+            : -1;
+          if (assistantIdx >= 0) {
+            list.splice(assistantIdx, 0, synth);
+          } else {
+            list.push(synth);
+          }
+        }
+      }
+      break;
+    }
     case "thinking-delta": {
       const turnId = (payload as { turnId: string }).turnId;
       const delta = (payload as { delta: string }).delta ?? "";
@@ -256,10 +361,10 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       bubble.text = (bubble.text ?? "") + delta;
       break;
     }
-    // tool-calls-requested, tool-invocations, permission-request,
-    // user-question-request, plan-*, usage, reflection-checkpoint,
-    // retry-attempt — intentionally no-op for the first cut. Will be
-    // surfaced once the V2 UI has primitives for them.
+    // permission-request, user-question-request, plan-*, usage,
+    // reflection-checkpoint, retry-attempt — intentionally no-op for
+    // the first cut. Will be surfaced once the V2 UI has primitives
+    // for them.
     default:
       break;
   }
