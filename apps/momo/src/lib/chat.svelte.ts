@@ -149,6 +149,112 @@ function ensureSubscription(sessionId: string): void {
   subscriptions.set(sessionId, unsub);
 }
 
+/* ── Internal helpers ─────────────────────────────────────────── */
+
+/**
+ * Find the assistant bubble bound to `messageId`, narrowed to the
+ * assistant variant. Returns `null` if the id isn't in the list or if
+ * the matched message has a non-assistant role. `pendingByTurn` only
+ * ever binds assistant bubbles in production, but the narrow keeps TS
+ * happy AND traps stale entries from a future bug at the call site
+ * (text-delta, turn-complete, turn-error, fireTurn.catch).
+ */
+function findAssistantBubble(
+  list: ChatMessage[],
+  messageId: string
+): Extract<ChatMessage, { role: "assistant" }> | null {
+  const target = list.find((m) => m.id === messageId);
+  return target && target.role === "assistant" ? target : null;
+}
+
+/**
+ * Insert `msg` immediately BEFORE the pending assistant bubble for
+ * `turnId`, falling back to appending at the end of the list when there
+ * is no assistant bubble bound yet. Canonical ordering for any
+ * "pre-answer" message (thinking, tool call, question form) — cognitively
+ * they belong before the answer they feed into. Centralised here so every
+ * new role with this requirement adds one line, not seven.
+ */
+function insertBeforeAssistant(
+  list: ChatMessage[],
+  turnId: string,
+  msg: ChatMessage
+): void {
+  const ref = pendingByTurn.get(turnId);
+  const idx = ref ? list.findIndex((m) => m.id === ref.messageId) : -1;
+  if (idx >= 0) {
+    list.splice(idx, 0, msg);
+  } else {
+    list.push(msg);
+  }
+}
+
+/**
+ * Post-amble for a turn ending — both `turn-complete` and `turn-error`
+ * run the same cleanup. The caller handles the *pre*-amble (updating the
+ * assistant bubble's text + error flag + pending state); this helper
+ * unifies what comes after: drop the pendingByTurn binding, flip any
+ * thinking bubble out of pending, clear the per-session running flag so
+ * the Composer flips back to Send.
+ */
+function finalizeTurn(list: ChatMessage[], sessionId: string, turnId: string): void {
+  pendingByTurn.delete(turnId);
+  for (const m of list) {
+    if (m.role === "thinking" && m.turnId === turnId) m.pending = false;
+  }
+  if (runningTurnBySessionId[sessionId] === turnId) {
+    delete runningTurnBySessionId[sessionId];
+  }
+}
+
+/**
+ * O(n) scan of a session's messages, returning a Map keyed by `turnId`
+ * for turns that currently have an "agent is working" indicator on
+ * screen — a thinking block, a running tool pill, or an unanswered
+ * question form. Used by `Agent.svelte` to suppress the empty pending
+ * assistant row's typing-dot stand-in (which would be redundant noise
+ * alongside any of the above).
+ *
+ * Computing per-session once per render keeps the renderer O(n) total
+ * rather than O(n²) — the predicate used to live inline in the template
+ * and was re-evaluated for every assistant message.
+ */
+export function activitySiblingMap(sessionId: string): Map<string, true> {
+  const list = chatSessions[sessionId];
+  const out = new Map<string, true>();
+  if (!list) return out;
+  for (const m of list) {
+    if (m.role === "thinking") out.set(m.turnId, true);
+    else if (m.role === "tool" && m.status === "running") out.set(m.turnId, true);
+    else if (m.role === "question" && !m.answered) out.set(m.turnId, true);
+  }
+  return out;
+}
+
+/**
+ * Adapter — translate one persisted timeline item into a live
+ * `ChatMessage`, or `null` if the kind isn't supported by the V2 UI yet.
+ * Same shape as the live event handlers above, so adding hydration
+ * support for a new role is one branch here plus one case in
+ * `handleSessionEvent`. Today only `user_message` / `assistant_message`
+ * survive; tool / thinking / question / permission / diff history is
+ * intentionally dropped (see plan's Out of Scope section).
+ */
+function historicalMessageFromTimelineItem(
+  sessionId: string,
+  item: agent.SessionTimelineItem
+): ChatMessage | null {
+  const id = `hist-${sessionId}-${item.id}`;
+  const text = typeof item.text === "string" ? item.text : "";
+  if (item.kind === "user_message") {
+    return { id, role: "user", text, createdAt: 0 };
+  }
+  if (item.kind === "assistant_message") {
+    return { id, role: "assistant", text, createdAt: 0 };
+  }
+  return null;
+}
+
 function handleSessionEvent(sessionId: string, payload: SessionEventPayload): void {
   const list = chatSessions[sessionId];
   if (!list) return;
@@ -196,11 +302,8 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       const delta = (payload as { delta: string }).delta ?? "";
       const ref = pendingByTurn.get(turnId);
       if (!ref) return;
-      const target = list.find((m) => m.id === ref.messageId);
+      const target = findAssistantBubble(list, ref.messageId);
       if (!target) return;
-      // pendingByTurn only ever binds to assistant bubbles, but narrow
-      // anyway so the tool variant (which has no `text`) typechecks.
-      if (target.role !== "assistant") return;
       target.text = (target.text ?? "") + delta;
       break;
     }
@@ -209,25 +312,15 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       const assistantText = (payload as { assistantText?: string }).assistantText;
       const ref = pendingByTurn.get(turnId);
       if (ref) {
-        const target = list.find((m) => m.id === ref.messageId);
-        if (target && target.role === "assistant") {
+        const target = findAssistantBubble(list, ref.messageId);
+        if (target) {
           if (typeof assistantText === "string" && assistantText.length > 0) {
             target.text = assistantText;
           }
           target.pending = false;
         }
-        pendingByTurn.delete(turnId);
       }
-      // Also flip any thinking bubble for this turn out of pending. Loop
-      // unconditionally (not gated on `ref`) because a thinking-only turn
-      // never registers in `pendingByTurn` — there was no assistant bubble
-      // to bind.
-      for (const m of list) {
-        if (m.role === "thinking" && m.turnId === turnId) m.pending = false;
-      }
-      if (runningTurnBySessionId[sessionId] === turnId) {
-        delete runningTurnBySessionId[sessionId];
-      }
+      finalizeTurn(list, sessionId, turnId);
       break;
     }
     case "turn-error": {
@@ -235,21 +328,14 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       const error = (payload as { error: string }).error ?? "Turn failed";
       const ref = pendingByTurn.get(turnId);
       if (ref) {
-        const target = list.find((m) => m.id === ref.messageId);
-        if (target && target.role === "assistant") {
+        const target = findAssistantBubble(list, ref.messageId);
+        if (target) {
           target.text = `Error: ${error}`;
           target.pending = false;
           target.error = true;
         }
-        pendingByTurn.delete(turnId);
       }
-      // Same as turn-complete: also flip any thinking bubble for this turn.
-      for (const m of list) {
-        if (m.role === "thinking" && m.turnId === turnId) m.pending = false;
-      }
-      if (runningTurnBySessionId[sessionId] === turnId) {
-        delete runningTurnBySessionId[sessionId];
-      }
+      finalizeTurn(list, sessionId, turnId);
       pushToast(error, "error");
       break;
     }
@@ -263,12 +349,12 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       for (const r of requests) {
         // De-dupe (callId, turnId) — a re-emit within the same turn
         // shouldn't double-render a pill (real backends may resend on
-        // reconnect). But callId is only unique per-turn (see v1
+        // reconnect). callId is only unique per-turn (see v1
         // chat-session-ui.spec.ts:1112): the same id appearing in a
         // later turn must produce a fresh pill so the user can see
         // both calls in the timeline.
         if (list.some((m) => m.role === "tool" && m.callId === r.callId && m.turnId === turnId)) continue;
-        const newPill: Extract<ChatMessage, { role: "tool" }> = {
+        insertBeforeAssistant(list, turnId, {
           id: nextMessageId(),
           role: "tool",
           toolId: r.toolId,
@@ -277,19 +363,7 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
           input: r.input,
           createdAt: Date.now(),
           turnId
-        };
-        // Insert BEFORE the pending assistant bubble for this turn (if any),
-        // mirroring the thinking-delta pattern — tools should read before the
-        // final answer they fed, not after.
-        const ref = pendingByTurn.get(turnId);
-        const assistantIdx = ref
-          ? list.findIndex((m) => m.id === ref.messageId)
-          : -1;
-        if (assistantIdx >= 0) {
-          list.splice(assistantIdx, 0, newPill);
-        } else {
-          list.push(newPill);
-        }
+        });
       }
       break;
     }
@@ -317,7 +391,7 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
           // Edge: some backends batch the result without firing
           // tool-calls-requested first. Synthesize the pill at terminal
           // status, still slotted before the assistant bubble for this turn.
-          const synth: Extract<ChatMessage, { role: "tool" }> = {
+          insertBeforeAssistant(list, turnId, {
             id: nextMessageId(),
             role: "tool",
             toolId: i.toolId,
@@ -327,16 +401,7 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
             output: i.output,
             createdAt: Date.now(),
             turnId
-          };
-          const ref = pendingByTurn.get(turnId);
-          const assistantIdx = ref
-            ? list.findIndex((m) => m.id === ref.messageId)
-            : -1;
-          if (assistantIdx >= 0) {
-            list.splice(assistantIdx, 0, synth);
-          } else {
-            list.push(synth);
-          }
+          });
         }
       }
       break;
@@ -348,7 +413,7 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
       // De-dupe by requestId — the backend may re-emit on reconnect and we
       // mustn't double-render the form.
       if (list.some((m) => m.role === "question" && m.requestId === requestId)) break;
-      const newQuestion: Extract<ChatMessage, { role: "question" }> = {
+      insertBeforeAssistant(list, turnId, {
         id: nextMessageId(),
         role: "question",
         requestId,
@@ -356,18 +421,7 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
         questions,
         answered: false,
         createdAt: Date.now()
-      };
-      // Slot BEFORE the pending assistant bubble for this turn — same
-      // pattern as thinking-delta and tool-calls-requested. The agent
-      // composes its final answer AFTER the user picks, so the form
-      // belongs ahead of the assistant bubble in reading order.
-      const ref = pendingByTurn.get(turnId);
-      const assistantIdx = ref ? list.findIndex((m) => m.id === ref.messageId) : -1;
-      if (assistantIdx >= 0) {
-        list.splice(assistantIdx, 0, newQuestion);
-      } else {
-        list.push(newQuestion);
-      }
+      });
       break;
     }
     case "thinking-delta": {
@@ -389,18 +443,7 @@ function handleSessionEvent(sessionId: string, payload: SessionEventPayload): vo
           createdAt: Date.now(),
           turnId
         };
-        // Insert BEFORE the assistant bubble for this turn (if any) so the
-        // chronological reading order matches the cognitive order
-        // (think → answer). If there's no assistant bubble yet, append.
-        const ref = pendingByTurn.get(turnId);
-        const assistantIdx = ref
-          ? list.findIndex((m) => m.id === ref.messageId)
-          : -1;
-        if (assistantIdx >= 0) {
-          list.splice(assistantIdx, 0, bubble);
-        } else {
-          list.push(bubble);
-        }
+        insertBeforeAssistant(list, turnId, bubble);
       }
       bubble.text = (bubble.text ?? "") + delta;
       break;
@@ -523,21 +566,12 @@ function hydrateSession(sessionId: string): void {
     .then((detail) => {
       const historical: ChatMessage[] = [];
       for (const item of detail.timeline ?? []) {
-        if (item.kind === "user_message" || item.kind === "assistant_message") {
-          historical.push({
-            // Stable id namespaced by sessionId so it never collides with live
-            // `msg-…` ids generated by nextMessageId().
-            id: `hist-${sessionId}-${item.id}`,
-            role: item.kind === "user_message" ? "user" : "assistant",
-            text: typeof item.text === "string" ? item.text : "",
-            // DTO has no timestamp on these timeline items; 0 sorts to the
-            // top, which matches the prepend below.
-            createdAt: 0,
-          });
-        }
-        // Other kinds (system_message, command, tool_call, permission_dialog,
-        // diff_snapshot) are intentionally skipped — V2 has no UI primitives
-        // for them yet.
+        // Single adapter — translates one persisted item into a live
+        // ChatMessage (or returns null to skip). Adding hydration support
+        // for a new role is one branch inside that function, not a copy
+        // of this loop.
+        const msg = historicalMessageFromTimelineItem(sessionId, item);
+        if (msg) historical.push(msg);
       }
       const current = chatSessions[sessionId];
       if (current) {
@@ -602,10 +636,8 @@ function fireTurn(sessionId: string, bubbleId: string, message: string): void {
         // match it against thinking siblings.
         const list = chatSessions[sessionId];
         if (list) {
-          const target = list.find((m) => m.id === bubbleId);
-          if (target && target.role === "assistant") {
-            target.turnId = res.turnId;
-          }
+          const target = findAssistantBubble(list, bubbleId);
+          if (target) target.turnId = res.turnId;
         }
       }
     })
@@ -613,11 +645,8 @@ function fireTurn(sessionId: string, bubbleId: string, message: string): void {
       const msg = err instanceof Error ? err.message : String(err);
       const list = chatSessions[sessionId];
       if (list) {
-        const target = list.find((m) => m.id === bubbleId);
-        // Only assistant bubbles carry the `error` field — the pending
-        // bubble created in pushPendingAssistant is always the assistant
-        // variant, so this narrow is exact.
-        if (target && target.role === "assistant") {
+        const target = findAssistantBubble(list, bubbleId);
+        if (target) {
           target.text = `Error: ${msg}`;
           target.pending = false;
           target.error = true;

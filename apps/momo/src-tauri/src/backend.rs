@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const DEFAULT_PROVIDER: &str = "codex";
@@ -28,22 +28,28 @@ const DEFAULT_PUFFER_MODEL: &str = "default";
 pub(crate) struct BackendState {
     turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Per-request senders for `askUserQuestion` round-trips. Keyed by
-    /// `requestId` (session-unique by construction). When the agent runtime
-    /// emits a `user-question-request` event it inserts a sender here and
-    /// blocks on the matching receiver; `resolve_user_question` pops the
-    /// sender and forwards the user's answers back to the worker.
+    /// `(turnId, requestId)` so a future deterministic-counter runtime
+    /// that recycles requestIds across turns can't deliver an answer to
+    /// the wrong worker. Today's tests-only path emits unique ids per
+    /// turn already, so the composite key is forward-defensive — see
+    /// architectural-review Sev-2 #5 (2026-05-27).
+    ///
+    /// When the agent runtime emits a `user-question-request` event it
+    /// inserts a sender here and blocks on the matching receiver;
+    /// `resolve_user_question` pops the sender and forwards the user's
+    /// answers back to the worker.
     ///
     /// Mirrors `apps/puffer-desktop/src-tauri/src/turn.rs:48-49`
     /// (`pending_questions: Arc<Mutex<HashMap<String, mpsc::Sender<...>>>>`)
     /// but lives on the global backend rather than per-turn because momo's
     /// turn registry doesn't carry an entry struct — one map covers all
-    /// concurrent turns since request ids are unique session-wide.
+    /// concurrent turns.
     ///
     /// Today nothing inserts into this map — see
     /// `codex_app_server.rs::tool_request_user_input_response` for the
     /// extension point. The frontend works against this RPC regardless
     /// (tests synthesise the event via `daemon.emit`).
-    pending_questions: Mutex<HashMap<String, std_mpsc::Sender<Value>>>,
+    pending_questions: Mutex<HashMap<(String, String), std_mpsc::Sender<Value>>>,
 }
 
 impl BackendState {
@@ -99,6 +105,17 @@ impl BackendState {
                 if let Some(flag) = self.turns.lock().unwrap().get(&turn_id) {
                     flag.store(true, Ordering::SeqCst);
                 }
+                self.pending_questions
+                    .lock()
+                    .unwrap()
+                    .retain(|(pending_turn_id, _), sender| {
+                        if pending_turn_id == &turn_id {
+                            let _ = sender.send(json!({ "__cancelled": true }));
+                            false
+                        } else {
+                            true
+                        }
+                    });
                 Ok(json!({}))
             }
             "resolve_user_question" => self.resolve_user_question(params),
@@ -472,11 +489,11 @@ impl BackendState {
     /// arrives. Mirrors `apps/puffer-desktop/src-tauri/src/turn.rs:295-315`
     /// adapted for momo's single global pending map (rather than per-turn).
     ///
-    /// `turnId` is accepted for parity with v1's RPC shape — momo doesn't
-    /// key the map by turnId today (requestIds are session-unique), but
-    /// future runtime emission may want it.
+    /// Keyed by `(turnId, requestId)` so concurrent turns sharing a
+    /// requestId (e.g. a deterministic counter from a future runtime)
+    /// don't cross-talk.
     fn resolve_user_question(&self, params: Value) -> Result<Value> {
-        let _turn_id = string_param(&params, &["turnId", "turn_id"])?;
+        let turn_id = string_param(&params, &["turnId", "turn_id"])?;
         let request_id = string_param(&params, &["requestId", "request_id"])?;
         let answers = params
             .get("answers")
@@ -486,7 +503,7 @@ impl BackendState {
             .pending_questions
             .lock()
             .unwrap()
-            .remove(&request_id);
+            .remove(&(turn_id, request_id));
         let Some(sender) = sender else {
             // No pending request — tests synthesise events without a real
             // runtime waiting, so this is the common path today. Return
@@ -523,7 +540,7 @@ impl BackendState {
         self.pending_questions
             .lock()
             .unwrap()
-            .insert(request_id.to_string(), tx);
+            .insert((turn_id.to_string(), request_id.to_string()), tx);
         let channel = format!("session:{session_id}:event");
         events.emit(
             channel,
@@ -603,6 +620,33 @@ fn ensure_session_cwd(cwd: &Path) -> Result<()> {
     }
     fs::create_dir_all(cwd)
         .with_context(|| format!("failed to create session cwd {}", cwd.display()))
+}
+
+fn wait_for_user_question_answer(
+    rx: std_mpsc::Receiver<Value>,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            bail!("turn canceled");
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(answer) => {
+                if answer
+                    .get("__cancelled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    bail!("turn canceled");
+                }
+                return Ok(answer);
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("agent worker already released the user question channel");
+            }
+        }
+    }
 }
 
 fn run_agent_turn_thread(
