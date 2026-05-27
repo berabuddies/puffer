@@ -57,10 +57,10 @@
   import {
     workSessions,
     lifeSessions,
-    createSessionInGroup,
-    renameSession,
-    type SessionGroup
+    createSessionForProject,
+    renameSession
   } from "../../lib/sessionStore.svelte";
+  import type { ProjectId } from "../../lib/projectStore.svelte";
   import type { SessionListItem } from "../../lib/agentClient";
 
   // See IconBlock.svelte — lucide-svelte v1 ships legacy class typings; use
@@ -90,8 +90,9 @@
     { label: "Connected Apps", icon: LayoutGrid, href: "/apps", activePrefixes: ["/apps"] }
   ];
 
-  // Session rows under the Work / Life groups are driven by sessionStore;
-  // group membership lives in localStorage (no backend support yet).
+  // Session rows under the Work / Life projects are driven by sessionStore;
+  // a session's project is derived from its cwd matching one of the two
+  // fixed project paths returned by `list_projects`.
   let workExpanded = $state(true);
   let lifeExpanded = $state(true);
 
@@ -288,12 +289,12 @@
   }
 
   /**
-   * Mint a fresh empty puffer session, remember which group it belongs
-   * to, and navigate into it. The session row appears in the sidebar
+   * Mint a fresh empty puffer session in the given project's fixed cwd
+   * and navigate into it. The session row appears in the sidebar
    * immediately via the local optimistic insert inside the store.
    */
-  function startNewChatInGroup(group: SessionGroup): void {
-    void createSessionInGroup(group)
+  function startNewChatInProject(projectId: ProjectId): void {
+    void createSessionForProject(projectId)
       .then((sessionId) => {
         navigate(`/agent/${sessionId}`);
       })
@@ -497,7 +498,7 @@
               type="button"
               aria-label="New chat in Work"
               title="New chat in Work"
-              onclick={() => startNewChatInGroup("work")}
+              onclick={() => startNewChatInProject("work")}
             >
               <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
             </button>
@@ -530,7 +531,7 @@
               type="button"
               aria-label="New chat in Life"
               title="New chat in Life"
-              onclick={() => startNewChatInGroup("life")}
+              onclick={() => startNewChatInProject("life")}
             >
               <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
             </button>

@@ -1,8 +1,8 @@
 use crate::codex_app_server::{self, CapturedTurnEvent, CodexTurnOptions, CodexTurnOutcome};
 use crate::dtos::{
-    AgentDiffDto, AuthProviderStatusDto, DivergenceReportDto, FolderGroupDto, ProviderSummaryDto,
-    RepoStatusDto, ResourceCountsDto, SessionDetailDto, SessionListItemDto, SettingsConfigDto,
-    SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
+    AgentDiffDto, AuthProviderStatusDto, DivergenceReportDto, FolderGroupDto, ProjectDto,
+    ProviderSummaryDto, RepoStatusDto, ResourceCountsDto, SessionDetailDto, SessionListItemDto,
+    SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
 };
 use crate::events::EventEmitter;
 use anyhow::{anyhow, bail, Context, Result};
@@ -42,6 +42,7 @@ impl BackendState {
         params: Value,
     ) -> Result<Value> {
         match method {
+            "list_projects" => serde_value(self.list_projects()?),
             "list_grouped_sessions" => serde_value(self.list_grouped_sessions()?),
             "load_session_detail" => {
                 let session_id = string_param(&params, &["sessionId", "session_id"])?;
@@ -87,6 +88,26 @@ impl BackendState {
 
     fn default_workspace(&self) -> Result<PathBuf> {
         Ok(env::current_dir().context("failed to read current directory")?)
+    }
+
+    /// Returns the two fixed projects (Work and Life) surfaced in the rail.
+    /// Each project's cwd lives under `$MOMO_HOME/projects/<id>` and is
+    /// created on demand so `create_session` can immediately use it.
+    fn list_projects(&self) -> Result<Vec<ProjectDto>> {
+        let root = app_home()?.join("projects");
+        let entries = [("work", "Work"), ("life", "Life")];
+        let mut out = Vec::with_capacity(entries.len());
+        for (id, label) in entries {
+            let cwd = root.join(id);
+            fs::create_dir_all(&cwd)
+                .with_context(|| format!("failed to create project dir {}", cwd.display()))?;
+            out.push(ProjectDto {
+                id: id.to_string(),
+                label: label.to_string(),
+                cwd: cwd.to_string_lossy().to_string(),
+            });
+        }
+        Ok(out)
     }
 
     fn list_grouped_sessions(&self) -> Result<Vec<FolderGroupDto>> {

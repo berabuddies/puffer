@@ -41,6 +41,7 @@
 
   import Sidebar from "./Sidebar.svelte";
   import { loadSessions } from "../../lib/sessionStore.svelte";
+  import { loadProjects } from "../../lib/projectStore.svelte";
 
   interface Props {
     children: Snippet;
@@ -55,9 +56,11 @@
 
   // Kick the session list once when the shell mounts — onboarding routes
   // render bare (no Shell), so by the time we get here the user is on a
-  // real product page and the sidebar needs its data. Errors surface as
-  // toast inside the store.
+  // real product page and the sidebar needs its data. Projects load in
+  // parallel so the cwd-based session filter is ready by the time the
+  // session list resolves. Errors surface as toast inside the stores.
   onMount(() => {
+    void loadProjects();
     void loadSessions();
   });
 </script>

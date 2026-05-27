@@ -24,6 +24,15 @@ pub(crate) struct SessionListItemDto {
     pub model_id: Option<String>,
 }
 
+/// Describes one fixed project surfaced in the desktop rail (Work / Life).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectDto {
+    pub id: String,
+    pub label: String,
+    pub cwd: String,
+}
+
 /// Describes one grouped folder section in the desktop sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
