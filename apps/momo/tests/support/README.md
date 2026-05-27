@@ -13,7 +13,7 @@ This folder is shared by `apps/momo/tests/chat/**.spec.ts` and the
 | Fire turn-start / text-delta / turn-complete from a happy path | `emitTurnStart`, `emitTextDelta`, `emitTurnComplete` (chatEmit.ts) |
 | Same, but in one call for the *happy path only* | `emitTurnLifecycle({ deltas })` (chatEmit.ts) |
 | Drive a thinking / tool / question event flow | `emitThinkingDelta`, `emitToolRequest`, `emitToolInvocation`, `emitQuestion` |
-| Hold an RPC open until you say go | `deferRpc(daemon, "load_session_detail")` (chatTiming.ts) |
+| Hold an RPC open until you say go | `const p = deferRpc(daemon, "run_agent_turn"); /* assert… */ p.resolve();` (chatTiming.ts; backed by `FakeDaemon.deferRpc`) |
 | Make an RPC take a fixed ms | `delayRpc(daemon, "load_session_detail", 800)` (chatTiming.ts) |
 | Target a chat surface in the DOM | `locate*` from chatLocators.ts (returns `Locator`, you await) |
 | Type + Enter + IME / state | `composer*` from composerHelpers.ts |
@@ -59,8 +59,10 @@ When a new helper is needed:
 ## File map
 
 ```
-fakeDaemon.ts        — DO NOT EDIT. 2043 lines, already supports cancel_turn
-                       and resolve_user_question.
+fakeDaemon.ts        — websocket fake. Already supports cancel_turn and
+                       resolve_user_question. Extend with new public methods
+                       when a race needs more wiring (see deferRpc, added
+                       2026-05-27 for promise-based RPC pinning).
 bootHelpers.ts       — bootOnboarded(), openSession() (stub)
 chatEmit.ts          — emit* primitives + emitTurnLifecycle convenience
 chatTiming.ts        — deferRpc(), delayRpc()

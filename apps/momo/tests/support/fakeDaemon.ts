@@ -26,6 +26,30 @@ type ResponseFailureDelay = ResponseDelay & {
   error: string;
 };
 
+type PendingDeferral = {
+  method: string;
+  predicate: (request: DaemonRequest) => boolean;
+  /**
+   * Future that race-test code awaits. Resolves to a `{ kind: "ok", value }`
+   * or `{ kind: "err", error }` payload that the dispatcher uses to send the
+   * appropriate response/failure frame.
+   */
+  promise: Promise<DeferralOutcome>;
+  /** Used to enforce single-resolution: defer handles can only resolve once. */
+  settled: boolean;
+};
+
+export type DeferralOutcome =
+  | { kind: "ok"; value: unknown }
+  | { kind: "err"; error: string };
+
+export interface DeferralHandle {
+  /** Send the success response now (uses the dispatcher's normal result for the method). */
+  resolve(value?: unknown): void;
+  /** Send a failure response now with the given error string. */
+  reject(error: string): void;
+}
+
 type FakeFileValue =
   | string
   | {
@@ -256,6 +280,14 @@ export class FakeDaemon {
   private readonly responseDelays: ResponseDelay[] = [];
   private readonly responseFailureDelays: ResponseFailureDelay[] = [];
   private readonly methodFailures = new Map<string, string[]>();
+  /**
+   * Promise-based deferrals — RPCs whose response is held until the test
+   * code explicitly calls `resolve()` or `reject()` on the returned handle.
+   * Matched on a one-shot basis: the first request whose method + predicate
+   * matches a pending entry claims that entry. Used to write tests like
+   * "Stop button stays disabled until run_agent_turn responds with a turnId."
+   */
+  private readonly pendingDeferrals: PendingDeferral[] = [];
   private readonly browserTabs = new Map<string, TabSet>();
   private readonly browserRecordings = new Map<string, JsonRecord[]>();
   private readonly ptys = new Map<string, PtySet>();
@@ -1073,6 +1105,48 @@ export class FakeDaemon {
     this.methodFailures.set(method, failures);
   }
 
+  /**
+   * Install a promise-based deferral for the next request matching
+   * `method` (and optionally `predicate`). The returned handle's
+   * `resolve()` / `reject()` send the response frame at call time; until
+   * one of them is called, the request stays open from the client's POV.
+   * Use this for "Stop disabled until run_agent_turn returns" / "two
+   * clicks during a pending answer don't both submit" race tests.
+   *
+   * Matched on a one-shot basis — a second matching request goes through
+   * the normal dispatch path. To pin multiple, call `deferRpc` again.
+   */
+  deferRpc(
+    method: string,
+    predicate: (request: DaemonRequest) => boolean = () => true
+  ): DeferralHandle {
+    let resolveOutcome!: (outcome: DeferralOutcome) => void;
+    const promise = new Promise<DeferralOutcome>((res) => { resolveOutcome = res; });
+    const entry: PendingDeferral = { method, predicate, promise, settled: false };
+    this.pendingDeferrals.push(entry);
+    return {
+      resolve: (value?: unknown): void => {
+        if (entry.settled) return;
+        entry.settled = true;
+        resolveOutcome({ kind: "ok", value });
+      },
+      reject: (error: string): void => {
+        if (entry.settled) return;
+        entry.settled = true;
+        resolveOutcome({ kind: "err", error });
+      }
+    };
+  }
+
+  private takeDeferral(request: DaemonRequest): PendingDeferral | null {
+    const index = this.pendingDeferrals.findIndex(
+      (entry) => entry.method === request.method && entry.predicate(request)
+    );
+    if (index === -1) return null;
+    const [entry] = this.pendingDeferrals.splice(index, 1);
+    return entry;
+  }
+
   setGroupedSessionFilter(filter: ((metadata: JsonRecord) => boolean) | null): void {
     this.groupedSessionFilter = filter;
   }
@@ -1119,6 +1193,21 @@ export class FakeDaemon {
     this.record(request);
 
     try {
+      const deferral = this.takeDeferral(request);
+      if (deferral) {
+        // Hold the response until the test calls handle.resolve()/reject().
+        // We dispatch lazily so the eventual handle.resolve(undefined) still
+        // gets the default result for this method.
+        void deferral.promise.then((outcome) => {
+          if (outcome.kind === "ok") {
+            const value = outcome.value !== undefined ? outcome.value : this.dispatch(request);
+            socket.send(this.response(request.id, value));
+          } else {
+            socket.send(this.failure(request.id, outcome.error));
+          }
+        });
+        return;
+      }
       const delayedFailure = this.takeResponseFailureDelay(request);
       if (delayedFailure) {
         setTimeout(() => socket.send(this.failure(request.id, delayedFailure.error)), delayedFailure.ms);
