@@ -173,6 +173,136 @@ test("pipeline overview and create pages keep focused headers", async ({ page })
   await expect(page.getByRole("button", { name: "Add Puffer node" })).toBeVisible();
 });
 
+test("pipeline overview opens workflow and run details on separate pages", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  const now = Date.now();
+  daemon.setWorkflowSnapshot({
+    workflows: [
+      {
+        schema: "puffer.workflow.v1",
+        slug: "release-pipeline",
+        enabled: true,
+        trigger: { type: "connection", connection_slug: "telegram-user", pattern: "ship" },
+        pipeline: {
+          name: "Release pipeline",
+          working_dir: "/tmp/puffer",
+          concurrency: 1,
+          nodes: [
+            {
+              id: "deploy",
+              type: "codex",
+              agent: "Codex deployer",
+              model: "gpt-5.4-codex",
+              tools: ["bash", "git"],
+              prompt: "Deploy and report release status."
+            }
+          ]
+        }
+      },
+      {
+        schema: "puffer.workflow.v1",
+        slug: "daily-digest",
+        enabled: true,
+        trigger: { type: "cron", cron: "0 9 * * *" },
+        pipeline: {
+          name: "Daily digest",
+          working_dir: "/tmp/puffer",
+          concurrency: 1,
+          nodes: [
+            {
+              id: "summarize",
+              type: "puffer",
+              agent: "Puffer summarizer",
+              model: "puffer-default",
+              tools: ["workflow"],
+              prompt: "Summarize connector activity."
+            }
+          ]
+        }
+      }
+    ],
+    runs: [
+      {
+        idx: 21,
+        workflow_slug: "release-pipeline",
+        run_id: "run-release-live",
+        trigger: { text: "ship this" },
+        status: "running",
+        started_at_ms: now - 60_000,
+        ended_at_ms: null,
+        nodes: [
+          {
+            id: "deploy",
+            status: "running",
+            started_at_ms: now - 60_000,
+            ended_at_ms: null,
+            output: "deploying release",
+            error: null
+          }
+        ],
+        error: null,
+        trigger_key: "telegram-user:ship"
+      },
+      {
+        idx: 20,
+        workflow_slug: "daily-digest",
+        run_id: "run-digest",
+        trigger: { text: "cron" },
+        status: "completed",
+        started_at_ms: now - 120_000,
+        ended_at_ms: now - 100_000,
+        nodes: [
+          {
+            id: "summarize",
+            status: "completed",
+            started_at_ms: now - 120_000,
+            ended_at_ms: now - 100_000,
+            output: "digest complete",
+            error: null
+          }
+        ],
+        error: null,
+        trigger_key: "cron:daily"
+      }
+    ],
+    connectors: [],
+    connections: []
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const title = page.locator(".pf-pipe-top-id");
+  await expect(title).toContainText("Workflow dashboard");
+
+  const ongoing = page.getByLabel("Ongoing workflows");
+  const liveRun = ongoing.getByRole("button", { name: /Release pipeline/ });
+  await expect(liveRun).toContainText("#21");
+  await expect(liveRun).toContainText("running");
+  await liveRun.click();
+
+  await expect(title).toContainText("Workflow detail");
+  await expect(title).toContainText("Release pipeline");
+  await expect(title).toContainText("release-pipeline");
+  await expect(page.getByLabel("Workflow runs").getByRole("button", { name: /#21/ })).toHaveAttribute(
+    "data-selected",
+    "true"
+  );
+  await expect(page.locator(".pf-pipe-traj-list")).toContainText("deploying release");
+
+  await page.getByRole("button", { name: "Back to workflows" }).click();
+  await expect(title).toContainText("Workflow dashboard");
+  await expect(page.getByLabel("Workflow list")).toBeVisible();
+
+  await page.getByLabel("Workflow list").getByRole("button", { name: /Daily digest/ }).click();
+  await expect(title).toContainText("Workflow detail");
+  await expect(title).toContainText("Daily digest");
+  await expect(title).toContainText("daily-digest");
+  await expect(page.getByRole("button", { name: "Back to workflows" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New workflow" })).toBeVisible();
+});
+
 test("pipeline workflow run search filters selected workflow runs", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowSnapshot({

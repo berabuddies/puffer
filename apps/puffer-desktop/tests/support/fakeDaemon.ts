@@ -59,6 +59,14 @@ type WorkflowSnapshotFixture = {
   monitor_task_error?: string | null;
 };
 
+type ConnectorSetupQuestionFixture = {
+  type: "input" | "choice";
+  header: string;
+  question: string;
+  options?: JsonRecord[];
+  multiSelect?: boolean;
+};
+
 type SessionDetailOverrides = {
   latestDiff: JsonRecord | null;
   diffHistory: JsonRecord[];
@@ -305,6 +313,23 @@ export class FakeDaemon {
     connectorSlug: string;
     connectionSlug: string;
   }>();
+  private connectorSetupQuestions: ConnectorSetupQuestionFixture[] = [
+    {
+      type: "input",
+      header: "Credential",
+      question: "Connector credential",
+      options: []
+    },
+    {
+      type: "choice",
+      header: "Mode",
+      question: "Setup mode",
+      options: [
+        { label: "Default", description: "Standard setup" },
+        { label: "Strict", description: "Extra validation" }
+      ]
+    }
+  ];
   private workflowSnapshot: WorkflowSnapshotFixture = {
     workflows: [
       {
@@ -691,6 +716,13 @@ export class FakeDaemon {
       monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
       monitor_task_error: snapshot.monitor_task_error ?? null
     };
+  }
+
+  setConnectorSetupQuestions(questions: ConnectorSetupQuestionFixture[]): void {
+    this.connectorSetupQuestions = questions.map((question) => ({
+      ...question,
+      options: question.options?.map((option) => ({ ...option })) ?? []
+    }));
   }
 
   socketCount(): number {
@@ -1248,23 +1280,10 @@ export class FakeDaemon {
           type: "user-question-request",
           turnId,
           requestId: "connector-setup",
-          questions: [
-            {
-              type: "input",
-              header: "Credential",
-              question: "Connector credential",
-              options: []
-            },
-            {
-              type: "choice",
-              header: "Mode",
-              question: "Setup mode",
-              options: [
-                { label: "Default", description: "Standard setup" },
-                { label: "Strict", description: "Extra validation" }
-              ]
-            }
-          ]
+          questions: this.connectorSetupQuestions.map((question) => ({
+            ...question,
+            options: question.options?.map((option) => ({ ...option })) ?? []
+          }))
         });
       }, 0);
     }

@@ -1495,6 +1495,85 @@ test("connector settings renders dynamic AskUserQuestion inputs", async ({ page 
   await expect(pane.locator(".pf-mcp-card").filter({ hasText: "telegram-test" })).toBeVisible();
 });
 
+test("connector settings submits dynamic password, radio, and multiselect answers", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setConnectorSetupQuestions([
+    {
+      type: "input",
+      header: "API Token",
+      question: "Workspace token",
+      options: []
+    },
+    {
+      type: "choice",
+      header: "Region",
+      question: "Workspace region",
+      options: [
+        { label: "US", description: "United States", preview: "us-east" },
+        { label: "EU", description: "European Union", preview: "eu-west" }
+      ]
+    },
+    {
+      type: "choice",
+      header: "Scopes",
+      question: "Enabled scopes",
+      multiSelect: true,
+      options: [
+        { label: "messages:read", description: "Read incoming messages", preview: "read" },
+        { label: "messages:write", description: "Send responses", preview: "write" }
+      ]
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connectors" }).click();
+  await daemon.waitForRequest("workflow_list");
+
+  const pane = page.locator(".pf-settings-pane");
+  await pane.locator(".pf-connector-form select").selectOption("slack-app");
+  await pane.getByLabel("Connector connection slug").fill("team-slack");
+  await expect(pane.getByLabel("Connector setup command")).toContainText("/connect slack-app team-slack");
+  await pane.getByRole("button", { name: "Start setup" }).click();
+
+  const turn = await daemon.waitForRequest("run_agent_turn");
+  expect(turn.params).toMatchObject({
+    message: "/connect slack-app team-slack"
+  });
+
+  const questions = pane.getByLabel("Connector setup questions");
+  await expect(questions).toContainText("3 questions");
+  const tokenQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Workspace token" });
+  const scopeQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Enabled scopes" });
+  const tokenInput = tokenQuestion.locator("input");
+  await expect(tokenInput).toHaveAttribute("type", "password");
+  await expect(questions.getByLabel("US")).toBeChecked();
+  await expect(questions.getByText("us-east")).toBeVisible();
+  await expect(questions.getByText("eu-west")).toBeVisible();
+  await expect(questions.getByRole("button", { name: "Submit answers" })).toBeDisabled();
+
+  await tokenInput.fill("xoxb-secret");
+  await expect(questions.getByRole("button", { name: "Submit answers" })).toBeDisabled();
+
+  await questions.getByLabel("EU").check();
+  await scopeQuestion.getByLabel("messages:read").check();
+  await scopeQuestion.getByLabel("messages:write").check();
+  await questions.getByRole("button", { name: "Submit answers" }).click();
+
+  const resolved = await daemon.waitForRequest("resolve_user_question");
+  expect(resolved.params).toMatchObject({
+    requestId: "connector-setup",
+    answers: {
+      "Workspace token": "xoxb-secret",
+      "Workspace region": "EU",
+      "Enabled scopes": ["messages:read", "messages:write"]
+    }
+  });
+  await expect(pane.getByText("Connector setup finished for team-slack.")).toBeVisible();
+  await expect(pane.locator(".pf-mcp-card").filter({ hasText: "team-slack" })).toBeVisible();
+});
+
 test("connector settings remain readable on narrow screens", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
