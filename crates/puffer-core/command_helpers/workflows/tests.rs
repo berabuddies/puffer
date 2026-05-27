@@ -77,6 +77,32 @@ mod tests {
     }
 
     #[test]
+    fn workflow_header_surfaces_dashboard_views_and_next_steps() {
+        let paths = ConfigPaths::discover(std::path::Path::new("/tmp/puffer-workflows-test"));
+        let context = ConnectorContext {
+            connectors: Vec::new(),
+            connections: Vec::new(),
+            bindings: Vec::new(),
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_header(
+            &mut out,
+            &paths,
+            &[],
+            &[],
+            &context,
+            &monitor_tasks::MonitorTaskContext::default(),
+        );
+
+        assert!(out.contains("views: /workflows runs | /workflows tasks"));
+        assert!(out.contains("next: /connect <connector-slug> <connection-name>"));
+        assert!(out.contains("/workflows new <workflow-slug> <connection-slug> [pattern]"));
+        assert!(out.contains("/monitor <connection-slug>"));
+    }
+
+    #[test]
     fn workflow_connections_show_monitor_command_for_trigger_ready_connections() {
         let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
         let context = ConnectorContext {
@@ -98,9 +124,8 @@ mod tests {
         write_connections(&mut out, &context, &roots, "");
 
         assert!(out.contains("filters: trigger-ready | no-trigger | draft | append | monitor | repair"));
-        assert!(out.contains(
-            "trigger=ready repair=/connect demo-chat demo-main draft=/workflows new demo-main-workflow demo-main append=/workflows append demo-main /tmp/demo-main.log monitor=/monitor demo-main"
-        ));
+        assert!(out.contains("- demo-main [Authenticated] connector=demo-chat consumer=idle trigger=ready Demo main channel"));
+        assert!(out.contains("commands: repair=/connect demo-chat demo-main | draft=/workflows new demo-main-workflow demo-main | append=/workflows append demo-main /tmp/demo-main.log | monitor=/monitor demo-main"));
     }
 
     #[test]

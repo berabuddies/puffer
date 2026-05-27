@@ -211,7 +211,7 @@ fn render_shows_workflow_connector_argument_popup() {
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("/workflows append telegram-user"));
     assert!(rendered.contains("connection=telegram-user"));
-    assert!(rendered.contains("Append events from Telegram personal account"));
+    assert!(rendered.contains("Append events to a file from Telegram personal account"));
 }
 
 #[test]
@@ -241,5 +241,5 @@ fn render_shows_monitor_connector_argument_popup() {
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("/monitor telegram-user"));
     assert!(rendered.contains("connection=telegram-user"));
-    assert!(rendered.contains("Monitor events from Telegram personal account"));
+    assert!(rendered.contains("Create monitor workflow for Telegram personal account"));
 }

@@ -159,6 +159,12 @@ fn write_header(
         monitor_tasks.active_count(),
         monitor_tasks.tasks.len()
     );
+    out.push_str(
+        "views: /workflows runs | /workflows tasks | /workflows connections | /workflows connectors\n",
+    );
+    out.push_str(
+        "next: /connect <connector-slug> <connection-name> | /workflows new <workflow-slug> <connection-slug> [pattern] | /monitor <connection-slug>\n",
+    );
     if let Some(error) = &context.error {
         let _ = writeln!(out, "connector_runtime={}", first_line(error));
     }
@@ -259,7 +265,11 @@ fn write_workflow_bindings(out: &mut String, context: &ConnectorContext, query: 
             workflow_filter_label(binding.filter.as_ref()),
             binding.description
         );
-        let _ = writeln!(out, "  delete={}", workflow_delete_command(&binding.slug));
+        let _ = writeln!(
+            out,
+            "  commands: delete={}",
+            workflow_delete_command(&binding.slug)
+        );
     }
 }
 
@@ -312,39 +322,30 @@ fn write_connections(
         } else {
             "trigger=unavailable"
         };
-        let monitor = if trigger_supported {
-            format!(" monitor=/monitor {}", connection.slug)
-        } else {
-            String::new()
-        };
-        let draft = if trigger_supported {
-            format!(" draft={}", workflow_draft_command(&connection.slug))
-        } else {
-            String::new()
-        };
-        let append = if trigger_supported {
-            format!(
-                " append={}",
-                workflow_append_command(&connection.slug, None)
-            )
-        } else {
-            String::new()
-        };
         let connect_command = connection_connect_command(connection);
+        let mut commands = vec![format!("repair={connect_command}")];
+        if trigger_supported {
+            commands.push(format!(
+                "draft={}",
+                workflow_draft_command(&connection.slug)
+            ));
+            commands.push(format!(
+                "append={}",
+                workflow_append_command(&connection.slug, None)
+            ));
+            commands.push(format!("monitor=/monitor {}", connection.slug));
+        }
         let _ = writeln!(
             out,
-            "- {} connector={} state={:?} {} {} repair={}{}{}{} {}",
+            "- {} [{:?}] connector={} {} {} {}",
             connection.slug,
-            connection.connector_slug,
             connection.state,
+            connection.connector_slug,
             consumer,
             trigger,
-            connect_command,
-            draft,
-            append,
-            monitor,
             connection.description
         );
+        let _ = writeln!(out, "  commands: {}", commands.join(" | "));
     }
 }
 
@@ -469,25 +470,28 @@ fn write_connectors(
             .map(|summary| format!(" connections={summary}"))
             .unwrap_or_default();
         let connect_command = connector_connect_command(connector);
-        let draft_summary = trigger_supported
-            .then(|| format!(" draft={}", connector_draft_command(context, connector)))
-            .unwrap_or_default();
-        let append_summary = trigger_supported
-            .then(|| format!(" append={}", connector_append_command(context, connector)))
-            .unwrap_or_default();
+        let mut commands = vec![format!("connect={connect_command}")];
+        if trigger_supported {
+            commands.push(format!(
+                "draft={}",
+                connector_draft_command(context, connector)
+            ));
+            commands.push(format!(
+                "append={}",
+                connector_append_command(context, connector)
+            ));
+        }
         let _ = writeln!(
             out,
-            "- {} [{}] {} runtime={}{}{} connect={}{}{}",
+            "- {} [{}] {} runtime={}{}{}",
             connector.slug,
             capabilities.join(","),
             connector.description,
             runtime_summary,
             action_summary,
-            connection_summary,
-            connect_command,
-            draft_summary,
-            append_summary
+            connection_summary
         );
+        let _ = writeln!(out, "  commands: {}", commands.join(" | "));
         write_connector_detail(out, connector, show_unique_connector_detail);
     }
 }

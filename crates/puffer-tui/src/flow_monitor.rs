@@ -85,7 +85,7 @@ pub(super) fn execute_monitor_command(
         rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
         thinking_active: false,
-        status_hint: Some("Setting up monitor...".to_string()),
+        status_hint: Some("Creating monitor workflow...".to_string()),
         cancel,
     });
     Ok(())

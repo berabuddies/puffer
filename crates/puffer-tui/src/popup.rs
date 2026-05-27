@@ -457,11 +457,11 @@ fn workflow_connector_command_description(
     suggested_connection: &str,
 ) -> String {
     let action = match kind {
-        WorkflowConnectorCommandKind::New => "Create draft",
-        WorkflowConnectorCommandKind::Append => "Append events",
+        WorkflowConnectorCommandKind::New => "Create draft workflow",
+        WorkflowConnectorCommandKind::Append => "Append events to a file",
     };
     format!(
-        "{action} from {}  connection={suggested_connection}; connector={}",
+        "{action} from {}; connection={suggested_connection}; connector={}",
         template.description, template.slug
     )
 }
@@ -508,7 +508,7 @@ fn monitor_connector_description(
     suggested_connection: &str,
 ) -> String {
     format!(
-        "Monitor events from {}  connection={suggested_connection}; connector={}",
+        "Create monitor workflow for {}; connection={suggested_connection}; connector={}",
         template.description, template.slug
     )
 }

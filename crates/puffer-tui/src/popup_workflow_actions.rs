@@ -70,7 +70,7 @@ fn workflow_binding_delete_row(binding: WorkflowBindingSpec) -> ConnectorPopupRo
 
 fn workflow_binding_delete_description(binding: &WorkflowBindingSpec) -> String {
     format!(
-        "Delete {} action  connection={}; connector={}; status={}; target={}; filter={}",
+        "Delete {} action; connection={}; connector={}; status={}; target={}; filter={}",
         workflow_action_type(&binding.action),
         binding.connection_slug,
         binding.connector_slug.as_deref().unwrap_or("-"),

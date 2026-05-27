@@ -98,20 +98,29 @@ pub(super) fn write_monitor_tasks(out: &mut String, context: &MonitorTaskContext
     for task in tasks.into_iter().take(20) {
         let action_summary = task.action_summary();
         let ignore_command = task.ignore_command();
+        let memory = task
+            .monitor_memory_path
+            .as_deref()
+            .map(|path| format!(" memory={path}"))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {} [{}] connection={} connector={} subject={}{} show=/tasks show {} ignore={}",
+            "- {} [{}] connection={} connector={}{} subject={}{}",
             task.task_id,
             task.status_label(),
             task.monitor_connection.as_deref().unwrap_or("<unknown>"),
             task.monitor_connector.as_deref().unwrap_or("<unknown>"),
+            memory,
             super::first_line(&task.subject_or_description()),
             action_summary
                 .as_deref()
                 .map(|summary| format!(" actions={summary}"))
-                .unwrap_or_default(),
-            task.task_id,
-            ignore_command
+                .unwrap_or_default()
+        );
+        let _ = writeln!(
+            out,
+            "  commands: show=/tasks show {} | ignore={}",
+            task.task_id, ignore_command
         );
     }
 }

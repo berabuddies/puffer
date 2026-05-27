@@ -319,11 +319,11 @@ fn workflow_connection_command_description(
     template: &ConnectorTemplate,
 ) -> String {
     let action = match kind {
-        WorkflowConnectorCommandKind::New => "Create draft",
-        WorkflowConnectorCommandKind::Append => "Append events",
+        WorkflowConnectorCommandKind::New => "Create draft workflow",
+        WorkflowConnectorCommandKind::Append => "Append events to a file",
     };
     format!(
-        "{action} from configured {}  connection={}; connector={}",
+        "{action} from configured {}; connection={}; connector={}",
         template.description, connection.slug, connection.connector_slug
     )
 }
@@ -338,7 +338,7 @@ fn monitor_connection_row(
         row: PopupRow {
             name: format!("monitor {}", connection.slug),
             description: format!(
-                "Monitor events from configured {}  connection={}; connector={}",
+                "Create monitor workflow for configured {}; connection={}; connector={}",
                 template.description, connection.slug, connection.connector_slug
             ),
             replacement: command,
@@ -358,7 +358,7 @@ fn connect_connection_row(
         row: PopupRow {
             name: format!("connect {}", connection.slug),
             description: format!(
-                "Repair configured {}  connection={}; connector={}",
+                "Repair connector setup for configured {}; connection={}; connector={}",
                 template.description, connection.slug, connection.connector_slug
             ),
             replacement,
@@ -482,7 +482,7 @@ mod tests {
 
         assert_eq!(row.row.name, "connect work-telegram");
         assert_eq!(row.row.replacement, "/connect telegram-login work-telegram");
-        assert!(row.row.description.contains("Repair configured"));
+        assert!(row.row.description.contains("Repair connector setup"));
         assert!(row.search_text.contains("repair"));
     }
 }

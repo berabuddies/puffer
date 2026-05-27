@@ -30,7 +30,10 @@ pub(crate) fn handle_monitor_command(
             Err(error) => lines.push(format!("{connection_slug}: failed: {error:#}")),
         }
     }
-    Ok(format!("Monitor setup\n{}", lines.join("\n")))
+    Ok(format!(
+        "Monitor setup\nnext=/workflows tasks | /tasks show <task-id> | /workflows connections\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// Runs the deterministic `/monitor` flow without a provider turn.
