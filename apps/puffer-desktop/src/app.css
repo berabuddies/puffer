@@ -280,12 +280,13 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   width: var(--pf-sidebar-width, 248px); flex-shrink: 0;
   min-width: 220px;
   max-width: 420px;
-  background:
-    linear-gradient(180deg, color-mix(in oklab, var(--background) 94%, var(--puffer-accent) 6%), var(--background) 118px),
-    var(--background);
-  border-right: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
+  background: #fafafa;
+  border-right: 1px solid #ebebeb;
   display: flex; flex-direction: column;
-  font-size: 13px;
+  gap: 10px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 16px;
   position: relative;
 }
 .pf-sidebar-resizer {
@@ -316,115 +317,102 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-sidebar[data-resizing="true"] .pf-sidebar-resizer::after {
   background: var(--puffer-accent);
 }
-.pf-sidebar-section { padding: 8px 10px 4px; }
+.pf-sidebar-section { padding: 0; }
 .pf-sidebar-section:first-child {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 2px;
 }
 .pf-sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 6px 3px 12px;
+  gap: 10px;
+  min-height: 44px;
+  padding: 4px 4px 17px;
 }
 .pf-sidebar-brand-copy {
   flex: 1;
   min-width: 0;
-  display: grid;
-  gap: 0;
-  line-height: 1.05;
+  display: flex;
+  align-items: center;
+  line-height: 1.1;
 }
 .pf-sidebar-brand-copy strong {
-  color: var(--foreground);
-  font-size: 13px;
-  font-weight: 750;
+  color: #111111;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 17px;
   letter-spacing: 0;
 }
-.pf-sidebar-brand-copy span {
-  color: var(--muted-foreground);
-  font-size: 10.5px;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
 .pf-sidebar-collapse {
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
-  border-radius: 6px;
-  background: color-mix(in oklab, var(--background) 86%, var(--muted));
-  color: var(--muted-foreground);
+  border: 1px solid #ebebeb;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #8e8e8e;
   cursor: pointer;
   transition: background 120ms, color 120ms, border-color 120ms, box-shadow 120ms;
   flex-shrink: 0;
 }
 .pf-sidebar-collapse:hover {
   background: var(--background);
-  border-color: color-mix(in oklab, var(--puffer-accent) 24%, var(--border));
-  color: var(--foreground);
+  border-color: #dcccf8;
+  color: #111111;
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
 }
 .pf-sidebar-section + .pf-sidebar-section {
-  border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
-  margin-top: 6px;
-  padding-top: 10px;
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
 }
 .pf-sidebar-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: color-mix(in oklab, var(--muted-foreground) 88%, var(--foreground));
-  font-weight: 750;
-  padding: 4px 6px 8px;
+  min-height: 22px;
+  font-size: 11px;
+  text-transform: capitalize;
+  letter-spacing: 0;
+  color: #6f6f73;
+  font-weight: 700;
+  padding: 4px 6px;
   display: flex; align-items: center; justify-content: space-between;
-}
-.pf-sidebar-label .count {
-  font-family: var(--font-mono);
-  font-weight: 650;
-  font-size: 10px;
-  min-width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--muted) 82%, var(--background));
-  color: var(--muted-foreground);
 }
 .pf-sidebar-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 7px 9px;
+  padding: 6px 12px;
   border-radius: 7px;
-  color: var(--muted-foreground);
+  color: #77777d;
+  font-weight: 500;
   cursor: pointer;
   transition: color 120ms, border-color 120ms, box-shadow 120ms, background 120ms;
   min-height: 34px; white-space: nowrap; overflow: hidden;
   background: transparent; border: 1px solid transparent; width: 100%;
-  text-align: left; font-size: inherit;
+  text-align: left; font-size: 14px;
+  line-height: 18px;
   position: relative;
 }
 .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status):not(.pf-sidebar-avatar) {
   overflow: hidden; text-overflow: ellipsis;
 }
 .pf-sidebar-item:hover {
-  background: color-mix(in oklab, var(--background) 78%, var(--muted));
-  border-color: color-mix(in oklab, var(--border) 70%, transparent);
-  color: var(--foreground);
+  background: #f5f5f5;
+  border-color: #ebebeb;
+  color: #111111;
 }
 .pf-sidebar-item[data-active="true"] {
-  background: color-mix(in oklab, var(--puffer-accent) 12%, var(--background));
-  border-color: color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
-  color: var(--foreground);
+  background: #f2eaff;
+  border-color: #dcccf8;
+  color: #111111;
   font-weight: 700;
-  box-shadow: inset 2px 0 0 var(--puffer-accent);
+  box-shadow: none;
 }
 .pf-sidebar-item[data-active="true"] svg {
-  color: var(--puffer-accent);
+  color: #8b4de8;
+}
+.pf-sidebar-item:not([data-active="true"]) svg {
+  color: #8e8e8e;
 }
 .pf-sidebar-item .pf-row-stack {
   display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;
@@ -438,8 +426,9 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-sidebar-user {
   margin: 0;
   min-height: 44px;
-  background: color-mix(in oklab, var(--background) 84%, var(--muted));
-  border-color: color-mix(in oklab, var(--border) 82%, transparent);
+  background: #f5f5f5;
+  border-color: #e4e4e4;
+  padding: 8px;
 }
 .pf-sidebar-user svg {
   margin-left: auto;
@@ -449,42 +438,23 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   width: 26px;
   height: 26px;
   border-radius: 7px;
-  background: color-mix(in oklab, var(--puffer-accent) 15%, var(--background));
-  border: 1px solid color-mix(in oklab, var(--puffer-accent) 20%, transparent);
+  background: #f2eaff;
+  border: 1px solid #dcccf8;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: 11px;
-  font-weight: 750;
-  color: var(--puffer-accent);
+  font-weight: 700;
+  color: #8b4de8;
   flex-shrink: 0;
 }
 .pf-sidebar-account {
-  padding-bottom: 10px;
+  margin-top: auto;
+  padding-bottom: 0;
 }
 
-.pf-sidebar-agents { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.pf-sidebar-filters {
-  display: grid; grid-template-columns: 1fr; gap: 4px;
-  padding: 0 0 8px; flex-shrink: 0;
-}
-.pf-sidebar-filters select {
-  font-size: 11px;
-  font-family: var(--font-sans);
-  font-weight: 600;
-  padding: 5px 8px;
-  border-radius: 7px;
-  border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
-  background: color-mix(in oklab, var(--background) 88%, var(--muted));
-  color: var(--muted-foreground);
-  appearance: none;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path d='M1 3l3 3 3-3' fill='none' stroke='%23888' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat; background-position: right 6px center;
-  padding-right: 22px; cursor: pointer;
-  min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;
-}
-.pf-sidebar-filters select:hover { color: var(--foreground); }
-.pf-sidebar-agents-list { flex: 1; overflow: auto; padding: 0 0 4px; }
+.pf-sidebar-agents { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; gap: 4px; }
+.pf-sidebar-agents-list { flex: 1; overflow: auto; padding: 0; }
 
 .pf-sidebar-project-group {
   display: flex;
@@ -497,7 +467,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   border-radius: 6px;
   background: transparent;
   border: 0;
-  color: var(--muted-foreground);
+  color: #77777d;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -505,38 +475,43 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   width: 100%;
   transition: color 120ms;
 }
-.pf-sidebar-project-header:hover { color: var(--foreground); }
+.pf-sidebar-project-header:hover { color: #111111; }
 .pf-sidebar-project-header .name {
   flex: 1; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .pf-sidebar-project-header .count {
-  font-size: 11px;
-  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  color: #77777d;
   font-variant-numeric: tabular-nums;
 }
 .pf-sidebar-project-children {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   padding-left: 10px;
   margin-left: 6px;
-  border-left: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
+  border-left: 1px solid #e4e4e4;
 }
 
 .pf-sidebar-agent-row {
   display: flex; align-items: stretch;
-  border-radius: 7px;
+  border-radius: 6px;
   overflow: hidden;
   border: 1px solid transparent;
   transition: border-color 120ms, box-shadow 120ms, background 120ms;
 }
 .pf-sidebar-agent {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 6px;
   padding: 5px 8px;
   border-radius: 6px;
   cursor: pointer;
-  color: var(--foreground);
-  font-size: 13px;
+  color: #77777d;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
   overflow: hidden;
   background: transparent; border: 0; flex: 1; min-width: 0;
   text-align: left;
@@ -548,19 +523,19 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   display: flex; align-items: baseline; gap: 8px; min-width: 0;
 }
 .pf-sidebar-agent-row:hover {
-  background: color-mix(in oklab, var(--background) 78%, var(--muted));
-  border-color: color-mix(in oklab, var(--border) 68%, transparent);
+  background: #f5f5f5;
+  border-color: #ebebeb;
 }
 .pf-sidebar-agent-row[data-active="true"] {
-  background: color-mix(in oklab, var(--puffer-accent) 10%, var(--background));
-  border-color: color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
+  background: #f2eaff;
+  border-color: #dcccf8;
   font-weight: 700;
 }
 .pf-sidebar-agent-row .pf-pin-button {
-  width: 28px;
+  width: 24px;
   border: 0;
   background: transparent;
-  color: var(--muted-foreground);
+  color: #8e8e8e;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -569,7 +544,10 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 }
 .pf-sidebar-agent-row .pf-pin-button:hover:not(:disabled),
 .pf-sidebar-agent-row .pf-pin-button[data-pinned="true"] {
-  color: var(--foreground);
+  color: #8b4de8;
+}
+.pf-sidebar-agent-row .pf-pin-button[data-pinned="true"] svg {
+  fill: currentColor;
 }
 .pf-sidebar-agent-row .pf-pin-button:disabled {
   cursor: wait;
@@ -581,7 +559,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 }
 .pf-sidebar-agent .state {
   font-size: 10.5px; font-family: var(--font-mono);
-  color: var(--muted-foreground);
+  color: #8e8e8e;
   text-transform: lowercase;
   white-space: nowrap;
   flex-shrink: 0;
@@ -591,7 +569,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-sidebar-agent .state[data-state="review"]   { color: oklch(0.55 0.17 40); }
 .pf-sidebar-agent .age {
   font-size: 11px;
-  color: var(--muted-foreground);
+  color: #8e8e8e;
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
@@ -604,10 +582,8 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   display: none;
 }
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-brand {
-  flex-direction: column;
   justify-content: center;
-  gap: 6px;
-  padding-bottom: 8px;
+  padding: 4px 0 8px;
 }
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-brand-copy {
   display: none;
@@ -623,8 +599,16 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   padding: 8px;
   box-shadow: none;
 }
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-user svg {
+  display: none;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-user {
+  min-height: 34px;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+}
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-label,
-.pf-sidebar[data-collapsed="true"] .pf-sidebar-filters,
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-agents-list {
   display: none;
 }
@@ -650,7 +634,6 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   .pf-sidebar-item .pf-row-stack { display: none; }
   .pf-sidebar-item { justify-content: center; padding: 8px; }
   .pf-sidebar-label,
-  .pf-sidebar-filters,
   .pf-sidebar-agents-list { display: none; }
   .pf-tab-pill { max-width: 140px; }
   .pf-tab-pill span { display: none; }
