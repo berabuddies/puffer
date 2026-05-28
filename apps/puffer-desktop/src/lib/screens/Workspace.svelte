@@ -40,12 +40,6 @@
     settingsSnapshot?: SettingsSnapshot | null;
   };
 
-  type RecentSession = {
-    session: SessionListItem;
-    projectLabel: string;
-    projectPath: string;
-  };
-
   let {
     groups,
     defaultWorkspaceCwd = "",
@@ -54,7 +48,6 @@
     onOpenBoard,
     onNewAgent,
     onSessionReady,
-    onOpenWorkspacePicker,
     pinnedWorkspacePaths = [],
     pinningWorkspacePaths = [],
     onToggleWorkspacePin,
@@ -66,6 +59,8 @@
   }: Props = $props();
 
   let showConnect = $state(false);
+  let projectPendingDelete: MockProject | null = $state(null);
+  let deletingProject = $state(false);
   let searchQuery = $state("");
   let searchInput: HTMLInputElement | null = $state(null);
 
@@ -131,21 +126,6 @@
   let agents = $derived<MockAgent[]>(
     groups.flatMap((g) => g.sessions.map((s) => agentFromSession(s, g.id)))
   );
-  let recentSessions = $derived<RecentSession[]>(
-    groups
-      .flatMap((group) =>
-        group.sessions.map((session) => ({
-          session,
-          projectLabel: group.label,
-          projectPath: group.path
-        }))
-      )
-      .sort((left, right) =>
-        right.session.updatedAtMs - left.session.updatedAtMs ||
-        left.projectLabel.localeCompare(right.projectLabel)
-      )
-  );
-
   function normalizeSearch(value: string): string {
     return value.trim().toLowerCase();
   }
@@ -174,17 +154,6 @@
     );
   }
 
-  function recentSessionMatches(row: RecentSession, needle: string): boolean {
-    return (
-      includesNeedle(sessionDisplayName(row.session), needle) ||
-      includesNeedle(sessionDisplayTitle(row.session), needle) ||
-      includesNeedle(row.session.note, needle) ||
-      includesNeedle(row.session.cwd, needle) ||
-      includesNeedle(row.projectLabel, needle) ||
-      includesNeedle(row.projectPath, needle)
-    );
-  }
-
   function projectAgents(projectId: string): MockAgent[] {
     return agents.filter((a) => a.project === projectId);
   }
@@ -203,28 +172,11 @@
       return projectMatches(project, searchNeedle) || projectAgents(project.id).some((a) => agentMatches(a, searchNeedle));
     })
   );
-  let visibleAgentCount = $derived(
-    visibleProjects.reduce((count, project) => count + visibleAgentsFor(project).length, 0)
-  );
-  let agentCount = $derived(agents.length);
   let projectCount = $derived(projects.length);
   let visibleProjectCount = $derived(visibleProjects.length);
-  let visibleRecentSessions = $derived<RecentSession[]>(
-    searchNeedle
-      ? recentSessions.filter((row) => recentSessionMatches(row, searchNeedle))
-      : recentSessions
-  );
-  let headerSubtitle = $derived(
-    loading
-      ? "loading..."
-      : defaultWorkspaceCwd
-        ? defaultWorkspaceCwd
-        : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
-  );
 
   $effect(() => {
     visibleProjects;
-    visibleRecentSessions;
     if (!searchNeedle) return;
     void tick().then(() => {
       if (document.activeElement !== document.body) return;
@@ -237,37 +189,35 @@
     await onNewAgent(cwd);
   }
 
-  function sessionEventLabel(count: number): string {
-    return `${count} ${count === 1 ? "event" : "events"}`;
+  function requestDeleteProject(project: MockProject) {
+    if (!onDeleteProject) return;
+    projectPendingDelete = project;
   }
 
-  function recentSessionTitle(session: SessionListItem): string {
-    return sessionDisplayTitle(session) || sessionDisplayName(session);
+  async function confirmDeleteProject() {
+    const project = projectPendingDelete;
+    if (!project || !onDeleteProject || deletingProject) return;
+    deletingProject = true;
+    try {
+      await onDeleteProject(project.path);
+      projectPendingDelete = null;
+    } finally {
+      deletingProject = false;
+    }
   }
 </script>
 
 <div class="pf-pw">
   <div class="pf-pw-top">
     <div class="pf-pw-top-left">
-      <h1>{projectCount === 1 ? "Project" : "Projects"} {projectCount}</h1>
-      {#if onOpenWorkspacePicker && defaultWorkspaceCwd}
-        <button
-          type="button"
-          class="pf-pw-sub pf-pw-sub-btn"
-          onclick={() => onOpenWorkspacePicker?.()}
-          title="Switch workspace"
-          aria-label="Switch workspace"
-        >{headerSubtitle}</button>
-      {:else}
-        <span class="pf-pw-sub">{headerSubtitle}</span>
-      {/if}
+      <h1>Projects</h1>
     </div>
     <div class="pf-pw-top-right">
       <div class="pf-pw-search">
         <Icon name="search" size={12} />
         <input
           bind:this={searchInput}
-          placeholder="Search tasks, agents, branches…"
+          placeholder="Search..."
           aria-label="Search workspace"
           bind:value={searchQuery}
         />
@@ -295,38 +245,65 @@
     />
   {/if}
 
-  {#if visibleRecentSessions.length > 0}
-    <section class="pf-pw-history" aria-label="Session history">
-      <div class="pf-pw-history-head">
-        <div class="copy">
-          <span class="pf-screen-top-eyebrow">History</span>
-          <h2>Session history</h2>
-        </div>
-        <span class="count">{visibleRecentSessions.length} {visibleRecentSessions.length === 1 ? "session" : "sessions"}</span>
-      </div>
-      <div class="pf-pw-history-list">
-        {#each visibleRecentSessions as row (row.session.id)}
+  {#if projectPendingDelete}
+    <div class="pf-project-delete-scrim" role="presentation" onkeydown={() => {}}>
+      <div
+        class="pf-project-delete-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`delete-project-title-${projectPendingDelete.id}`}
+        aria-describedby={`delete-project-description-${projectPendingDelete.id}`}
+      >
+        <div class="pf-project-delete-head">
+          <div class="pf-project-delete-title-group">
+            <div class="pf-project-delete-title" id={`delete-project-title-${projectPendingDelete.id}`}>Delete project?</div>
+          </div>
           <button
             type="button"
-            class="pf-pw-history-row"
-            onclick={() => onOpenAgent?.(row.session.id)}
-            title={`${recentSessionTitle(row.session)} - ${row.projectPath}`}
+            class="pf-project-delete-close"
+            onclick={() => (projectPendingDelete = null)}
+            aria-label="Close"
+            disabled={deletingProject}
           >
-            <span class="main">
-              <span class="title">{recentSessionTitle(row.session)}</span>
-              <span class="status-pill" data-status={row.session.activityStatus}>{row.session.activityStatus}</span>
-            </span>
-            <span class="meta">
-              <span>{row.projectLabel}</span>
-              <span class="sep">/</span>
-              <span>{sessionEventLabel(row.session.eventCount)}</span>
-              <span class="sep">/</span>
-              <span>{formatAge(row.session.updatedAtMs)}</span>
-            </span>
+            <Icon name="x" size={14} />
           </button>
-        {/each}
+        </div>
+        <div class="pf-project-delete-body">
+          <div class="pf-project-delete-icon" aria-hidden="true">
+            <Icon name="alert" size={18} />
+          </div>
+          <div class="pf-project-delete-copy">
+            <p id={`delete-project-description-${projectPendingDelete.id}`}>
+              This will remove <strong>{projectPendingDelete.name}</strong> and all of its sessions from this workspace.
+            </p>
+          </div>
+        </div>
+        <div class="pf-project-delete-foot">
+          <div class="pf-project-delete-actions">
+            <button
+              type="button"
+              class="pf-project-delete-cancel"
+              onclick={() => (projectPendingDelete = null)}
+              disabled={deletingProject}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="pf-project-delete-confirm"
+              onclick={confirmDeleteProject}
+              disabled={deletingProject}
+            >
+              {#if deletingProject}
+                <Icon name="refresh" size={13} />Deleting...
+              {:else}
+                Delete project
+              {/if}
+            </button>
+          </div>
+        </div>
       </div>
-    </section>
+    </div>
   {/if}
 
   <div class="pf-pw-list">
@@ -381,7 +358,7 @@
         {onOpenBoard}
         onNewAgent={onNewAgent ? () => handleNewAgent(p.path) : undefined}
         onTogglePin={onToggleWorkspacePin ? () => onToggleWorkspacePin(p.path, !projectPinned) : undefined}
-        onDeleteProject={onDeleteProject ? () => onDeleteProject(p.path) : undefined}
+        onDeleteProject={onDeleteProject ? () => requestDeleteProject(p) : undefined}
         onSetProjectTags={onSetProjectTags ? (tags) => onSetProjectTags(p.path, tags) : undefined}
         onDeleteSession={onDeleteSession}
         onSetSessionTags={onSetSessionTags}

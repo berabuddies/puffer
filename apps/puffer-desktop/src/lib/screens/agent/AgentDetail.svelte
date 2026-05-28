@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import Puffer from "../../design/Puffer.svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import AgentDetailContent from "./AgentDetailContent.svelte";
   import {
@@ -100,7 +99,6 @@
   let displayName = $derived(sessionDisplayName(session));
   let displayTitle = $derived(sessionDisplayTitle(session));
   let displayBranch = $derived(sessionDetail?.repoStatus?.branch ?? "");
-  let displayProject = $derived(session?.folderPath?.split("/").pop() ?? "");
   let projectCwd = $derived(sessionDetail?.repoStatus?.cwd ?? session?.cwd ?? "");
   let displayWorktree = $derived("");
   let status = $derived<AgentStatus>(
@@ -465,7 +463,6 @@
     <button type="button" class="pf-agent-back" onclick={onBack} title="Back to workspace" aria-label="Back">
       <Icon name="chevL" size={13} />
     </button>
-    <Puffer size={20} state={pufferState} />
     <div class="pf-agent-identity">
       <div class="name" class:editing={titleEditing}>
         {#if titleEditing}
@@ -515,21 +512,19 @@
           {/if}
         {/if}
       </div>
-      <div class="meta">
-        {#if displayProject}
-          <span class="mono">{displayProject}</span>
-          <span class="sep">·</span>
-        {/if}
-        {#if displayBranch}
-          <span class="branch mono"><Icon name="branch" size={10} />{displayBranch}</span>
-          {#if displayWorktree}
-            <span class="sep">·</span>
+      {#if displayBranch || displayWorktree}
+        <div class="meta">
+          {#if displayBranch}
+            <span class="branch mono"><Icon name="branch" size={10} />{displayBranch}</span>
+            {#if displayWorktree}
+              <span class="sep">·</span>
+            {/if}
           {/if}
-        {/if}
-        {#if displayWorktree}
-          <span class="mono">{displayWorktree}</span>
-        {/if}
-      </div>
+          {#if displayWorktree}
+            <span class="mono">{displayWorktree}</span>
+          {/if}
+        </div>
+      {/if}
     </div>
     <span class="pf-agent-status-pill" data-status={status}>
       {#if pufferState === "running"}

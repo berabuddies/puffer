@@ -82,7 +82,6 @@
   >
     <div class="pf-modal-head">
       <div class="pf-modal-title-group">
-        <div class="pf-modal-eyebrow">New agent</div>
         <div class="pf-modal-title">Choose provider</div>
       </div>
       <button type="button" class="pf-modal-close" onclick={onClose} aria-label="Close" disabled={busy}>
@@ -129,9 +128,6 @@
     </div>
 
     <div class="pf-modal-foot">
-      <div class="pf-modal-foot-hint">
-        Provider is saved on this session and used for every turn in it.
-      </div>
       <div class="pf-modal-foot-btns">
         <button type="button" class="sc-btn" data-variant="ghost" onclick={onClose} disabled={busy}>
           Cancel

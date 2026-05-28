@@ -691,13 +691,6 @@
     </div>
 
     <div class="pf-modal-foot">
-      <div class="pf-modal-foot-hint">
-        {#if mode === "local"}
-          Agent runs on this machine in <span class="pf-mono">{localDest || "(choose a directory)"}</span>
-        {:else}
-          Agent runs on <span class="pf-mono">{sshTarget || "(ssh target)"}</span>
-        {/if}
-      </div>
       <div class="pf-modal-foot-btns">
         <button type="button" class="sc-btn" data-variant="ghost" onclick={onClose} disabled={busy}>
           Cancel

@@ -11,7 +11,7 @@
   let { a, onOpen, onDelete, onSetTags }: Props = $props();
 
   let title = $derived(a.title || a.name || "New Session");
-  let statusLabel = $derived(AGENT_STATE_LABELS[a.status] ?? a.status);
+  let statusLabel = $derived((AGENT_STATE_LABELS[a.status] ?? a.status).toLowerCase());
 
   function parseTags(input: string): string[] {
     return input
@@ -67,9 +67,7 @@
       {#if onSetTags}
         <button
           type="button"
-          class="sc-btn pf-pw-agent-action"
-          data-variant="ghost"
-          data-size="sm"
+          class="pf-pw-agent-action"
           onclick={handleEditTags}
           title="Edit session tags"
           aria-label={`Edit tags for ${title}`}
@@ -78,13 +76,11 @@
       {#if onDelete}
         <button
           type="button"
-          class="sc-btn pf-pw-agent-action"
-          data-variant="ghost"
-          data-size="sm"
+          class="pf-pw-agent-action"
           onclick={handleDelete}
           title="Delete session"
           aria-label={`Delete session ${title}`}
-        ><Icon name="x" size={11} /></button>
+        ><Icon name="trash" size={11} /></button>
       {/if}
     </div>
   {/if}

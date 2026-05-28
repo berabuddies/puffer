@@ -52,6 +52,8 @@
     | "token"
     | "wrench"
     | "pin"
+    | "trash"
+    | "alert"
     | "bot";
 </script>
 
@@ -107,6 +109,8 @@
   import SparklesIcon from "lucide-svelte/icons/sparkles";
   import SquarePauseIcon from "lucide-svelte/icons/square-pause";
   import TerminalIcon from "lucide-svelte/icons/terminal";
+  import Trash2Icon from "lucide-svelte/icons/trash-2";
+  import TriangleAlertIcon from "lucide-svelte/icons/triangle-alert";
   import WrenchIcon from "lucide-svelte/icons/wrench";
   import XIcon from "lucide-svelte/icons/x";
   import ZapIcon from "lucide-svelte/icons/zap";
@@ -171,6 +175,8 @@
     token: BadgeCentIcon,
     wrench: WrenchIcon,
     pin: PinIcon,
+    trash: Trash2Icon,
+    alert: TriangleAlertIcon,
     bot: BotIcon
   };
 

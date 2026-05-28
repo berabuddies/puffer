@@ -51,18 +51,12 @@
     void onSetProjectTags(parseTags(raw));
   }
 
-  function handleDeleteProject() {
+  function requestDeleteProject() {
     if (!onDeleteProject) return;
-    const ok = window.confirm(
-      `Delete project "${project.name}" and ALL its sessions?\nThis cannot be undone.`
-    );
-    if (!ok) return;
     void onDeleteProject();
   }
 
   let collapsed = $state(false);
-  let active = $derived(agents.filter((a) => a.status === "running" || a.status === "awaiting").length);
-  let review = $derived(agents.filter((a) => a.status === "review").length);
 </script>
 
 <div class="pf-pw-project" data-collapsed={collapsed}>
@@ -97,55 +91,43 @@
         </span>
       {/if}
     </div>
-    <div class="pf-pw-project-counts">
-      <span class="count">{agents.length} {agents.length === 1 ? "session" : "sessions"}</span>
-      <span class="sep">·</span>
-      <span class="count running">{active} active</span>
-      <span class="sep">·</span>
-      <span class="count review">{review} review</span>
+    <div class="pf-pw-project-actions" aria-label={`${project.name} actions`}>
+      <button
+        type="button"
+        class="pf-pw-icon-btn"
+        data-pinned={pinned}
+        onclick={onTogglePin}
+        title={pinned ? "Unpin workspace" : "Pin workspace"}
+        aria-label={pinned ? "Unpin workspace" : "Pin workspace"}
+        aria-pressed={pinned ? "true" : "false"}
+        disabled={!onTogglePin || pinBusy}
+      ><Icon name="pin" size={13} /></button>
+      <button
+        type="button"
+        class="pf-pw-icon-btn"
+        onclick={() => onOpenBoard?.(project.id)}
+        title="Open project details"
+        aria-label={`Open details for ${project.name}`}
+      ><Icon name="eye" size={13} /></button>
+      {#if onSetProjectTags}
+        <button
+          type="button"
+          class="pf-pw-icon-btn"
+          onclick={handleEditProjectTags}
+          title="Edit project tags"
+          aria-label={`Edit tags for ${project.name}`}
+        ><Icon name="edit" size={13} /></button>
+      {/if}
+      {#if onDeleteProject}
+        <button
+          type="button"
+          class="pf-pw-icon-btn"
+          onclick={requestDeleteProject}
+          title="Delete project"
+          aria-label={`Delete project ${project.name}`}
+        ><Icon name="trash" size={13} /></button>
+      {/if}
     </div>
-    <button
-      type="button"
-      class="sc-btn"
-      data-variant="ghost"
-      data-size="sm"
-      data-pinned={pinned}
-      onclick={onTogglePin}
-      title={pinned ? "Unpin workspace" : "Pin workspace"}
-      aria-label={pinned ? "Unpin workspace" : "Pin workspace"}
-      aria-pressed={pinned ? "true" : "false"}
-      disabled={!onTogglePin || pinBusy}
-    ><Icon name="pin" size={12} />{pinned ? "Pinned" : "Pin"}</button>
-    <button
-      type="button"
-      class="sc-btn"
-      data-variant="ghost"
-      data-size="sm"
-      onclick={() => onOpenBoard?.(project.id)}
-      title="Open project details"
-    >Details</button>
-    {#if onSetProjectTags}
-      <button
-        type="button"
-        class="sc-btn"
-        data-variant="ghost"
-        data-size="sm"
-        onclick={handleEditProjectTags}
-        title="Edit project tags"
-        aria-label={`Edit tags for ${project.name}`}
-      ><Icon name="edit" size={12} />Tags</button>
-    {/if}
-    {#if onDeleteProject}
-      <button
-        type="button"
-        class="sc-btn"
-        data-variant="ghost"
-        data-size="sm"
-        onclick={handleDeleteProject}
-        title="Delete project"
-        aria-label={`Delete project ${project.name}`}
-      ><Icon name="x" size={12} />Delete</button>
-    {/if}
   </div>
 
   {#if !collapsed}

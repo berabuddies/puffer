@@ -1464,7 +1464,6 @@
             >
               <div class="pf-modal-head">
                 <div class="pf-modal-title-group">
-                  <div class="pf-modal-eyebrow">Connector</div>
                   <div class="pf-modal-title">Create connection</div>
                 </div>
                 <button type="button" class="pf-modal-close" onclick={closeConnectorCreate} aria-label="Close">
@@ -1524,7 +1523,6 @@
                 </div>
               </div>
               <div class="pf-modal-foot">
-                <div class="pf-modal-foot-hint">Setup questions open in a separate dialog.</div>
                 <div class="pf-modal-foot-btns">
                   <button
                     type="button"
@@ -1578,9 +1576,7 @@
             >
               <div class="pf-modal-head pf-connector-question-head">
                 <div class="pf-modal-title-group">
-                  <div class="pf-modal-eyebrow">{selectedConnector?.connector_slug ?? "connector"}</div>
                   <div class="pf-modal-title">Setup questions</div>
-                  <p>{connectorConnectionSlug.trim()}</p>
                 </div>
                 <span class="pf-status-pill">{connectorQuestionRequest.questions.length} question{connectorQuestionRequest.questions.length === 1 ? "" : "s"}</span>
               </div>
@@ -1642,9 +1638,6 @@
                 {/each}
               </div>
               <div class="pf-modal-foot pf-connector-question-actions">
-                <div class="pf-modal-foot-hint">
-                  <span class="pf-mono">{connectorCommandPreview}</span>
-                </div>
                 <div class="pf-modal-foot-btns">
                   <button
                     type="button"
