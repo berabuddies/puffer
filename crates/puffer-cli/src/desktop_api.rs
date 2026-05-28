@@ -36,9 +36,15 @@ pub(crate) fn run_desktop_api(
     match command {
         DesktopApiCommand::SessionGroups => {
             let session_store = SessionStore::from_paths(paths)?;
+            let project_tags = crate::project_metadata::ProjectMetadataStore::from_paths(paths)
+                .all()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(key, meta)| (key, meta.tags))
+                .collect::<BTreeMap<String, Vec<String>>>();
             println!(
                 "{}",
-                serde_json::to_string_pretty(&list_grouped_sessions(&session_store)?)?
+                serde_json::to_string_pretty(&list_grouped_sessions(&session_store, &project_tags)?)?
             );
         }
         DesktopApiCommand::SessionDetail { session_id } => {
@@ -173,7 +179,10 @@ pub(crate) fn run_desktop_api(
     Ok(())
 }
 
-pub(crate) fn list_grouped_sessions(session_store: &SessionStore) -> Result<Vec<FolderGroupDto>> {
+pub(crate) fn list_grouped_sessions(
+    session_store: &SessionStore,
+    project_tags: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<FolderGroupDto>> {
     let sessions = session_store.list_sessions()?;
     let mut groups = BTreeMap::<String, Vec<SessionListItemDto>>::new();
     for session in sessions {
@@ -211,12 +220,14 @@ pub(crate) fn list_grouped_sessions(session_store: &SessionStore) -> Result<Vec<
         .into_iter()
         .map(|(folder_path, mut sessions)| {
             sessions.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+            let tags = project_tags.get(&folder_path).cloned().unwrap_or_default();
             FolderGroupDto {
                 folder_id: folder_path.clone(),
                 folder_label: folder_label(Path::new(&folder_path)),
                 folder_path: folder_path.clone(),
                 session_count: sessions.len(),
                 sessions,
+                tags,
             }
         })
         .collect::<Vec<_>>();
@@ -653,7 +664,7 @@ fn store_credential(
         .context("failed to save auth store")
 }
 
-fn session_group_root(cwd: &Path) -> PathBuf {
+pub(crate) fn session_group_root(cwd: &Path) -> PathBuf {
     cwd.to_path_buf()
 }
 

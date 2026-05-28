@@ -60,7 +60,7 @@ use puffer_transport_anthropic::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -782,6 +782,10 @@ async fn dispatch_request(
         "save_file_tabs" => respond!(handle_save_file_tabs(&state, &params)),
         "load_session_detail" => respond!(handle_load_session_detail(&state, &params)),
         "rename_session" => respond!(handle_rename_session(&state, &params)),
+        "delete_session" => respond!(handle_delete_session(&state, &params)),
+        "set_session_tags" => respond!(handle_set_session_tags(&state, &params)),
+        "delete_project" => respond!(handle_delete_project(&state, &params)),
+        "set_project_tags" => respond!(handle_set_project_tags(&state, &params)),
         "refresh_repo_status" => respond!(handle_refresh_repo_status(&state, &params)),
         "load_settings_snapshot" => respond!(detached!(|s| handle_load_settings_snapshot(&s))),
         "login_with_api_key" => {
@@ -994,9 +998,20 @@ async fn dispatch_request(
 
 fn handle_list_grouped_sessions(state: &DaemonState) -> Result<Value> {
     let session_store = SessionStore::from_paths(&state.paths)?;
-    let mut groups: Vec<FolderGroupDto> = desktop_api::list_grouped_sessions(&session_store)?;
+    let project_tags = project_tag_map(&state.paths);
+    let mut groups: Vec<FolderGroupDto> =
+        desktop_api::list_grouped_sessions(&session_store, &project_tags)?;
     apply_session_routing_to_groups(state, &mut groups)?;
     Ok(serde_json::to_value(groups)?)
+}
+
+fn project_tag_map(paths: &ConfigPaths) -> BTreeMap<String, Vec<String>> {
+    crate::project_metadata::ProjectMetadataStore::from_paths(paths)
+        .all()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, meta)| (key, meta.tags))
+        .collect()
 }
 
 fn apply_session_routing_to_groups(
@@ -1166,6 +1181,113 @@ fn handle_rename_session(state: &DaemonState, params: &Value) -> Result<Value> {
         desktop_api::load_session_detail(&session_store, session_id)?;
     apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
+}
+
+fn handle_delete_session(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?;
+    let session_uuid = Uuid::parse_str(session_id).context("invalid sessionId")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    session_store.delete_session(session_uuid)?;
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "delete_session",
+            "sessionId": session_id,
+        }),
+    });
+    Ok(json!({ "ok": true, "sessionId": session_id }))
+}
+
+fn handle_set_session_tags(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?;
+    let tags = params
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .context("missing tags")?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let session_uuid = Uuid::parse_str(session_id).context("invalid sessionId")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    session_store.set_tags(session_uuid, tags)?;
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "set_session_tags",
+            "sessionId": session_id,
+        }),
+    });
+    let mut detail: SessionDetailDto =
+        desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_routing_to_detail(state, &mut detail)?;
+    Ok(serde_json::to_value(detail)?)
+}
+
+fn handle_delete_project(state: &DaemonState, params: &Value) -> Result<Value> {
+    let folder_path = params
+        .get("folderPath")
+        .or_else(|| params.get("folder_path"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("missing folderPath")?
+        .to_string();
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let sessions = session_store.list_sessions()?;
+    let target = std::path::Path::new(&folder_path);
+    let mut removed = 0usize;
+    for session in sessions {
+        if desktop_api::session_group_root(&session.cwd) == target {
+            session_store.delete_session(session.id)?;
+            removed += 1;
+        }
+    }
+    let _ = crate::project_metadata::ProjectMetadataStore::from_paths(&state.paths).delete(target);
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "delete_project",
+            "folderPath": folder_path,
+            "removedSessions": removed,
+        }),
+    });
+    Ok(json!({ "ok": true, "folderPath": folder_path, "removedSessions": removed }))
+}
+
+fn handle_set_project_tags(state: &DaemonState, params: &Value) -> Result<Value> {
+    let folder_path = params
+        .get("folderPath")
+        .or_else(|| params.get("folder_path"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("missing folderPath")?
+        .to_string();
+    let tags = params
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .context("missing tags")?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let store = crate::project_metadata::ProjectMetadataStore::from_paths(&state.paths);
+    let meta = store.set_tags(std::path::Path::new(&folder_path), tags)?;
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "set_project_tags",
+            "folderPath": folder_path,
+        }),
+    });
+    Ok(json!({ "ok": true, "folderPath": folder_path, "tags": meta.tags }))
 }
 
 fn handle_refresh_repo_status(state: &DaemonState, params: &Value) -> Result<Value> {

@@ -39,6 +39,7 @@ type BackendFolderGroup = {
   folderPath: string;
   sessionCount: number;
   sessions: BackendSessionListItem[];
+  tags?: string[];
 };
 
 type BackendDesktopPinState = {
@@ -573,7 +574,8 @@ export async function listGroupedSessions(remote?: RemoteConnection): Promise<Fo
     label: group.folderLabel,
     path: group.folderPath,
     sessionCount: group.sessionCount,
-    sessions: group.sessions.map(normalizeSessionListItem)
+    sessions: group.sessions.map(normalizeSessionListItem),
+    tags: group.tags ?? []
   }));
 }
 
@@ -1023,7 +1025,8 @@ export async function listGroupedSessionsFromDaemon(): Promise<FolderGroup[]> {
       label: folder.folderLabel,
       path: folder.folderPath,
       sessionCount: folder.sessionCount,
-      sessions: folder.sessions.map(normalizeSessionListItem)
+      sessions: folder.sessions.map(normalizeSessionListItem),
+      tags: folder.tags ?? []
     }));
   } catch (_error) {
     if (!canReachDaemon()) return mockFolders;
@@ -1088,6 +1091,42 @@ export async function renameSession(sessionId: string, title: string): Promise<S
     title
   });
   return normalizeSessionDetail(raw);
+}
+
+/** Permanently deletes one session and all of its sidecar files. */
+export async function deleteSession(sessionId: string): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request<{ ok: boolean }>("delete_session", { sessionId });
+}
+
+/** Replaces the tag list on one session. Tags are trimmed, deduped, sorted. */
+export async function setSessionTags(sessionId: string, tags: string[]): Promise<SessionDetail> {
+  const client = await ensureLocalDaemonClient();
+  const raw = await client.request<BackendSessionDetail>("set_session_tags", {
+    sessionId,
+    tags
+  });
+  return normalizeSessionDetail(raw);
+}
+
+/** Permanently deletes every session under `folderPath` and removes the
+ *  project's metadata entry. Use with strong UI confirmation. */
+export async function deleteProject(folderPath: string): Promise<{ removedSessions: number }> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ ok: boolean; removedSessions: number }>("delete_project", {
+    folderPath
+  });
+  return { removedSessions: result.removedSessions };
+}
+
+/** Replaces the tag list on one project (folder). */
+export async function setProjectTags(folderPath: string, tags: string[]): Promise<string[]> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ ok: boolean; tags: string[] }>("set_project_tags", {
+    folderPath,
+    tags
+  });
+  return result.tags;
 }
 
 /** Load registered workflows and recent runs from the daemon. */

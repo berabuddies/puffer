@@ -37,6 +37,7 @@ export type FolderGroup = {
   path: string;
   sessionCount: number;
   sessions: SessionListItem[];
+  tags: string[];
 };
 
 export type DesktopPinState = {

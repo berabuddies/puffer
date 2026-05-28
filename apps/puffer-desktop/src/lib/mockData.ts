@@ -98,14 +98,16 @@ export const mockFolders: FolderGroup[] = [
     label: "puffer",
     path: "/home/c/puffer",
     sessionCount: 2,
-    sessions: [sessionA, sessionB]
+    sessions: [sessionA, sessionB],
+    tags: []
   },
   {
     id: "/home/c/sample-python",
     label: "sample-python",
     path: "/home/c/sample-python",
     sessionCount: 1,
-    sessions: [sessionC]
+    sessions: [sessionC],
+    tags: []
   }
 ];
 

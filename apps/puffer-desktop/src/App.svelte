@@ -30,10 +30,14 @@
     loginWithApiKey,
     loginWithApiKeyViaDaemon,
     loginWithOauth,
+    deleteProject,
+    deleteSession,
     listGroupedSessionsFromDaemon,
     loadSettingsSnapshot,
     loadSessionDetailFromDaemon,
     renameSession,
+    setProjectTags,
+    setSessionTags,
     mergePullRequest,
     logoutProvider,
     logoutProviderViaDaemon,
@@ -527,7 +531,8 @@
         label: fallbackProjectLabel(session),
         path,
         sessionCount: 1,
-        sessions: [session]
+        sessions: [session],
+        tags: []
       },
       ...sourceGroups
     ].sort(compareFolderGroups);
@@ -1251,6 +1256,49 @@
       statusMessage = authError;
     } finally {
       authBusyProviderId = null;
+    }
+  }
+
+  async function handleDeleteSession(sessionId: string) {
+    try {
+      await deleteSession(sessionId);
+      if (selectedSession?.id === sessionId) {
+        selectedSession = null;
+      }
+      await refreshGroups();
+    } catch (error) {
+      statusMessage = `Delete session failed: ${error}`;
+    }
+  }
+
+  async function handleSetSessionTags(sessionId: string, tags: string[]) {
+    try {
+      await setSessionTags(sessionId, tags);
+      await refreshGroups();
+    } catch (error) {
+      statusMessage = `Set session tags failed: ${error}`;
+    }
+  }
+
+  async function handleDeleteProject(folderPath: string) {
+    try {
+      const result = await deleteProject(folderPath);
+      if (selectedSession && selectedSessionGroup?.path === folderPath) {
+        selectedSession = null;
+      }
+      await refreshGroups();
+      statusMessage = `Deleted project (${result.removedSessions} sessions).`;
+    } catch (error) {
+      statusMessage = `Delete project failed: ${error}`;
+    }
+  }
+
+  async function handleSetProjectTags(folderPath: string, tags: string[]) {
+    try {
+      await setProjectTags(folderPath, tags);
+      await refreshGroups();
+    } catch (error) {
+      statusMessage = `Set project tags failed: ${error}`;
     }
   }
 
@@ -3665,6 +3713,10 @@
                   .filter((key) => key.startsWith("workspace:"))
                   .map((key) => key.slice("workspace:".length))}
                 onToggleWorkspacePin={(path, pinned) => void toggleDesktopPin("workspace", path, pinned)}
+                onDeleteSession={(id) => void handleDeleteSession(id)}
+                onSetSessionTags={(id, tags) => void handleSetSessionTags(id, tags)}
+                onDeleteProject={(path) => void handleDeleteProject(path)}
+                onSetProjectTags={(path, tags) => void handleSetProjectTags(path, tags)}
               />
             {/if}
           {:else if tweaks.screen === "workflows"}

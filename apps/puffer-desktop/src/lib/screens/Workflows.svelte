@@ -624,7 +624,11 @@
 
   function selectWorkflow(slug: string) {
     workflowSlug = slug;
-    selectedNodeId = null;
+    // For existing workflows, jump to the first agent node so the user lands
+    // on a useful form. Blank drafts override this back to "trigger" in
+    // createWorkflowDraft.
+    const nextWorkflow = editorWorkflows.find((item) => item.slug === slug);
+    selectedNodeId = nextWorkflow?.pipeline.nodes[0]?.id ?? "trigger";
   }
 
   function openWorkflowDetail(slug: string) {
@@ -2773,23 +2777,27 @@
 
         </div>
 
-        {#if selectedNodeId !== null}
         <div class="pf-canvas-selected" aria-label="Selected node">
           <section class="pf-canvas-section pf-canvas-section-agent">
             <div class="pf-editor-panel-head">
               <Icon name="panel" size={13} />
               <span>{triggerSelected ? "Trigger & workflow" : "Selected node"}</span>
-              <button
-                type="button"
-                class="sc-btn pf-canvas-selected-close"
-                data-variant="ghost"
-                data-size="sm"
-                aria-label="Close selected node panel"
-                onclick={() => (selectedNodeId = null)}
-              >
-                <Icon name="x" size={12} />Close
-              </button>
+              {#if selectedNodeId !== null}
+                <button
+                  type="button"
+                  class="sc-btn pf-canvas-selected-close"
+                  data-variant="ghost"
+                  data-size="sm"
+                  aria-label="Close selected node panel"
+                  onclick={() => (selectedNodeId = null)}
+                >
+                  <Icon name="x" size={12} />Close
+                </button>
+              {/if}
             </div>
+            {#if selectedNodeId === null}
+              <div class="pf-pipe-empty">Click the trigger to set it up, click any node to edit it, or add one from the toolbar at the top of the canvas.</div>
+            {/if}
             {#if triggerSelected}
               <div class="pf-canvas-selected-grid">
                 <label>
@@ -2964,7 +2972,6 @@
             {/if}
           </section>
         </div>
-        {/if}
 
         <div class="pf-canvas-runs-sheet" data-open={runsSheetOpen}>
           <button

@@ -33,6 +33,8 @@ pub(crate) struct FolderGroupDto {
     pub(crate) folder_path: String,
     pub(crate) session_count: usize,
     pub(crate) sessions: Vec<SessionListItemDto>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -33,6 +33,10 @@
     pinnedWorkspacePaths?: string[];
     pinningWorkspacePaths?: string[];
     onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
+    onDeleteSession?: (sessionId: string) => void | Promise<void>;
+    onSetSessionTags?: (sessionId: string, tags: string[]) => void | Promise<void>;
+    onDeleteProject?: (folderPath: string) => void | Promise<void>;
+    onSetProjectTags?: (folderPath: string, tags: string[]) => void | Promise<void>;
     settingsSnapshot?: SettingsSnapshot | null;
   };
 
@@ -54,6 +58,10 @@
     pinnedWorkspacePaths = [],
     pinningWorkspacePaths = [],
     onToggleWorkspacePin,
+    onDeleteSession,
+    onSetSessionTags,
+    onDeleteProject,
+    onSetProjectTags,
     settingsSnapshot = null
   }: Props = $props();
 
@@ -96,7 +104,8 @@
       branch: "",
       remote: "",
       color: hashColor(group.id),
-      remoteHost: false
+      remoteHost: false,
+      tags: group.tags ?? []
     };
   }
 
@@ -113,7 +122,8 @@
       step: session.note ?? (session.eventCount > 0 ? `${session.eventCount} transcript events` : "Ready to start"),
       tools: session.eventCount,
       elapsed: formatAge(session.updatedAtMs),
-      model: ""
+      model: "",
+      tags: session.tags ?? []
     };
   }
 
@@ -371,6 +381,10 @@
         {onOpenBoard}
         onNewAgent={onNewAgent ? () => handleNewAgent(p.path) : undefined}
         onTogglePin={onToggleWorkspacePin ? () => onToggleWorkspacePin(p.path, !projectPinned) : undefined}
+        onDeleteProject={onDeleteProject ? () => onDeleteProject(p.path) : undefined}
+        onSetProjectTags={onSetProjectTags ? (tags) => onSetProjectTags(p.path, tags) : undefined}
+        onDeleteSession={onDeleteSession}
+        onSetSessionTags={onSetSessionTags}
       />
     {/each}
   </div>

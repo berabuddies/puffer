@@ -268,6 +268,7 @@ export class FakeDaemon {
   private readonly browserRecordings = new Map<string, JsonRecord[]>();
   private readonly ptys = new Map<string, PtySet>();
   private readonly sessions = new Map<string, JsonRecord>();
+  private readonly projectTags = new Map<string, string[]>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
@@ -982,6 +983,14 @@ export class FakeDaemon {
         return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
       case "rename_session":
         return this.renameSession(request.params);
+      case "delete_session":
+        return this.deleteSessionRpc(request.params);
+      case "set_session_tags":
+        return this.setSessionTagsRpc(request.params);
+      case "delete_project":
+        return this.deleteProjectRpc(request.params);
+      case "set_project_tags":
+        return this.setProjectTagsRpc(request.params);
       case "create_session":
         return this.createSession(request.params);
       case "run_agent_turn":
@@ -1328,6 +1337,55 @@ export class FakeDaemon {
     return {};
   }
 
+  private deleteSessionRpc(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? "");
+    this.sessions.delete(sessionId);
+    this.timelines.delete(sessionId);
+    this.details.delete(sessionId);
+    return { ok: true, sessionId };
+  }
+
+  private setSessionTagsRpc(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? "");
+    const rawTags = Array.isArray(params.tags) ? params.tags : [];
+    const cleaned = rawTags
+      .map((tag) => String(tag).trim())
+      .filter((tag) => tag.length > 0);
+    const dedup = Array.from(new Set(cleaned)).sort();
+    const metadata = this.sessions.get(sessionId) ?? sessionMeta({ sessionId });
+    metadata.tags = dedup;
+    metadata.updatedAtMs = Date.now();
+    this.sessions.set(sessionId, metadata);
+    return this.sessionDetail(sessionId);
+  }
+
+  private deleteProjectRpc(params: JsonRecord): JsonRecord {
+    const folderPath = String(params.folderPath ?? "").trim();
+    if (!folderPath) return { ok: false, removedSessions: 0, folderPath };
+    let removed = 0;
+    for (const [id, metadata] of Array.from(this.sessions.entries())) {
+      if (String(metadata.folderPath ?? metadata.cwd ?? "") === folderPath) {
+        this.sessions.delete(id);
+        this.timelines.delete(id);
+        this.details.delete(id);
+        removed += 1;
+      }
+    }
+    this.projectTags.delete(folderPath);
+    return { ok: true, folderPath, removedSessions: removed };
+  }
+
+  private setProjectTagsRpc(params: JsonRecord): JsonRecord {
+    const folderPath = String(params.folderPath ?? "").trim();
+    const rawTags = Array.isArray(params.tags) ? params.tags : [];
+    const cleaned = rawTags
+      .map((tag) => String(tag).trim())
+      .filter((tag) => tag.length > 0);
+    const dedup = Array.from(new Set(cleaned)).sort();
+    this.projectTags.set(folderPath, dedup);
+    return { ok: true, folderPath, tags: dedup };
+  }
+
   private renameSession(params: JsonRecord): JsonRecord {
     const sessionId = String(params.sessionId ?? session.sessionId);
     const title = String(params.title ?? "").trim();
@@ -1534,6 +1592,8 @@ export class FakeDaemon {
       (group.sessions as JsonRecord[]).sort(
         (left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0)
       );
+      const folderPath = String(group.folderPath ?? "");
+      group.tags = this.projectTags.get(folderPath) ?? [];
     }
     return Array.from(groups.values());
   }

@@ -176,7 +176,7 @@ test("workflow overview and create pages keep focused headers", async ({ page })
   await openWorkflows(page);
 
   const title = page.locator(".pf-pipe-top-id");
-  await expect(title).toContainText("Workflow dashboard");
+  await expect(title).toContainText("Workflows");
   await expect(title).not.toContainText("agent-review-workflow");
 
   await page.getByRole("button", { name: "New workflow" }).click();
@@ -294,7 +294,7 @@ test("workflow overview opens workflow and run details on separate pages", async
   await openWorkflows(page);
 
   const title = page.locator(".pf-pipe-top-id");
-  await expect(title).toContainText("Workflow dashboard");
+  await expect(title).toContainText("Workflows");
 
   const ongoing = page.getByLabel("Ongoing workflows");
   const liveRun = ongoing.getByRole("button", { name: /Release workflow/ });
@@ -312,7 +312,7 @@ test("workflow overview opens workflow and run details on separate pages", async
   await expect(page.locator(".pf-pipe-traj-list")).toContainText("deploying release");
 
   await page.getByRole("button", { name: "Back to workflows" }).click();
-  await expect(title).toContainText("Workflow dashboard");
+  await expect(title).toContainText("Workflows");
   await expect(page.getByLabel("Workflow list")).toBeVisible();
 
   await page.getByLabel("Workflow list").getByRole("button", { name: /Daily digest/ }).click();

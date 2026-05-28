@@ -183,6 +183,39 @@ impl SessionStore {
         })
     }
 
+    /// Replaces the full tag list, deduplicating and sorting in place.
+    pub fn set_tags(&self, session_id: Uuid, tags: Vec<String>) -> Result<()> {
+        self.update_metadata(session_id, |metadata| {
+            let mut next: Vec<String> = tags
+                .into_iter()
+                .map(|tag| tag.trim().to_string())
+                .filter(|tag| !tag.is_empty())
+                .collect();
+            next.sort();
+            next.dedup();
+            metadata.tags = next;
+        })
+    }
+
+    /// Permanently deletes a session and its sidecar files (events log,
+    /// trace files). Missing files are silently ignored.
+    pub fn delete_session(&self, session_id: Uuid) -> Result<()> {
+        // Files are named `<uuid>.session.json`, `<uuid>.jsonl`, and
+        // `<uuid>.<trace>.jsonl`. Sweep every file in the sessions root
+        // whose name starts with `<uuid>.`.
+        let needle = format!("{session_id}.");
+        if let Ok(entries) = fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with(&needle) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Loads a session metadata record and its transcript events from disk.
     pub fn load_session(&self, session_id: Uuid) -> Result<SessionRecord> {
         let path = self.session_path(session_id);
@@ -647,6 +680,71 @@ mod tests {
                 rewrite: TranscriptRewrite::PopLast { count: 2 },
             }
         );
+    }
+
+    #[test]
+    fn set_tags_dedupes_trims_and_sorts() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+
+        store
+            .set_tags(
+                session.id,
+                vec!["b".into(), "a".into(), "  ".into(), "b".into(), " c ".into()],
+            )
+            .unwrap();
+        let reloaded = store.load_session(session.id).unwrap();
+        assert_eq!(reloaded.metadata.tags, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn delete_session_removes_all_sidecars() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+        store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "hello".into(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+        store
+            .append_trace_event(session.id, "runtime_trace", &serde_json::json!({"k":1}))
+            .unwrap();
+
+        // All three files exist before delete.
+        let base = store.session_path(session.id);
+        assert!(base.exists());
+        assert!(base.with_extension("jsonl").exists());
+        assert!(base.with_extension("runtime_trace.jsonl").exists());
+
+        store.delete_session(session.id).unwrap();
+
+        // None of them remain after.
+        assert!(!base.exists());
+        assert!(!base.with_extension("jsonl").exists());
+        assert!(!base.with_extension("runtime_trace.jsonl").exists());
+        // The session no longer appears in list_sessions.
+        let listed = store.list_sessions().unwrap();
+        assert!(listed.iter().all(|s| s.id != session.id));
+    }
+
+    #[test]
+    fn delete_session_is_idempotent_when_files_missing() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        // Deleting a never-created session must not error.
+        store.delete_session(Uuid::new_v4()).unwrap();
     }
 
     #[test]

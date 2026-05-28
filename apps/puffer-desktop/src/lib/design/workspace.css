@@ -1225,3 +1225,53 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .pf-modal-foot-btns { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* Tag chips and per-session action buttons for the workspace list */
+.pf-pw-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+}
+.pf-pw-tags-agent {
+  margin-left: 0;
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+.pf-pw-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 88%, var(--puffer-accent) 12%);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.pf-pw-agent-wrap {
+  position: relative;
+  display: flex;
+}
+.pf-pw-agent-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: none;
+  gap: 2px;
+  background: color-mix(in oklab, var(--background) 92%, transparent);
+  border-radius: 6px;
+  padding: 2px;
+}
+.pf-pw-agent-wrap:hover .pf-pw-agent-actions,
+.pf-pw-agent-wrap:focus-within .pf-pw-agent-actions {
+  display: inline-flex;
+}
+.pf-pw-agent-action {
+  padding: 0 4px;
+  height: 20px;
+  min-width: 20px;
+}

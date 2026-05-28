@@ -28,6 +28,7 @@ mod desktop_api_types;
 mod heartbeat;
 mod internal_tools;
 mod non_interactive;
+mod project_metadata;
 mod resource_fs;
 mod runner_selection;
 mod subscriber_tool_args;
