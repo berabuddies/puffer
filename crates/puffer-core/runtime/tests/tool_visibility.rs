@@ -76,6 +76,38 @@ fn bundled_resources_register_sleep_tool() {
 }
 
 #[test]
+fn openai_function_tool_parameters_use_valid_object_roots() {
+    let resources = bundled_resources();
+    let registry = ToolRegistry::from_resources(&resources);
+    let tools = openai_tool_definitions(&registry, None, false).unwrap();
+
+    for tool in tools.iter().filter(|tool| tool.kind == "function") {
+        assert_eq!(
+            tool.parameters
+                .get("type")
+                .and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{} parameters must have an object root for OpenAI",
+            tool.name
+        );
+        for keyword in ["oneOf", "anyOf", "allOf", "enum", "not"] {
+            assert!(
+                tool.parameters.get(keyword).is_none(),
+                "{} parameters must not use top-level `{}` for OpenAI",
+                tool.name,
+                keyword
+            );
+        }
+    }
+
+    let mcp_tool = tools
+        .iter()
+        .find(|tool| tool.name == "McpToolCall")
+        .expect("McpToolCall should be model-visible");
+    assert_eq!(mcp_tool.parameters.get("oneOf"), None);
+}
+
+#[test]
 fn notebook_edit_tool_is_visible_to_anthropic_and_openai_tool_builders() {
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
@@ -354,10 +386,9 @@ fn web_search_tool_prompt_matches_claude_reference_for_anthropic_and_openai() {
         .expect("WebSearch anthropic tool definition");
     assert_eq!(anthropic_definition["description"], json!(expected.clone()));
 
-    // OpenAI now serializes WebSearch as a native server-side tool
-    // (`{"type": "web_search"}`) rather than a function-shaped tool with a
-    // description. The function-shaped fallback can still be opted into via
-    // PUFFER_OPENAI_NATIVE_WEB_SEARCH=0.
+    // OpenAI now serializes WebSearch as a native server-side tool rather
+    // than a function-shaped tool with a description. The function-shaped
+    // fallback can still be opted into via PUFFER_OPENAI_NATIVE_WEB_SEARCH=0.
     let openai = openai_tool_definitions(&registry, None, false).unwrap();
     let native = openai
         .iter()
@@ -367,7 +398,7 @@ fn web_search_tool_prompt_matches_claude_reference_for_anthropic_and_openai() {
     assert!(native.description.is_empty());
     assert_eq!(
         serde_json::to_value(native).unwrap(),
-        json!({ "type": "web_search" })
+        json!({ "type": "web_search", "external_web_access": true })
     );
     let _ = expected;
 }

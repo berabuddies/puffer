@@ -1,0 +1,19 @@
+id: ConnectorTemplate
+name: ConnectorTemplate
+description: |-
+  Return a connector template, starter skill text, and a Python connector
+  program skeleton for the requested connector slug.
+
+  Use this when creating a new connector implementation or inspecting the
+  required protocol: authenticate, auth check, subscribe JSONL frames, and act.
+handler: runtime:workflow:connector_template
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    connector_slug:
+      type: string
+      description: Connector slug, such as "telegram-login" or "my-connector".
+  required: [connector_slug]
+  additionalProperties: false

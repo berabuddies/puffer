@@ -1,0 +1,33 @@
+id: ConnectorAct
+name: ConnectorAct
+description: |-
+  Invoke a connector action, such as sending a message through Telegram,
+  Slack, or email.
+
+  Connector actions are external side effects. The connector's action metadata
+  defines the permission category and input shape.
+handler: runtime:workflow:connector_act
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    connector_slug:
+      type: string
+    connection_slug:
+      type: string
+      description: Authorized connection slug. Defaults to input.connection or connector_slug.
+    account_slug:
+      type: string
+      description: Alias for connection_slug when the connector connection represents an account.
+    account:
+      type: string
+      description: Alias for connection_slug when the connector connection represents an account.
+    action:
+      type: string
+      description: Connector action slug, such as "send_message".
+    input:
+      type: object
+      description: Action JSON payload.
+  required: [connector_slug, action, input]
+  additionalProperties: false

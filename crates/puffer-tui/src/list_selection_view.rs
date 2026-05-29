@@ -42,6 +42,11 @@ impl ListSelectionView {
         self.selection = self.items.len().saturating_sub(1);
     }
 
+    /// Moves the selection to a specific item when present.
+    pub(crate) fn select_index(&mut self, index: usize) {
+        self.selection = index.min(self.items.len().saturating_sub(1));
+    }
+
     /// Moves the selection upward by a page-sized jump.
     pub(crate) fn page_up(&mut self) {
         for _ in 0..10 {

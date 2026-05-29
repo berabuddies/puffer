@@ -43,6 +43,7 @@ type WsEventMessage = {
 };
 
 const REQUEST_TIMEOUT_MS = 30000;
+const DEV_BROWSER_BACKEND_URL = "ws://127.0.0.1:1421/ws";
 
 export class DaemonClient {
   private connectionListeners = new Set<(state: ConnectionState) => void>();
@@ -303,7 +304,7 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
   if (typeof window === "undefined") return null;
 
   const params = new URLSearchParams(window.location.search);
-  const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const viteEnv = (import.meta as unknown as { env?: Record<string, boolean | string | undefined> }).env;
   const url =
     params.get("pufferBackend") ||
     params.get("corbinaBackend") ||
@@ -311,8 +312,9 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
     params.get("backend") ||
     window.localStorage.getItem("puffer.backendUrl") ||
     window.localStorage.getItem("corbina.backendUrl") ||
-    viteEnv?.VITE_PUFFER_DAEMON_URL ||
-    viteEnv?.VITE_CORBINA_DAEMON_URL;
+    stringEnv(viteEnv?.VITE_PUFFER_DAEMON_URL) ||
+    stringEnv(viteEnv?.VITE_CORBINA_DAEMON_URL) ||
+    devBrowserBackendUrl(viteEnv);
 
   if (!url || (!url.startsWith("ws://") && !url.startsWith("wss://"))) return null;
 
@@ -324,8 +326,8 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
       params.get("token") ||
       window.localStorage.getItem("puffer.backendToken") ||
       window.localStorage.getItem("corbina.backendToken") ||
-      viteEnv?.VITE_PUFFER_DAEMON_TOKEN ||
-      viteEnv?.VITE_CORBINA_DAEMON_TOKEN ||
+      stringEnv(viteEnv?.VITE_PUFFER_DAEMON_TOKEN) ||
+      stringEnv(viteEnv?.VITE_CORBINA_DAEMON_TOKEN) ||
       "dev",
     protocolVersion: "1",
     workspaceRoot:
@@ -334,6 +336,24 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
       window.localStorage.getItem("corbina.workspaceRoot") ||
       ""
   };
+}
+
+function stringEnv(value: boolean | string | undefined): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function devBrowserBackendUrl(viteEnv?: Record<string, boolean | string | undefined>): string | null {
+  if (canInvokeTauri() || !isViteDev(viteEnv) || !isLocalBrowserPreview()) return null;
+  return DEV_BROWSER_BACKEND_URL;
+}
+
+function isViteDev(viteEnv?: Record<string, boolean | string | undefined>): boolean {
+  return viteEnv?.DEV === true || viteEnv?.MODE === "development";
+}
+
+function isLocalBrowserPreview(): boolean {
+  const hostname = window.location.hostname;
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
 export function configuredBrowserRemoteDaemonHandshake(): DaemonHandshake | null {

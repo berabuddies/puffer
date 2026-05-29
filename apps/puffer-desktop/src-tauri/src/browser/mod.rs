@@ -5,8 +5,8 @@
 //! `Page.screencastFrame` images onto the daemon event bus, and forwards the
 //! small navigation/input surface the Svelte Browser pane needs for v1.
 
-use anyhow::{anyhow, bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -15,24 +15,27 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{connect, Message, WebSocket};
-use url::Url;
+use tungstenite::{Message, WebSocket, connect};
 
 use crate::events::EventEmitter;
 
 mod agent;
+mod cdp;
 mod chrome;
 mod cursor;
 mod devtools;
 mod input;
+mod network_idle;
 pub(crate) mod params;
 mod recording;
 mod selection;
 mod tabs;
 mod types;
 
-pub(crate) use agent::handle_browser_agent;
 use agent::BrowserElementRef;
+pub(crate) use agent::handle_browser_agent;
+use cdp::{apply_viewport, set_read_timeout, start_screencast};
+pub(super) use cdp::{frame_session_id_string, normalize_url, send_cdp};
 use chrome::{
     cdp_http_endpoint, create_page_target, first_page_target, read_devtools_ws_url,
     resolve_chrome_executable, safe_profile_name, terminate_profile_processes,
@@ -40,11 +43,12 @@ use chrome::{
 use cursor::{cursor_eval_expression, parse_cursor_response};
 use devtools::emit_devtools_event;
 use input::send_input;
+use network_idle::{NetworkIdleTracker, NetworkIdleWaiter, drain_network_idle_waiters};
 use recording::BrowserRecordingRegistry;
 use selection::{parse_copy_selection_response, selection_eval_expression};
 use tabs::{
-    backend_session_id, parse_backend_session_id, BrowserTabInfo, BrowserTabRegistry,
-    BrowserTabsState,
+    BrowserTabInfo, BrowserTabRegistry, BrowserTabsState, backend_session_id,
+    parse_backend_session_id,
 };
 pub(crate) use types::{
     BrowserCopySelection, BrowserCursor, BrowserEvaluation, BrowserHistoryDirection,
@@ -320,23 +324,25 @@ fn active_or_first_tab(tabs: &BrowserTabsState) -> Option<BrowserTabInfo> {
 }
 
 fn spawn_idle_pruner(sessions: Arc<Mutex<HashMap<String, BrowserSession>>>) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(60));
-        let stale = {
-            let mut sessions = sessions.lock().unwrap();
-            let stale = sessions
-                .iter()
-                .filter_map(|(id, session)| {
-                    (session.idle_for() >= SESSION_IDLE_TIMEOUT).then(|| id.clone())
-                })
-                .collect::<Vec<_>>();
-            stale
-                .iter()
-                .filter_map(|id| sessions.remove(id))
-                .collect::<Vec<_>>()
-        };
-        for session in stale {
-            let _ = session.close();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            let stale = {
+                let mut sessions = sessions.lock().unwrap();
+                let stale = sessions
+                    .iter()
+                    .filter_map(|(id, session)| {
+                        (session.idle_for() >= SESSION_IDLE_TIMEOUT).then(|| id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                stale
+                    .iter()
+                    .filter_map(|id| sessions.remove(id))
+                    .collect::<Vec<_>>()
+            };
+            for session in stale {
+                let _ = session.close();
+            }
         }
     });
 }
@@ -494,6 +500,18 @@ impl BrowserSession {
             .map_err(|message| anyhow!("{message}"))
     }
 
+    fn wait_network_idle(&self, idle_ms: u64, timeout_ms: u64) -> Result<()> {
+        let (reply, rx) = mpsc::channel();
+        self.send(BrowserCommand::WaitNetworkIdle {
+            idle_ms,
+            timeout_ms,
+            reply,
+        })?;
+        rx.recv_timeout(Duration::from_millis(timeout_ms.saturating_add(1_000)))
+            .context("timed out waiting for browser network-idle response")?
+            .map_err(|message| anyhow!("{message}"))
+    }
+
     fn close(&self) -> Result<()> {
         self.send(BrowserCommand::Close)
     }
@@ -532,6 +550,11 @@ enum BrowserCommand {
     Evaluate {
         expression: String,
         reply: Sender<std::result::Result<BrowserEvaluation, String>>,
+    },
+    WaitNetworkIdle {
+        idle_ms: u64,
+        timeout_ms: u64,
+        reply: Sender<std::result::Result<(), String>>,
     },
     Close,
 }
@@ -584,6 +607,8 @@ fn run_cdp_worker(
     let _ = start_screencast(&mut socket, &mut next_id, width, height);
     let id = send_state_eval(&mut socket, &mut next_id);
     pending.insert(id, PendingKind::StateEval);
+    let mut network_idle = NetworkIdleTracker::default();
+    let mut network_idle_waiters = Vec::<NetworkIdleWaiter>::new();
 
     let mut alive = true;
     while alive {
@@ -601,10 +626,12 @@ fn run_cdp_worker(
                     &state,
                     &channel_state,
                     &events,
+                    &mut network_idle_waiters,
                 ),
                 Err(TryRecvError::Empty) => break,
             }
         }
+        drain_network_idle_waiters(&mut network_idle_waiters, &network_idle);
         if !alive {
             break;
         }
@@ -622,6 +649,7 @@ fn run_cdp_worker(
                         &mut next_id,
                         &mut pending,
                         &state,
+                        &mut network_idle,
                         value,
                     );
                 }
@@ -649,6 +677,7 @@ fn handle_command(
     state: &Arc<Mutex<BrowserState>>,
     channel_state: &str,
     events: &EventEmitter,
+    network_idle_waiters: &mut Vec<NetworkIdleWaiter>,
 ) {
     match command {
         BrowserCommand::Navigate(url) => {
@@ -733,6 +762,15 @@ fn handle_command(
             );
             pending.insert(id, PendingKind::Evaluate { reply });
         }
+        BrowserCommand::WaitNetworkIdle {
+            idle_ms,
+            timeout_ms,
+            reply,
+        } => network_idle_waiters.push(NetworkIdleWaiter::new(
+            Duration::from_millis(idle_ms.max(1)),
+            Duration::from_millis(timeout_ms.max(1)),
+            reply,
+        )),
         BrowserCommand::Close => {}
     }
 }
@@ -748,6 +786,7 @@ fn handle_cdp_message(
     next_id: &mut u64,
     pending: &mut HashMap<u64, PendingKind>,
     state: &Arc<Mutex<BrowserState>>,
+    network_idle: &mut NetworkIdleTracker,
     value: Value,
 ) {
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
@@ -776,6 +815,7 @@ fn handle_cdp_message(
     let Some(method) = value.get("method").and_then(Value::as_str) else {
         return;
     };
+    network_idle.record_event(method, &value);
     match method {
         "Page.screencastFrame" => {
             let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -921,102 +961,6 @@ fn parse_evaluation_response(value: &Value) -> Result<BrowserEvaluation> {
     Ok(BrowserEvaluation {
         value: result.get("value").cloned().unwrap_or(Value::Null),
     })
-}
-
-fn apply_viewport(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    next_id: &mut u64,
-    width: u32,
-    height: u32,
-) -> Result<u64> {
-    Ok(send_cdp(
-        socket,
-        next_id,
-        "Emulation.setDeviceMetricsOverride",
-        json!({
-            "width": width,
-            "height": height,
-            "deviceScaleFactor": 1,
-            "mobile": false
-        }),
-    ))
-}
-
-fn start_screencast(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    next_id: &mut u64,
-    width: u32,
-    height: u32,
-) -> Result<u64> {
-    Ok(send_cdp(
-        socket,
-        next_id,
-        "Page.startScreencast",
-        json!({
-            "format": "jpeg",
-            "quality": 70,
-            "maxWidth": width,
-            "maxHeight": height,
-            "everyNthFrame": 1
-        }),
-    ))
-}
-
-pub(super) fn send_cdp(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    next_id: &mut u64,
-    method: &str,
-    params: Value,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    let _ = socket.send(Message::Text(
-        json!({ "id": id, "method": method, "params": params })
-            .to_string()
-            .into(),
-    ));
-    id
-}
-
-fn set_read_timeout(socket: &WebSocket<MaybeTlsStream<TcpStream>>, timeout: Option<Duration>) {
-    let stream = socket.get_ref();
-    let tcp: &TcpStream = match stream {
-        MaybeTlsStream::Plain(s) => s,
-        _ => return,
-    };
-    let _ = tcp.set_read_timeout(timeout);
-}
-
-fn normalize_url(raw: &str) -> Result<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(DEFAULT_URL.to_string());
-    }
-    if trimmed == DEFAULT_URL {
-        return Ok(DEFAULT_URL.to_string());
-    }
-    if let Ok(parsed) = Url::parse(trimmed) {
-        if matches!(parsed.scheme(), "http" | "https" | "file" | "data") {
-            return Ok(trimmed.to_string());
-        }
-    }
-    let with_scheme = if trimmed.starts_with("localhost")
-        || trimmed.starts_with("127.")
-        || trimmed.starts_with("[::1]")
-    {
-        format!("http://{trimmed}")
-    } else {
-        format!("https://{trimmed}")
-    };
-    Url::parse(&with_scheme).with_context(|| format!("invalid browser URL `{raw}`"))?;
-    Ok(with_scheme)
-}
-
-fn frame_session_id_string(session_id: &str, cdp_session_id: Option<&Value>) -> String {
-    match cdp_session_id.and_then(Value::as_i64) {
-        Some(value) => format!("{session_id}:{value}"),
-        None => session_id.to_string(),
-    }
 }
 
 #[cfg(test)]

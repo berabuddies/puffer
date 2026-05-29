@@ -98,14 +98,16 @@ export const mockFolders: FolderGroup[] = [
     label: "puffer",
     path: "/home/c/puffer",
     sessionCount: 2,
-    sessions: [sessionA, sessionB]
+    sessions: [sessionA, sessionB],
+    tags: []
   },
   {
     id: "/home/c/sample-python",
     label: "sample-python",
     path: "/home/c/sample-python",
     sessionCount: 1,
-    sessions: [sessionC]
+    sessions: [sessionC],
+    tags: []
   }
 ];
 
@@ -610,7 +612,8 @@ export const mockSettingsSnapshot: SettingsSnapshot = {
     mascotDisplayName: "Clawd",
     mascotEnabled: true,
     uiNoAltScreen: false,
-    uiTmuxGoldenMode: false
+    uiTmuxGoldenMode: false,
+    browserChromeProfile: null
   },
   resources: {
     providers: 2,
@@ -629,5 +632,22 @@ export const mockSettingsSnapshot: SettingsSnapshot = {
     folderGroups: 2
   },
   auth: mockAuth,
-  providers: mockProviders
+  providers: mockProviders,
+  browserProfiles: [
+    {
+      id: "Default",
+      name: "Personal",
+      email: "demo@example.com",
+      googleAccounts: [
+        {
+          email: "demo@example.com",
+          name: "Demo User",
+          gaiaId: "demo-gaia"
+        }
+      ],
+      path: "/Users/demo/Library/Application Support/Google/Chrome/Default",
+      isLastUsed: true,
+      isSelected: true
+    }
+  ]
 };

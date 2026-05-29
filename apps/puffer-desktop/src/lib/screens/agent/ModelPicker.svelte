@@ -11,6 +11,7 @@
     contextKey?: string | null;
     allowProviderSwitch?: boolean;
     disabled?: boolean;
+    modelLoader?: (providerId: string) => Promise<ModelDescriptorInfo[]>;
     onChange: (providerId: string, modelId: string) => void;
   };
 
@@ -21,6 +22,7 @@
     contextKey = null,
     allowProviderSwitch = true,
     disabled = false,
+    modelLoader = listProviderModels,
     onChange
   }: Props = $props();
 
@@ -97,7 +99,7 @@
       const providers = provider ? [provider] : [];
       for (const provider of providers) {
         try {
-          next[provider.id] = await listProviderModels(provider.id);
+          next[provider.id] = await modelLoader(provider.id);
         } catch (error) {
           if (!Object.prototype.hasOwnProperty.call(next, provider.id)) {
             next[provider.id] = [];
@@ -140,7 +142,7 @@
     busy = true;
     loadError = null;
     try {
-      models = await listProviderModels(providerId);
+      models = await modelLoader(providerId);
       if (generation !== providerSwitchGeneration) return;
       modelsByProvider = { ...modelsByProvider, [providerId]: models };
     } catch (error) {

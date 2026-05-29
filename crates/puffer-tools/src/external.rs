@@ -201,6 +201,7 @@ fn is_runtime_local_handler(handler: &str) -> bool {
     matches!(
         handler,
         "runtime:agent"
+            | "runtime:lambda_host_call"
             | "runtime:skill"
             | "runtime:tool_search"
             | "runtime:browser"
@@ -273,6 +274,27 @@ mod tests {
             name: "Sleep".to_string(),
             description: "Wait without keeping bash busy".to_string(),
             handler: "runtime:sleep".to_string(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: ToolKind::Custom,
+            input_schema: ToolInputSchema::default(),
+            metadata: ToolMetadata::default(),
+            policy: ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: ToolDisplayHints::default(),
+        };
+        let runtime = runtime_from_definition(&definition).expect("runtime");
+        assert!(matches!(runtime, ToolRuntime::RuntimeLocal));
+    }
+
+    #[test]
+    fn runtime_from_definition_accepts_lambda_host_call_handler() {
+        let definition = ToolDefinition {
+            id: "LambdaHostCall".to_string(),
+            name: "LambdaHostCall".to_string(),
+            description: "Bridge a formal Lambda Skill host call".to_string(),
+            handler: "runtime:lambda_host_call".to_string(),
             aliases: Vec::new(),
             handler_args: Vec::new(),
             kind: ToolKind::Custom,

@@ -1,0 +1,17 @@
+id: ConnectorCreation
+name: ConnectorCreation
+description: |-
+  Create a starter connector template, skill text, and Python program skeleton.
+
+  Use this before ConnectorRegister when a connector does not already exist.
+handler: runtime:workflow:connector_creation
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    connector_slug:
+      type: string
+      description: Connector slug, such as "my-connector".
+  required: [connector_slug]
+  additionalProperties: false

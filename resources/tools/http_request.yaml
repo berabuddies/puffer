@@ -1,0 +1,60 @@
+id: HttpRequest
+name: HttpRequest
+description: |-
+  Execute one explicit HTTP request with fully declared method, URL, headers,
+  and body.
+
+  Use this for verified Lambda Skill contracts only when the generated concrete
+  contract fully specifies the remote endpoint semantics. Do not use it as a
+  generic substitute for app-specific tools whose host contract does not name
+  the exact method, URL, auth header, and payload shape.
+handler: runtime:workflow:http_request
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    method:
+      type: string
+      enum:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+      description: HTTP method to send.
+    url:
+      type: string
+      format: uri
+      description: Fully qualified http or https URL.
+    headers:
+      type: object
+      additionalProperties:
+        type: string
+      description: Exact request headers.
+    json:
+      description: JSON request body. Mutually exclusive with body.
+    body:
+      type: string
+      description: Raw UTF-8 request body. Mutually exclusive with json.
+    timeoutMs:
+      type: integer
+      minimum: 1
+      maximum: 300000
+      description: Request timeout in milliseconds. Defaults to 60000.
+    failOnHttpError:
+      type: boolean
+      description: Whether 4xx/5xx statuses should fail the tool. Defaults to true.
+  required:
+    - method
+    - url
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+  may_access_network: true
+display:
+  group: network
+  title: HttpRequest
+  show_in_status: true

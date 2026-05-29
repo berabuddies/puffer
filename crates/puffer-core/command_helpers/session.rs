@@ -83,12 +83,17 @@ pub(crate) fn append_tool_invocations(
                 input: invocation.input.clone(),
                 output: invocation.output.clone(),
                 success: invocation.success,
+                metadata: tool_invocation_metadata(invocation),
                 actor: Some(state.assistant_actor()),
                 subject: state.tool_subject_actor(&invocation.tool_id, &invocation.output),
             },
         )?;
     }
     Ok(())
+}
+
+fn tool_invocation_metadata(invocation: &ToolInvocation) -> Option<serde_json::Value> {
+    (!invocation.metadata.is_null()).then(|| invocation.metadata.clone())
 }
 
 /// Handles `/tag` by toggling one searchable session tag.

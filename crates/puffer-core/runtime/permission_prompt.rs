@@ -259,6 +259,8 @@ fn permission_request_summary(definition: &ToolDefinition, input: &Value) -> Str
         "AskUserQuestion" => "Answer questions?".to_string(),
         "ExitPlanMode" => "Exit plan mode?".to_string(),
         "Email" => email_permission_summary(input),
+        "Lark" => lark_permission_summary(input),
+        "Slack" => slack_permission_summary(input),
         "Telegram" => telegram_permission_summary(input),
         _ => definition.id.clone(),
     }
@@ -271,8 +273,82 @@ fn email_permission_summary(input: &Value) -> String {
     }
 }
 
+fn lark_permission_summary(input: &Value) -> String {
+    match input.get("action").and_then(Value::as_str) {
+        Some("configure_app") => "Configure Lark app credentials".to_string(),
+        Some("import_env") => "Import Lark credentials from environment".to_string(),
+        Some("list_chats") => "List Lark chats".to_string(),
+        Some("login_token") => "Configure Lark user token login".to_string(),
+        Some("mget_messages") => "Fetch Lark message details".to_string(),
+        Some("read_messages") => input
+            .get("chat_id")
+            .and_then(Value::as_str)
+            .map(|chat| format!("Read Lark messages in {chat}"))
+            .unwrap_or_else(|| "Read Lark messages".to_string()),
+        Some("search_chats") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Lark chats for {query}"))
+            .unwrap_or_else(|| "Search Lark chats".to_string()),
+        Some("search_messages") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Lark messages for {query}"))
+            .unwrap_or_else(|| "Search Lark messages".to_string()),
+        Some("search_users") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Lark users for {query}"))
+            .unwrap_or_else(|| "Search Lark users".to_string()),
+        _ => "Use Lark internal tool".to_string(),
+    }
+}
+
+fn slack_permission_summary(input: &Value) -> String {
+    match input.get("action").and_then(Value::as_str) {
+        Some("configure_app") => "Configure Slack app credentials".to_string(),
+        Some("import_local") => input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| format!("Import Slack auth from {path}"))
+            .unwrap_or_else(|| "Import Slack local app auth".to_string()),
+        Some("list_conversations") => "List Slack conversations".to_string(),
+        Some("login_browser") => "Configure Slack browser login".to_string(),
+        Some("login_token") => "Configure Slack OAuth login".to_string(),
+        Some("read_messages") => input
+            .get("channel")
+            .and_then(Value::as_str)
+            .map(|channel| format!("Read Slack messages in {channel}"))
+            .unwrap_or_else(|| "Read Slack messages".to_string()),
+        Some("search_conversations") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Slack conversations for {query}"))
+            .unwrap_or_else(|| "Search Slack conversations".to_string()),
+        Some("search_messages") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Slack messages for {query}"))
+            .unwrap_or_else(|| "Search Slack messages".to_string()),
+        Some("search_users") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Slack users for {query}"))
+            .unwrap_or_else(|| "Search Slack users".to_string()),
+        _ => "Use Slack internal tool".to_string(),
+    }
+}
+
 fn telegram_permission_summary(input: &Value) -> String {
     match input.get("action").and_then(Value::as_str) {
+        Some("import_desktop") => input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| format!("Import Telegram Desktop auth from {path}"))
+            .unwrap_or_else(|| "Import Telegram Desktop auth".to_string()),
+        Some("list_peers") => "List Telegram peers".to_string(),
+        Some("login_qr") => "Start Telegram QR login".to_string(),
+        Some("login_qr_wait") => "Wait for Telegram QR login approval".to_string(),
         Some("login_start") => input
             .get("phone")
             .and_then(Value::as_str)
@@ -280,6 +356,16 @@ fn telegram_permission_summary(input: &Value) -> String {
             .unwrap_or_else(|| "Start Telegram login".to_string()),
         Some("login_submit_code") => "Submit Telegram login code".to_string(),
         Some("login_submit_password") => "Submit Telegram 2FA password".to_string(),
+        Some("search_messages") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Telegram messages for {query}"))
+            .unwrap_or_else(|| "Search Telegram messages".to_string()),
+        Some("search_peers") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Telegram peers for {query}"))
+            .unwrap_or_else(|| "Search Telegram peers".to_string()),
         _ => "Use Telegram internal tool".to_string(),
     }
 }

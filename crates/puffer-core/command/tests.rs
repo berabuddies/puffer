@@ -11,6 +11,7 @@ use tempfile::tempdir;
 mod artifacts;
 mod basics;
 mod commit;
+mod connectors;
 mod context;
 mod doctor;
 mod files;
@@ -29,6 +30,7 @@ mod tag;
 mod tasks;
 mod terminal_setup;
 mod usage_buddy;
+mod workflows;
 
 pub(super) fn puffer_home_lock() -> &'static Mutex<()> {
     crate::test_locks::env_lock()
@@ -792,25 +794,80 @@ fn skill_command_rejects_model_only_skills_for_direct_invocation() {
 }
 
 #[test]
-fn session_command_can_list_and_update_note() {
+fn hidden_telegram_skill_does_not_activate_direct_telegram_command() {
+    let _lock = lock_puffer_home();
     let tempdir = tempdir().unwrap();
+    let home = tempdir.path().join("home");
+    let _home = ScopedPufferHome::set(&home);
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
     let session = session_store
         .create_session(tempdir.path().to_path_buf())
         .unwrap();
-    let second = session_store
-        .create_session(tempdir.path().join("secondary"))
-        .unwrap();
-    session_store
-        .rename_session(second.id, "dockyard".to_string())
-        .unwrap();
     let mut state = AppState::new(
         PufferConfig::default(),
         tempdir.path().to_path_buf(),
         session,
     );
+    let resources = LoadedResources {
+        skills: vec![LoadedItem {
+            value: puffer_resources::SkillSpec {
+                name: "telegram".to_string(),
+                description: "Hidden Telegram helper".to_string(),
+                content: "Hidden".to_string(),
+                user_invocable: false,
+                ..puffer_resources::SkillSpec::default()
+            },
+            source_info: SourceInfo {
+                path: PathBuf::from("/tmp/work/.puffer/resources/skills/telegram/SKILL.md"),
+                kind: SourceKind::Workspace,
+            },
+        }],
+        ..LoadedResources::default()
+    };
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &resources,
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/telegram search-peers hi",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        state.transcript.last(),
+        Some(RenderedMessage {
+            role: MessageRole::System,
+            text,
+            ..
+        }) if text == "Unknown command: /telegram"
+    ));
+}
+
+#[test]
+fn session_command_can_list_and_update_note() {
+    let tempdir = tempdir().unwrap();
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _home = ScopedPufferHome::set(&home);
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let second = session_store
+        .create_session(workspace.join("secondary"))
+        .unwrap();
+    session_store
+        .rename_session(second.id, "dockyard".to_string())
+        .unwrap();
+    let mut state = AppState::new(PufferConfig::default(), workspace, session);
 
     dispatch_command(
         &mut state,
@@ -888,24 +945,25 @@ fn session_command_can_update_note_and_slug() {
 
 #[test]
 fn session_command_lists_saved_sessions() {
+    let _lock = lock_puffer_home();
     let tempdir = tempdir().unwrap();
-    let paths = ConfigPaths::discover(tempdir.path());
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _home = ScopedPufferHome::set(&home);
+    let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
-    let session = session_store
-        .create_session(tempdir.path().join("current"))
-        .unwrap();
+    let current = workspace.join("current");
+    let session = session_store.create_session(current.clone()).unwrap();
     let listed = session_store
-        .create_session(tempdir.path().join("listed"))
+        .create_session(workspace.join("listed"))
         .unwrap();
     session_store
         .rename_session(listed.id, "dockyard".to_string())
         .unwrap();
-    let mut state = AppState::new(
-        PufferConfig::default(),
-        tempdir.path().join("current"),
-        session,
-    );
+    let mut state = AppState::new(PufferConfig::default(), current, session);
 
     dispatch_command(
         &mut state,

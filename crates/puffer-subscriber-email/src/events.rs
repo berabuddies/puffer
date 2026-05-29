@@ -30,6 +30,7 @@ pub fn emit_control(topic: &str, kind: &str, payload: Value) -> anyhow::Result<(
     let event = Event {
         topic: topic.to_string(),
         kind: kind.to_string(),
+        control: true,
         dedup_key: None,
         text: String::new(),
         payload,

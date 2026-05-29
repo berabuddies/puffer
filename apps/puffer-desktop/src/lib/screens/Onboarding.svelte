@@ -1,10 +1,19 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import LoginView from "../components/LoginView.svelte";
+  import LocalModelSetupCard from "../components/LocalModelSetupCard.svelte";
   import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
   import { providerCatalogForSetup } from "../providerFallbacks";
   import { providerIsAvailableForAgent } from "../providerIds";
+  import { isDesktopMac } from "../shell/platform";
+  import {
+    minicpm5Recommend,
+    minicpm5Install,
+    type Minicpm5Recommendation
+  } from "../api/desktop";
+  import { listen } from "@tauri-apps/api/event";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
 
   type Props = {
@@ -31,6 +40,61 @@
     ).length
   );
   let signedIn = $derived(agentProviderCount > 0);
+
+  // Local-model (MiniCPM5) recommend + install — macOS only. The backend
+  // decides eligibility (Apple Silicon, not already installed); we just ask.
+  let mcp = $state<Minicpm5Recommendation | null>(null);
+  let mcpInstalling = $state(false);
+  let mcpDone = $state<boolean | null>(null);
+  let mcpLog = $state("");
+
+  onMount(() => {
+    if (!isDesktopMac()) return;
+    // Guard against unmount racing the async listen()/recommend() resolutions:
+    // if we're already torn down, drop the result / unsubscribe immediately.
+    let cancelled = false;
+    let unlog: (() => void) | null = null;
+    let undone: (() => void) | null = null;
+    void minicpm5Recommend()
+      .then((r) => {
+        if (!cancelled) mcp = r;
+      })
+      .catch(() => {});
+    void listen<string>("minicpm5://install-log", (e) => (mcpLog = e.payload)).then((u) => {
+      if (cancelled) u();
+      else unlog = u;
+    });
+    void listen<{ success: boolean }>("minicpm5://install-done", (e) => {
+      mcpInstalling = false;
+      mcpDone = e.payload?.success ?? false;
+      // The installer registered a new local provider — refresh the snapshot so
+      // it surfaces (and onboarding can advance past the unauthenticated state).
+      if (mcpDone) props.onRefresh();
+    }).then((u) => {
+      if (cancelled) u();
+      else undone = u;
+    });
+    return () => {
+      cancelled = true;
+      unlog?.();
+      undone?.();
+    };
+  });
+
+  async function installMcp() {
+    mcpInstalling = true;
+    mcpDone = null;
+    mcpLog = "Starting…";
+    try {
+      await minicpm5Install();
+    } catch (error) {
+      mcpInstalling = false;
+      mcpDone = false;
+      mcpLog = String(error);
+    }
+  }
+
+  let showMcpCard = $derived(mcp?.recommend === true || mcpInstalling || mcpDone !== null);
 
   let steps = $derived(
     signedIn
@@ -88,6 +152,8 @@
           </div>
         </div>
       </div>
+      <LocalModelSetupCard compact={true} onRefresh={props.onRefresh} />
+
       <div style="display: flex; margin-top: 28px; gap: 10px; justify-content: flex-end;">
         <button type="button" class="sc-btn" data-variant="default" onclick={props.onFinish}>
           Continue<Icon name="arrow" size={14} />
@@ -107,6 +173,38 @@
         onImportExternal={props.onImportExternal}
         onRefresh={props.onRefresh}
       />
+    {/if}
+
+    {#if showMcpCard}
+      <div class="pf-mcp">
+        <div class="pf-mcp-top">
+          <span class="pf-mcp-dot"></span>
+          <div class="pf-mcp-text">
+            <div class="pf-mcp-title">{mcp?.display_name ?? "MiniCPM5-1B (local)"}</div>
+            <div class="pf-mcp-sub">
+              {mcp?.why ?? "on-device — private, free, always-on"}{mcp?.size
+                ? ` · ${mcp.size}`
+                : ""}
+            </div>
+          </div>
+        </div>
+        {#if mcpDone === true}
+          <div class="pf-mcp-status" data-state="ok">
+            Installed — available as a local provider.
+          </div>
+        {:else if mcpInstalling}
+          <div class="pf-mcp-status">Installing… <code>{mcpLog}</code></div>
+        {:else if mcpDone === false}
+          <div class="pf-mcp-status" data-state="err">Install failed. <code>{mcpLog}</code></div>
+          <button type="button" class="sc-btn" data-variant="ghost" onclick={installMcp}>
+            Retry
+          </button>
+        {:else}
+          <button type="button" class="sc-btn" data-variant="default" onclick={installMcp}>
+            Install local model
+          </button>
+        {/if}
+      </div>
     {/if}
   </div>
 </div>
@@ -214,4 +312,37 @@
     .pf-onboard-side { padding: 24px; }
     .pf-onboard-main { padding: 32px; }
   }
+
+  .pf-mcp {
+    margin-top: 24px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card, var(--background));
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 520px;
+  }
+  .pf-mcp-top { display: flex; align-items: flex-start; gap: 10px; }
+  .pf-mcp-dot {
+    width: 8px; height: 8px; margin-top: 5px; border-radius: 50%;
+    background: var(--puffer-accent);
+    flex: none;
+  }
+  .pf-mcp-title { font-size: 14px; font-weight: 600; }
+  .pf-mcp-sub { font-size: 12px; color: var(--muted-foreground); margin-top: 2px; }
+  .pf-mcp-status {
+    font-size: 12px;
+    color: var(--muted-foreground);
+  }
+  .pf-mcp-status[data-state="ok"] { color: var(--puffer-accent); }
+  .pf-mcp-status[data-state="err"] { color: var(--destructive, #d33); }
+  .pf-mcp-status code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    opacity: 0.8;
+    word-break: break-all;
+  }
+  .pf-mcp .sc-btn { align-self: flex-start; }
 </style>

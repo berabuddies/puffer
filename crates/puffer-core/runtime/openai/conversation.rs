@@ -1173,13 +1173,17 @@ fn find_valid_keep_boundary(items: &[ConversationItem], min_keep: usize) -> usiz
 // System reminder (shared — previously Responses-only)
 // ---------------------------------------------------------------------------
 
-/// Builds the system reminder text (currentDate + gitStatus).
+/// Builds the system reminder text (currentDate, currentTime, and gitStatus).
 /// Previously only injected into Responses API `instructions` field.
 /// Now available to both paths via ConversationItem pipeline.
 pub(crate) fn build_system_reminder(state: &AppState, git_status: &str) -> String {
-    let now = time::OffsetDateTime::now_utc();
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let date_str = format!("{}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
-    let mut reminder = format!("# currentDate\nToday's date is {date_str}.");
+    let time_str = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| now.to_string());
+    let mut reminder =
+        format!("# currentDate\nToday's date is {date_str}.\n\n# currentTime\nCurrent computer time is {time_str}.");
     if !git_status.is_empty() {
         reminder.push_str(&format!("\n\n# gitStatus\n{git_status}"));
     }
@@ -1697,6 +1701,7 @@ mod tests {
             input: r#"{"command":"ls"}"#.into(),
             output: "result".into(),
             success: true,
+            metadata: Value::Null,
             terminate: false,
         }];
         append_tool_results(&mut items, &invocations);
@@ -1716,6 +1721,7 @@ mod tests {
             input: r#"{"command":"bad"}"#.into(),
             output: "command not found".into(),
             success: false,
+            metadata: Value::Null,
             terminate: false,
         }];
         append_tool_results(&mut items, &invocations);
@@ -1763,6 +1769,8 @@ mod tests {
         let reminder = build_system_reminder(&state, "");
         assert!(reminder.contains("currentDate"));
         assert!(reminder.contains("Today's date is"));
+        assert!(reminder.contains("currentTime"));
+        assert!(reminder.contains("Current computer time is"));
     }
 
     #[test]

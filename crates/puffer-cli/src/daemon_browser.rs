@@ -18,8 +18,10 @@ use url::Url;
 use crate::daemon::ServerEnvelope;
 
 mod agent;
+mod cdp;
 mod chrome;
 mod client;
+mod console;
 mod cursor;
 mod devtools;
 mod input;
@@ -36,14 +38,14 @@ mod upload;
 mod worker;
 
 pub(crate) use agent::handle_browser_agent;
+pub(super) use cdp::parse_evaluation_response;
+pub(super) use cdp::send_cdp;
 use chrome::safe_profile_name;
 pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};
+use console::BrowserConsoleRegistry;
 use recording::BrowserRecordingRegistry;
 pub(crate) use rpc::*;
 use screenshot::BrowserElementRef;
-#[cfg(test)]
-pub(super) use session::parse_evaluation_response;
-pub(super) use session::send_cdp;
 use session::{BrowserRootSession, BrowserSession};
 use tabs::{backend_session_id, parse_backend_session_id, BrowserTabRegistry};
 pub(crate) use tabs::{BrowserCurrentTabContext, BrowserTabInfo, BrowserTabsState};
@@ -63,38 +65,99 @@ const AGENT_RECORDING_WINDOW: Duration = Duration::from_secs(5);
 /// Tracks live browser roots and page workers by session id.
 pub(crate) struct BrowserRegistry {
     profile_root: PathBuf,
+    chrome_profile: Arc<Mutex<Option<String>>>,
+    root_chrome_profiles: Arc<Mutex<HashMap<String, Option<String>>>>,
     roots: Arc<Mutex<HashMap<String, BrowserRootSession>>>,
     enabled: bool,
     sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
     tabs: Arc<Mutex<BrowserTabRegistry>>,
     agent_refs: Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
+    console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
     recordings: Arc<Mutex<BrowserRecordingRegistry>>,
 }
 
 impl BrowserRegistry {
     /// Creates an empty browser session registry.
-    pub(crate) fn new(profile_root: PathBuf, enabled: bool) -> Self {
+    pub(crate) fn new(
+        profile_root: PathBuf,
+        enabled: bool,
+        chrome_profile: Option<String>,
+    ) -> Self {
         let roots = Arc::new(Mutex::new(HashMap::<String, BrowserRootSession>::new()));
         let sessions = Arc::new(Mutex::new(HashMap::<String, BrowserSession>::new()));
         let tabs = Arc::new(Mutex::new(BrowserTabRegistry::default()));
         let agent_refs = Arc::new(Mutex::new(HashMap::new()));
+        let console_logs = Arc::new(Mutex::new(BrowserConsoleRegistry::default()));
         if enabled {
             spawn_idle_pruner(
                 Arc::clone(&roots),
                 Arc::clone(&sessions),
                 Arc::clone(&tabs),
                 Arc::clone(&agent_refs),
+                Arc::clone(&console_logs),
             );
         }
         Self {
             profile_root,
+            chrome_profile: Arc::new(Mutex::new(chrome_profile)),
+            root_chrome_profiles: Arc::new(Mutex::new(HashMap::new())),
             roots,
             enabled,
             sessions,
             tabs,
             agent_refs,
+            console_logs,
             recordings: Arc::new(Mutex::new(BrowserRecordingRegistry::default())),
         }
+    }
+
+    /// Updates the selected source Chrome profile and closes existing roots.
+    pub(crate) fn set_chrome_profile(&self, chrome_profile: Option<String>) {
+        let mut guard = self.chrome_profile.lock().unwrap();
+        if *guard == chrome_profile {
+            return;
+        }
+        *guard = chrome_profile;
+        drop(guard);
+        let root_ids = self
+            .roots
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for root_id in root_ids {
+            let _ = self.shutdown_root(&root_id, false);
+        }
+    }
+
+    /// Updates a root-session Chrome profile override and closes that root.
+    pub(crate) fn set_root_chrome_profile(
+        &self,
+        root_session_id: &str,
+        chrome_profile: Option<String>,
+    ) {
+        let normalized = chrome_profile.filter(|value| !value.trim().is_empty());
+        let mut guard = self.root_chrome_profiles.lock().unwrap();
+        let changed = match normalized.as_ref() {
+            Some(profile) => {
+                guard
+                    .get(root_session_id)
+                    .and_then(|value| value.as_deref())
+                    != Some(profile.as_str())
+            }
+            None => guard.contains_key(root_session_id),
+        };
+        if !changed {
+            return;
+        }
+        if let Some(profile) = normalized {
+            guard.insert(root_session_id.to_string(), Some(profile));
+        } else {
+            guard.remove(root_session_id);
+        }
+        drop(guard);
+        let _ = self.shutdown_root(root_session_id, true);
     }
 
     /// Opens or reuses the browser page worker for `session_id`.
@@ -125,6 +188,7 @@ impl BrowserRegistry {
         let session = BrowserSession::spawn(
             events,
             Arc::clone(&self.recordings),
+            Arc::clone(&self.console_logs),
             session_id.clone(),
             root,
             width,
@@ -145,6 +209,11 @@ impl BrowserRegistry {
     /// Navigates a live page worker.
     pub(crate) fn navigate(&self, session_id: &str, url: String) -> Result<()> {
         self.get(session_id)?.navigate(normalize_url(&url)?)
+    }
+
+    /// Waits for a live page worker to report that navigation has completed.
+    pub(crate) fn wait_for_load(&self, session_id: &str, timeout: Duration) -> Result<()> {
+        self.get(session_id)?.wait_for_load(timeout)
     }
 
     /// Reloads a live page worker.
@@ -290,6 +359,18 @@ impl BrowserRegistry {
         Ok(self.list_tabs(root_session_id))
     }
 
+    /// Reads buffered console logs for a live browser page worker.
+    pub(crate) fn console_logs(&self, session_id: &str, clear: bool) -> Result<Value> {
+        self.get(session_id)?;
+        let logs = self.console_logs.lock().unwrap().read(session_id, clear);
+        let count = logs.len();
+        Ok(json!({
+            "logs": logs,
+            "count": count,
+            "cleared": clear
+        }))
+    }
+
     /// Tears down the shared Chrome root and every page worker below it.
     pub(crate) fn close_root(&self, root_session_id: &str) -> Result<()> {
         self.shutdown_root(root_session_id, false)
@@ -337,8 +418,16 @@ impl BrowserRegistry {
             return Ok(root);
         }
         let _ = self.shutdown_root(root_session_id, true);
+        let selected_profile = self
+            .root_chrome_profiles
+            .lock()
+            .unwrap()
+            .get(root_session_id)
+            .cloned()
+            .unwrap_or_else(|| self.chrome_profile.lock().unwrap().clone());
         let root = BrowserRootSession::spawn(
             self.profile_root.join(safe_profile_name(root_session_id)),
+            selected_profile,
             width,
             height,
         )?;
@@ -371,6 +460,7 @@ impl BrowserRegistry {
 
     fn remove_page_session(&self, session_id: &str) -> Option<BrowserSession> {
         self.agent_refs.lock().unwrap().remove(session_id);
+        self.console_logs.lock().unwrap().remove(session_id);
         self.sessions.lock().unwrap().remove(session_id)
     }
 
@@ -384,6 +474,7 @@ impl BrowserRegistry {
         cleanup_root_metadata(
             &self.tabs,
             &self.agent_refs,
+            &self.console_logs,
             root_session_id,
             &backend_ids,
             preserve_tabs,
@@ -431,6 +522,7 @@ fn spawn_idle_pruner(
     sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
     tabs: Arc<Mutex<BrowserTabRegistry>>,
     agent_refs: Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
+    console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
 ) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(60));
@@ -457,7 +549,14 @@ fn spawn_idle_pruner(
                 .iter()
                 .map(|(session_id, _)| session_id.clone())
                 .collect::<Vec<_>>();
-            cleanup_root_metadata(&tabs, &agent_refs, &root_session_id, &backend_ids, true);
+            cleanup_root_metadata(
+                &tabs,
+                &agent_refs,
+                &console_logs,
+                &root_session_id,
+                &backend_ids,
+                true,
+            );
             for (_, session) in root_sessions {
                 let _ = session.close();
             }
@@ -485,6 +584,7 @@ fn drain_root_sessions(
 fn cleanup_root_metadata(
     tabs: &Arc<Mutex<BrowserTabRegistry>>,
     agent_refs: &Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
+    console_logs: &Arc<Mutex<BrowserConsoleRegistry>>,
     root_session_id: &str,
     backend_ids: &[String],
     preserve_tabs: bool,
@@ -492,6 +592,14 @@ fn cleanup_root_metadata(
     {
         let mut refs = agent_refs.lock().unwrap();
         refs.retain(|session_id, _| session_root_id(session_id) != root_session_id);
+    }
+    if preserve_tabs {
+        let mut console_logs = console_logs.lock().unwrap();
+        for backend_id in backend_ids {
+            console_logs.remove(backend_id);
+        }
+    } else {
+        console_logs.lock().unwrap().remove_root(root_session_id);
     }
     let mut tabs = tabs.lock().unwrap();
     if preserve_tabs {

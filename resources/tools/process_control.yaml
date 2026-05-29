@@ -1,0 +1,43 @@
+id: ProcessControl
+name: ProcessControl
+description: |-
+  Typed control surface for processes and background tasks that were already
+  created by Puffer tools.
+
+  Use this for verified Lambda skill contracts that need to list, poll, read
+  output from, interrupt, or stop an existing process/session. It does not
+  launch new commands and it does not accept arbitrary shell text.
+handler: runtime:workflow:process_control
+approval_policy: auto
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - list
+        - poll
+        - log
+        - kill
+        - interrupt_or_kill
+      description: The process operation to perform.
+    sessionId:
+      type: string
+      description: The process_id or background task id. Omit only for action=list.
+    block:
+      type: boolean
+      description: For poll, wait briefly for the process to exit before returning.
+      default: false
+    timeout:
+      type: integer
+      minimum: 0
+      maximum: 30000
+      description: Poll wait time in milliseconds, capped at 30000.
+  required:
+    - action
+  additionalProperties: false
+display:
+  group: shell
+  title: ProcessControl
+  show_in_status: false

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "settings-connectors",
+  "title": "Settings connector setup and dynamic questions",
+  "priority": 8,
+  "seed": "settings-connector-race",
+  "startNode": "settings/connectors",
+  "entrypoint": "settings.connector-setup",
+  "iterations": 10,
+  "steps": 12,
+  "replayLimit": 2,
+  "ownedNodes": ["settings/connectors"],
+  "allowedSetupNodes": ["app", "settings"],
+  "ownedCoverage": ["route:settings-connectors", "control:settings.connector-setup", "control:settings.connector-answer", "state:settings.saving", "async:stale-session-event"],
+  "allowedAsyncEvents": ["duplicate-submit", "late-success", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "one-request-per-intent", "controls-disabled-while-pending", "draft-preserved-on-failure", "stale-error-scoped", "no-permanent-loading"]
+}

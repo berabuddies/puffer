@@ -436,6 +436,21 @@ pub(super) fn execute_openai_tool_calls(
     structured_output: Option<&StructuredOutputConfig>,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<OpenAIToolResults> {
+    if state.lambda_gate.is_some() || tool_calls.iter().any(|tc| tc.name == "Skill") {
+        return execute_openai_tool_calls_serial(
+            state,
+            resources,
+            providers,
+            auth_store,
+            tool_calls,
+            registry,
+            cwd,
+            request_config,
+            model_id,
+            structured_output,
+            tool_filter,
+        );
+    }
     // Count how many parallel-safe tools we have.
     let parallel_count = tool_calls
         .iter()
@@ -489,19 +504,25 @@ pub(super) fn execute_openai_tool_calls(
     let runner = state.tool_runner.clone();
 
     // Pre-allocate results array; each slot filled by either parallel or serial exec.
-    let mut results: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
+    let mut results: Vec<Option<(String, bool, Value)>> = vec![None; tool_calls.len()];
 
     // Execute parallel-safe permitted tools concurrently.
     std::thread::scope(|s| {
-        let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool)>)> =
-            Vec::new();
+        let mut handles: Vec<(
+            usize,
+            std::thread::ScopedJoinHandle<'_, (String, bool, Value)>,
+        )> = Vec::new();
         for (i, tc) in tool_calls.iter().enumerate() {
             // Skip denied tools and non-parallel tools.
             if !is_parallel_safe_tool(&tc.name) {
                 continue;
             }
             if let PermissionOutcome::Denied(ref denied) = permissions[i] {
-                results[i] = Some((denied.output.stdout.clone(), denied.success));
+                results[i] = Some((
+                    denied.output.stdout.clone(),
+                    denied.success,
+                    denied.output.metadata.clone(),
+                ));
                 continue;
             }
             let filesystem_policy = match &permissions[i] {
@@ -511,7 +532,7 @@ pub(super) fn execute_openai_tool_calls(
             let definition = match registry.definition(&tc.name) {
                 Some(d) => d.clone(),
                 None => {
-                    results[i] = Some((format!("unknown tool {}", tc.name), false));
+                    results[i] = Some((format!("unknown tool {}", tc.name), false, Value::Null));
                     continue;
                 }
             };
@@ -542,19 +563,22 @@ pub(super) fn execute_openai_tool_calls(
                             } else {
                                 format!("{}\n{}", exec.output.stdout, exec.output.stderr)
                             };
-                            (output, exec.success)
+                            (output, exec.success, exec.output.metadata)
                         }
-                        Err(error) => (format!("Tool execution failed: {error}"), false),
+                        Err(error) => (
+                            format!("Tool execution failed: {error}"),
+                            false,
+                            Value::Null,
+                        ),
                     }
                 }),
             ));
         }
         for (i, handle) in handles {
-            results[i] = Some(
-                handle
-                    .join()
-                    .unwrap_or_else(|_| ("Tool execution panicked".to_string(), false)),
-            );
+            results[i] =
+                Some(handle.join().unwrap_or_else(|_| {
+                    ("Tool execution panicked".to_string(), false, Value::Null)
+                }));
         }
     });
 
@@ -564,11 +588,15 @@ pub(super) fn execute_openai_tool_calls(
             continue; // Already executed in parallel or denied.
         }
         if let PermissionOutcome::Denied(ref denied) = permissions[i] {
-            results[i] = Some((denied.output.stdout.clone(), denied.success));
+            results[i] = Some((
+                denied.output.stdout.clone(),
+                denied.success,
+                denied.output.metadata.clone(),
+            ));
             continue;
         }
         // Serial execution with full &mut state access.
-        let (output, success) = match execute_tool_call(
+        let (output, success, metadata) = match execute_tool_call(
             state,
             resources,
             providers,
@@ -592,11 +620,15 @@ pub(super) fn execute_openai_tool_calls(
                 } else {
                     format!("{}\n{}", exec.output.stdout, exec.output.stderr)
                 };
-                (output, exec.success)
+                (output, exec.success, exec.output.metadata)
             }
-            Err(error) => (format!("Tool execution failed: {error}"), false),
+            Err(error) => (
+                format!("Tool execution failed: {error}"),
+                false,
+                Value::Null,
+            ),
         };
-        results[i] = Some((output, success));
+        results[i] = Some((output, success, metadata));
     }
 
     // ---------- Phase 3: Assemble outputs in original order ----------
@@ -604,9 +636,9 @@ pub(super) fn execute_openai_tool_calls(
     let mut outputs = Vec::with_capacity(tool_calls.len());
     let mut invocations = Vec::with_capacity(tool_calls.len());
     for (i, tc) in tool_calls.iter().enumerate() {
-        let (raw_output, success) = results[i]
+        let (raw_output, success, metadata) = results[i]
             .take()
-            .unwrap_or_else(|| ("Tool was not executed".to_string(), false));
+            .unwrap_or_else(|| ("Tool was not executed".to_string(), false, Value::Null));
         let output =
             super::process_tool_result(&raw_output, super::MAX_TOOL_RESULT_CHARS, session_id);
         outputs.push(OpenAIResponsesFunctionCallOutput {
@@ -620,6 +652,7 @@ pub(super) fn execute_openai_tool_calls(
             input: serde_json::to_string(&tc.arguments)?,
             output,
             success,
+            metadata,
             terminate: false,
         });
     }
@@ -657,7 +690,7 @@ fn execute_openai_tool_calls_serial(
     let mut outputs = Vec::new();
     let mut invocations = Vec::new();
     for tool_call in tool_calls {
-        let (output, success) = match execute_tool_call(
+        let (output, success, metadata) = match execute_tool_call(
             state,
             resources,
             providers,
@@ -681,9 +714,13 @@ fn execute_openai_tool_calls_serial(
                 } else {
                     format!("{}\n{}", execution.output.stdout, execution.output.stderr)
                 };
-                (output, execution.success)
+                (output, execution.success, execution.output.metadata)
             }
-            Err(error) => (format!("Tool execution failed: {error}"), false),
+            Err(error) => (
+                format!("Tool execution failed: {error}"),
+                false,
+                Value::Null,
+            ),
         };
         let output =
             super::process_tool_result(&output, super::MAX_TOOL_RESULT_CHARS, &state.session.id);
@@ -698,6 +735,7 @@ fn execute_openai_tool_calls_serial(
             input: serde_json::to_string(&tool_call.arguments)?,
             output,
             success,
+            metadata,
             terminate: false,
         });
     }

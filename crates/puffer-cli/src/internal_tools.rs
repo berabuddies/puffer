@@ -19,6 +19,8 @@ pub(crate) fn run_internal_tool_command(
         InternalToolCommand::Aliases => print_alias_setup(),
         InternalToolCommand::Browser(args) => run_browser(cwd, paths, args),
         InternalToolCommand::Email(args) => subscriber_tools::run_email(args),
+        InternalToolCommand::Lark(args) => subscriber_tools::run_lark(args),
+        InternalToolCommand::Slack(args) => subscriber_tools::run_slack(args),
         InternalToolCommand::Telegram(args) => subscriber_tools::run_telegram(args),
     }
 }

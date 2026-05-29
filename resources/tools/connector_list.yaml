@@ -1,0 +1,16 @@
+id: ConnectorList
+name: ConnectorList
+description: |-
+  List connector templates Puffer can use for connections and workflow actions.
+
+  A connector is a reusable integration type, such as `telegram-login`,
+  `telegram-bot`, `lark-app`, `lark-login`, `slack-app`, `slack-login`,
+  `slack-bot`, or `email`.
+  Use this before creating a connection or invoking a connector action.
+handler: runtime:workflow:connector_list
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

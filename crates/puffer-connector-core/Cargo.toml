@@ -11,6 +11,7 @@ puffer-core = { path = "../puffer-core" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
 puffer-session-store = { path = "../puffer-session-store" }
+puffer-subscriptions = { path = "../puffer-subscriptions" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -13,6 +13,8 @@ pub struct InternalCliToolDescriptor {
 
 const BROWSER_ALIASES: &[&str] = &["browser"];
 const EMAIL_ALIASES: &[&str] = &["email"];
+const LARK_ALIASES: &[&str] = &["lark"];
+const SLACK_ALIASES: &[&str] = &["slack"];
 const TELEGRAM_ALIASES: &[&str] = &["telegram"];
 
 const INTERNAL_CLI_TOOLS: &[InternalCliToolDescriptor] = &[
@@ -25,6 +27,16 @@ const INTERNAL_CLI_TOOLS: &[InternalCliToolDescriptor] = &[
         id: "email",
         aliases: EMAIL_ALIASES,
         skill_name: "email",
+    },
+    InternalCliToolDescriptor {
+        id: "lark",
+        aliases: LARK_ALIASES,
+        skill_name: "lark",
+    },
+    InternalCliToolDescriptor {
+        id: "slack",
+        aliases: SLACK_ALIASES,
+        skill_name: "slack",
     },
     InternalCliToolDescriptor {
         id: "telegram",
@@ -75,6 +87,10 @@ mod tests {
         assert!(helpers.contains("'/tmp/puffer' internal-tool 'browser' \"$@\""));
         assert!(helpers.contains("email()"));
         assert!(helpers.contains("'/tmp/puffer' internal-tool 'email' \"$@\""));
+        assert!(helpers.contains("lark()"));
+        assert!(helpers.contains("'/tmp/puffer' internal-tool 'lark' \"$@\""));
+        assert!(helpers.contains("slack()"));
+        assert!(helpers.contains("'/tmp/puffer' internal-tool 'slack' \"$@\""));
         assert!(helpers.contains("telegram()"));
         assert!(helpers.contains("'/tmp/puffer' internal-tool 'telegram' \"$@\""));
     }

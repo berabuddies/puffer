@@ -1,0 +1,57 @@
+{
+  "id": "workflows-draft-race",
+  "title": "Workflows draft and refresh races",
+  "focus": "Workflow node editing, trigger editing, tab switches, and stale workflow refreshes.",
+  "severityTarget": "P1 workflow draft loss, invalid graph save, or blocked workflow editing after refresh.",
+  "primaryRoutes": ["workflows"],
+  "defaultIterations": 6,
+  "defaultSteps": 12,
+  "setup": [
+    {
+      "id": "setup-open-workflows",
+      "action": "open-workflows",
+      "kind": "ui",
+      "target": "workflows",
+      "coverage": ["route:workflows", "state:daemon.connected"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "edit-workflow-node",
+      "kind": "ui",
+      "target": "workflows.node-editor",
+      "weight": 8,
+      "params": { "field": { "oneOf": ["id", "name", "tool", "prompt"] } },
+      "coverage": ["control:workflows.node-editor", "async:server-push-update"]
+    },
+    {
+      "id": "edit-workflow-trigger",
+      "kind": "ui",
+      "target": "workflows.trigger-editor",
+      "weight": 8,
+      "params": { "field": { "oneOf": ["kind", "cron", "event"] } },
+      "coverage": ["control:workflows.trigger-editor", "async:delayed-list-refresh"]
+    },
+    {
+      "id": "emit-workflow-refresh",
+      "kind": "daemon",
+      "target": "workflow_list",
+      "weight": 7,
+      "coverage": ["async:late-success", "async:server-push-update"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 5,
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "no-data-loss",
+    "draft-preserved-on-failure",
+    "stale-error-scoped",
+    "no-permanent-loading"
+  ]
+}

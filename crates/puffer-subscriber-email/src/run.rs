@@ -139,7 +139,14 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubscriberCommand::TelegramLoginStart { .. }
             | SubscriberCommand::TelegramLoginSubmitCode { .. }
-            | SubscriberCommand::TelegramLoginSubmitPassword { .. } => {
+            | SubscriberCommand::TelegramLoginSubmitPassword { .. }
+            | SubscriberCommand::TelegramQrLoginStart { .. }
+            | SubscriberCommand::TelegramQrLoginWait { .. }
+            | SubscriberCommand::TelegramImportTdata { .. }
+            | SubscriberCommand::TelegramAuthOk
+            | SubscriberCommand::TelegramListPeers { .. }
+            | SubscriberCommand::TelegramSearchMessages { .. }
+            | SubscriberCommand::TelegramListMessages { .. } => {
                 emit_control(
                     &env.topic,
                     "command_ignored",
@@ -280,7 +287,7 @@ async fn handle_command(
             *config = new_cfg;
             emit_control(&env.topic, "config_updated", json!({}))?;
         }
-        SubscriberCommand::SendMessage { peer, text } => {
+        SubscriberCommand::SendMessage { peer, text, .. } => {
             match smtp_send::send_message(config, &peer, &text).await {
                 Ok(outcome) => {
                     emit_control(
@@ -301,7 +308,14 @@ async fn handle_command(
         }
         SubscriberCommand::TelegramLoginStart { .. }
         | SubscriberCommand::TelegramLoginSubmitCode { .. }
-        | SubscriberCommand::TelegramLoginSubmitPassword { .. } => {
+        | SubscriberCommand::TelegramLoginSubmitPassword { .. }
+        | SubscriberCommand::TelegramQrLoginStart { .. }
+        | SubscriberCommand::TelegramQrLoginWait { .. }
+        | SubscriberCommand::TelegramImportTdata { .. }
+        | SubscriberCommand::TelegramAuthOk
+        | SubscriberCommand::TelegramListPeers { .. }
+        | SubscriberCommand::TelegramSearchMessages { .. }
+        | SubscriberCommand::TelegramListMessages { .. } => {
             emit_control(
                 &env.topic,
                 "command_ignored",

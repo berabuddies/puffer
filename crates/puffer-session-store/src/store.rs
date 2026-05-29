@@ -18,6 +18,25 @@ pub struct SessionStore {
     root: PathBuf,
 }
 
+/// Session tag used for non-interactive background agent sessions.
+pub const BACKGROUND_SESSION_TAG: &str = "puffer:background";
+
+/// One sorted page of session summaries from the session store.
+#[derive(Debug, Clone)]
+pub struct SessionListPage {
+    pub sessions: Vec<SessionSummary>,
+    pub offset: usize,
+    pub limit: usize,
+    pub total_sessions: usize,
+}
+
+impl SessionListPage {
+    /// Returns true when another page exists after this one.
+    pub fn has_more(&self) -> bool {
+        self.offset.saturating_add(self.sessions.len()) < self.total_sessions
+    }
+}
+
 impl SessionStore {
     /// Creates a session store rooted under the user configuration directory.
     pub fn from_paths(paths: &ConfigPaths) -> Result<Self> {
@@ -34,6 +53,15 @@ impl SessionStore {
 
     /// Creates a new session and writes its metadata stub to disk.
     pub fn create_session(&self, cwd: PathBuf) -> Result<SessionMetadata> {
+        self.create_session_with_tags(cwd, Vec::new())
+    }
+
+    /// Creates a new session with initial tags and writes its metadata stub to disk.
+    pub fn create_session_with_tags(
+        &self,
+        cwd: PathBuf,
+        tags: Vec<String>,
+    ) -> Result<SessionMetadata> {
         let now = unix_timestamp_ms();
         let metadata = SessionMetadata {
             id: Uuid::new_v4(),
@@ -44,7 +72,7 @@ impl SessionStore {
             updated_at_ms: now,
             parent_session_id: None,
             slug: Some(format!("session-{}", Uuid::new_v4().simple())),
-            tags: Vec::new(),
+            tags: normalize_tags(tags),
             note: None,
         };
         let path = self.session_path(metadata.id);
@@ -183,6 +211,32 @@ impl SessionStore {
         })
     }
 
+    /// Replaces the full tag list, deduplicating and sorting in place.
+    pub fn set_tags(&self, session_id: Uuid, tags: Vec<String>) -> Result<()> {
+        self.update_metadata(session_id, |metadata| {
+            metadata.tags = normalize_tags(tags);
+        })
+    }
+
+    /// Permanently deletes a session and its sidecar files (events log,
+    /// trace files). Missing files are silently ignored.
+    pub fn delete_session(&self, session_id: Uuid) -> Result<()> {
+        // Files are named `<uuid>.session.json`, `<uuid>.jsonl`, and
+        // `<uuid>.<trace>.jsonl`. Sweep every file in the sessions root
+        // whose name starts with `<uuid>.`.
+        let needle = format!("{session_id}.");
+        if let Ok(entries) = fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with(&needle) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Loads a session metadata record and its transcript events from disk.
     pub fn load_session(&self, session_id: Uuid) -> Result<SessionRecord> {
         let path = self.session_path(session_id);
@@ -194,8 +248,82 @@ impl SessionStore {
         })
     }
 
-    /// Lists all sessions sorted by most recently updated first.
+    /// Lists visible sessions sorted by most recently updated first.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        let metadata = self.list_visible_session_metadata(&[BACKGROUND_SESSION_TAG])?;
+        metadata
+            .into_iter()
+            .map(|metadata| self.session_summary_from_metadata(metadata))
+            .collect()
+    }
+
+    /// Lists all sessions except those containing one of the excluded tags.
+    pub fn list_sessions_excluding_tags(
+        &self,
+        excluded_tags: &[&str],
+    ) -> Result<Vec<SessionSummary>> {
+        let metadata = self.list_session_metadata()?;
+        metadata
+            .into_iter()
+            .filter(|metadata| !metadata_has_any_tag(metadata, excluded_tags))
+            .map(|metadata| self.session_summary_from_metadata(metadata))
+            .collect()
+    }
+
+    /// Lists one sorted page of visible sessions without counting events outside that page.
+    pub fn list_sessions_page(&self, offset: usize, limit: usize) -> Result<SessionListPage> {
+        let metadata = self.list_visible_session_metadata(&[BACKGROUND_SESSION_TAG])?;
+        self.session_page_from_metadata(offset, limit, metadata)
+    }
+
+    /// Lists one sorted page after excluding sessions with any hidden tag.
+    pub fn list_sessions_page_excluding_tags(
+        &self,
+        offset: usize,
+        limit: usize,
+        excluded_tags: &[&str],
+    ) -> Result<SessionListPage> {
+        let metadata = self.list_session_metadata()?;
+        let metadata = metadata
+            .into_iter()
+            .filter(|metadata| !metadata_has_any_tag(metadata, excluded_tags))
+            .collect::<Vec<_>>();
+        self.session_page_from_metadata(offset, limit, metadata)
+    }
+
+    fn session_page_from_metadata(
+        &self,
+        offset: usize,
+        limit: usize,
+        metadata: Vec<SessionMetadata>,
+    ) -> Result<SessionListPage> {
+        let total_sessions = metadata.len();
+        let sessions = metadata
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|metadata| self.session_summary_from_metadata(metadata))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SessionListPage {
+            sessions,
+            offset,
+            limit,
+            total_sessions,
+        })
+    }
+
+    fn list_visible_session_metadata(
+        &self,
+        excluded_tags: &[&str],
+    ) -> Result<Vec<SessionMetadata>> {
+        let metadata = self.list_session_metadata()?;
+        Ok(metadata
+            .into_iter()
+            .filter(|metadata| !metadata_has_any_tag(metadata, excluded_tags))
+            .collect())
+    }
+
+    fn list_session_metadata(&self) -> Result<Vec<SessionMetadata>> {
         let mut sessions = Vec::new();
         for entry in fs::read_dir(&self.root)
             .with_context(|| format!("failed to read session dir {}", self.root.display()))?
@@ -209,26 +337,30 @@ impl SessionStore {
                 continue;
             }
             let file: SessionFile = serde_json::from_slice(&fs::read(&path)?)?;
-            let event_count = self
-                .load_events(file.metadata.id)
-                .map(|events| events.len())
-                .unwrap_or(0);
-            sessions.push(SessionSummary {
-                id: file.metadata.id,
-                display_name: file.metadata.display_name.clone(),
-                generated_title: file.metadata.generated_title.clone(),
-                cwd: file.metadata.cwd.clone(),
-                created_at_ms: file.metadata.created_at_ms,
-                updated_at_ms: file.metadata.updated_at_ms,
-                event_count,
-                parent_session_id: file.metadata.parent_session_id,
-                slug: file.metadata.slug.clone(),
-                tags: file.metadata.tags.clone(),
-                note: file.metadata.note.clone(),
-            });
+            sessions.push(file.metadata);
         }
         sessions.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
         Ok(sessions)
+    }
+
+    fn session_summary_from_metadata(&self, metadata: SessionMetadata) -> Result<SessionSummary> {
+        let event_count = self
+            .load_events(metadata.id)
+            .map(|events| events.len())
+            .unwrap_or(0);
+        Ok(SessionSummary {
+            id: metadata.id,
+            display_name: metadata.display_name.clone(),
+            generated_title: metadata.generated_title.clone(),
+            cwd: metadata.cwd.clone(),
+            created_at_ms: metadata.created_at_ms,
+            updated_at_ms: metadata.updated_at_ms,
+            event_count,
+            parent_session_id: metadata.parent_session_id,
+            slug: metadata.slug.clone(),
+            tags: metadata.tags.clone(),
+            note: metadata.note.clone(),
+        })
     }
 
     /// Finds the most recent session matching a UUID prefix, name, or generated-title substring.
@@ -360,6 +492,24 @@ fn unix_timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut tags = tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+fn metadata_has_any_tag(metadata: &SessionMetadata, tags: &[&str]) -> bool {
+    metadata
+        .tags
+        .iter()
+        .any(|tag| tags.iter().any(|hidden| tag == hidden))
+}
+
 fn sanitize_trace_name(name: &str) -> String {
     let filtered = name
         .chars()
@@ -425,6 +575,98 @@ mod tests {
         let fork_record = store.load_session(fork.id).unwrap();
         assert_eq!(fork_record.metadata.parent_session_id, Some(source.id));
         assert_eq!(fork_record.events.len(), 1);
+    }
+
+    #[test]
+    fn list_sessions_page_reports_total_and_has_more() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+
+        let first = store.create_session(tempdir.path().join("first")).unwrap();
+        store
+            .set_display_name(first.id, Some("First".to_string()))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = store.create_session(tempdir.path().join("second")).unwrap();
+        store
+            .set_display_name(second.id, Some("Second".to_string()))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let third = store.create_session(tempdir.path().join("third")).unwrap();
+        store
+            .append_event(
+                third.id,
+                TranscriptEvent::UserMessage {
+                    text: "hello".to_string(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+
+        let first_page = store.list_sessions_page(0, 2).unwrap();
+        assert_eq!(first_page.total_sessions, 3);
+        assert_eq!(first_page.offset, 0);
+        assert_eq!(first_page.limit, 2);
+        assert!(first_page.has_more());
+        assert_eq!(
+            first_page.sessions.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![third.id, second.id]
+        );
+        assert_eq!(first_page.sessions[0].event_count, 1);
+
+        let second_page = store.list_sessions_page(2, 2).unwrap();
+        assert_eq!(second_page.total_sessions, 3);
+        assert!(!second_page.has_more());
+        assert_eq!(second_page.sessions.len(), 1);
+        assert_eq!(second_page.sessions[0].id, first.id);
+    }
+
+    #[test]
+    fn list_sessions_page_hides_background_sessions() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+
+        let visible = store
+            .create_session(tempdir.path().join("visible"))
+            .unwrap();
+        store
+            .set_display_name(visible.id, Some("Visible".to_string()))
+            .unwrap();
+        let hidden = store
+            .create_session_with_tags(
+                tempdir.path().join("hidden"),
+                vec![BACKGROUND_SESSION_TAG.to_string()],
+            )
+            .unwrap();
+        let other_visible = store
+            .create_session_with_tags(
+                tempdir.path().join("other-visible"),
+                vec![" review ".to_string(), "review".to_string()],
+            )
+            .unwrap();
+        let blank = store.create_session(tempdir.path().join("blank")).unwrap();
+
+        let default_page = store.list_sessions_page(0, 10).unwrap();
+        assert_eq!(default_page.total_sessions, 3);
+
+        let ids = default_page
+            .sessions
+            .iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&visible.id));
+        assert!(ids.contains(&other_visible.id));
+        assert!(ids.contains(&blank.id));
+        assert!(!ids.contains(&hidden.id));
+        assert_eq!(other_visible.tags, vec!["review".to_string()]);
+
+        let all_page = store.list_sessions_page_excluding_tags(0, 10, &[]).unwrap();
+        assert_eq!(all_page.total_sessions, 4);
     }
 
     #[test]
@@ -647,6 +889,77 @@ mod tests {
                 rewrite: TranscriptRewrite::PopLast { count: 2 },
             }
         );
+    }
+
+    #[test]
+    fn set_tags_dedupes_trims_and_sorts() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+
+        store
+            .set_tags(
+                session.id,
+                vec![
+                    "b".into(),
+                    "a".into(),
+                    "  ".into(),
+                    "b".into(),
+                    " c ".into(),
+                ],
+            )
+            .unwrap();
+        let reloaded = store.load_session(session.id).unwrap();
+        assert_eq!(reloaded.metadata.tags, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn delete_session_removes_all_sidecars() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+        store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "hello".into(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+        store
+            .append_trace_event(session.id, "runtime_trace", &serde_json::json!({"k":1}))
+            .unwrap();
+
+        // All three files exist before delete.
+        let base = store.session_path(session.id);
+        assert!(base.exists());
+        assert!(base.with_extension("jsonl").exists());
+        assert!(base.with_extension("runtime_trace.jsonl").exists());
+
+        store.delete_session(session.id).unwrap();
+
+        // None of them remain after.
+        assert!(!base.exists());
+        assert!(!base.with_extension("jsonl").exists());
+        assert!(!base.with_extension("runtime_trace.jsonl").exists());
+        // The session no longer appears in list_sessions.
+        let listed = store.list_sessions().unwrap();
+        assert!(listed.iter().all(|s| s.id != session.id));
+    }
+
+    #[test]
+    fn delete_session_is_idempotent_when_files_missing() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        // Deleting a never-created session must not error.
+        store.delete_session(Uuid::new_v4()).unwrap();
     }
 
     #[test]

@@ -4,10 +4,11 @@ use crate::state::{LoopKind, PendingSubmit, PendingSubmitEvent, PendingSubmitRes
 use puffer_config::{
     ensure_workspace_dirs, save_user_config, ConfigPaths, MemoryConfig, PufferConfig,
 };
-use puffer_core::{ToolInvocation, TurnExecution};
+use puffer_core::{ToolCallRequest, ToolInvocation, TurnExecution};
 use puffer_provider_registry::{AuthMode, ModelDescriptor, ProviderDescriptor};
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
 use puffer_session_store::{SessionMetadata, TranscriptEvent};
+use serde_json::{json, Map};
 use std::sync::mpsc;
 use tempfile::tempdir;
 
@@ -37,6 +38,13 @@ fn transient_session(cwd: &Path) -> SessionMetadata {
         slug: None,
         tags: Vec::new(),
         note: None,
+    }
+}
+
+fn user_question_answer(question: &str, answer: &str) -> UserQuestionPromptResponse {
+    UserQuestionPromptResponse {
+        answers: Map::from_iter([(question.to_string(), json!(answer))]),
+        annotations: Map::new(),
     }
 }
 
@@ -341,6 +349,161 @@ fn handle_prompt_submit_starts_async_provider_turn_and_polls_result() {
     assert!(!tui.has_pending_submit());
     assert!(state.transcript.iter().any(|message| {
         message.role == MessageRole::System && message.text.starts_with("Provider request failed:")
+    }));
+}
+
+#[test]
+fn handle_prompt_submit_routes_connect_through_user_question_worker() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/connect".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.has_pending_submit());
+    assert_eq!(
+        tui.pending_submit
+            .as_ref()
+            .and_then(|pending| pending.status_hint.as_deref()),
+        Some("Connecting...")
+    );
+
+    let mut opened_connector_question = false;
+    for _ in 0..100 {
+        let completed = poll_pending_submit(
+            &mut state,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+        )
+        .unwrap();
+        if let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay {
+            opened_connector_question = overlay.title().contains("Which connector should");
+            break;
+        }
+        if completed {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(opened_connector_question);
+    assert!(respond_to_user_question(
+        &mut tui,
+        user_question_answer(
+            "Which connector should Puffer connect?",
+            "missing-connector"
+        ),
+    ));
+
+    let mut completed = false;
+    for _ in 0..100 {
+        let step_completed = poll_pending_submit(
+            &mut state,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+        )
+        .unwrap();
+        if let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay {
+            assert!(!overlay.title().contains("exact connection name"));
+        }
+        if step_completed {
+            completed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(completed);
+    assert!(!tui.has_pending_submit());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.text.starts_with("/connect failed:")
+    }));
+    assert!(!state
+        .transcript
+        .iter()
+        .any(|message| message.text.contains("Provider request failed")));
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::CommandInvoked { name, args, .. }
+                if name == "connect" && args.is_empty()
+        )
+    }));
+}
+
+#[test]
+fn handle_prompt_submit_routes_monitor_through_user_question_worker() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/monitor".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.has_pending_submit());
+    assert_eq!(
+        tui.pending_submit
+            .as_ref()
+            .and_then(|pending| pending.status_hint.as_deref()),
+        Some("Creating monitor workflow...")
+    );
+    assert!(state.transcript.iter().all(|message| {
+        !message
+            .text
+            .contains("interactive AskUserQuestion response is required for /monitor")
+    }));
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::CommandInvoked { name, args, .. }
+                if name == "monitor" && args.is_empty()
+        )
     }));
 }
 
@@ -910,6 +1073,84 @@ fn cancel_pending_submit_records_interrupt_and_starts_next_queued_prompt() {
 }
 
 #[test]
+fn cancel_pending_submit_preserves_streamed_progress() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut tui = TuiState::default();
+    let (sender, receiver) = mpsc::channel();
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: "work".to_string(),
+        receiver,
+        transcript_persisted_len: state.transcript.len(),
+        pending_tool_calls: Vec::new(),
+        rendered_tool_invocations: 0,
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: None,
+        cancel: puffer_core::CancelToken::new(),
+    });
+
+    sender
+        .send(PendingSubmitEvent::TextDelta("partial answer".to_string()))
+        .unwrap();
+    sender
+        .send(PendingSubmitEvent::ToolCallsRequested(vec![
+            ToolCallRequest {
+                call_id: "call-pending".to_string(),
+                tool_id: "Bash".to_string(),
+                input: "{\"command\":\"sleep 10\"}".to_string(),
+            },
+        ]))
+        .unwrap();
+
+    assert!(cancel_pending_submit(&mut state, &session_store, &mut tui).unwrap());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.text == "partial answer"
+    }));
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::ToolResult && message.text == "Interrupted by user."
+    }));
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::System && message.text == "Interrupted by user."
+    }));
+
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::AssistantMessage { text, .. } if text == "partial answer"
+        )
+    }));
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::ToolInvocation {
+                call_id,
+                tool_id,
+                success,
+                output,
+                ..
+            } if call_id == "call-pending"
+                && tool_id == "Bash"
+                && !*success
+                && output == "Interrupted by user."
+        )
+    }));
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::SystemMessage { text, .. } if text == "Interrupted by user."
+        )
+    }));
+}
+
+#[test]
 fn submit_next_queued_prompt_waits_for_open_overlay() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
@@ -1110,6 +1351,7 @@ fn poll_pending_submit_skips_empty_assistant_message_after_tool_only_turn() {
                     input: "true".to_string(),
                     output: "ok".to_string(),
                     success: true,
+                    metadata: serde_json::Value::Null,
                     terminate: true,
                 }],
                 reflection_traces: Vec::new(),

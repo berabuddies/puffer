@@ -215,6 +215,7 @@ mod tests {
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
     use puffer_session_store::SessionStore;
     use std::fs;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
 
     fn state() -> AppState {
@@ -227,8 +228,17 @@ mod tests {
         AppState::new(PufferConfig::default(), root, session)
     }
 
+    fn plan_test_guard() -> MutexGuard<'static, ()> {
+        static PLAN_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        PLAN_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
+    }
+
     #[test]
     fn plan_file_path_does_not_materialize_the_file() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let state = state();
         let path = plan_file_path(&state).unwrap();
@@ -238,6 +248,7 @@ mod tests {
 
     #[test]
     fn ensure_plan_file_writes_the_default_scaffold() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let state = state();
         let path = ensure_plan_file(&state).unwrap();
@@ -247,6 +258,7 @@ mod tests {
 
     #[test]
     fn plan_has_user_content_ignores_the_default_scaffold() {
+        let _guard = plan_test_guard();
         assert!(!plan_has_user_content(DEFAULT_PLAN_TEXT));
         assert!(plan_has_user_content(
             "# Current Plan\n\n1. Verify the fix.\n"
@@ -255,6 +267,7 @@ mod tests {
 
     #[test]
     fn plan_slug_prefers_session_slug_and_is_cached_until_cleared() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let mut state = state();
         state.session.slug = Some("dockyard-plan".to_string());
@@ -268,6 +281,7 @@ mod tests {
 
     #[test]
     fn set_plan_slug_sanitizes_input() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let state = state();
         set_plan_slug(state.session.id, "plan !!! alpha".to_string()).unwrap();
@@ -276,6 +290,7 @@ mod tests {
 
     #[test]
     fn read_plan_text_migrates_legacy_plan_path() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let state = state();
         let legacy_path = ConfigPaths::discover(&state.cwd)
@@ -296,6 +311,7 @@ mod tests {
 
     #[test]
     fn copy_plan_for_resume_reuses_source_slug() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let source = state();
         let mut target = state();
@@ -316,6 +332,7 @@ mod tests {
 
     #[test]
     fn copy_plan_for_fork_uses_distinct_slug() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let source = state();
         let mut target = state();
@@ -340,6 +357,7 @@ mod tests {
 
     #[test]
     fn clear_all_plan_slugs_resets_cache() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let state = state();
         set_plan_slug(state.session.id, "manual".to_string()).unwrap();
@@ -350,6 +368,7 @@ mod tests {
 
     #[test]
     fn fallback_slug_uses_session_id_when_slug_is_invalid() {
+        let _guard = plan_test_guard();
         clear_all_plan_slugs().unwrap();
         let mut state = state();
         state.session.slug = Some("  !!!  ".to_string());

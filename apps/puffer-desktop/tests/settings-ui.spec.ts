@@ -24,6 +24,22 @@ test("empty provider registry still offers built-in setup options", async ({ pag
   await expect(page.getByRole("button", { name: "Project", exact: true })).toBeVisible();
 });
 
+test("web preview auto-connects to local dev backend websocket", async ({ page }) => {
+  const daemon = new FakeDaemon({ url: "ws://127.0.0.1:1421/ws" });
+  await daemon.install(page);
+
+  await page.goto("/?skipOnboarding=1");
+  await daemon.waitForRequest("load_settings_snapshot");
+
+  expect(daemon.socketUrls.some((url) => url.startsWith("ws://127.0.0.1:1421/ws"))).toBe(true);
+  await page.getByRole("button", { name: "Settings" }).click();
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.locator(".pf-settings-row").filter({ hasText: "Daemon" })).toContainText(
+    "ws://127.0.0.1:1421/ws"
+  );
+  await expect(pane.getByText("Preview mode")).toHaveCount(0);
+});
+
 test("default model cannot be saved before provider models load", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
@@ -1457,4 +1473,191 @@ test("MCP settings do not reload-loop when no servers are configured", async ({ 
   await expect(page.getByText("No MCP servers configured.")).toBeVisible();
   await page.waitForTimeout(300);
   expect(daemon.requests.filter((request) => request.method === "list_mcp_servers")).toHaveLength(1);
+});
+
+test("connector settings renders dynamic AskUserQuestion inputs", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connectors" }).click();
+  await daemon.waitForRequest("workflow_list");
+
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.getByRole("tab", { name: /Connections/ })).toHaveAttribute("aria-selected", "true");
+  await pane.getByRole("tab", { name: /Catalog/ }).click();
+  await expect(pane.getByLabel("Connector catalog")).toBeVisible();
+  await pane.getByRole("tab", { name: /Connections/ }).click();
+  await expect(pane.getByLabel("Connector connections")).toBeVisible();
+  await expect(pane.getByRole("button", { name: "New connection" })).toBeVisible();
+  await pane.getByRole("button", { name: "New connection" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create connector connection" });
+  await expect(createDialog).toBeVisible();
+  await expect(createDialog.locator(".pf-connector-form select")).toHaveValue("telegram-login");
+  await createDialog.getByLabel("Connector connection slug").fill("telegram-test");
+  await createDialog.getByRole("button", { name: "Start setup" }).click();
+
+  const turn = await daemon.waitForRequest("dispatch_slash_command");
+  expect(turn.params).toMatchObject({
+    message: "/connect telegram-login telegram-test"
+  });
+
+  const dialog = page.getByRole("dialog", { name: "Connector setup questions" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAttribute("aria-modal", "true");
+  await expect(dialog.getByText("Setup questions")).toBeVisible();
+  await dialog.locator(".pf-connector-question").filter({ hasText: "Connector credential" }).locator("input").fill("secret-test");
+  await expect(dialog.getByLabel("Default")).toBeChecked();
+  await dialog.getByRole("button", { name: "Submit answers" }).click();
+
+  const resolved = await daemon.waitForRequest("resolve_user_question");
+  expect(resolved.params).toMatchObject({
+    requestId: "connector-setup",
+    answers: {
+      "Connector credential": "secret-test",
+      "Setup mode": "Default"
+    }
+  });
+  await expect(pane.getByText("Connector setup finished for telegram-test.")).toBeVisible();
+  await expect(pane.locator(".pf-mcp-card").filter({ hasText: "telegram-test" })).toBeVisible();
+});
+
+test("connector settings submits dynamic password, radio, and multiselect answers", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setConnectorSetupQuestions([
+    {
+      type: "input",
+      header: "API Token",
+      question: "Workspace token",
+      options: []
+    },
+    {
+      type: "choice",
+      header: "Region",
+      question: "Workspace region",
+      options: [
+        { label: "US", description: "United States", preview: "us-east" },
+        { label: "EU", description: "European Union", preview: "eu-west" }
+      ]
+    },
+    {
+      type: "choice",
+      header: "Scopes",
+      question: "Enabled scopes",
+      multiSelect: true,
+      options: [
+        { label: "messages:read", description: "Read incoming messages", preview: "read" },
+        { label: "messages:write", description: "Send responses", preview: "write" }
+      ]
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connectors" }).click();
+  await daemon.waitForRequest("workflow_list");
+
+  const pane = page.locator(".pf-settings-pane");
+  await pane.getByRole("button", { name: "New connection" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create connector connection" });
+  await createDialog.locator(".pf-connector-form select").selectOption("slack-app");
+  await createDialog.getByLabel("Connector connection slug").fill("team-slack");
+  await expect(createDialog.getByLabel("Connector setup command")).toContainText("/connect slack-app team-slack");
+  await createDialog.getByRole("button", { name: "Start setup" }).click();
+
+  const turn = await daemon.waitForRequest("dispatch_slash_command");
+  expect(turn.params).toMatchObject({
+    message: "/connect slack-app team-slack"
+  });
+
+  const questions = page.getByRole("dialog", { name: "Connector setup questions" });
+  await expect(questions).toHaveAttribute("aria-modal", "true");
+  await expect(questions).toContainText("3 questions");
+  const tokenQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Workspace token" });
+  const scopeQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Enabled scopes" });
+  const tokenInput = tokenQuestion.locator("input");
+  await expect(tokenInput).toHaveAttribute("type", "password");
+  await expect(questions.getByLabel("US")).toBeChecked();
+  await expect(questions.getByText("us-east")).toBeVisible();
+  await expect(questions.getByText("eu-west")).toBeVisible();
+  await expect(questions.getByRole("button", { name: "Submit answers" })).toBeDisabled();
+
+  await tokenInput.fill("xoxb-secret");
+  await expect(questions.getByRole("button", { name: "Submit answers" })).toBeDisabled();
+
+  await questions.getByLabel("EU").check();
+  await scopeQuestion.getByLabel("messages:read").check();
+  await scopeQuestion.getByLabel("messages:write").check();
+  await questions.getByRole("button", { name: "Submit answers" }).click();
+
+  const resolved = await daemon.waitForRequest("resolve_user_question");
+  expect(resolved.params).toMatchObject({
+    requestId: "connector-setup",
+    answers: {
+      "Workspace token": "xoxb-secret",
+      "Workspace region": "EU",
+      "Enabled scopes": ["messages:read", "messages:write"]
+    }
+  });
+  await expect(pane.getByText("Connector setup finished for team-slack.")).toBeVisible();
+  await expect(pane.locator(".pf-mcp-card").filter({ hasText: "team-slack" })).toBeVisible();
+});
+
+test("connector settings remain readable on narrow screens", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Connectors" }).click();
+  await daemon.waitForRequest("workflow_list");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const navBox = await page.locator(".pf-settings-nav").boundingBox();
+  const paneBox = await page.locator(".pf-settings-pane").boundingBox();
+  const toolbarBox = await page.locator(".pf-connector-toolbar").boundingBox();
+  const tabsBox = await page.locator(".pf-connector-tabs").boundingBox();
+
+  expect(navBox?.height).toBeLessThan(90);
+  expect(paneBox?.width).toBeGreaterThan(340);
+  expect(toolbarBox?.width).toBeGreaterThan(330);
+  expect(tabsBox?.width).toBeGreaterThan(330);
+  await expect(page.getByRole("heading", { name: "Connectors" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New connection" })).toBeVisible();
+
+  await page.getByRole("button", { name: "New connection" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create connector connection" });
+  await expect(createDialog).toBeVisible();
+  const dialogBox = await createDialog.boundingBox();
+  expect(dialogBox?.width).toBeGreaterThan(340);
+  await expect(createDialog.getByLabel("Connector connection slug")).toBeVisible();
+});
+
+test("providers pane can install and start the local MiniCPM5 behavior model", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const card = pane.locator(".pf-local-model-card");
+  await expect(card.getByRole("heading", { name: "MiniCPM5 local model" })).toBeVisible();
+  await expect(card).toContainText("MiniCPM5-1B runs on-device");
+
+  await card.getByRole("button", { name: "Check status" }).click();
+  await expect(card).toContainText("Status checked at");
+  await expect(card).toContainText("Server health");
+  await expect(card).toContainText("http://127.0.0.1:8088/v1/models");
+
+  await card.getByRole("button", { name: /Install MiniCPM5/ }).click();
+  const install = await daemon.waitForRequest("install_local_model");
+  expect(install.params).toMatchObject({ modelId: "minicpm5" });
+
+  await expect(card).toContainText("MiniCPM5 is installed, registered, and running");
+  await expect(card.getByRole("button", { name: /MiniCPM5 ready/ })).toBeDisabled();
 });

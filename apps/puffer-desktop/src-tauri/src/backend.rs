@@ -7,7 +7,7 @@ use crate::dtos::{
 };
 use crate::events::EventEmitter;
 use crate::repo_actions;
-use crate::{browser, files, fs_watch, lsp, pty};
+use crate::{browser, files, fs_watch, local_model, lsp, pty};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,7 @@ pub(crate) struct BackendState {
     ptys: Arc<pty::PtyRegistry>,
     fs_watches: Arc<fs_watch::FsWatchRegistry>,
     browsers: browser::BrowserRegistry,
+    local_models: local_model::LocalModelInstaller,
     turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
@@ -55,6 +56,7 @@ impl BackendState {
             ptys,
             fs_watches: Arc::new(fs_watch::FsWatchRegistry::new()),
             browsers: browser::BrowserRegistry::new(browser_profile_root),
+            local_models: local_model::LocalModelInstaller::new(),
             turns: Mutex::new(HashMap::new()),
         }
     }
@@ -210,6 +212,19 @@ impl BackendState {
             "update_config" => {
                 self.update_config(params)?;
                 serde_value(self.load_settings_snapshot()?)
+            }
+            "local_model_status" => {
+                let model_id = optional_string_param(&params, &["modelId", "model_id"])
+                    .unwrap_or_else(|| "minicpm5".to_string());
+                serde_value(self.local_models.status(&model_id)?)
+            }
+            "install_local_model" => {
+                let model_id = optional_string_param(&params, &["modelId", "model_id"])
+                    .unwrap_or_else(|| "minicpm5".to_string());
+                serde_value(
+                    self.local_models
+                        .install_or_start(events.clone(), &model_id)?,
+                )
             }
             other => bail!("unsupported backend method `{other}`"),
         }

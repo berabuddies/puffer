@@ -129,7 +129,7 @@ fn poll_internal_permission_request(
     loop {
         match pending.stream.read(&mut chunk) {
             Ok(0) if pending.buffer.is_empty() => {
-                return Ok(PendingInternalPermissionOutcome::Remove)
+                return Ok(PendingInternalPermissionOutcome::Remove);
             }
             Ok(0) => {
                 let response = InternalToolBrokerResponse::Permission(

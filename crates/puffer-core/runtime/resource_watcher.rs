@@ -125,12 +125,10 @@ impl ResourceWatcher {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                if let Some(prev) = *guard {
-                    if now.duration_since(prev) < DEBOUNCE {
-                        // Already raised inside the debounce window; the
-                        // existing flag covers this burst.
-                        return;
-                    }
+                if !should_raise_signal(*guard, signal_clone.load(Ordering::Acquire), now) {
+                    // Already raised inside the debounce window; the
+                    // existing flag covers this burst.
+                    return;
                 }
                 *guard = Some(now);
                 signal_clone.store(true, Ordering::Release);
@@ -197,7 +195,7 @@ fn is_meaningful_event(event: &Event) -> bool {
 /// Returns true when at least one path in the event is "resource-like":
 ///   1. some path component matches one of [`WATCHED_SUBDIRS`]
 ///      (e.g. `…/skills/picked-up/SKILL.md` contains a `skills` segment),
-///      AND every component appearing *after* it is non-noise, AND
+///      AND every component appearing *after* it is non-noise when present, AND
 ///   2. no path component is a dotfile / editor swap file / tmpfile.
 ///
 /// We deliberately don't prefix-match against `_roots` because notify
@@ -207,10 +205,22 @@ fn is_meaningful_event(event: &Event) -> bool {
 /// match would silently fail. Matching on a known subdir component is
 /// just as targeted and survives this platform quirk.
 fn is_resource_event(event: &Event, _roots: &[PathBuf]) -> bool {
-    event.paths.iter().any(|p| is_resource_path(p.as_path()))
+    event.paths.iter().any(|p| {
+        matches!(
+            classify_resource_path(p.as_path()),
+            ResourcePathMatch::Concrete | ResourcePathMatch::ParentOnly
+        )
+    })
 }
 
-fn is_resource_path(path: &Path) -> bool {
+enum ResourcePathMatch {
+    Concrete,
+    ParentOnly,
+    Noise,
+    Unrelated,
+}
+
+fn classify_resource_path(path: &Path) -> ResourcePathMatch {
     // Walk path components forward. Ignore everything up to (and
     // including) the first match against a watched subdir; check only
     // the *trailing* segments for dotfile/swap-file noise. We can't
@@ -233,23 +243,39 @@ fn is_resource_path(path: &Path) -> bool {
         }
     }
     let Some(start) = after_subdir else {
-        return false;
+        return ResourcePathMatch::Unrelated;
     };
+    let mut trailing_components = 0;
     for component in components.iter().skip(start) {
         let std::path::Component::Normal(raw) = component else {
             continue;
         };
         let Some(name) = raw.to_str() else {
-            return false;
+            return ResourcePathMatch::Noise;
         };
         if name.starts_with('.') {
-            return false;
+            return ResourcePathMatch::Noise;
         }
         if name.ends_with('~') || name.ends_with(".swp") || name.ends_with(".tmp") {
-            return false;
+            return ResourcePathMatch::Noise;
         }
+        if trailing_components > 0 {
+            return ResourcePathMatch::Concrete;
+        }
+        trailing_components += 1;
     }
-    true
+    ResourcePathMatch::ParentOnly
+}
+
+fn should_raise_signal(
+    last_fired: Option<Instant>,
+    signal_already_set: bool,
+    now: Instant,
+) -> bool {
+    let Some(prev) = last_fired else {
+        return true;
+    };
+    now.duration_since(prev) >= DEBOUNCE || !signal_already_set
 }
 
 #[cfg(test)]
@@ -387,6 +413,21 @@ mod tests {
         assert!(
             wait_for_signal(&signal, Duration::from_secs(2)),
             "watcher should re-raise the signal after the debounce window elapses"
+        );
+    }
+
+    #[test]
+    fn debounce_allows_reraising_after_consumer_clears_signal() {
+        let now = Instant::now();
+        let first_fire = now - Duration::from_millis(10);
+
+        assert!(
+            !should_raise_signal(Some(first_fire), true, now),
+            "a still-latched signal covers duplicate events inside the debounce window"
+        );
+        assert!(
+            should_raise_signal(Some(first_fire), false, now),
+            "a consumed signal can be raised again for a follow-up file write inside the debounce window"
         );
     }
 

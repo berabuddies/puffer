@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "workflows-draft-graph",
+  "title": "Workflows draft graph editing and stale refresh",
+  "priority": 6,
+  "seed": "workflows-draft-race",
+  "startNode": "workflows/draft-graph",
+  "entrypoint": "workflows.node-editor",
+  "iterations": 10,
+  "steps": 12,
+  "replayLimit": 2,
+  "ownedNodes": ["workflows/draft-graph"],
+  "allowedSetupNodes": ["app", "workflows"],
+  "ownedCoverage": ["route:workflows", "control:workflows.node-editor", "control:workflows.trigger-editor", "async:server-push-update", "invariant:draft-preserved-on-failure"],
+  "allowedAsyncEvents": ["late-success", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "draft-preserved-on-failure", "no-data-loss", "stale-error-scoped", "no-permanent-loading"]
+}

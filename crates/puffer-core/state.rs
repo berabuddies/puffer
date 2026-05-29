@@ -203,6 +203,10 @@ pub struct AppState {
     pub vim_mode: bool,
     /// Session-scoped reflection policy toggled via `/reflect`; `None` means off.
     pub reflection_config: Option<ReflectionConfig>,
+    /// Active Lambda Skill host-call gate for the current skill side turn.
+    pub(crate) lambda_gate: Option<crate::runtime::lambda_gate::LambdaGateState>,
+    /// Formal Lambda host call waiting for its declared concrete Puffer tool.
+    pub(crate) pending_lambda_host_call: Option<crate::runtime::lambda_gate::PendingLambdaHostCall>,
     /// Optional persisted goal for the current session, set via `/goal`.
     /// Borrows the shape of Codex's per-thread goal (`codex/codex-rs/core/src/goals.rs`)
     /// — objective text + creation timestamp + optional token budget.
@@ -252,6 +256,8 @@ pub struct AppState {
     pub tool_runner: Arc<dyn ToolRunner>,
     /// In-memory store for interactive/background processes with PTY or pipe I/O.
     pub process_store: Arc<Mutex<crate::runtime::process_store::ProcessStore>>,
+    /// Session-scoped secret handles prepared by verified Lambda Skill bridges.
+    pub(crate) secret_values: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -316,6 +322,8 @@ impl AppState {
             project_memory_review_turns: 0,
             vim_mode,
             reflection_config: None,
+            lambda_gate: None,
+            pending_lambda_host_call: None,
             session_goal: None,
             should_exit: false,
             reload_resources_requested: false,
@@ -339,6 +347,7 @@ impl AppState {
             process_store: Arc::new(Mutex::new(
                 crate::runtime::process_store::ProcessStore::default(),
             )),
+            secret_values: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

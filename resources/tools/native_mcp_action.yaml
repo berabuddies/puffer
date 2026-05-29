@@ -1,0 +1,65 @@
+id: NativeMcpAction
+name: NativeMcpAction
+description: |-
+  Validate and add MCP server manifests for verified native-mcp Lambda Skill
+  contracts.
+
+  This tool preserves the native-mcp safety claims in Puffer: stdio servers
+  are written with a safe inherited environment plus explicit env values only,
+  HTTP headers can be carried through SecretValue handles, and sampling must
+  remain disabled until Puffer has a bounded sampling implementation.
+handler: runtime:workflow:native_mcp_action
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - validateStdioConfig
+        - validateHttpConfig
+        - applySecurityPolicy
+        - configureSampling
+        - addStdioServer
+        - addHttpServer
+        - discoverTools
+    name:
+      type: string
+    command:
+      type: string
+    args:
+      type: array
+      items:
+        type: string
+    envVars:
+      x-puffer-secret: true
+      description: SecretValue handle, JSON object, JSON string, or KEY=VALUE lines for stdio env.
+    url:
+      type: string
+    headers:
+      x-puffer-secret: true
+      description: SecretValue handle, JSON object, JSON string, or KEY=VALUE lines for HTTP headers.
+    timeout:
+      type: integer
+    connectTimeout:
+      type: integer
+    config:
+      description: ServerConfig object produced by validateStdioConfig or validateHttpConfig.
+    security:
+      description: SecurityReview object produced by applySecurityPolicy.
+    sampling:
+      description: SamplingConfig object produced by configureSampling.
+    trusted:
+      type: boolean
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: true
+display:
+  group: mcp
+  title: NativeMcpAction
+  show_in_status: true

@@ -1,0 +1,93 @@
+id: TaskFlow
+name: TaskFlow
+description: |-
+  Typed workflow-state surface for verified Lambda Skill contracts.
+
+  Use this for contracts that create or update a managed workflow state record,
+  link child work to a flow, enforce an expected revision before mutating state,
+  append to a named local buffer, or read a compact flow summary. It does not
+  send network messages or execute shell commands.
+handler: runtime:workflow:task_flow
+approval_policy: auto
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - from_tool_context
+        - bind_session
+        - create_managed
+        - run_task
+        - set_waiting
+        - resume
+        - finish
+        - fail
+        - request_cancel
+        - cancel_flow
+        - get_task_summary
+        - append_buffer
+      description: The workflow-state operation to perform.
+    flow:
+      description: Optional TaskFlow binding object returned by from_tool_context or bind_session.
+    ctx:
+      description: Trusted tool context used by from_tool_context.
+    sessionKey:
+      type: string
+      description: Session key for bind_session.
+    requesterOrigin:
+      type: string
+      description: Request origin for bind_session.
+    controllerId:
+      type: string
+      description: Controller identifier for a new managed flow.
+    goal:
+      type: string
+      description: Goal text for a new managed flow.
+    currentStep:
+      type: string
+      description: Current workflow step.
+    stateJson:
+      description: JSON state object or JSON-encoded state string.
+    waitJson:
+      description: JSON wait object or JSON-encoded wait string.
+    runtime:
+      type: string
+      description: Runtime identifier for run_task.
+    childSessionKey:
+      type: string
+      description: Child session key to link to the flow for run_task.
+    runId:
+      type: string
+      description: Optional child run id. Defaults to a deterministic local child id.
+    taskDesc:
+      type: string
+      description: Task description to link to the flow for run_task.
+    flowId:
+      type: string
+      description: Managed workflow id.
+    expectedRevision:
+      description: Revision token that must match before mutating an existing flow.
+    status:
+      type: string
+      description: Optional status override for resume; defaults to running.
+    reason:
+      type: string
+      description: Failure or cancellation reason.
+    namespace:
+      type: string
+      description: Local buffer namespace for append_buffer.
+    item:
+      description: Item to append for append_buffer.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: true
+  may_write_files: true
+display:
+  group: workflow
+  title: TaskFlow
+  show_in_status: true

@@ -12,13 +12,51 @@
     onOpenBoard?: (projectId: string) => void;
     onNewAgent?: () => void;
     onTogglePin?: () => void;
+    onDeleteProject?: () => void | Promise<void>;
+    onSetProjectTags?: (tags: string[]) => void | Promise<void>;
+    onDeleteSession?: (sessionId: string) => void | Promise<void>;
+    onSetSessionTags?: (sessionId: string, tags: string[]) => void | Promise<void>;
   };
 
-  let { project, agents, pinned = false, pinBusy = false, onOpenAgent, onOpenBoard, onNewAgent, onTogglePin }: Props = $props();
+  let {
+    project,
+    agents,
+    pinned = false,
+    pinBusy = false,
+    onOpenAgent,
+    onOpenBoard,
+    onNewAgent,
+    onTogglePin,
+    onDeleteProject,
+    onSetProjectTags,
+    onDeleteSession,
+    onSetSessionTags
+  }: Props = $props();
+
+  function parseTags(input: string): string[] {
+    return input
+      .split(/[\s,]+/)
+      .map((tag) => tag.trim())
+      .filter((tag) => tag.length > 0);
+  }
+
+  function handleEditProjectTags() {
+    if (!onSetProjectTags) return;
+    const current = (project.tags ?? []).join(", ");
+    const raw = window.prompt(
+      `Tags for ${project.name} (comma- or space-separated, blank to clear):`,
+      current
+    );
+    if (raw === null) return;
+    void onSetProjectTags(parseTags(raw));
+  }
+
+  function requestDeleteProject() {
+    if (!onDeleteProject) return;
+    void onDeleteProject();
+  }
 
   let collapsed = $state(false);
-  let active = $derived(agents.filter((a) => a.status === "running" || a.status === "awaiting").length);
-  let review = $derived(agents.filter((a) => a.status === "review").length);
 </script>
 
 <div class="pf-pw-project" data-collapsed={collapsed}>
@@ -45,40 +83,62 @@
       {#if project.branch}
         <span class="branch"><Icon name="branch" size={10} />{project.branch}</span>
       {/if}
+      {#if project.tags && project.tags.length > 0}
+        <span class="pf-pw-tags" aria-label="Project tags">
+          {#each project.tags as tag (tag)}
+            <span class="pf-pw-tag">{tag}</span>
+          {/each}
+        </span>
+      {/if}
     </div>
-    <div class="pf-pw-project-counts">
-      <span class="count">{agents.length} {agents.length === 1 ? "session" : "sessions"}</span>
-      <span class="sep">·</span>
-      <span class="count running">{active} active</span>
-      <span class="sep">·</span>
-      <span class="count review">{review} review</span>
+    <div class="pf-pw-project-actions" aria-label={`${project.name} actions`}>
+      <button
+        type="button"
+        class="pf-pw-icon-btn"
+        data-pinned={pinned}
+        onclick={onTogglePin}
+        title={pinned ? "Unpin workspace" : "Pin workspace"}
+        aria-label={pinned ? "Unpin workspace" : "Pin workspace"}
+        aria-pressed={pinned ? "true" : "false"}
+        disabled={!onTogglePin || pinBusy}
+      ><Icon name="pin" size={13} /></button>
+      <button
+        type="button"
+        class="pf-pw-icon-btn"
+        onclick={() => onOpenBoard?.(project.id)}
+        title="Open project details"
+        aria-label={`Open details for ${project.name}`}
+      ><Icon name="eye" size={13} /></button>
+      {#if onSetProjectTags}
+        <button
+          type="button"
+          class="pf-pw-icon-btn"
+          onclick={handleEditProjectTags}
+          title="Edit project tags"
+          aria-label={`Edit tags for ${project.name}`}
+        ><Icon name="edit" size={13} /></button>
+      {/if}
+      {#if onDeleteProject}
+        <button
+          type="button"
+          class="pf-pw-icon-btn"
+          onclick={requestDeleteProject}
+          title="Delete project"
+          aria-label={`Delete project ${project.name}`}
+        ><Icon name="trash" size={13} /></button>
+      {/if}
     </div>
-    <button
-      type="button"
-      class="sc-btn"
-      data-variant="ghost"
-      data-size="sm"
-      data-pinned={pinned}
-      onclick={onTogglePin}
-      title={pinned ? "Unpin workspace" : "Pin workspace"}
-      aria-label={pinned ? "Unpin workspace" : "Pin workspace"}
-      aria-pressed={pinned ? "true" : "false"}
-      disabled={!onTogglePin || pinBusy}
-    ><Icon name="pin" size={12} />{pinned ? "Pinned" : "Pin"}</button>
-    <button
-      type="button"
-      class="sc-btn"
-      data-variant="ghost"
-      data-size="sm"
-      onclick={() => onOpenBoard?.(project.id)}
-      title="Open project details"
-    >Details</button>
   </div>
 
   {#if !collapsed}
     <div class="pf-pw-agents-strip">
       {#each agents as a (a.id)}
-        <AgentCard {a} onOpen={() => onOpenAgent?.(a.id)} />
+        <AgentCard
+          {a}
+          onOpen={() => onOpenAgent?.(a.id)}
+          onDelete={onDeleteSession ? () => onDeleteSession(a.id) : undefined}
+          onSetTags={onSetSessionTags ? (tags) => onSetSessionTags(a.id, tags) : undefined}
+        />
       {/each}
       {#if agents.length === 0}
         <div class="pf-pw-agents-empty">

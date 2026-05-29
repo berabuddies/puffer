@@ -35,6 +35,11 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
     let root_session_id = required_string(params, "sessionId")?;
     let width = optional_u32(params, "width").unwrap_or(INITIAL_WIDTH);
     let height = optional_u32(params, "height").unwrap_or(INITIAL_HEIGHT);
+    if let Some(chrome_profile) = chrome_profile_override(params)? {
+        state
+            .browsers
+            .set_root_chrome_profile(&root_session_id, chrome_profile);
+    }
     match action.as_str() {
         "list" => Ok(serde_json::to_value(
             state.browsers.list_tabs(&root_session_id),
@@ -133,6 +138,15 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             state.browsers.agent_snapshot(&backend_id)
         }
+        "consoleLogs" | "console" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            let clear = params
+                .get("clear")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            state.browsers.console_logs(&backend_id, clear)
+        }
         "screenshot" => {
             let (tab_id, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
@@ -141,6 +155,38 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state
                 .browsers
                 .agent_screenshot(&backend_id, &tab_id, options)
+        }
+        "openScreenshot" => {
+            let url = required_string(params, "url")?;
+            let (tab_id, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            state.browsers.navigate(&backend_id, url)?;
+            state.browsers.focus_tab(&root_session_id, &tab_id)?;
+            publish_tabs(state, &root_session_id);
+            state
+                .browsers
+                .wait_for_load(&backend_id, navigation_timeout(params))?;
+            let options = parse_agent_screenshot_options(params)?;
+            state
+                .browsers
+                .agent_screenshot(&backend_id, &tab_id, options)
+        }
+        "openConsoleLogs" => {
+            let url = required_string(params, "url")?;
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            let _ = state.browsers.console_logs(&backend_id, true);
+            state.browsers.arm_agent_recording(&backend_id);
+            state.browsers.navigate(&backend_id, url)?;
+            state
+                .browsers
+                .wait_for_load(&backend_id, navigation_timeout(params))?;
+            let clear = params
+                .get("clear")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            state.browsers.console_logs(&backend_id, clear)
         }
         "click" => {
             let (_, backend_id) =
@@ -538,7 +584,7 @@ fn ensure_target_tab(
     height: u32,
 ) -> Result<(String, String)> {
     let tabs = state.browsers.list_tabs(root_session_id);
-    if let Some(tab_id) = optional_string(params, "tabId") {
+    if let Some(tab_id) = optional_string(params, "tabId").or_else(|| tab_id_from_page(params)) {
         let backend_id = backend_session_id(root_session_id, &tab_id);
         let restore_url = tabs
             .tabs
@@ -581,6 +627,23 @@ fn ensure_target_tab(
     )?;
     publish_tabs(state, root_session_id);
     Ok((tab.tab_id, tab.backend_session_id))
+}
+
+fn tab_id_from_page(params: &Value) -> Option<String> {
+    let page = params.get("page")?;
+    if let Some(tab_id) = page
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(tab_id.to_string());
+    }
+    page.get("tabId")
+        .or_else(|| page.get("tab_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn ensure_backend_session(
@@ -639,6 +702,29 @@ fn optional_string(params: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn chrome_profile_override(params: &Value) -> Result<Option<Option<String>>> {
+    let Some(value) = params
+        .get("chromeProfile")
+        .or_else(|| params.get("chrome_profile"))
+    else {
+        return Ok(None);
+    };
+    match value {
+        Value::Null => Ok(Some(None)),
+        Value::String(value) if value.trim().is_empty() => Ok(Some(None)),
+        Value::String(value) => Ok(Some(Some(value.trim().to_string()))),
+        _ => bail!("chromeProfile must be string or null"),
+    }
+}
+
+fn navigation_timeout(params: &Value) -> Duration {
+    Duration::from_millis(u64::from(
+        optional_u32(params, "timeoutMs")
+            .unwrap_or(30_000)
+            .clamp(1, 120_000),
+    ))
+}
+
 /// Returns the text payload for one synthesized key event when applicable.
 pub(super) fn key_text(key: &str) -> Option<String> {
     (key.len() == 1).then(|| key.to_string())
@@ -695,7 +781,7 @@ mod tests {
     #[test]
     fn open_target_resolution_reserves_first_new_tab() {
         let profile = tempfile::tempdir().unwrap();
-        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false);
+        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false, None);
         let params = json!({});
 
         let tab_id = resolve_open_target_tab_id(&browsers, "root", &params, true);
@@ -717,7 +803,7 @@ mod tests {
     #[test]
     fn open_target_resolution_reuses_active_tab() {
         let profile = tempfile::tempdir().unwrap();
-        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false);
+        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false, None);
         browsers.tabs.lock().unwrap().open_tab(
             "root",
             Some("existing".to_string()),
@@ -730,5 +816,17 @@ mod tests {
         let tab_id = resolve_open_target_tab_id(&browsers, "root", &json!({}), true);
 
         assert_eq!(tab_id, "existing");
+    }
+
+    #[test]
+    fn page_handle_can_resolve_target_tab_id() {
+        assert_eq!(
+            tab_id_from_page(&json!({ "page": { "tabId": "t3" } })).as_deref(),
+            Some("t3")
+        );
+        assert_eq!(
+            tab_id_from_page(&json!({ "page": "t4" })).as_deref(),
+            Some("t4")
+        );
     }
 }

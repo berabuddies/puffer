@@ -1,0 +1,737 @@
+.pf-tasks {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--background);
+}
+
+.pf-tasks-top {
+  flex-shrink: 0;
+  height: 48px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: color-mix(in oklab, var(--background) 96%, var(--muted));
+}
+
+.pf-tasks-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pf-tasks-title h1 {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.pf-tasks-title span {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-tasks-top-right {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pf-tasks-search {
+  width: min(320px, 32vw);
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--muted-foreground);
+}
+
+.pf-tasks-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.pf-tasks-search input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.pf-tasks-summary {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  background: var(--background);
+}
+
+.pf-tasks-summary button,
+.pf-tasks-summary > div,
+.pf-tasks-summary label {
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.pf-tasks-summary button {
+  cursor: pointer;
+}
+
+.pf-tasks-summary button:hover {
+  background: var(--accent);
+}
+
+.pf-tasks-summary button[data-active="true"] {
+  background: var(--pf-selected-bg);
+  color: var(--foreground);
+}
+
+.pf-tasks-summary strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.pf-tasks-summary span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pf-tasks-summary select {
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 0 7px;
+  font-size: 12px;
+}
+
+.pf-monitor-create {
+  flex-shrink: 0;
+  min-height: 42px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in oklab, var(--muted) 18%, var(--background));
+}
+
+.pf-monitor-create label {
+  min-width: min(360px, 48vw);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pf-monitor-create label > span,
+.pf-monitor-create-empty {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.pf-monitor-create select {
+  min-width: 0;
+  width: 100%;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.pf-monitor-create button {
+  margin-left: auto;
+}
+
+.pf-tasks-warning {
+  flex-shrink: 0;
+  min-height: 38px;
+  padding: 6px 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--puffer-accent) 24%, var(--border));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: color-mix(in oklab, var(--puffer-accent) 8%, var(--background));
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.pf-tasks-warning span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-tasks-warning strong {
+  font-weight: 650;
+}
+
+.pf-tasks-warning button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.pf-tasks-error {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--destructive) 25%, var(--border));
+  background: color-mix(in oklab, var(--destructive) 8%, var(--background));
+  color: var(--destructive);
+  font-size: 12px;
+}
+
+.pf-tasks-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pf-task-row {
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+
+.pf-task-row:hover {
+  background: color-mix(in oklab, var(--muted) 42%, transparent);
+}
+
+.pf-task-row[data-terminal="true"] {
+  color: color-mix(in oklab, var(--foreground) 72%, var(--muted-foreground));
+}
+
+.pf-task-row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pf-task-row-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.pf-task-row-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.pf-task-source,
+.pf-task-status {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pf-task-source {
+  background: color-mix(in oklab, var(--muted) 70%, transparent);
+  color: var(--muted-foreground);
+}
+
+.pf-task-row[data-source="monitor"] .pf-task-source {
+  background: color-mix(in oklab, var(--puffer-accent) 12%, var(--background));
+  color: var(--puffer-accent);
+}
+
+.pf-task-status {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.pf-task-status[data-status="completed"] {
+  background: color-mix(in oklab, oklch(0.62 0.15 145) 14%, var(--background));
+  color: oklch(0.52 0.14 145);
+}
+
+.pf-task-status[data-status="failed"],
+.pf-task-status[data-status="stopped"] {
+  background: color-mix(in oklab, var(--destructive) 12%, var(--background));
+  color: var(--destructive);
+}
+
+.pf-task-status[data-status="ignored"] {
+  background: color-mix(in oklab, var(--muted) 78%, var(--background));
+  color: var(--muted-foreground);
+}
+
+.pf-task-row-main p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pf-task-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  overflow: hidden;
+}
+
+.pf-task-meta > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-task-meta code {
+  max-width: 180px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.pf-task-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.pf-task-ignore {
+  color: var(--muted-foreground);
+}
+
+.pf-task-ignore:hover {
+  color: var(--destructive);
+}
+
+.pf-task-ignore-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.pf-task-ignore-options {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 180px;
+  max-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--popover);
+  box-shadow: var(--shadow-md);
+}
+
+.pf-task-ignore-options button {
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--foreground);
+  padding: 7px 8px;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.pf-task-ignore-options button:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.pf-tasks-empty {
+  padding: 24px 14px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.pf-task-config-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--background) 72%, transparent);
+  backdrop-filter: blur(4px);
+}
+
+.pf-task-config {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pf-task-config-head {
+  min-height: 54px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pf-task-config-head h2 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.pf-task-config-head span,
+.pf-task-config-section-head span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.pf-task-config-section {
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pf-task-config-section:last-child {
+  min-height: 0;
+  border-bottom: 0;
+  overflow: auto;
+}
+
+.pf-task-config-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.pf-task-config-section-head strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.pf-task-config-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.pf-task-config-row label,
+.pf-task-config-memory-select {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pf-task-config-row label > span,
+.pf-task-config-memory-select > span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pf-task-config input,
+.pf-task-config select,
+.pf-task-config textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.pf-task-config input,
+.pf-task-config select {
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.pf-task-config input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.pf-task-config textarea {
+  min-height: 260px;
+  resize: vertical;
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.pf-task-config input:focus,
+.pf-task-config select:focus,
+.pf-task-config textarea:focus {
+  outline: none;
+  border-color: color-mix(in oklab, var(--puffer-accent) 60%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--puffer-accent) 16%, transparent);
+}
+
+.pf-task-config p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.pf-task-config-memory-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.pf-task-monitor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pf-task-monitor-row {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pf-task-monitor-row[data-enabled="false"] {
+  color: var(--muted-foreground);
+}
+
+.pf-task-monitor-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pf-task-monitor-main strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.pf-task-monitor-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.pf-task-monitor-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.pf-task-filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+
+.pf-task-filter-rule {
+  min-width: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.pf-task-filter-rule span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pf-task-filter-rule code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.pf-task-config-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 860px) {
+  .pf-tasks-top {
+    height: auto;
+    min-height: 48px;
+    align-items: stretch;
+    flex-direction: column;
+    padding: 8px 10px;
+  }
+
+  .pf-tasks-top-right {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .pf-tasks-search {
+    width: 100%;
+  }
+
+  .pf-tasks-summary {
+    padding: 6px 10px;
+  }
+
+  .pf-monitor-create {
+    padding: 8px 10px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pf-monitor-create label {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .pf-monitor-create button {
+    margin-left: 0;
+    align-self: flex-start;
+  }
+
+  .pf-tasks-warning {
+    padding: 8px 10px;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pf-tasks-warning span {
+    white-space: normal;
+  }
+
+  .pf-tasks-warning button {
+    margin-left: 0;
+  }
+
+  .pf-task-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .pf-task-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .pf-task-config-backdrop {
+    padding: 10px;
+    align-items: stretch;
+  }
+
+  .pf-task-config {
+    width: 100%;
+    max-height: calc(100vh - 20px);
+  }
+
+  .pf-task-config-row,
+  .pf-task-config-section-head,
+  .pf-task-config-actions,
+  .pf-task-monitor-row,
+  .pf-task-monitor-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pf-task-filter-rule {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+}

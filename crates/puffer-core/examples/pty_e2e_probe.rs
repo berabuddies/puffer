@@ -26,8 +26,7 @@ fn main() -> Result<()> {
     let config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = puffer_provider_registry::AuthStore::load(&auth_path)?;
-    let resources =
-        load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
+    let resources = load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
 
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
@@ -55,8 +54,12 @@ fn main() -> Result<()> {
     }
     let _ = providers.discover_and_merge_all(&auth_store);
 
-    let provider_id = std::env::var("PROBE_PROVIDER")
-        .unwrap_or_else(|_| config.default_provider.clone().unwrap_or_else(|| "hanbbq".to_string()));
+    let provider_id = std::env::var("PROBE_PROVIDER").unwrap_or_else(|_| {
+        config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "hanbbq".to_string())
+    });
     let model = resolve_model(&providers, &provider_id)?;
     eprintln!("[pty-probe] provider={provider_id} model={model}");
 
@@ -104,7 +107,13 @@ After each step, report what output you received. At the end, summarize whether 
     );
     eprintln!();
 
-    let turn = execute_user_turn(&mut state, &resources, &mut providers, &mut auth_store, prompt)?;
+    let turn = execute_user_turn(
+        &mut state,
+        &resources,
+        &mut providers,
+        &mut auth_store,
+        prompt,
+    )?;
     eprintln!();
     eprintln!(
         "[pty-probe] turn completed: {} tool invocations",
@@ -132,7 +141,10 @@ After each step, report what output you received. At the end, summarize whether 
         let mut store = state.process_store.lock().unwrap();
         let exited = store.drain_exited();
         eprintln!();
-        eprintln!("[pty-probe] ProcessStore: {} processes drained (exited)", exited.len());
+        eprintln!(
+            "[pty-probe] ProcessStore: {} processes drained (exited)",
+            exited.len()
+        );
         for (pid, cmd, code) in &exited {
             eprintln!("  pid={pid} cmd={cmd:?} exit_code={code:?}");
         }

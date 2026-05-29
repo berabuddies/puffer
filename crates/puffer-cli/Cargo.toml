@@ -30,6 +30,8 @@ puffer-runner-api = { path = "../puffer-runner-api" }
 puffer-runner-grpc = { path = "../puffer-runner-grpc" }
 puffer-runner-local = { path = "../puffer-runner-local" }
 puffer-session-store = { path = "../puffer-session-store" }
+puffer-lark = { path = "../puffer-lark" }
+puffer-slack = { path = "../puffer-slack" }
 puffer-subscriber-email = { path = "../puffer-subscriber-email" }
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
 puffer-subscriber-telegram-user = { path = "../puffer-subscriber-telegram-user" }
@@ -46,6 +48,7 @@ webbrowser = "1.0"
 # Daemon subcommand dependencies — WebSocket server + tower-layered HTTP
 axum = { version = "0.7", features = ["ws"] }
 futures = "0.3"
+fslock.workspace = true
 rand = "0.8"
 tower = "0.5"
 
@@ -59,7 +62,6 @@ puffer-connector-discord = { path = "../puffer-connector-discord", optional = tr
 puffer-connector-slack = { path = "../puffer-connector-slack", optional = true }
 puffer-connector-matrix = { path = "../puffer-connector-matrix", optional = true }
 puffer-connector-email = { path = "../puffer-connector-email", optional = true }
-puffer-connector-webhook = { path = "../puffer-connector-webhook", optional = true }
 ctrlc = "3"
 
 # PTY-backed user terminal tab. `portable-pty` spawns a real shell in the
@@ -80,14 +82,12 @@ connector-discord = ["dep:puffer-connector-discord"]
 connector-slack = ["dep:puffer-connector-slack"]
 connector-matrix = ["dep:puffer-connector-matrix"]
 connector-email = ["dep:puffer-connector-email"]
-connector-webhook = ["dep:puffer-connector-webhook"]
 connectors-all = [
     "connector-telegram",
     "connector-discord",
     "connector-slack",
     "connector-matrix",
     "connector-email",
-    "connector-webhook",
 ]
 
 [dev-dependencies]

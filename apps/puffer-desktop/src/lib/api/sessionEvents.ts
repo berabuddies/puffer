@@ -47,7 +47,24 @@ export type SessionStreamEvent =
         input: string;
         output: string;
         success: boolean;
+        metadata?: unknown;
       }[];
+      replay?: boolean;
+    } & StreamActorFields)
+  | ({
+      type: "lambda-gate";
+      turnId: string;
+      callId: string;
+      toolId: string;
+      gateEvent: string;
+      hostTool?: string | null;
+      hostArgs?: unknown;
+      concreteTool?: string | null;
+      concreteInput?: unknown;
+      reason?: string | null;
+      retryTool?: string | null;
+      recoverable?: boolean | null;
+      registeredFacts?: unknown;
       replay?: boolean;
     } & StreamActorFields)
   | ({

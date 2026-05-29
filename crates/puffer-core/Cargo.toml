@@ -36,6 +36,7 @@ path = "tests/hot_reload.rs"
 anyhow.workspace = true
 arboard.workspace = true
 async-trait = "0.1"
+base64.workspace = true
 dirs.workspace = true
 glob.workspace = true
 fslock.workspace = true
@@ -69,6 +70,8 @@ puffer-resources = { path = "../puffer-resources" }
 puffer-runner-api = { path = "../puffer-runner-api" }
 puffer-session-store = { path = "../puffer-session-store" }
 puffer-skill-evolution = { path = "../puffer-skill-evolution" }
+puffer-lark = { path = "../puffer-lark" }
+puffer-slack = { path = "../puffer-slack" }
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
 puffer-subscriptions = { path = "../puffer-subscriptions" }
 puffer-tools = { path = "../puffer-tools" }
@@ -77,7 +80,6 @@ puffer-workflow = { path = "../puffer-workflow" }
 
 [dev-dependencies]
 axum = "0.8"
-base64.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokio-util = "0.7"

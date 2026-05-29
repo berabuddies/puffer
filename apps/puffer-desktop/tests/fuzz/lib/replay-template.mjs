@@ -59,6 +59,9 @@ export const REPLAY_ACTION_IDS = [
   "type-terminal",
   "close-terminal",
   "emit-late-pty-output",
+  "open-settings-connectors",
+  "start-connector-setup",
+  "answer-connector-questions",
   "open-settings-mcp",
   "add-mcp-server",
   "emit-mcp-list-refresh",
@@ -66,10 +69,10 @@ export const REPLAY_ACTION_IDS = [
   "open-permissions",
   "save-permissions",
   "emit-permissions-refresh",
-  "open-pipelines",
-  "edit-pipeline-node",
-  "edit-pipeline-trigger",
-  "emit-pipeline-refresh",
+  "open-workflows",
+  "edit-workflow-node",
+  "edit-workflow-trigger",
+  "emit-workflow-refresh",
   "type-page-input",
   "special-key",
   "emit-state-for-old-tab",
@@ -115,6 +118,9 @@ export function buildReplayTemplate(testCase, options = {}) {
     "  let activeReplaySessionId = \"session-browser\";",
     "  let activeReplayTurnId: string | null = null;",
     "  let activeReplayEventTurnId: string | null = null;",
+    "  let connectorReplaySessionId: string | null = null;",
+    "  let connectorReplayTurnId: string | null = null;",
+    "  let connectorReplayConnectionSlug: string | null = null;",
     "  let createdReplaySessionCount = 0;",
     "  let replayTurnSequence = 0;",
     "  let socketCountBeforeDisconnect = 0;",
@@ -224,6 +230,12 @@ function expectedTurnCountsByMessage(steps) {
   let currentMessage = "";
   let submittedCurrentIntent = false;
   for (const step of steps) {
+    if (step.action === "start-connector-setup" || step.action === "answer-connector-questions") {
+      const connectionSlug = String(step.params?.connectionSlug ?? "fuzz-connector");
+      const message = `/connect telegram-login ${connectionSlug}`;
+      counts[message] = (counts[message] ?? 0) + 1;
+      continue;
+    }
     if (step.action === "type-composer" && step.params?.text) {
       currentMessage = String(step.params.text);
       submittedCurrentIntent = false;
@@ -670,6 +682,74 @@ function commandsForAction(step) {
       return [
         "await openSettingsPane(page, \"MCP Servers\", /MCP|Servers/i);"
       ];
+    case "open-settings-connectors":
+      return [
+        "await openSettingsPane(page, \"Connectors\", /Connectors/i);"
+      ];
+    case "start-connector-setup":
+      return [
+        "await openSettingsPane(page, \"Connectors\", /Connectors/i);",
+        "const connectorPane = page.locator(\".pf-settings-pane\");",
+        "const existingConnectorQuestions = connectorPane.getByLabel(\"Connector setup questions\");",
+        "if (!(await existingConnectorQuestions.isVisible({ timeout: 500 }).catch(() => false))) {",
+        "  const connectorSlugInput = connectorPane.getByLabel(\"Connector connection slug\");",
+        "  await expect(connectorSlugInput).toBeVisible({ timeout: 3_000 });",
+        "  const connectorSlugEnabled = await expect(connectorSlugInput).toBeEnabled({ timeout: 5_000 }).then(() => true).catch(() => false);",
+        "  if (connectorSlugEnabled) {",
+        `    await connectorSlugInput.fill(${JSON.stringify(params.connectionSlug ?? "fuzz-connector")});`,
+        "    requestIndexBefore = daemon.requests.length;",
+        "    await connectorPane.getByRole(\"button\", { name: /Start setup/i }).click({ timeout: 2_000 });",
+        "    const connectorTurnRequest = await waitForNewDaemonRequest(daemon, \"run_agent_turn\", requestIndexBefore, () => true, 3_000);",
+        "    connectorReplaySessionId = String(connectorTurnRequest.params.sessionId ?? \"session-browser\");",
+        "    connectorReplayTurnId = replayTurnRegistry.latestForSession(connectorReplaySessionId);",
+        "    connectorReplayConnectionSlug = " + JSON.stringify(params.connectionSlug ?? "fuzz-connector") + ";",
+        "    emitReplayConnectorQuestions(daemon, connectorReplaySessionId, connectorReplayTurnId);",
+        "    await connectorPane.getByLabel(\"Connector setup questions\").waitFor({ state: \"visible\", timeout: 3_000 }).catch(() => undefined);",
+        "  }",
+        "}"
+      ];
+    case "answer-connector-questions":
+      return [
+        "await openSettingsPane(page, \"Connectors\", /Connectors/i);",
+        "const connectorPane = page.locator(\".pf-settings-pane\");",
+        "let connectorQuestionPanel = connectorPane.getByLabel(\"Connector setup questions\");",
+        "if (!(await connectorQuestionPanel.isVisible({ timeout: 500 }).catch(() => false))) {",
+        "  await connectorQuestionPanel.waitFor({ state: \"visible\", timeout: 3_000 }).catch(() => undefined);",
+        "}",
+        "if (!(await connectorQuestionPanel.isVisible({ timeout: 500 }).catch(() => false))) {",
+        "  const connectorSlugInput = connectorPane.getByLabel(\"Connector connection slug\");",
+        "  await expect(connectorSlugInput).toBeVisible({ timeout: 3_000 });",
+        "  const connectorSlugEnabled = await expect(connectorSlugInput).toBeEnabled({ timeout: 5_000 }).then(() => true).catch(() => false);",
+        "  if (connectorSlugEnabled) {",
+        `    await connectorSlugInput.fill(${JSON.stringify(params.connectionSlug ?? "fuzz-connector")});`,
+        "    requestIndexBefore = daemon.requests.length;",
+        "    await connectorPane.getByRole(\"button\", { name: /Start setup/i }).click({ timeout: 2_000 });",
+        "    const connectorTurnRequest = await waitForNewDaemonRequest(daemon, \"run_agent_turn\", requestIndexBefore, () => true, 3_000);",
+        "    connectorReplaySessionId = String(connectorTurnRequest.params.sessionId ?? \"session-browser\");",
+        "    connectorReplayTurnId = replayTurnRegistry.latestForSession(connectorReplaySessionId);",
+        "    connectorReplayConnectionSlug = " + JSON.stringify(params.connectionSlug ?? "fuzz-connector") + ";",
+        "    emitReplayConnectorQuestions(daemon, connectorReplaySessionId, connectorReplayTurnId);",
+        "    connectorQuestionPanel = connectorPane.getByLabel(\"Connector setup questions\");",
+        "  }",
+        "}",
+        "await expect(connectorQuestionPanel).toBeVisible({ timeout: 3_000 });",
+        "const connectorInputs = connectorQuestionPanel.locator(\".pf-connector-question input[type='text'], .pf-connector-question input[type='password']\");",
+        "for (let index = 0; index < await connectorInputs.count(); index += 1) {",
+        "  const input = connectorInputs.nth(index);",
+        "  if (await input.isEnabled().catch(() => false)) await input.fill(\"fuzz-secret\");",
+        "}",
+        "const connectorCheckboxes = connectorQuestionPanel.locator(\".pf-connector-question input[type='checkbox']\");",
+        "if (await connectorCheckboxes.count()) await connectorCheckboxes.first().check().catch(() => undefined);",
+        "const submitConnectorAnswers = connectorQuestionPanel.getByRole(\"button\", { name: /Submit answers/i });",
+        "await expect(submitConnectorAnswers).toBeEnabled({ timeout: 3_000 });",
+        "requestIndexBefore = daemon.requests.length;",
+        "await submitConnectorAnswers.click({ timeout: 2_000 });",
+        "await waitForNewDaemonRequest(daemon, \"resolve_user_question\", requestIndexBefore, () => true, 3_000);",
+        "emitReplayConnectorComplete(daemon, connectorReplaySessionId, connectorReplayTurnId, connectorReplayConnectionSlug);",
+        "connectorReplaySessionId = null;",
+        "connectorReplayTurnId = null;",
+        "connectorReplayConnectionSlug = null;"
+      ];
     case "add-mcp-server":
       return [
         "await openSettingsPane(page, \"MCP Servers\", /MCP|Servers/i);",
@@ -716,26 +796,26 @@ function commandsForAction(step) {
         "daemon.emit(\"settings:permissions:changed\", { reason: \"fuzz-refresh\", at: Date.now() });",
         "daemon.delayResponse(\"list_permissions\", () => true, 350);"
       ];
-    case "open-pipelines":
+    case "open-workflows":
       return [
         "await clickFirstVisible(page, [",
-        "  () => page.getByRole(\"button\", { name: /Pipelines|Workflows/i }).first(),",
-        "  () => page.locator(\".pf-sidebar-item\").filter({ hasText: /Pipelines|Workflows/ }).first()",
-        "], \"open Pipelines\");"
+        "  () => page.getByRole(\"button\", { name: /Workflows/i }).first(),",
+        "  () => page.locator(\".pf-sidebar-item\").filter({ hasText: /Workflows/ }).first()",
+        "], \"open Workflows\");"
       ];
-    case "edit-pipeline-node":
-    case "edit-pipeline-trigger":
+    case "edit-workflow-node":
+    case "edit-workflow-trigger":
       return [
         "await clickFirstVisible(page, [",
         "  () => page.locator(\"input, textarea\").first(),",
         "  () => page.locator(\"[contenteditable='true']\").first()",
-        "], \"focus pipeline editor\");",
+        "], \"focus workflow editor\");",
         `await page.keyboard.type(${JSON.stringify(params.field ?? "fuzz")});`
       ];
-    case "emit-pipeline-refresh":
+    case "emit-workflow-refresh":
       return [
         "daemon.emit(\"workflow:list:changed\", { reason: \"fuzz-refresh\", at: Date.now() });",
-        "daemon.delayResponse(\"list_workflows\", () => true, 350);"
+        "daemon.delayResponse(\"workflow_list\", () => true, 350);"
       ];
     case "type-page-input":
       return [
@@ -1346,6 +1426,36 @@ function replayHelperLines() {
     "      if (turnId) activeTurnIds.delete(turnId);",
     "    }",
     "  };",
+    "}",
+    "",
+    "function emitReplayConnectorQuestions(daemon, sessionId: string | null, turnId: string | null): void {",
+    "  if (!sessionId || !turnId) return;",
+    "  daemon.emit(`session:${sessionId}:event`, {",
+    "    type: \"user-question-request\",",
+    "    turnId,",
+    "    requestId: \"connector-setup\",",
+    "    questions: [",
+    "      { type: \"input\", header: \"Credential\", question: \"Connector credential\", options: [] },",
+    "      {",
+    "        type: \"choice\",",
+    "        header: \"Mode\",",
+    "        question: \"Setup mode\",",
+    "        options: [",
+    "          { label: \"Default\", description: \"Use recommended defaults\", preview: \"default\" },",
+    "          { label: \"Manual\", description: \"Enter all values manually\", preview: \"manual\" }",
+    "        ]",
+    "      }",
+    "    ]",
+    "  });",
+    "}",
+    "",
+    "function emitReplayConnectorComplete(daemon, sessionId: string | null, turnId: string | null, connectionSlug: string | null): void {",
+    "  if (!sessionId || !turnId) return;",
+    "  daemon.emit(`session:${sessionId}:event`, {",
+    "    type: \"turn-complete\",",
+    "    turnId,",
+    "    assistantText: `Created connector connection ${connectionSlug ?? \"fuzz-connector\"}.`",
+    "  });",
     "}",
     "",
     "async function waitForDaemonRequest(daemon, method: string, predicate = () => true, timeoutMs = 5_000) {",

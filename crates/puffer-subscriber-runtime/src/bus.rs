@@ -114,6 +114,7 @@ mod tests {
             event: Event {
                 topic: topic.into(),
                 kind: "message".into(),
+                control: false,
                 dedup_key: None,
                 text: String::new(),
                 payload: serde_json::Value::Null,

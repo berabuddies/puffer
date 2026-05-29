@@ -55,6 +55,10 @@ fn manifest_with_marker(server_id: &str, marker: &str) -> Vec<McpServerSpec> {
         endpoint: String::new(),
         target: format!("'{}' --marker {}", STUB_BIN, marker),
         description: "Integration-test stub MCP server".into(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: Default::default(),
         oauth: None,
     }]
@@ -177,6 +181,10 @@ fn bounded_retries_exhaust_for_dead_binary() {
         endpoint: String::new(),
         target: format!("'{}' --exit-immediately", STUB_BIN),
         description: "Always exits immediately".into(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: Default::default(),
         oauth: None,
     }];

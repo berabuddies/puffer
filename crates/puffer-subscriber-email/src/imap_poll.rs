@@ -294,6 +294,7 @@ fn build_message_event(topic: &str, config: &EmailConfig, uid: u32, email: &Pars
     Event {
         topic: topic.to_string(),
         kind: "message".to_string(),
+        control: false,
         dedup_key: Some(format!("{}:{}", config.username, uid)),
         text,
         payload: Value::Object(payload),

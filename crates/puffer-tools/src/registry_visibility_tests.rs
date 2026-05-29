@@ -166,9 +166,16 @@ fn workspace_builtin_tool_resources_are_registerable() {
         missing.is_empty(),
         "builtin resources produced unsupported tool registrations: {missing:?}"
     );
+    assert!(registry.definition("BrowserAction").is_some());
+    assert!(registry.definition("HttpRequest").is_some());
+    assert!(registry.definition("McpToolCall").is_some());
+    assert!(registry.definition("SlackAction").is_some());
+    assert!(registry.definition("TaskFlow").is_some());
     assert!(registry.definition("Sleep").is_some());
     assert!(!registered.contains("Browser"));
     assert!(!registered.contains("Email"));
+    assert!(!registered.contains("Lark"));
+    assert!(!registered.contains("Slack"));
     assert!(!registered.contains("Telegram"));
     assert!(registry.definition("EmailConfigure").is_none());
     assert!(registry.definition("TelegramLoginStart").is_none());
@@ -203,8 +210,12 @@ fn workspace_builtin_internal_tool_resources_are_registerable() {
     );
     assert!(registry.internal_definition("Browser").is_some());
     assert!(registry.internal_definition("Email").is_some());
+    assert!(registry.internal_definition("Lark").is_some());
+    assert!(registry.internal_definition("Slack").is_some());
     assert!(registry.internal_definition("Telegram").is_some());
     assert!(registry.definition("Browser").is_none());
     assert!(registry.definition("Email").is_none());
+    assert!(registry.definition("Lark").is_none());
+    assert!(registry.definition("Slack").is_none());
     assert!(registry.definition("Telegram").is_none());
 }

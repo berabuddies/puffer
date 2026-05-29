@@ -32,7 +32,7 @@ MODEL = "claude-opus-4-6"
 
 # Keep ANTHROPIC_API_KEY explicitly empty for the Infer Claude gateway. The
 # base URL and auth token are inherited from the launching shell so secrets do
-# not appear in this pipeline file.
+# not appear in this campaign file.
 CLAUDE_ENV = {
     "ANTHROPIC_API_KEY": "",
     "ANTHROPIC_MODEL": MODEL,
@@ -113,6 +113,18 @@ LEGACY_AREAS = [
         ),
     },
     {
+        "name": "settings-connectors",
+        "seed": "settings-connector-race",
+        "iterations": 20,
+        "steps": 14,
+        "replay_limit": 2,
+        "priority": "P2",
+        "focus": (
+            "Settings connector setup: deterministic /connect commands, dynamic "
+            "AskUserQuestion inputs, stale snapshots, and narrow layouts"
+        ),
+    },
+    {
         "name": "settings-mcp-permissions",
         "seed": "settings-mcp-permission-race",
         "iterations": 20,
@@ -125,14 +137,14 @@ LEGACY_AREAS = [
         ),
     },
     {
-        "name": "pipelines-drafts",
-        "seed": "pipelines-draft-race",
+        "name": "workflows-drafts",
+        "seed": "workflows-draft-race",
         "iterations": 20,
         "steps": 14,
         "replay_limit": 2,
         "priority": "P2",
         "focus": (
-            "Pipeline editor drafts and graph state: tab switching, refresh, provider "
+            "Workflow editor drafts and graph state: tab switching, refresh, provider "
             "changes, trigger edits, required-field validation, and cycle handling"
         ),
     },

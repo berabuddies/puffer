@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tungstenite::stream::MaybeTlsStream;
@@ -20,8 +21,9 @@ use super::chrome::{
     close_page_target, create_page_target, initial_page_target, read_devtools_ws_url,
     resolve_chrome_executable, ChromePageTarget,
 };
+use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
-use super::devtools::emit_devtools_event;
+use super::devtools::{devtools_event_payload, emit_devtools_payload};
 use super::input::send_input;
 use super::recording::BrowserRecordingRegistry;
 use super::screenshot::{
@@ -38,9 +40,10 @@ use super::worker::{
     set_read_timeout, start_screencast,
 };
 use super::{
-    BrowserCopySelection, BrowserCursor, BrowserEvaluation, BrowserHistoryDirection,
-    BrowserInputEvent, BrowserState, CDP_READ_TIMEOUT, DEFAULT_URL,
+    parse_evaluation_response, send_cdp, BrowserCopySelection, BrowserCursor, BrowserEvaluation,
+    BrowserHistoryDirection, BrowserInputEvent, BrowserState, CDP_READ_TIMEOUT, DEFAULT_URL,
 };
+use crate::browser_profiles::{prepare_managed_profile, ChromeProfileLaunch};
 
 type UploadReply = Sender<std::result::Result<(), String>>;
 
@@ -68,34 +71,21 @@ pub(super) struct BrowserSession {
 
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
-    pub(super) fn spawn(profile_dir: PathBuf, width: u32, height: u32) -> Result<Self> {
+    pub(super) fn spawn(
+        profile_dir: PathBuf,
+        selected_profile: Option<String>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
         let chrome = resolve_chrome_executable()
             .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
-        std::fs::create_dir_all(&profile_dir).context("create browser profile directory")?;
         super::chrome::terminate_profile_processes(&profile_dir);
-        match std::fs::remove_file(profile_dir.join("DevToolsActivePort")) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("remove stale Chrome DevToolsActivePort"),
-        }
+        let launch = prepare_managed_profile(&profile_dir, selected_profile.as_deref())?;
+        remove_stale_devtools_port(&profile_dir)?;
 
-        let mut child = Command::new(&chrome)
-            .arg("--headless=new")
-            .arg("--remote-debugging-port=0")
-            .arg(format!("--user-data-dir={}", profile_dir.display()))
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--disable-background-networking")
-            .arg("--disable-features=Translate")
-            .arg("--disable-gpu")
-            .arg("--allow-file-access")
-            .arg("--allow-file-access-from-files")
-            .arg("--force-color-profile=srgb")
-            .arg(format!("--window-size={width},{height}"))
-            .arg(DEFAULT_URL)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+        let mut command = Command::new(&chrome);
+        configure_chrome_command(&mut command, &profile_dir, &launch, width, height);
+        let mut child = command
             .spawn()
             .with_context(|| format!("launch Chrome at {}", chrome.display()))?;
 
@@ -183,6 +173,7 @@ impl BrowserSession {
     pub(super) fn spawn(
         events: broadcast::Sender<ServerEnvelope>,
         recordings: Arc<Mutex<BrowserRecordingRegistry>>,
+        console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
         session_id: String,
         root: BrowserRootSession,
         width: u32,
@@ -206,6 +197,7 @@ impl BrowserSession {
             run_cdp_worker(
                 events,
                 recordings,
+                console_logs,
                 session_id,
                 worker_root,
                 target,
@@ -252,6 +244,20 @@ impl BrowserSession {
         state.url = url;
         state.loading = true;
         Ok(())
+    }
+
+    /// Waits until the page worker reports that the current document finished loading.
+    pub(super) fn wait_for_load(&self, timeout: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            if !self.state.lock().unwrap().loading {
+                return Ok(());
+            }
+            if start.elapsed() >= timeout {
+                bail!("timed out waiting for browser page load");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     pub(super) fn reload(&self) -> Result<()> {
@@ -440,6 +446,7 @@ enum PendingKind {
 fn run_cdp_worker(
     events: broadcast::Sender<ServerEnvelope>,
     recordings: Arc<Mutex<BrowserRecordingRegistry>>,
+    console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
     session_id: String,
     root: BrowserRootSession,
     target: ChromePageTarget,
@@ -515,6 +522,7 @@ fn run_cdp_worker(
                         &channel_devtools,
                         &session_id,
                         &recordings,
+                        &console_logs,
                         &mut socket,
                         &mut next_id,
                         &mut pending,
@@ -678,6 +686,7 @@ fn handle_cdp_message(
     channel_devtools: &str,
     session_id: &str,
     recordings: &Arc<Mutex<BrowserRecordingRegistry>>,
+    console_logs: &Arc<Mutex<BrowserConsoleRegistry>>,
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: &mut u64,
     pending: &mut HashMap<u64, PendingKind>,
@@ -861,8 +870,12 @@ fn handle_cdp_message(
                 }
             }
         }
-        _ if emit_devtools_event(events, channel_devtools, method, &value) => {}
-        _ => {}
+        _ => {
+            if let Some(payload) = devtools_event_payload(method, &value) {
+                console_logs.lock().unwrap().record(session_id, &payload);
+                emit_devtools_payload(events, channel_devtools, payload);
+            }
+        }
     }
 }
 
@@ -921,59 +934,41 @@ fn emit_state_error<E: std::fmt::Display>(
     });
 }
 
-/// Decodes one CDP evaluation response into the Browser API result shape.
-pub(crate) fn parse_evaluation_response(value: &Value) -> Result<BrowserEvaluation> {
-    if let Some(details) = value.pointer("/result/exceptionDetails") {
-        let description = details
-            .pointer("/exception/description")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::trim)
-            .map(ToString::to_string);
-        let text = details
-            .get("text")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::trim)
-            .map(ToString::to_string);
-        let line_number = details.get("lineNumber").and_then(Value::as_u64);
-        let column_number = details.get("columnNumber").and_then(Value::as_u64);
-        let message = description
-            .or(text)
-            .unwrap_or_else(|| "unknown browser exception".to_string());
-        if let (Some(line), Some(column)) = (line_number, column_number) {
-            bail!(
-                "browser evaluation failed at line {}, column {}: {}",
-                line + 1,
-                column + 1,
-                message
-            );
-        }
-        bail!("browser evaluation failed: {message}");
+fn remove_stale_devtools_port(profile_dir: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(profile_dir.join("DevToolsActivePort")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove stale Chrome DevToolsActivePort"),
     }
-    let Some(result) = value.pointer("/result/result") else {
-        bail!("browser evaluation returned no result");
-    };
-    Ok(BrowserEvaluation {
-        value: result.get("value").cloned().unwrap_or(Value::Null),
-    })
 }
 
-/// Sends one raw CDP message and returns the assigned request id.
-pub(crate) fn send_cdp(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    next_id: &mut u64,
-    method: &str,
-    params: Value,
-) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    let _ = socket.send(Message::Text(
-        json!({ "id": id, "method": method, "params": params })
-            .to_string()
-            .into(),
-    ));
-    id
+fn configure_chrome_command(
+    command: &mut Command,
+    profile_dir: &std::path::Path,
+    launch: &ChromeProfileLaunch,
+    width: u32,
+    height: u32,
+) {
+    command
+        .arg("--headless=new")
+        .arg("--remote-debugging-port=0")
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-background-networking")
+        .arg("--disable-features=Translate")
+        .arg("--disable-gpu")
+        .arg("--allow-file-access")
+        .arg("--allow-file-access-from-files")
+        .arg("--force-color-profile=srgb")
+        .arg(format!("--window-size={width},{height}"))
+        .arg(DEFAULT_URL)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(profile_directory) = &launch.profile_directory {
+        command.arg(format!("--profile-directory={profile_directory}"));
+    }
 }
 
 fn ensure_root_alive(inner: &mut BrowserRootState) -> Result<()> {

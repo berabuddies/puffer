@@ -15,9 +15,10 @@ use puffer_test_support::{
     capture_tmux_visible_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command_with_size,
     temp_workspace, wait_for_tmux_text, TerminalSize,
 };
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -48,12 +49,16 @@ where
         while handled < expected_requests && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let mut buffer = vec![0_u8; 65_536];
-                    let bytes = stream.read(&mut buffer).unwrap_or(0);
-                    if bytes == 0 {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            eprintln!("mock listener read failed: {error}");
+                            continue;
+                        }
+                    };
+                    if request.is_empty() {
                         continue;
                     }
-                    let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
                     log.lock().unwrap().push(request);
                     let body = response_body(handled);
                     let response = format!(
@@ -75,6 +80,83 @@ where
         }
     });
     (format!("http://{address}"), requests, server)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut body_offset = None;
+    let mut expected_len = None;
+    loop {
+        let bytes = match stream.read(&mut chunk) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && !buffer.is_empty() =>
+            {
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        if bytes == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..bytes]);
+        if body_offset.is_none() {
+            if let Some(offset) = http_body_offset(&buffer) {
+                body_offset = Some(offset);
+                expected_len = content_length(&buffer[..offset]);
+            }
+        }
+        if let (Some(offset), Some(length)) = (body_offset, expected_len) {
+            if buffer.len() >= offset + length {
+                break;
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&buffer).to_string())
+}
+
+fn http_body_offset(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
+fn content_length(headers: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(headers);
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
+}
+
+fn request_json_body(raw: &str) -> Value {
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("");
+    serde_json::from_str(body).unwrap_or_else(|error| {
+        panic!("request body is not valid JSON: {error}\n--- body ---\n{body}")
+    })
+}
+
+fn request_tool_schema<'a>(request: &'a Value, tool_name: &str) -> &'a Value {
+    request["tools"]
+        .as_array()
+        .and_then(|tools| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+        })
+        .and_then(|tool| tool.get("input_schema"))
+        .unwrap_or_else(|| panic!("request is missing `{tool_name}` input schema: {request}"))
 }
 
 fn sse_text_response(text: &str) -> String {
@@ -523,6 +605,109 @@ fn tmux_agent_loop_drives_tool_round_trip_in_tui() {
     );
 
     let _ = capture_tmux_visible_pane(&session);
+}
+
+#[test]
+fn tmux_agent_loop_validates_workflow_shorthand_in_tui() {
+    if !require_tmux_or_skip("tmux_agent_loop_validates_workflow_shorthand_in_tui") {
+        return;
+    }
+
+    let final_text = "puffer-tmux-workflow-validate-ok";
+    let action_yaml = r#"steps:
+  - write_file:
+      path: /tmp/hi
+      content: "{{ event.text }}\n"
+"#;
+    let tool_input = json!({ "yaml_action": action_yaml }).to_string();
+    let final_text_owned = final_text.to_string();
+    let (mock_url, requests, server) = spawn_mock_anthropic(2, move |index| {
+        if index == 0 {
+            sse_tool_use_response("toolu_workflow_1", "WorkflowValidate", &tool_input)
+        } else {
+            sse_text_response(&final_text_owned)
+        }
+    });
+
+    let (_tempdir, workspace) = temp_workspace().unwrap();
+    link_repo_resources(workspace.as_path());
+    write_anthropic_override(workspace.as_path(), &mock_url);
+    write_config(workspace.as_path());
+
+    let binary = env!("CARGO_BIN_EXE_puffer");
+    let session = start_tmux_command_with_size(
+        "sh",
+        &[
+            "-lc",
+            &format!(
+                "HOME='{ws}' PUFFER_HTTP_TRACE_PATH='{ws}/wire.log' '{bin}'",
+                ws = workspace.display(),
+                bin = binary
+            ),
+        ],
+        Some(workspace.as_path()),
+        TerminalSize {
+            cols: 120,
+            rows: 40,
+        },
+    )
+    .unwrap();
+
+    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(20)).unwrap();
+    send_tmux_keys(
+        &session,
+        &[
+            "create a pipeline that on any message containing hi, save it to /tmp/hi",
+            "Enter",
+        ],
+    )
+    .unwrap();
+
+    let capture = match wait_for_tmux_text(&session, final_text, Duration::from_secs(40)) {
+        Ok(capture) => capture,
+        Err(error) => {
+            let pane = capture_tmux_visible_pane(&session)
+                .unwrap_or_else(|_| "<failed to capture pane>".to_string());
+            let wire = std::fs::read_to_string(workspace.join("wire.log"))
+                .unwrap_or_else(|_| "<no wire log>".to_string());
+            panic!(
+                "expected final text after workflow validation: {error}\n--- pane ---\n{pane}\n--- wire ---\n{wire}"
+            );
+        }
+    };
+    assert!(
+        capture.contains(final_text),
+        "tmux pane missing final text:\n{capture}"
+    );
+
+    server.join().unwrap();
+    let captured = requests.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        2,
+        "mock should have received workflow tool round trip requests"
+    );
+
+    let first_body = request_json_body(&captured[0]);
+    let workflow_create_schema = request_tool_schema(&first_body, "WorkflowCreate");
+    assert_eq!(
+        workflow_create_schema.get("type").and_then(Value::as_str),
+        Some("object")
+    );
+    assert!(
+        workflow_create_schema.get("anyOf").is_none(),
+        "WorkflowCreate schema must not expose top-level anyOf: {workflow_create_schema}"
+    );
+
+    let second_raw = &captured[1];
+    assert!(
+        second_raw.contains("tool_result"),
+        "second request missing workflow tool_result block: {second_raw}"
+    );
+    assert!(
+        second_raw.contains("file_append") && second_raw.contains("/tmp/hi"),
+        "workflow validation result should include normalized file_append action: {second_raw}"
+    );
 }
 
 #[test]

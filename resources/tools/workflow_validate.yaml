@@ -1,0 +1,29 @@
+id: WorkflowValidate
+name: WorkflowValidate
+description: |-
+  Validate a workflow action JSON object or YAML action graph before
+  registering it.
+
+  Prefer canonical actions. To append matching event text to a file:
+    type: file_append
+    path: /tmp/hi
+
+  Step shorthand is also accepted for compatibility:
+    steps:
+      - file_append:
+          path: /tmp/hi
+handler: runtime:workflow:workflow_validate
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    action:
+      type: object
+      description: Workflow action JSON.
+    yaml_action:
+      type: string
+      description: >-
+        Workflow action YAML. Prefer `type: file_append` with `path: /tmp/...`
+        for saving matching messages.
+  additionalProperties: false

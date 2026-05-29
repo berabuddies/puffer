@@ -10,6 +10,7 @@ export type MockProject = {
   remote: string;
   color: string;
   remoteHost?: boolean;
+  tags?: string[];
 };
 
 export type MockAgent = {
@@ -25,6 +26,7 @@ export type MockAgent = {
   tools: number;
   elapsed: string;
   model: string;
+  tags?: string[];
 };
 
 export type MockTask = {

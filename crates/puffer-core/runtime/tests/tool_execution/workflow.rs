@@ -1,6 +1,9 @@
 use super::*;
 use puffer_config::ConfigPaths;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
 use std::time::Duration;
 
 #[test]
@@ -19,6 +22,284 @@ fn todo_write_rejects_multiple_in_progress_items() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("at most one in_progress"));
+}
+
+#[test]
+fn process_control_lists_logs_and_stops_interactive_processes() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let process_id = {
+        let mut store = state.process_store.lock().unwrap();
+        let process_id = store.allocate_id();
+        let entry = crate::runtime::process_store::spawn_tracked_process(
+            "printf 'ready\\n'; sleep 30",
+            &cwd,
+            process_id,
+            true,
+        )
+        .unwrap();
+        store.insert(entry);
+        process_id
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let has_output = state
+            .process_store
+            .lock()
+            .unwrap()
+            .peek(process_id)
+            .map(|entry| String::from_utf8_lossy(&entry.collect_output()).contains("ready"))
+            .unwrap_or(false);
+        if has_output || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let listed = crate::runtime::claude_tools::workflow::process_control::execute_process_control(
+        &mut state,
+        &cwd,
+        json!({ "action": "list" }),
+    )
+    .unwrap();
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["processes"][0]["sessionId"], process_id.to_string());
+
+    let log = crate::runtime::claude_tools::workflow::process_control::execute_process_control(
+        &mut state,
+        &cwd,
+        json!({ "action": "log", "sessionId": process_id.to_string() }),
+    )
+    .unwrap();
+    let log: Value = serde_json::from_str(&log).unwrap();
+    assert!(log["output"].as_str().unwrap_or_default().contains("ready"));
+
+    let stopped = crate::runtime::claude_tools::workflow::process_control::execute_process_control(
+        &mut state,
+        &cwd,
+        json!({ "action": "kill", "sessionId": process_id.to_string() }),
+    )
+    .unwrap();
+    let stopped: Value = serde_json::from_str(&stopped).unwrap();
+    assert_eq!(stopped["status"], "killed");
+    assert!(state
+        .process_store
+        .lock()
+        .unwrap()
+        .peek(process_id)
+        .is_none());
+}
+
+#[test]
+fn task_flow_enforces_revisions_and_persists_state() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let created = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "create_managed",
+            "controllerId": "controller",
+            "goal": "triage inbox",
+            "currentStep": "classify",
+            "stateJson": "{\"items\":[]}"
+        }),
+    )
+    .unwrap();
+    let created: Value = serde_json::from_str(&created).unwrap();
+    let flow_id = created["flowId"].as_str().unwrap();
+    assert_eq!(created["revision"], 1);
+    assert_eq!(created["flow"]["status"], "running");
+
+    let waiting = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "set_waiting",
+            "flowId": flow_id,
+            "expectedRevision": 1,
+            "currentStep": "await_reply",
+            "stateJson": {"items": ["thread-1"]},
+            "waitJson": {"kind": "slack_reply", "thread": "thread-1"}
+        }),
+    )
+    .unwrap();
+    let waiting: Value = serde_json::from_str(&waiting).unwrap();
+    assert_eq!(waiting["applied"], true);
+    assert_eq!(waiting["revision"], 2);
+
+    let stale = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "resume",
+            "flowId": flow_id,
+            "expectedRevision": 1,
+            "currentStep": "route",
+            "stateJson": "{}"
+        }),
+    )
+    .unwrap();
+    let stale: Value = serde_json::from_str(&stale).unwrap();
+    assert_eq!(stale["applied"], false);
+    assert_eq!(stale["code"], "revision_mismatch");
+    assert_eq!(stale["currentRevision"], 2);
+
+    let finished = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "finish",
+            "flowId": flow_id,
+            "expectedRevision": "2",
+            "stateJson": {"done": true}
+        }),
+    )
+    .unwrap();
+    let finished: Value = serde_json::from_str(&finished).unwrap();
+    assert_eq!(finished["status"], "finished");
+    assert_eq!(finished["revision"], 3);
+
+    let summary = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "get_task_summary",
+            "flowId": flow_id
+        }),
+    )
+    .unwrap();
+    let summary: Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["summary"]["status"], "finished");
+    assert_eq!(summary["summary"]["state"], json!({"done": true}));
+}
+
+#[test]
+fn task_flow_bindings_and_buffers_do_not_spawn_or_call_network() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let binding = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "bind_session",
+            "sessionKey": "agent:main",
+            "requesterOrigin": "local"
+        }),
+    )
+    .unwrap();
+    let binding: Value = serde_json::from_str(&binding).unwrap();
+    assert_eq!(binding["flow"]["sessionKey"], "agent:main");
+
+    let appended = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "append_buffer",
+            "namespace": "eod",
+            "item": "send tomorrow"
+        }),
+    )
+    .unwrap();
+    let appended: Value = serde_json::from_str(&appended).unwrap();
+    assert_eq!(appended["applied"], true);
+    assert_eq!(appended["count"], 1);
+
+    let error = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "append_buffer",
+            "namespace": "../eod",
+            "item": "bad"
+        }),
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("namespace must be a simple identifier"));
+}
+
+#[test]
+fn http_request_sends_declared_json_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1/search", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if String::from_utf8_lossy(&request).contains("\"query\":\"alpha\"") {
+                break;
+            }
+        }
+        let request_text = String::from_utf8_lossy(&request).to_string();
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
+        stream.write_all(response.as_bytes()).unwrap();
+        request_text
+    });
+
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::claude_tools::workflow::http_request::execute_http_request(
+        &mut state,
+        &cwd,
+        json!({
+            "method": "POST",
+            "url": url,
+            "headers": {
+                "Authorization": "Bearer token",
+                "Notion-Version": "2022-06-28"
+            },
+            "json": {"query": "alpha"},
+            "timeoutMs": 5000
+        }),
+    )
+    .unwrap();
+    let request_text = server.join().unwrap();
+    assert!(request_text.starts_with("POST /v1/search HTTP/1.1"));
+    assert!(request_text.contains("authorization: Bearer token"));
+    assert!(request_text.contains("notion-version: 2022-06-28"));
+    assert!(request_text.contains("\"query\":\"alpha\""));
+
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["status"], 200);
+    assert_eq!(parsed["body"], "{\"ok\":true}");
+}
+
+#[test]
+fn http_request_fails_closed_on_http_errors_by_default() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/denied", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 256];
+        let _ = stream.read(&mut buffer).unwrap();
+        let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\ndenied";
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::http_request::execute_http_request(
+        &mut state,
+        &cwd,
+        json!({
+            "method": "GET",
+            "url": url
+        }),
+    )
+    .unwrap_err();
+    server.join().unwrap();
+    assert!(error
+        .to_string()
+        .contains("HTTP request failed with status 403"));
 }
 
 #[test]
@@ -286,76 +567,6 @@ fn config_tool_allows_null_to_clear_model_override() {
 }
 
 #[test]
-fn ask_user_question_rejects_duplicate_question_text() {
-    let mut state = temp_state();
-    let cwd = state.cwd.clone();
-    let error =
-        crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
-            &mut state,
-            &cwd,
-            json!({
-                "questions": [
-                    {
-                        "question": "Pick one",
-                        "header": "choice",
-                        "options": [
-                            {"label": "A", "description": "A"},
-                            {"label": "B", "description": "B"}
-                        ]
-                    },
-                    {
-                        "question": "Pick one",
-                        "header": "second",
-                        "options": [
-                            {"label": "C", "description": "C"},
-                            {"label": "D", "description": "D"}
-                        ]
-                    }
-                ]
-            }),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("question texts must be unique"));
-}
-
-#[test]
-fn ask_user_question_uses_prompt_handler_answers() {
-    let mut state = temp_state();
-    let cwd = state.cwd.clone();
-    let output = crate::runtime::with_user_question_prompt_handler(
-        |_request| crate::runtime::UserQuestionPromptResponse {
-            answers: serde_json::Map::from_iter([(
-                "Where is Lily?".to_string(),
-                json!("In the garden"),
-            )]),
-            annotations: serde_json::Map::new(),
-        },
-        || {
-            crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
-                &mut state,
-                &cwd,
-                json!({
-                    "questions": [
-                        {
-                            "question": "Where is Lily?",
-                            "header": "Location",
-                            "options": [
-                                {"label": "In the garden", "description": "Lily is outside"},
-                                {"label": "In the kitchen", "description": "Lily is inside"}
-                            ]
-                        }
-                    ]
-                }),
-            )
-        },
-    )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(parsed["pending"], false);
-    assert_eq!(parsed["answers"]["Where is Lily?"], "In the garden");
-}
-
-#[test]
 fn team_create_makes_dirs_and_team_delete_removes_them() {
     let tempdir = tempfile::tempdir().unwrap();
     let home = tempdir.path().join("home");
@@ -520,6 +731,82 @@ fn task_update_sets_timestamps_for_progress() {
     assert_eq!(task["status"], "in_progress");
     assert!(task["started_at_ms"].is_number());
     assert!(task["updated_at_ms"].is_number());
+}
+
+#[test]
+fn task_create_persists_received_and_expires_at() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let created = crate::runtime::claude_tools::workflow::task_create::execute_task_create(
+        &mut state,
+        &cwd,
+        json!({
+            "subject": "Handle support ping",
+            "description": "Handle support ping",
+            "receivedAt": "2026-05-27T12:00:00Z",
+            "expiresAt": "2026-05-28T12:00:00Z"
+        }),
+    )
+    .unwrap();
+    let created: Value = serde_json::from_str(&created).unwrap();
+    assert_eq!(created["task"]["receivedAt"], "2026-05-27T12:00:00Z");
+    assert_eq!(created["task"]["expiresAt"], "2026-05-28T12:00:00Z");
+
+    let tasks_path = ConfigPaths::discover(&cwd)
+        .workspace_config_dir
+        .join(format!(
+            "runtime/claude_workflow/sessions/{}/tasks.json",
+            state.session.id
+        ));
+    let persisted: Value = serde_json::from_str(&fs::read_to_string(tasks_path).unwrap()).unwrap();
+    assert_eq!(persisted["tasks"][0]["receivedAt"], "2026-05-27T12:00:00Z");
+    assert_eq!(persisted["tasks"][0]["expiresAt"], "2026-05-28T12:00:00Z");
+    assert!(persisted["tasks"][0].get("received_at").is_none());
+    assert!(persisted["tasks"][0].get("expires_at").is_none());
+}
+
+#[test]
+fn monitor_task_create_requires_received_and_expires_at() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::task_create::execute_task_create(
+        &mut state,
+        &cwd,
+        json!({
+            "subject": "Handle support ping",
+            "description": "Handle support ping",
+            "metadata": {
+                "_monitor": true,
+                "monitor_connection": "telegram-user"
+            },
+            "received_at": "2026-05-27T12:00:00Z",
+            "expires_at": "2026-05-28T12:00:00Z"
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("requires receivedAt"));
+}
+
+#[test]
+fn task_create_rejects_invalid_expiry_timestamp() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::task_create::execute_task_create(
+        &mut state,
+        &cwd,
+        json!({
+            "subject": "Handle support ping",
+            "description": "Handle support ping",
+            "receivedAt": "2026-05-27T12:00:00Z",
+            "expiresAt": "tomorrow"
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("expiresAt must be an RFC3339 timestamp"));
 }
 
 #[test]

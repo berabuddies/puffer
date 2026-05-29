@@ -147,7 +147,7 @@ pub(crate) fn start_configured_connectors(
             BuildOutcome::Unknown => {
                 eprintln!(
                     "connector `{platform}` is not recognized; \
-                     known platforms: telegram, discord, slack, matrix, email, webhook"
+                     known platforms: telegram, discord, slack, matrix, email"
                 );
             }
         }
@@ -251,22 +251,6 @@ fn build_connector(platform: &str, entry: &puffer_connector_core::ConnectorConfi
                 }
             }
             #[cfg(not(feature = "connector-email"))]
-            {
-                let _ = entry;
-                BuildOutcome::NotCompiledIn
-            }
-        }
-        "webhook" => {
-            #[cfg(feature = "connector-webhook")]
-            {
-                match entry.parse::<puffer_connector_webhook::WebhookConfig>() {
-                    Ok(cfg) => BuildOutcome::Built(Box::new(
-                        puffer_connector_webhook::WebhookConnector::new(cfg),
-                    )),
-                    Err(error) => BuildOutcome::ConfigError(error),
-                }
-            }
-            #[cfg(not(feature = "connector-webhook"))]
             {
                 let _ = entry;
                 BuildOutcome::NotCompiledIn

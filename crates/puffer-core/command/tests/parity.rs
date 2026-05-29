@@ -264,7 +264,10 @@ fn ask_user_question_tool_prompt_matches_claude_reference() {
     .replace("${EXIT_PLAN_MODE_TOOL_NAME}", "ExitPlanMode");
     let preview =
         normalize_reference_template(&extract_template_literal(&reference, "markdown: `"));
-    let expected = format!("{prompt}\n{preview}");
+    let expected = format!("{prompt}\n{preview}").replace(
+        "- Users will always be able to select \"Other\" to provide custom text input\n- Use multiSelect: true to allow multiple answers to be selected for a question",
+        "- Use `type: \"choice\"` or omit `type` when the user should select from options\n- Use `type: \"input\"` when the user should type a value such as a phone number, login code, password, host, URL, or sender list\n- Choice questions let users select \"Other\" to provide custom text input\n- Use `searchable: true` for single-select catalog questions where users should filter a longer option list\n- Input questions collect the typed answer directly\n- Use multiSelect: true to allow multiple answers to be selected for a question",
+    );
 
     assert_eq!(tool.description.trim_end(), expected.trim_end());
 }

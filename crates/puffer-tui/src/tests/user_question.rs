@@ -57,6 +57,32 @@ fn sample_preview_payload() -> serde_json::Value {
     ])
 }
 
+fn sample_input_payload() -> serde_json::Value {
+    json!([
+        {
+            "type": "input",
+            "header": "Phone",
+            "question": "What phone number should Telegram use?"
+        }
+    ])
+}
+
+fn sample_searchable_payload() -> serde_json::Value {
+    json!([
+        {
+            "type": "choice",
+            "header": "Connector",
+            "question": "Which connector should Puffer connect?",
+            "searchable": true,
+            "options": [
+                {"label": "email", "description": "Email over IMAP and SMTP"},
+                {"label": "slack-login", "description": "Slack user account"},
+                {"label": "telegram-login", "description": "Telegram personal account"}
+            ]
+        }
+    ])
+}
+
 #[test]
 fn poll_pending_submit_opens_user_question_overlay() {
     let tempdir = tempdir().unwrap();
@@ -137,6 +163,88 @@ fn user_question_enter_sends_selected_answer() {
     assert!(response.annotations.is_empty());
     assert!(tui.overlay.is_none());
     assert!(tui.pending_user_question_request.is_none());
+}
+
+#[test]
+fn user_question_searchable_choice_filters_and_selects() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_searchable_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    for ch in "tele".chars() {
+        assert!(handle_user_question_key(
+            KeyEvent::from(KeyCode::Char(ch)),
+            &mut tui
+        ));
+    }
+    let Some(OverlayState::UserQuestionPrompt { overlay }) = &tui.overlay else {
+        panic!("user question overlay should remain open");
+    };
+    let rows = overlay.rows();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].1.contains("telegram-login"));
+    assert_eq!(
+        overlay.footer_hint(),
+        "1/3 match · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
+    assert_eq!(overlay.custom_answer(), "tele");
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        response.answers["Which connector should Puffer connect?"],
+        json!("telegram-login")
+    );
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_user_question_request.is_none());
+}
+
+#[test]
+fn user_question_searchable_choice_matches_multiple_terms() {
+    let mut overlay = UserQuestionOverlay::from_value(sample_searchable_payload()).unwrap();
+    assert_eq!(
+        overlay.footer_hint(),
+        "3 options · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
+
+    for ch in "slack account".chars() {
+        overlay.insert_custom_char(ch);
+    }
+
+    let rows = overlay.rows();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].1.contains("slack-login"));
+    assert_eq!(
+        overlay.footer_hint(),
+        "1/3 match · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
+}
+
+#[test]
+fn user_question_searchable_choice_reports_empty_search() {
+    let mut overlay = UserQuestionOverlay::from_value(sample_searchable_payload()).unwrap();
+
+    for ch in "matrix connector".chars() {
+        overlay.insert_custom_char(ch);
+    }
+
+    assert_eq!(
+        overlay.rows(),
+        vec![(false, "No options match \"matrix connector\"".to_string())]
+    );
+    assert_eq!(
+        overlay.footer_hint(),
+        "0/3 matches · Type to search · Arrows to move · Enter to select · Esc to close"
+    );
+    assert!(overlay.confirm_current().is_none());
 }
 
 #[test]
@@ -318,6 +426,58 @@ fn user_question_custom_answer_sends_other_text() {
 }
 
 #[test]
+fn user_question_input_answer_sends_typed_text() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_input_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    for ch in "+15551234567".chars() {
+        assert!(handle_user_question_key(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &mut tui
+        ));
+    }
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        response.answers["What phone number should Telegram use?"],
+        json!("+15551234567")
+    );
+    assert!(tui.overlay.is_none());
+}
+
+#[test]
+fn user_question_input_empty_answer_waits_for_text() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_input_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+
+    assert!(response_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::UserQuestionPrompt { .. })
+    ));
+}
+
+#[test]
 fn user_question_other_row_accepts_numeric_custom_answer() {
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {
@@ -488,6 +648,42 @@ fn render_user_question_shows_list_options() {
     assert!(rendered.contains("Fast  Prioritize speed"));
     assert!(rendered.contains("Careful  Prioritize review"));
     assert!(rendered.contains("Other  Type a custom answer"));
+}
+
+#[test]
+fn render_user_question_input_shows_input_row() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::UserQuestionPrompt {
+        overlay: UserQuestionOverlay::from_value(sample_input_payload()).unwrap(),
+    };
+
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(Some(overlay.clone()));
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            );
+            render::set_active_overlay(None);
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("Phone: What phone number should Telegram use?"));
+    assert!(rendered.contains("Input  Type answer"));
+    assert!(!rendered.contains("Other  Type a custom answer"));
 }
 
 #[test]

@@ -14,7 +14,12 @@ pub enum BrowserActionSet {
 enum BrowserIntentAction {
     List,
     Snapshot,
+    DomInspect,
+    WaitNetworkIdle,
+    ConsoleLogs,
     Screenshot,
+    OpenConsoleLogs,
+    OpenScreenshot,
     Open,
     New,
     Focus,
@@ -46,8 +51,15 @@ enum BrowserIntentAction {
 impl BrowserIntentAction {
     fn action_set(self) -> BrowserActionSet {
         match self {
-            Self::List | Self::Snapshot | Self::Screenshot => BrowserActionSet::Inspect,
+            Self::List
+            | Self::Snapshot
+            | Self::DomInspect
+            | Self::WaitNetworkIdle
+            | Self::ConsoleLogs
+            | Self::Screenshot => BrowserActionSet::Inspect,
             Self::Open
+            | Self::OpenConsoleLogs
+            | Self::OpenScreenshot
             | Self::New
             | Self::Focus
             | Self::Close
@@ -103,7 +115,12 @@ fn browser_intent_action(action: &str) -> Option<BrowserIntentAction> {
     match normalized_token(action).as_str() {
         "list" => Some(BrowserIntentAction::List),
         "snapshot" => Some(BrowserIntentAction::Snapshot),
+        "dominspect" | "inspectdom" => Some(BrowserIntentAction::DomInspect),
+        "waitnetworkidle" | "networkidle" => Some(BrowserIntentAction::WaitNetworkIdle),
+        "consolelogs" | "console" => Some(BrowserIntentAction::ConsoleLogs),
         "screenshot" => Some(BrowserIntentAction::Screenshot),
+        "openconsolelogs" | "openconsole" => Some(BrowserIntentAction::OpenConsoleLogs),
+        "openscreenshot" => Some(BrowserIntentAction::OpenScreenshot),
         "open" => Some(BrowserIntentAction::Open),
         "new" => Some(BrowserIntentAction::New),
         "focus" => Some(BrowserIntentAction::Focus),
@@ -149,8 +166,28 @@ mod tests {
             Some(BrowserActionSet::Inspect)
         );
         assert_eq!(
+            browser_action_set_for_action("domInspect"),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_action("waitNetworkIdle"),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
             browser_action_set_for_action("screenshot"),
             Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_action("consoleLogs"),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_action("openConsoleLogs"),
+            Some(BrowserActionSet::Navigate)
+        );
+        assert_eq!(
+            browser_action_set_for_action("openScreenshot"),
+            Some(BrowserActionSet::Navigate)
         );
         assert_eq!(
             browser_action_set_for_action("focus_ref"),

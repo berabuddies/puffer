@@ -25,8 +25,11 @@ pub use command::{
     command_surface, dispatch_command, find_command, supported_commands, CommandKind, CommandSpec,
 };
 pub use command_helpers::append_trace_events;
+pub use command_helpers::execute_connect_flow;
+pub use command_helpers::execute_monitor_flow;
 pub use command_helpers::CommandActionEntry;
 pub use command_helpers::CopyActionEntry;
+pub use command_helpers::LambdaSkillStatus;
 pub use command_helpers::McpActionEntry;
 pub use command_helpers::PluginActionEntry;
 pub use command_helpers::ResumeLaunchResolution;
@@ -53,8 +56,10 @@ pub use permissions::SessionPermissionState;
 pub use plan_mode::enter_plan_mode;
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
+pub use runtime::execute_tool_action_once;
 pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
+pub use runtime::lambda_gate::LambdaHostConcreteToolBinding;
 pub use runtime::mcp_discovery;
 pub use runtime::quota::{QuotaError, QuotaErrorKind, QUOTA_EXIT_CODE};
 pub use runtime::resource_watcher;
@@ -70,12 +75,14 @@ pub use runtime::{
     execute_user_prompt_streaming_with_prompt_tools_and_cancel as execute_user_turn_streaming_with_prompt_tools_and_cancel,
     execute_user_prompt_streaming_with_reflection as execute_user_turn_streaming_with_reflection,
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
+    execute_user_prompt_streaming_without_tools as execute_user_turn_streaming_without_tools,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
-    runtime_work_active, shutdown_runtime_services, with_permission_prompt_handler,
-    with_user_question_prompt_handler, BrowserAutoReviewActionSet, BrowserAutoReviewRawAction,
-    BrowserAutoReviewRequest, BrowserAutoReviewRuntimeResult, BrowserAutoReviewSessionTargeting,
-    BrowserAutoReviewSource, BrowserAutoReviewSuggestedGrantScope, BrowserAutoReviewTargetClass,
-    BrowserAutoReviewUrlSource, BrowserPermissionPromptActionSet, BrowserPermissionPromptPayload,
+    execute_user_prompt_without_tools as execute_user_turn_without_tools, runtime_work_active,
+    shutdown_runtime_services, with_permission_prompt_handler, with_user_question_prompt_handler,
+    BrowserAutoReviewActionSet, BrowserAutoReviewRawAction, BrowserAutoReviewRequest,
+    BrowserAutoReviewRuntimeResult, BrowserAutoReviewSessionTargeting, BrowserAutoReviewSource,
+    BrowserAutoReviewSuggestedGrantScope, BrowserAutoReviewTargetClass, BrowserAutoReviewUrlSource,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptPayload,
     BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
     CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
     PermissionPromptAction, PermissionPromptRequest, PermissionPromptReviewPayload,
@@ -124,6 +131,36 @@ pub fn render_doctor_report(
     auth_store: &AuthStore,
 ) -> Result<String> {
     command_helpers::render_doctor_report(state, resources, providers, auth_store)
+}
+
+/// Renders Lambda Skill harness status lines used by doctor surfaces.
+pub fn render_lambda_skill_doctor_status(resources: &LoadedResources) -> String {
+    command_helpers::render_lambda_skill_doctor_status(resources)
+}
+
+/// Returns Lambda Skill harness warning summaries used by doctor surfaces.
+pub fn lambda_skill_doctor_warning_lines(resources: &LoadedResources) -> Vec<String> {
+    command_helpers::lambda_skill_doctor_warnings(resources)
+        .into_iter()
+        .map(|warning| format!("{}; {}", warning.summary, warning.detail))
+        .collect()
+}
+
+/// Returns Lambda Skill readiness rows used by UI surfaces.
+pub fn lambda_skill_statuses(resources: &LoadedResources) -> Vec<LambdaSkillStatus> {
+    command_helpers::lambda_skill_statuses(resources)
+}
+
+/// Validates a precompiled Lambda Skill host catalogue for runtime use.
+pub fn validate_lambda_host_catalogue_runtime(raw: &str) -> Result<()> {
+    runtime::lambda_gate::validate_host_catalogue_runtime(raw)
+}
+
+/// Returns the concrete tool bindings declared by a Lambda Skill host catalogue.
+pub fn lambda_host_catalogue_concrete_tool_bindings(
+    raw: &str,
+) -> Result<Vec<LambdaHostConcreteToolBinding>> {
+    runtime::lambda_gate::host_catalogue_concrete_tool_bindings(raw)
 }
 
 /// Renders the current `/context` summary used by interactive overlays.

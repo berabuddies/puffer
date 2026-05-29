@@ -23,10 +23,12 @@ pub struct SlackConnector {
 }
 
 impl SlackConnector {
+    /// Creates a Slack connector from parsed configuration.
     pub fn new(config: SlackConfig) -> Self {
         Self { config }
     }
 
+    /// Returns the Slack connector configuration.
     pub fn config(&self) -> &SlackConfig {
         &self.config
     }

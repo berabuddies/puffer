@@ -1,0 +1,4 @@
+interface:
+  display_name: "CUA Dev"
+  short_description: "Develop Puffer CUA driver code"
+  default_prompt: "Use $cua-dev to work on Puffer CUA driver changes."

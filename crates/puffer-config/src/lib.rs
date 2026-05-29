@@ -44,6 +44,8 @@ pub struct PufferConfig {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub recap: RecapConfig,
+    #[serde(default)]
+    pub browser: BrowserConfig,
     pub mascot: MascotConfig,
     pub ui: UiConfig,
     /// When set, the runtime constructs a remote `RemoteToolRunner` against
@@ -185,6 +187,13 @@ impl Default for RecapConfig {
     }
 }
 
+/// Browser launch preferences persisted in the user config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BrowserConfig {
+    #[serde(default, alias = "chromeProfile")]
+    pub chrome_profile: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ProjectRegistry {
     #[serde(default)]
@@ -220,6 +229,7 @@ impl Default for PufferConfig {
             copy_full_response: false,
             memory: MemoryConfig::default(),
             recap: RecapConfig::default(),
+            browser: BrowserConfig::default(),
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),
@@ -407,6 +417,7 @@ pub fn load_config(paths: &ConfigPaths) -> Result<PufferConfig> {
             config.fast_mode,
             config.effort_level.clone(),
             config.copy_full_response,
+            config.browser.clone(),
         ));
     }
     if paths.workspace_config_file().exists() {
@@ -421,6 +432,7 @@ pub fn load_config(paths: &ConfigPaths) -> Result<PufferConfig> {
         fast_mode,
         effort_level,
         copy_full_response,
+        browser,
     )) = user_selection
     {
         config.default_provider = provider;
@@ -430,6 +442,7 @@ pub fn load_config(paths: &ConfigPaths) -> Result<PufferConfig> {
         config.fast_mode = fast_mode;
         config.effort_level = effort_level;
         config.copy_full_response = copy_full_response;
+        config.browser = browser;
     }
     Ok(config)
 }

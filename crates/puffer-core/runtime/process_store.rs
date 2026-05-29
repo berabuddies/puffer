@@ -16,8 +16,20 @@ pub struct ProcessOutput {
     pub exit_code: Option<i32>,
 }
 
+/// Read-only metadata for a tracked interactive process.
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessSnapshot {
+    pub process_id: i32,
+    pub command: String,
+    pub tty: bool,
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+    pub output_bytes: usize,
+}
+
 pub(crate) struct ProcessEntry {
     pub process_id: i32,
+    system_pid: Option<u32>,
     pub command: String,
     pub tty: bool,
     output_buffer: Arc<Mutex<HeadTailBuffer>>,
@@ -70,11 +82,37 @@ impl ProcessEntry {
     }
 
     pub fn terminate(&mut self) {
+        if let Some(pid) = self.system_pid.take() {
+            let _ = terminate_os_process(pid);
+        }
         #[cfg(unix)]
         if let Some(fd) = self.pty_master_fd.take() {
             unsafe { libc::close(fd) };
         }
         self.pipe_stdin.take();
+    }
+}
+
+fn terminate_os_process(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err(io::Error::other(format!("kill -TERM {pid} failed")));
+    }
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err(io::Error::other(format!("taskkill {pid} failed")));
     }
 }
 
@@ -139,6 +177,24 @@ impl ProcessStore {
 
     pub fn remove(&mut self, process_id: i32) -> Option<ProcessEntry> {
         self.processes.remove(&process_id)
+    }
+
+    /// Return read-only metadata for all tracked interactive processes.
+    pub(crate) fn snapshots(&self) -> Vec<ProcessSnapshot> {
+        let mut entries = self
+            .processes
+            .values()
+            .map(|entry| ProcessSnapshot {
+                process_id: entry.process_id,
+                command: entry.command.clone(),
+                tty: entry.tty,
+                exited: entry.has_exited(),
+                exit_code: entry.exit_code(),
+                output_bytes: entry.total_output_bytes(),
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.process_id);
+        entries
     }
 
     pub fn drain_exited(&mut self) -> Vec<(i32, String, Option<i32>)> {
@@ -333,6 +389,7 @@ pub(crate) fn spawn_pty_process(
     }
 
     let child = cmd.spawn()?;
+    let system_pid = child.id();
 
     let reader_buffer = Arc::clone(&store_buffer);
     let reader_master = master_fd;
@@ -366,6 +423,7 @@ pub(crate) fn spawn_pty_process(
 
     Ok(ProcessEntry {
         process_id,
+        system_pid: Some(system_pid),
         command: command.to_string(),
         tty: true,
         output_buffer: store_buffer,
@@ -399,6 +457,7 @@ pub(crate) fn spawn_pipe_process(
         cmd.env(key, value);
     }
     let mut child = cmd.spawn()?;
+    let system_pid = child.id();
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -448,6 +507,7 @@ pub(crate) fn spawn_pipe_process(
     // but we keep stdin for interactive writes.
     Ok(ProcessEntry {
         process_id,
+        system_pid: Some(system_pid),
         command: command.to_string(),
         tty: false,
         output_buffer: store_buffer,
@@ -490,6 +550,18 @@ pub(crate) fn spawn_tracked_process_with_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for_output(entry: &ProcessEntry, expected: &str) -> String {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let output = entry.collect_output();
+            let text = String::from_utf8_lossy(&output).to_string();
+            if text.contains(expected) || Instant::now() >= deadline {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn head_tail_buffer_small_data() {
@@ -546,6 +618,7 @@ mod tests {
         let exit_code = Arc::new(Mutex::new(Some(0)));
         store.insert(ProcessEntry {
             process_id: 1000,
+            system_pid: None,
             command: "echo done".to_string(),
             tty: false,
             output_buffer: buffer,
@@ -583,11 +656,7 @@ mod tests {
         assert_eq!(entry.process_id, 9999);
         assert!(entry.tty);
 
-        // Wait for process to finish and output to be collected
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let output = entry.collect_output();
-        let text = String::from_utf8_lossy(&output);
+        let text = wait_for_output(&entry, "pty-test-output");
         assert!(
             text.contains("pty-test-output"),
             "expected 'pty-test-output' in: {text}"
@@ -613,11 +682,7 @@ mod tests {
         assert_eq!(entry.process_id, 8888);
         assert!(!entry.tty);
 
-        // Wait for process to exit and output to be collected
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let output = entry.collect_output();
-        let text = String::from_utf8_lossy(&output);
+        let text = wait_for_output(&entry, "pipe-test");
         assert!(
             text.contains("pipe-test"),
             "expected 'pipe-test' in: {text}"

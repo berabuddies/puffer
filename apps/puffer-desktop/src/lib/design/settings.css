@@ -50,6 +50,7 @@
 }
 .pf-settings-row .meta .label { font-weight: 500; font-size: 14px; }
 .pf-settings-row .meta .desc { color: var(--muted-foreground); font-size: 12.5px; margin-top: 2px; line-height: 1.5; max-width: 480px; }
+.pf-settings-subhead { margin: 20px 0 8px; }
 
 .pf-perm-table {
   border: 1px solid var(--border);
@@ -98,12 +99,37 @@
 }
 .pf-mcp-card .title { font-weight: 500; }
 .pf-mcp-card .desc { font-size: 12px; color: var(--muted-foreground); margin-top: 2px; }
+.pf-skill-card .desc { max-width: 560px; line-height: 1.45; }
+.pf-verified-folder-card { grid-template-columns: 32px minmax(0, 1fr) auto auto auto; }
+.pf-inline-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+}
 .pf-mcp-card .conn {
   font-family: var(--font-sans); font-size: 11px;
   display: inline-flex; align-items: center; gap: 5px;
   color: oklch(0.5 0.16 145);
 }
 .pf-mcp-card .conn .dot { width: 6px; height: 6px; border-radius: 50%; background: oklch(0.65 0.18 145); }
+.pf-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 72%, var(--background));
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pf-status-pill.ready {
+  background: color-mix(in oklab, oklch(0.7 0.18 145) 18%, transparent);
+  color: oklch(0.4 0.16 145);
+}
 .pf-mcp-form {
   display: flex;
   flex-direction: column;
@@ -122,4 +148,439 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.pf-connector-setup-row {
+  align-items: start;
+}
+
+.pf-connector-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.pf-connector-create-scrim {
+  padding: 28px 16px;
+}
+
+.pf-connector-create-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 56px));
+}
+
+.pf-connector-create-form {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.pf-connector-create-body {
+  padding: 14px 16px;
+}
+
+.pf-connector-create-modal .pf-connector-form {
+  width: 100%;
+  min-width: 0;
+}
+
+.pf-connector-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-self: end;
+  min-width: min(420px, 100%);
+}
+
+.pf-connector-form label,
+.pf-connector-question label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
+
+.pf-connector-selected,
+.pf-connector-command,
+.pf-connector-question-panel,
+.pf-connector-output {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--background) 94%, var(--muted));
+}
+
+.pf-connector-selected {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+}
+
+.pf-connector-selected strong {
+  display: block;
+  font-size: 12.5px;
+}
+
+.pf-connector-selected span {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+.pf-connector-command {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 9px 10px;
+  color: var(--muted-foreground);
+}
+
+.pf-connector-command code {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-connector-validation {
+  color: var(--destructive, #c03232);
+  font-size: 11.5px;
+}
+
+.pf-connector-question-panel {
+  margin: 18px 0;
+  padding: 14px;
+}
+
+.pf-connector-question-scrim {
+  padding: 28px 16px;
+}
+
+.pf-connector-question-modal {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 56px));
+}
+
+.pf-connector-question-form {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.pf-connector-question-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pf-connector-question-head h3 {
+  margin: 0;
+}
+
+.pf-connector-question-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.pf-connector-question-modal .pf-connector-question-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 0;
+  padding: 14px 16px;
+}
+
+.pf-connector-question {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0;
+  background: var(--background);
+}
+
+.pf-connector-question legend {
+  display: grid;
+  gap: 2px;
+  padding: 0 4px;
+}
+
+.pf-connector-question legend span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pf-connector-question legend strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pf-connector-options {
+  display: grid;
+  gap: 8px;
+}
+
+.pf-connector-options label {
+  flex-direction: row;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.pf-connector-options input {
+  margin-top: 2px;
+}
+
+.pf-connector-options strong,
+.pf-connector-options small,
+.pf-connector-options code {
+  display: block;
+}
+
+.pf-connector-options strong {
+  color: var(--foreground);
+  font-size: 12.5px;
+}
+
+.pf-connector-options small {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
+.pf-connector-options code {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.pf-connector-question-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.pf-connector-question-modal .pf-connector-question-actions {
+  justify-content: initial;
+  margin-top: 0;
+}
+
+.pf-connector-output {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.pf-connector-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  margin: 18px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--muted) 56%, var(--background));
+}
+
+.pf-connector-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.pf-connector-tabs button:hover {
+  background: var(--pf-selected-bg-hover);
+  color: var(--foreground);
+}
+
+.pf-connector-tabs button[data-active="true"] {
+  background: var(--pf-selected-bg);
+  color: var(--foreground);
+  font-weight: 700;
+}
+
+.pf-connector-tabs span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--background) 70%, var(--muted));
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.pf-connector-panel {
+  min-width: 0;
+}
+
+.pf-connector-card-settings {
+  grid-template-columns: 32px minmax(0, 1fr) auto auto;
+}
+
+.pf-connector-catalog-button {
+  width: 100%;
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pf-connector-catalog-button[data-selected="true"] {
+  border-color: color-mix(in oklab, var(--puffer-accent) 34%, var(--border));
+  background: var(--pf-selected-bg);
+}
+
+.pf-connector-source {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .pf-settings {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .pf-settings-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px;
+  }
+
+  .pf-settings-nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    min-height: 32px;
+    white-space: nowrap;
+  }
+
+  .pf-settings-pane {
+    min-width: 0;
+    padding: 20px;
+  }
+
+  .pf-settings-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .pf-mcp-form,
+  .pf-connector-form {
+    justify-self: stretch;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .pf-connector-toolbar {
+    justify-content: stretch;
+  }
+
+  .pf-connector-toolbar .sc-btn {
+    flex: 1 1 0;
+  }
+
+  .pf-connector-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+
+  .pf-mcp-card,
+  .pf-connector-card-settings,
+  .pf-verified-folder-card {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .pf-mcp-card .pf-status-pill,
+  .pf-mcp-card .pf-connector-source,
+  .pf-connector-card-settings .pf-status-pill,
+  .pf-connector-card-settings .pf-connector-source {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .pf-connector-selected {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pf-connector-question-head {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pf-connector-question-actions {
+    justify-content: stretch;
+  }
+
+  .pf-connector-question-actions .sc-btn {
+    width: 100%;
+  }
+
+  .pf-connector-question-scrim {
+    align-items: stretch;
+    padding: 18px 12px;
+  }
+
+  .pf-connector-create-scrim {
+    align-items: stretch;
+    padding: 18px 12px;
+  }
+
+  .pf-connector-create-modal {
+    width: 100%;
+    max-height: calc(100vh - 36px);
+  }
+
+  .pf-connector-create-modal .pf-modal-foot-btns {
+    width: 100%;
+  }
+
+  .pf-connector-question-modal {
+    width: 100%;
+    max-height: calc(100vh - 36px);
+  }
+
+  .pf-connector-question-modal .pf-modal-foot-btns {
+    width: 100%;
+  }
 }

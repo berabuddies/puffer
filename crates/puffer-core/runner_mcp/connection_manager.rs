@@ -21,7 +21,7 @@
 //! ([`puffer_runner_api::ToolRunner`]) is sync for parity with
 //! `RemoteToolRunner`, which is itself sync over a shared tokio runtime.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -61,6 +61,8 @@ use std::path::PathBuf;
 /// elapses (the next attempt then resets the counter).
 const MAX_RETRIES: u32 = 3;
 const RETRY_WINDOW: Duration = Duration::from_secs(60);
+const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One configured MCP server known to the manager.
 #[derive(Debug, Clone)]
@@ -349,22 +351,28 @@ impl McpConnectionManager {
         let runtime = self.runtime();
         let mut attempt = 0;
         loop {
-            let (client, _progress) = self.connect(server, &runtime)?;
+            let (client, _progress, timeout) = self.connect(server, &runtime)?;
             let result = runtime.block_on(async {
                 let client = Arc::clone(&client);
-                client.peer().list_all_tools().await
+                tokio::time::timeout(timeout, client.peer().list_all_tools()).await
             });
             match result {
-                Ok(tools) => return Ok(tools.into_iter().map(rmcp_tool_to_dto).collect()),
-                Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
+                Ok(Ok(tools)) => return Ok(tools.into_iter().map(rmcp_tool_to_dto).collect()),
+                Ok(Err(e)) if attempt == 0 && is_auth_required_service_error(&e) => {
                     self.drop_client_and_refresh_oauth(server, &runtime)?;
                     attempt += 1;
                     continue;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     return Err(RunnerError::Mcp(format!(
                         "tools/list on `{server}` failed: {e}"
-                    )))
+                    )));
+                }
+                Err(_) => {
+                    return Err(RunnerError::Mcp(format!(
+                        "tools/list on `{server}` timed out after {}s",
+                        timeout.as_secs()
+                    )));
                 }
             }
         }
@@ -391,7 +399,7 @@ impl McpConnectionManager {
             other => {
                 return Err(RunnerError::InvalidArgument(format!(
                     "MCP tool arguments must be a JSON object or null, got {other}",
-                )))
+                )));
             }
         };
         let runtime = self.runtime();
@@ -419,7 +427,7 @@ impl McpConnectionManager {
         sink: &mut dyn ChunkSink,
         runtime: &Runtime,
     ) -> Result<McpResult, RunnerError> {
-        let (client, progress_registry) = self.connect(server, runtime)?;
+        let (client, progress_registry, timeout) = self.connect(server, runtime)?;
         let tool_name = tool.to_string();
         let server_label = server.to_string();
 
@@ -445,7 +453,10 @@ impl McpConnectionManager {
                 .peer()
                 .send_cancellable_request(
                     ClientRequest::CallToolRequest(request),
-                    PeerRequestOptions::no_options(),
+                    PeerRequestOptions {
+                        timeout: Some(timeout),
+                        meta: None,
+                    },
                 )
                 .await
             {
@@ -484,7 +495,7 @@ impl McpConnectionManager {
             other => {
                 return Err(RunnerError::Mcp(format!(
                     "tools/call `{tool}` on `{server}` returned unexpected response: {other:?}"
-                )))
+                )));
             }
         };
 
@@ -496,14 +507,14 @@ impl McpConnectionManager {
         let runtime = self.runtime();
         let mut attempt = 0;
         loop {
-            let (client, _progress) = self.connect(server, &runtime)?;
+            let (client, _progress, _timeout) = self.connect(server, &runtime)?;
             let result = runtime.block_on(async move { client.peer().list_all_resources().await });
             match result {
                 Ok(resources) => {
                     return Ok(resources
                         .into_iter()
                         .map(|r| rmcp_resource_to_dto(server, r))
-                        .collect())
+                        .collect());
                 }
                 Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
                     self.drop_client_and_refresh_oauth(server, &runtime)?;
@@ -513,7 +524,7 @@ impl McpConnectionManager {
                 Err(e) => {
                     return Err(RunnerError::Mcp(format!(
                         "resources/list on `{server}` failed: {e}"
-                    )))
+                    )));
                 }
             }
         }
@@ -528,7 +539,7 @@ impl McpConnectionManager {
         let runtime = self.runtime();
         let mut attempt = 0;
         loop {
-            let (client, _progress) = self.connect(server, &runtime)?;
+            let (client, _progress, _timeout) = self.connect(server, &runtime)?;
             let uri_owned = uri.to_string();
             let result = runtime.block_on(async move {
                 client
@@ -549,7 +560,7 @@ impl McpConnectionManager {
                 Err(e) => {
                     return Err(RunnerError::Mcp(format!(
                         "resources/read `{uri}` on `{server}` failed: {e}"
-                    )))
+                    )));
                 }
             }
         }
@@ -560,7 +571,7 @@ impl McpConnectionManager {
         let runtime = self.runtime();
         let mut attempt = 0;
         loop {
-            let (client, _progress) = self.connect(server, &runtime)?;
+            let (client, _progress, _timeout) = self.connect(server, &runtime)?;
             let result = runtime.block_on(async move { client.peer().list_all_prompts().await });
             match result {
                 Ok(prompts) => return Ok(prompts.into_iter().map(rmcp_prompt_to_dto).collect()),
@@ -572,7 +583,7 @@ impl McpConnectionManager {
                 Err(e) => {
                     return Err(RunnerError::Mcp(format!(
                         "prompts/list on `{server}` failed: {e}"
-                    )))
+                    )));
                 }
             }
         }
@@ -591,13 +602,13 @@ impl McpConnectionManager {
             other => {
                 return Err(RunnerError::InvalidArgument(format!(
                     "MCP prompt arguments must be a JSON object or null, got {other}",
-                )))
+                )));
             }
         };
         let runtime = self.runtime();
         let mut attempt = 0;
         loop {
-            let (client, _progress) = self.connect(server, &runtime)?;
+            let (client, _progress, _timeout) = self.connect(server, &runtime)?;
             let name_owned = name.to_string();
             let arguments = arguments.clone();
             let result = runtime.block_on(async move {
@@ -620,7 +631,7 @@ impl McpConnectionManager {
                 Err(e) => {
                     return Err(RunnerError::Mcp(format!(
                         "prompts/get `{name}` on `{server}` failed: {e}"
-                    )))
+                    )));
                 }
             }
         }
@@ -638,6 +649,7 @@ impl McpConnectionManager {
         (
             Arc<RunningService<RoleClient, McpClientHandler>>,
             ProgressRegistry,
+            Duration,
         ),
         RunnerError,
     > {
@@ -657,7 +669,11 @@ impl McpConnectionManager {
             // Detect a transport that has dropped without us noticing —
             // peer().is_transport_closed() reports the rmcp-side flag.
             if !client.peer().is_transport_closed() {
-                return Ok((Arc::clone(client), Arc::clone(&guard.progress)));
+                return Ok((
+                    Arc::clone(client),
+                    Arc::clone(&guard.progress),
+                    guard.recipe.timeout(),
+                ));
             }
             // Stale client: drop it before retrying.
             guard.client = None;
@@ -685,7 +701,7 @@ impl McpConnectionManager {
             Ok(client) => {
                 let arc = Arc::new(client);
                 guard.client = Some(Arc::clone(&arc));
-                Ok((arc, Arc::clone(&guard.progress)))
+                Ok((arc, Arc::clone(&guard.progress), guard.recipe.timeout()))
             }
             Err(error) => {
                 guard.record_failure();
@@ -819,12 +835,17 @@ async fn spawn_stdio_client(
     spec: StdioTransportSpec,
     handler: McpClientHandler,
 ) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
+    let connect_timeout = spec.connect_timeout;
     let transport: TokioChildProcess = spawn_stdio_child(server, &spec)
         .map_err(|e| RunnerError::Mcp(format!("spawn `{}`: {e}", spec.program)))?;
-    handler
-        .serve(transport)
-        .await
-        .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}")))
+    match tokio::time::timeout(connect_timeout, handler.serve(transport)).await {
+        Ok(result) => result
+            .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}"))),
+        Err(_) => Err(RunnerError::Mcp(format!(
+            "MCP handshake with `{server}` timed out after {}s",
+            connect_timeout.as_secs()
+        ))),
+    }
 }
 
 /// Build the rmcp streamable-HTTP transport and run the initialize
@@ -840,23 +861,39 @@ async fn spawn_http_client(
     handler: McpClientHandler,
     oauth_token_dir: PathBuf,
 ) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
+    let connect_timeout = spec.connect_timeout;
     if let Some(oauth_spec) = spec.oauth.clone() {
         let oauth_service = build_oauth_service(server, &spec.url, &oauth_spec, oauth_token_dir);
-        let resolved = oauth_service
-            .resolve()
-            .await
-            .map_err(|e| oauth_error_to_runner(server, e))?;
+        let resolved = match tokio::time::timeout(connect_timeout, oauth_service.resolve()).await {
+            Ok(Ok(resolved)) => resolved,
+            Ok(Err(error)) => return Err(oauth_error_to_runner(server, error)),
+            Err(_) => {
+                return Err(RunnerError::Mcp(format!(
+                    "MCP OAuth setup for `{server}` timed out after {}s",
+                    connect_timeout.as_secs()
+                )));
+            }
+        };
         let transport = build_oauth_streamable_http_transport(&spec, resolved.client.clone());
-        return handler
-            .serve(transport)
-            .await
-            .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}")));
+        return match tokio::time::timeout(connect_timeout, handler.serve(transport)).await {
+            Ok(result) => result.map_err(|e| {
+                RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}"))
+            }),
+            Err(_) => Err(RunnerError::Mcp(format!(
+                "MCP handshake with `{server}` timed out after {}s",
+                connect_timeout.as_secs()
+            ))),
+        };
     }
     let transport = build_streamable_http_transport(server, &spec)?;
-    handler
-        .serve(transport)
-        .await
-        .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}")))
+    match tokio::time::timeout(connect_timeout, handler.serve(transport)).await {
+        Ok(result) => result
+            .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}"))),
+        Err(_) => Err(RunnerError::Mcp(format!(
+            "MCP handshake with `{server}` timed out after {}s",
+            connect_timeout.as_secs()
+        ))),
+    }
 }
 
 fn build_oauth_service(
@@ -1169,7 +1206,10 @@ fn stdio_entry_from_spec(spec: &puffer_resources::McpServerSpec) -> Option<Conne
     let recipe = TransportRecipe::Stdio(StdioTransportSpec {
         program,
         args,
-        env: BTreeMap::new(),
+        env: spec.env.clone(),
+        inherit_env: spec.inherit_env,
+        timeout: duration_from_seconds(spec.timeout, DEFAULT_TOOL_TIMEOUT),
+        connect_timeout: duration_from_seconds(spec.connect_timeout, DEFAULT_CONNECT_TIMEOUT),
         cwd: None,
     });
     Some(ConnectionEntry::new(spec.id.clone(), recipe))
@@ -1211,8 +1251,17 @@ fn http_entry_from_spec(spec: &puffer_resources::McpServerSpec) -> Option<Connec
         url,
         headers,
         oauth,
+        timeout: duration_from_seconds(spec.timeout, DEFAULT_TOOL_TIMEOUT),
+        connect_timeout: duration_from_seconds(spec.connect_timeout, DEFAULT_CONNECT_TIMEOUT),
     });
     Some(ConnectionEntry::new(spec.id.clone(), recipe))
+}
+
+fn duration_from_seconds(value: Option<u64>, default: Duration) -> Duration {
+    match value {
+        Some(0) | None => default,
+        Some(seconds) => Duration::from_secs(seconds),
+    }
 }
 
 #[cfg(test)]

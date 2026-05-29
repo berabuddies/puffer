@@ -1,0 +1,49 @@
+id: McpToolCall
+name: McpToolCall
+description: |-
+  Execute one explicitly declared MCP tool call through Puffer's configured
+  MCP runner.
+
+  Use this for verified Lambda Skill contracts when the formal host operation
+  is already defined as a specific MCP server tool. The concrete input must
+  name the server, tool, and exact JSON arguments. This tool is not a
+  substitute for vague external actions that do not identify the target MCP
+  tool and argument shape.
+
+  Use either server/tool/args or qualifiedToolName/argsJson/registry. Puffer
+  validates that mode choice at execution time so the schema stays compatible
+  with model APIs that reject top-level union keywords in function parameters.
+handler: runtime:workflow:mcp_tool_call
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    server:
+      type: string
+      description: Configured MCP server id.
+    tool:
+      type: string
+      description: MCP tool name exposed by the configured server.
+    args:
+      type: object
+      additionalProperties: true
+      description: JSON arguments passed to the MCP tool.
+    qualifiedToolName:
+      type: string
+      description: Normalized Lambda/Hermes or Puffer MCP tool name, such as mcp_agentmail_send_message or mcp__agentmail__send_message.
+    argsJson:
+      type: string
+      description: JSON-encoded arguments passed to the resolved MCP tool.
+    registry:
+      description: Formal Lambda ToolRegistry proof argument for the admitted host call.
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: false
+  may_access_network: true
+display:
+  group: mcp
+  title: McpToolCall
+  show_in_status: true

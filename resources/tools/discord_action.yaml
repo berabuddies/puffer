@@ -1,0 +1,68 @@
+id: DiscordAction
+name: DiscordAction
+description: |-
+  Execute one Discord Bot API action through Puffer's typed Discord runtime.
+
+  Use this for verified Lambda Skill contracts that need narrowly declared
+  Discord reads or writes. The model supplies the Discord action and arguments;
+  Puffer owns credential lookup and API execution.
+handler: runtime:workflow:discord_action
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - sendEmbeds
+        - readMessages
+        - searchMessages
+      description: Discord action to perform.
+    service:
+      type: string
+      enum:
+        - discord
+      description: Optional service discriminator bound from host skill arguments.
+    channelId:
+      type: string
+      pattern: "^[0-9]+$"
+      description: Discord channel snowflake.
+    guildId:
+      type: string
+      pattern: "^[0-9]+$"
+      description: Discord guild snowflake used to discover channels for searchMessages.
+    channelIds:
+      type: array
+      description: Discord channel snowflakes to search for searchMessages.
+      items:
+        type: string
+        pattern: "^[0-9]+$"
+    query:
+      type: string
+      description: Case-insensitive text query for searchMessages.
+    body:
+      type: string
+      description: Message content for sendEmbeds.
+    embeds:
+      description: Discord embed JSON object, array, or a string containing either.
+      oneOf:
+        - type: string
+        - type: object
+        - type: array
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 100
+      description: Maximum number of messages to read.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+display:
+  group: communication
+  title: DiscordAction
+  show_in_status: true

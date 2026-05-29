@@ -153,6 +153,10 @@ fn friendly_tool_name(tool_id: &str) -> String {
         "subscriberscaffold" => "Subscriber Scaffold".to_string(),
         "subscriberinstall" => "Subscriber Install".to_string(),
         "subscriberlist" => "Subscriber List".to_string(),
+        "telegram" => "Telegram".to_string(),
+        "telegramimportdesktop" | "telegramimportlocal" => "Telegram Desktop Import".to_string(),
+        "telegramloginqr" => "Telegram QR Login".to_string(),
+        "telegramloginqrwait" => "Telegram QR Login (wait)".to_string(),
         "telegramloginstart" => "Telegram Login".to_string(),
         "telegramloginsubmitcode" => "Telegram Login (code)".to_string(),
         "telegramloginsubmitpassword" => "Telegram Login (2FA)".to_string(),
@@ -212,10 +216,19 @@ fn summarize_input(tool_id: &str, input: &str) -> Option<String> {
                 if paused { "pause" } else { "resume" }
             ))
         }
+        "telegram" => telegram_input_summary(parsed.as_ref()),
         "telegramloginstart" => {
             extract_string(parsed.as_ref(), &["phone"]).map(normalize_inline_text)
         }
-        // The submitted code and password are deliberately never rendered.
+        "telegramimportdesktop" | "telegramimportlocal" => {
+            extract_string(parsed.as_ref(), &["path"])
+                .map(normalize_inline_text)
+                .or_else(|| Some("Telegram Desktop tdata".to_string()))
+        }
+        "telegramloginqr" => Some("approval URL".to_string()),
+        "telegramloginqrwait" => Some("waiting for approval".to_string()),
+        // The submitted code, local passcode, and password are deliberately
+        // never rendered.
         "telegramloginsubmitcode" => Some("(code redacted)".to_string()),
         "telegramloginsubmitpassword" => Some("(password redacted)".to_string()),
         // Email configure surfaces the username only — credentials and
@@ -227,6 +240,41 @@ fn summarize_input(tool_id: &str, input: &str) -> Option<String> {
         _ => extract_first_string(parsed.as_ref()).map(normalize_inline_text),
     }?;
     Some(truncate(&summary, 140))
+}
+
+fn telegram_input_summary(value: Option<&Value>) -> Option<String> {
+    let action = value?
+        .as_object()?
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match action {
+        "import_desktop" => extract_string(value, &["path"])
+            .map(normalize_inline_text)
+            .or_else(|| Some("Telegram Desktop tdata".to_string())),
+        "list_peers" => Some(
+            extract_string(value, &["peer_kind"])
+                .map(|kind| format!("{kind} peers"))
+                .unwrap_or_else(|| "peers".to_string()),
+        ),
+        "login_qr" => Some("approval URL".to_string()),
+        "login_qr_wait" => Some("waiting for approval".to_string()),
+        "login_start" => extract_string(value, &["phone"])
+            .map(normalize_inline_text)
+            .or_else(|| Some("phone login".to_string())),
+        "login_submit_code" => Some("(code redacted)".to_string()),
+        "login_submit_password" => Some("(password redacted)".to_string()),
+        "search_messages" => {
+            let query = extract_string(value, &["query"]).map(normalize_inline_text)?;
+            let peer = extract_string(value, &["peer"]).map(normalize_inline_text)?;
+            Some(format!("{query} in {peer}"))
+        }
+        "search_peers" => extract_string(value, &["query"])
+            .map(normalize_inline_text)
+            .or_else(|| Some("search peers".to_string())),
+        other if !other.is_empty() => Some(other.replace('_', " ")),
+        _ => Some("Telegram action".to_string()),
+    }
 }
 
 fn normalized_tool_id(tool_id: &str) -> String {
@@ -370,7 +418,8 @@ fn display_output_lines(tool_id: &str, output: &str) -> (Vec<String>, bool) {
                 return (lines, false);
             }
         }
-        "telegramloginstart"
+        "telegramimportlocal"
+        | "telegramloginstart"
         | "telegramloginsubmitcode"
         | "telegramloginsubmitpassword"
         | "emailconfigure" => {

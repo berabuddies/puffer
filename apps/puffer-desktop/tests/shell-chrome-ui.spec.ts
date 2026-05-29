@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
 
+const removedDeploymentsTest = test.skip;
+
 test("Tauri mac shell exposes a drag-only titlebar without duplicate branding", async ({ page }) => {
   const daemon = new FakeDaemon();
   await page.addInitScript(() => {
@@ -64,8 +66,8 @@ test("desktop minimum width keeps primary navigation visible", async ({ page }) 
   const sidebar = page.locator(".pf-sidebar");
   await expect(sidebar).toBeVisible();
   await expect(sidebar.getByRole("button", { name: "Project" })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "Pipelines" })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "Deployments" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Workflows" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Deployments" })).toHaveCount(0);
   await expect(sidebar.getByRole("button", { name: "Settings" })).toBeVisible();
 });
 
@@ -76,18 +78,18 @@ test("sidebar primary navigation exposes the current page", async ({ page }) => 
 
   const sidebar = page.locator(".pf-sidebar");
   const project = sidebar.getByRole("button", { name: "Project" });
-  const pipelines = sidebar.getByRole("button", { name: "Pipelines" });
+  const workflows = sidebar.getByRole("button", { name: "Workflows" });
   const settings = sidebar.getByRole("button", { name: "Settings" });
 
   await expect(project).toHaveAttribute("aria-current", "page");
-  await expect(pipelines).not.toHaveAttribute("aria-current", "page");
+  await expect(workflows).not.toHaveAttribute("aria-current", "page");
 
-  await pipelines.click();
+  await workflows.click();
   await expect(project).not.toHaveAttribute("aria-current", "page");
-  await expect(pipelines).toHaveAttribute("aria-current", "page");
+  await expect(workflows).toHaveAttribute("aria-current", "page");
 
   await settings.click();
-  await expect(pipelines).not.toHaveAttribute("aria-current", "page");
+  await expect(workflows).not.toHaveAttribute("aria-current", "page");
   await expect(settings).toHaveAttribute("aria-current", "page");
 });
 
@@ -153,7 +155,7 @@ test("sidebar width can be resized and persists as a local shell tweak", async (
   expect(storedWidth).toBeGreaterThan(initialBox!.width + 72);
 });
 
-test("sidebar can open the deployments screen", async ({ page }) => {
+removedDeploymentsTest("sidebar can open the deployments screen", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -166,7 +168,7 @@ test("sidebar can open the deployments screen", async ({ page }) => {
   await expect(page.getByRole("button", { name: /New deployment/ })).toBeVisible();
 });
 
-test("deployment search filters environments and resets from Escape", async ({ page }) => {
+removedDeploymentsTest("deployment search filters environments and resets from Escape", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -198,7 +200,7 @@ test("deployment search filters environments and resets from Escape", async ({ p
   await expect(page.locator(".pf-dep-row").filter({ hasText: "stripe-api · production" })).toBeVisible();
 });
 
-test("deployment provider sync button reports progress and completion", async ({ page }) => {
+removedDeploymentsTest("deployment provider sync button reports progress and completion", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -225,7 +227,7 @@ test("deployment provider sync button reports progress and completion", async ({
   expect(statusBox!.height).toBeLessThanOrEqual(topbarBox!.height);
 });
 
-test("deployment new deployment button creates a local draft", async ({ page }) => {
+removedDeploymentsTest("deployment new deployment button creates a local draft", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -264,7 +266,7 @@ test("deployment new deployment button creates a local draft", async ({ page }) 
   await expect(page.getByRole("tab", { name: "Deploys" })).toHaveAttribute("aria-selected", "true");
 });
 
-test("deployment redeploy controls insert a live deploy history item", async ({ page }) => {
+removedDeploymentsTest("deployment redeploy controls insert a live deploy history item", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -296,7 +298,7 @@ test("deployment redeploy controls insert a live deploy history item", async ({ 
   await expect(page.locator(".pf-dep-history-row").first()).toContainText("manual-1431");
 });
 
-test("deployment history logs button opens deploy output", async ({ page }) => {
+removedDeploymentsTest("deployment history logs button opens deploy output", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -320,7 +322,7 @@ test("deployment history logs button opens deploy output", async ({ page }) => {
   await expect(page.getByLabel("Deploy logs for b-1428")).toHaveCount(0);
 });
 
-test("deployment open button opens public URLs and reports unavailable targets", async ({ page }) => {
+removedDeploymentsTest("deployment open button opens public URLs and reports unavailable targets", async ({ page }) => {
   await page.addInitScript(() => {
     const target = window as typeof window & {
       __openedDeploymentUrls?: Array<{ url: string; target?: string; features?: string }>;
@@ -370,7 +372,7 @@ test("deployment open button opens public URLs and reports unavailable targets",
   ).toEqual([{ url: "https://api.puffer.app", target: "_blank", features: "noopener,noreferrer" }]);
 });
 
-test("deployment detail tabs expose selected state", async ({ page }) => {
+removedDeploymentsTest("deployment detail tabs expose selected state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -399,7 +401,7 @@ test("deployment detail tabs expose selected state", async ({ page }) => {
   await expect(askTab).toHaveAttribute("aria-selected", "true");
 });
 
-test("deployment Ask Puffer composer sends prompts from button and Enter", async ({ page }) => {
+removedDeploymentsTest("deployment Ask Puffer composer sends prompts from button and Enter", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -452,7 +454,7 @@ test("deployment Ask Puffer composer sends prompts from button and Enter", async
   await expect(textbox).toHaveValue("");
 });
 
-test("deployment Ask Puffer quick actions give visible feedback", async ({ page }) => {
+removedDeploymentsTest("deployment Ask Puffer quick actions give visible feedback", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -480,7 +482,7 @@ test("deployment Ask Puffer quick actions give visible feedback", async ({ page 
   await expect(composer.getByRole("button", { name: "logs" })).toHaveAttribute("aria-pressed", "false");
 });
 
-test("deployment Ask Puffer saves diagnostic output into Memory", async ({ page }) => {
+removedDeploymentsTest("deployment Ask Puffer saves diagnostic output into Memory", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -507,7 +509,7 @@ test("deployment Ask Puffer saves diagnostic output into Memory", async ({ page 
   await expect(note).toContainText("#keepalive");
 });
 
-test("deployment secrets sync button reports progress and completion", async ({ page }) => {
+removedDeploymentsTest("deployment secrets sync button reports progress and completion", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -529,7 +531,7 @@ test("deployment secrets sync button reports progress and completion", async ({ 
   await expect(syncButton).toHaveAttribute("aria-busy", "false");
 });
 
-test("deployment add secret creates a local masked secret row", async ({ page }) => {
+removedDeploymentsTest("deployment add secret creates a local masked secret row", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -562,7 +564,7 @@ test("deployment add secret creates a local masked secret row", async ({ page })
   await expect(row).toContainText("tok_live_123");
 });
 
-test("deployment add memory note creates a local filtered note", async ({ page }) => {
+removedDeploymentsTest("deployment add memory note creates a local filtered note", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -602,7 +604,7 @@ test("deployment add memory note creates a local filtered note", async ({ page }
   await expect(note).toBeVisible();
 });
 
-test("deployment add provider creates a local integration card", async ({ page }) => {
+removedDeploymentsTest("deployment add provider creates a local integration card", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -635,7 +637,7 @@ test("deployment add provider creates a local integration card", async ({ page }
   await expect(provider).toHaveCount(1);
 });
 
-test("deployment provider settings edit the selected integration card", async ({ page }) => {
+removedDeploymentsTest("deployment provider settings edit the selected integration card", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -664,7 +666,7 @@ test("deployment provider settings edit the selected integration card", async ({
   await expect(provider).toContainText("connected");
 });
 
-test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
+removedDeploymentsTest("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -693,7 +695,7 @@ test("deployment secret reveal controls target one key and toggle their state", 
   );
 });
 
-test("deployment memory and secret row more menus expose actions", async ({ page }) => {
+removedDeploymentsTest("deployment memory and secret row more menus expose actions", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);

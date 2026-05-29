@@ -15,6 +15,7 @@
   let selectedAnswers = $state<Answers>({});
   let customText = $state<Record<string, string>>({});
   let customActive = $state<Record<string, boolean>>({});
+  let searchText = $state<Record<string, string>>({});
   let collapsed = $state(false);
   let lastItemId: string | null = null;
 
@@ -77,6 +78,65 @@
     return customText[draftKeyFor(index)] ?? "";
   }
 
+  function searchValue(index: number): string {
+    return searchText[draftKeyFor(index)] ?? "";
+  }
+
+  function searchTerms(query: string): string[] {
+    return query
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  function optionSearchText(option: AskUserQuestionItem["options"][number]): string {
+    return [option.label, option.description].join(" ").toLowerCase();
+  }
+
+  function optionMatches(option: AskUserQuestionItem["options"][number], query: string): boolean {
+    const terms = searchTerms(query);
+    if (terms.length === 0) return true;
+    const searchText = optionSearchText(option);
+    return terms.every((term) => searchText.includes(term));
+  }
+
+  function filteredOptions(question: AskUserQuestionItem, index: number): AskUserQuestionItem["options"] {
+    if (!question.searchable) return question.options;
+    const query = searchValue(index);
+    return question.options.filter((option) => optionMatches(option, query));
+  }
+
+  function searchSummary(
+    question: AskUserQuestionItem,
+    index: number,
+    visibleCount: number
+  ): string {
+    const total = question.options.length;
+    const query = searchValue(index).trim();
+    if (!query) return total === 1 ? "1 option" : `${total} options`;
+    return visibleCount === 1 ? `1/${total} match` : `${visibleCount}/${total} matches`;
+  }
+
+  function emptySearchMessage(index: number): string {
+    const query = searchValue(index).trim();
+    if (!query) return "No options available.";
+    return `No options match "${query}".`;
+  }
+
+  function setSearch(question: AskUserQuestionItem, index: number, value: string) {
+    const key = draftKeyFor(index);
+    searchText = { ...searchText, [key]: value };
+    const selected = selectedAnswers[key];
+    if (typeof selected === "string") {
+      const selectedOption = question.options.find((option) => option.label === selected);
+      if (selectedOption && !optionMatches(selectedOption, value)) {
+        const { [key]: _removed, ...rest } = selectedAnswers;
+        selectedAnswers = rest;
+      }
+    }
+  }
+
   function customChecked(question: AskUserQuestionItem, index: number): boolean {
     if (answered) return customAnswers(question, index).length > 0;
     const key = draftKeyFor(index);
@@ -108,6 +168,11 @@
   function answerFor(question: AskUserQuestionItem, index: number): string | string[] | null {
     const key = draftKeyFor(index);
     const custom = customValue(index).trim();
+    if (question.type === "input") return custom ? custom : null;
+    if (question.searchable) {
+      const selected = selectedAnswers[key];
+      return typeof selected === "string" && selected.trim() ? selected : null;
+    }
     if (question.multiSelect) {
       const values = selectedList(index);
       const withCustom = custom ? [...values, custom] : values;
@@ -136,6 +201,21 @@
   function canSubmit(): boolean {
     if (answered || disabled) return false;
     return item.questions.every((question, index) => hasAnswer(question, index));
+  }
+
+  function questionHint(question: AskUserQuestionItem): string {
+    if (question.type === "input") return "Type the requested value.";
+    if (question.searchable) return "Search options, then choose one.";
+    return question.multiSelect
+      ? "Choose one or more options, or enter a custom answer."
+      : "Choose one option, or enter a custom answer.";
+  }
+
+  function displayAnswer(question: AskUserQuestionItem, index: number): string {
+    const answer = item.answers?.[answerKeyFor(question, index)];
+    if (Array.isArray(answer)) return answer.join(", ");
+    if (typeof answer === "string") return answer;
+    return customValue(index);
   }
 
   function submit() {
@@ -175,40 +255,79 @@
         <div class="pf-question-title">{question.question}</div>
         {#if !answered}
           <div class="pf-question-hint">
-            {question.multiSelect ? "Choose one or more options, or enter a custom answer." : "Choose one option, or enter a custom answer."}
+            {questionHint(question)}
           </div>
         {/if}
-        <div class="pf-question-options" data-multi={question.multiSelect === true}>
-          {#each question.options as option (option.label)}
-            <label
-              class="pf-question-option"
-              data-selected={checked(question, index, option.label)}
-              data-readonly={answered || disabled}
-            >
+        {#if question.type === "input"}
+          <label
+            class="pf-question-input"
+            data-readonly={answered || disabled}
+          >
+            {#if answered}
+              <div class="pf-question-input-readonly">{displayAnswer(question, index)}</div>
+            {:else}
               <input
-                type={question.multiSelect ? "checkbox" : "radio"}
-                name={`question-${item.id}-${index}`}
-                checked={checked(question, index, option.label)}
-                disabled={answered || disabled}
-                onchange={() =>
-                  question.multiSelect
-                    ? toggleMulti(index, option.label)
-                    : selectSingle(index, option.label)}
+                class="pf-question-direct-input"
+                value={customValue(index)}
+                disabled={disabled}
+                placeholder="Type answer"
+                oninput={(event) =>
+                  setCustom(question, index, (event.currentTarget as HTMLInputElement).value)}
               />
-              <span class="pf-question-option-body">
-                <span>{option.label}</span>
-                <small>{option.description}</small>
-                {#if option.preview}
-                  <pre>{option.preview}</pre>
-                {/if}
+            {/if}
+          </label>
+        {:else}
+          {@const visibleOptions = filteredOptions(question, index)}
+          {#if question.searchable && !answered}
+            <label class="pf-question-search">
+              <Icon name="search" size={13} />
+              <input
+                value={searchValue(index)}
+                disabled={disabled}
+                placeholder="Search options"
+                oninput={(event) =>
+                  setSearch(question, index, (event.currentTarget as HTMLInputElement).value)}
+              />
+              <span class="pf-question-search-status">
+                {searchSummary(question, index, visibleOptions.length)}
               </span>
-              {#if answered && checked(question, index, option.label)}
-                <span class="pf-question-selected">Selected</span>
-              {/if}
             </label>
-          {/each}
-        </div>
-        {#if !answered || customAnswers(question, index).length > 0}
+          {/if}
+          <div class="pf-question-options" data-multi={question.multiSelect === true}>
+            {#each visibleOptions as option (option.label)}
+              <label
+                class="pf-question-option"
+                data-selected={checked(question, index, option.label)}
+                data-readonly={answered || disabled}
+              >
+                <input
+                  type={question.multiSelect ? "checkbox" : "radio"}
+                  name={`question-${item.id}-${index}`}
+                  checked={checked(question, index, option.label)}
+                  disabled={answered || disabled}
+                  onchange={() =>
+                    question.multiSelect
+                      ? toggleMulti(index, option.label)
+                      : selectSingle(index, option.label)}
+                />
+                <span class="pf-question-option-body">
+                  <span>{option.label}</span>
+                  <small>{option.description}</small>
+                  {#if option.preview}
+                    <pre>{option.preview}</pre>
+                  {/if}
+                </span>
+                {#if answered && checked(question, index, option.label)}
+                  <span class="pf-question-selected">Selected</span>
+                {/if}
+              </label>
+            {/each}
+          </div>
+          {#if question.searchable && visibleOptions.length === 0 && !answered}
+            <div class="pf-question-empty">{emptySearchMessage(index)}</div>
+          {/if}
+        {/if}
+        {#if question.type !== "input" && !question.searchable && (!answered || customAnswers(question, index).length > 0)}
           <label
             class="pf-question-other"
             data-selected={customChecked(question, index)}
@@ -337,6 +456,65 @@
     color: var(--muted-foreground);
     font-size: 12px;
     line-height: 1.35;
+  }
+
+  .pf-question-search,
+  .pf-question-input {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--background);
+    color: var(--foreground);
+  }
+
+  .pf-question-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 10px;
+  }
+
+  .pf-question-search-status {
+    flex-shrink: 0;
+    color: var(--muted-foreground);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .pf-question-search input,
+  .pf-question-direct-input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--foreground);
+    padding: 8px 0;
+    font: inherit;
+  }
+
+  .pf-question-input {
+    display: block;
+    padding: 0 10px;
+  }
+
+  .pf-question-input[data-readonly="true"] {
+    padding: 8px 10px;
+  }
+
+  .pf-question-input-readonly {
+    min-width: 0;
+    color: var(--foreground);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  .pf-question-empty {
+    color: var(--muted-foreground);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
   }
 
   .pf-question-options {

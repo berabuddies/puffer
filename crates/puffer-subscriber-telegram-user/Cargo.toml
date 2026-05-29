@@ -6,12 +6,21 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+aes = "0.8.4"
+base64.workspace = true
+cbc = "0.1.2"
+dirs.workspace = true
 grammers-client = "0.7"
 grammers-session = "0.7"
 grammers-tl-types = "0.7"
+hermes-tdata = "0.1.1"
+plist = "1.8.0"
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "fs"] }

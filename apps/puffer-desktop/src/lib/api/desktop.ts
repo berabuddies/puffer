@@ -14,10 +14,13 @@ import type {
   RepoActionResult,
   RepoStatus,
   SessionDetail,
+  SessionGroupsPage,
   SessionListItem,
   SettingsSnapshot,
   MessageActor,
   TimelineItem,
+  WorkflowDefinition,
+  WorkflowBindingCreateRequest,
   WorkflowRun,
   WorkflowSnapshot
 } from "../types";
@@ -37,6 +40,16 @@ type BackendFolderGroup = {
   folderPath: string;
   sessionCount: number;
   sessions: BackendSessionListItem[];
+  tags?: string[];
+};
+
+type BackendSessionGroupsPage = {
+  groups: BackendFolderGroup[];
+  offset: number;
+  limit: number;
+  returnedSessions: number;
+  totalSessions: number;
+  hasMore: boolean;
 };
 
 type BackendDesktopPinState = {
@@ -156,6 +169,7 @@ type BackendTimelineItem =
       input_json?: Record<string, unknown> | null;
       outputText?: string;
       output_text?: string;
+      metadata?: unknown;
     } & BackendActorFields
   | ({
       kind: "permission_dialog";
@@ -226,6 +240,7 @@ type BackendResourceCounts = SettingsSnapshot["resources"];
 type BackendSettingsSessionSummary = SettingsSnapshot["sessions"];
 type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
+type BackendBrowserProfile = SettingsSnapshot["browserProfiles"][number];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -238,6 +253,7 @@ type BackendSettingsSnapshot = {
   sessions: BackendSettingsSessionSummary;
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
+  browserProfiles: BackendBrowserProfile[];
 };
 
 type BackendRemoteOperation = RemoteOperation;
@@ -324,7 +340,9 @@ function normalizeAskUserQuestions(raw: unknown): AskUserQuestionItem[] {
     .map((item) => ({
       question: typeof item.question === "string" ? item.question : "Question",
       header: typeof item.header === "string" ? item.header : "Question",
+      type: item.type === "input" ? "input" as const : "choice" as const,
       multiSelect: item.multiSelect === true,
+      searchable: item.searchable === true,
       options: Array.isArray(item.options)
         ? item.options
             .map(asRecord)
@@ -438,14 +456,18 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         actor: value.actor ?? null
       };
     case "system_message":
+      const systemText = value.text;
+      const isVerifiedSkillGate = systemText.trim().startsWith("Verified Skill Gate");
+      const verifiedGateFailed = /\bevent:\s*[^\n]*reject/i.test(systemText);
       return {
         id: value.id,
         kind: "system",
         createdAtMs: value.createdAtMs ?? null,
-        title: "System message",
-        summary: preview(value.text),
-        body: value.text,
-        meta: [],
+        title: isVerifiedSkillGate ? "Verified Skill Gate" : "System message",
+        summary: preview(systemText),
+        body: systemText,
+        meta: isVerifiedSkillGate ? ["verified skill"] : [],
+        status: isVerifiedSkillGate ? (verifiedGateFailed ? "error" : "success") : null,
         actor: value.actor ?? null
       };
     case "command":
@@ -487,6 +509,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         input: inputText,
         output: outputText,
         inputJson,
+        metadata: value.metadata,
         actor: value.actor ?? null,
         subject: value.subject ?? null
       };
@@ -552,19 +575,35 @@ function normalizeSessionDetail(value: BackendSessionDetail): SessionDetail {
   };
 }
 
+function normalizeFolderGroup(group: BackendFolderGroup): FolderGroup {
+  return {
+    id: group.folderId,
+    label: group.folderLabel,
+    path: group.folderPath,
+    sessionCount: group.sessionCount,
+    sessions: group.sessions.map(normalizeSessionListItem),
+    tags: group.tags ?? []
+  };
+}
+
+function normalizeSessionGroupsPage(page: BackendSessionGroupsPage): SessionGroupsPage {
+  return {
+    groups: page.groups.map(normalizeFolderGroup),
+    offset: page.offset,
+    limit: page.limit,
+    returnedSessions: page.returnedSessions,
+    totalSessions: page.totalSessions,
+    hasMore: page.hasMore
+  };
+}
+
 export async function listGroupedSessions(remote?: RemoteConnection): Promise<FolderGroup[]> {
   if (!canInvokeTauri()) {
     if (canReachDaemon()) return listGroupedSessionsFromDaemon();
     return mockFolders;
   }
   const response = await invoke<BackendFolderGroup[]>("list_grouped_sessions", remoteArgs(remote));
-  return response.map((group) => ({
-    id: group.folderId,
-    label: group.folderLabel,
-    path: group.folderPath,
-    sessionCount: group.sessionCount,
-    sessions: group.sessions.map(normalizeSessionListItem)
-  }));
+  return response.map(normalizeFolderGroup);
 }
 
 export async function loadSessionDetail(
@@ -847,7 +886,8 @@ import {
 export async function createSession(
   cwd?: string,
   providerId?: string,
-  modelId?: string
+  modelId?: string,
+  displayName = "New Session"
 ): Promise<{
   sessionId: string;
   cwd: string;
@@ -859,7 +899,9 @@ export async function createSession(
   return client.request(
     "create_session",
     Object.fromEntries(
-      Object.entries({ cwd, providerId, modelId }).filter(([, value]) => Boolean(value))
+      Object.entries({ cwd, providerId, modelId, displayName }).filter(([, value]) =>
+        Boolean(value)
+      )
     )
   );
 }
@@ -1008,15 +1050,51 @@ export async function listGroupedSessionsFromDaemon(): Promise<FolderGroup[]> {
   try {
     const client = await ensureLocalDaemonClient();
     const raw = await client.request<BackendFolderGroup[]>("list_grouped_sessions");
-    return raw.map((folder) => ({
-      id: folder.folderId,
-      label: folder.folderLabel,
-      path: folder.folderPath,
-      sessionCount: folder.sessionCount,
-      sessions: folder.sessions.map(normalizeSessionListItem)
-    }));
+    return raw.map(normalizeFolderGroup);
   } catch (_error) {
     if (!canReachDaemon()) return mockFolders;
+    throw _error;
+  }
+}
+
+export async function listGroupedSessionsPageFromDaemon(
+  offset = 0,
+  limit = 30
+): Promise<SessionGroupsPage> {
+  try {
+    const client = await ensureLocalDaemonClient();
+    const raw = await client.request<BackendSessionGroupsPage>("list_grouped_sessions_page", {
+      offset,
+      limit
+    });
+    return normalizeSessionGroupsPage(raw);
+  } catch (_error) {
+    if (!canReachDaemon()) {
+      const entries = mockFolders.flatMap((folder) =>
+        folder.sessions.map((session) => ({ folder, session }))
+      );
+      const pageEntries = entries.slice(offset, offset + limit);
+      const groupsById = new Map<string, FolderGroup>();
+      for (const { folder, session } of pageEntries) {
+        const group = groupsById.get(folder.id) ?? {
+          ...folder,
+          sessions: [],
+          sessionCount: 0
+        };
+        group.sessions.push(session);
+        group.sessionCount = group.sessions.length;
+        groupsById.set(folder.id, group);
+      }
+      const pageGroups = Array.from(groupsById.values());
+      return {
+        groups: pageGroups,
+        offset,
+        limit,
+        returnedSessions: pageGroups.reduce((count, group) => count + group.sessions.length, 0),
+        totalSessions: entries.length,
+        hasMore: offset + limit < entries.length
+      };
+    }
     throw _error;
   }
 }
@@ -1080,10 +1158,114 @@ export async function renameSession(sessionId: string, title: string): Promise<S
   return normalizeSessionDetail(raw);
 }
 
+/** Permanently deletes one session and all of its sidecar files. */
+export async function deleteSession(sessionId: string): Promise<void> {
+  const client = await ensureLocalDaemonClient();
+  await client.request<{ ok: boolean }>("delete_session", { sessionId });
+}
+
+/** Replaces the tag list on one session. Tags are trimmed, deduped, sorted. */
+export async function setSessionTags(sessionId: string, tags: string[]): Promise<SessionDetail> {
+  const client = await ensureLocalDaemonClient();
+  const raw = await client.request<BackendSessionDetail>("set_session_tags", {
+    sessionId,
+    tags
+  });
+  return normalizeSessionDetail(raw);
+}
+
+/** Permanently deletes every session under `folderPath` and removes the
+ *  project's metadata entry. Use with strong UI confirmation. */
+export async function deleteProject(folderPath: string): Promise<{ removedSessions: number }> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ ok: boolean; removedSessions: number }>("delete_project", {
+    folderPath
+  });
+  return { removedSessions: result.removedSessions };
+}
+
+/** Replaces the tag list on one project (folder). */
+export async function setProjectTags(folderPath: string, tags: string[]): Promise<string[]> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ ok: boolean; tags: string[] }>("set_project_tags", {
+    folderPath,
+    tags
+  });
+  return result.tags;
+}
+
 /** Load registered workflows and recent runs from the daemon. */
 export async function loadWorkflowSnapshot(): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<WorkflowSnapshot>("workflow_list");
+}
+
+/** Persist one workflow definition through the daemon and return the refreshed snapshot. */
+export async function saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_save", { workflow });
+}
+
+/** Create or update one connection-triggered workflow binding. */
+export async function createWorkflowBinding(binding: WorkflowBindingCreateRequest): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_binding_create", binding);
+}
+
+/** Create or resume a connector monitor and return the refreshed workflow snapshot. */
+export async function createMonitor(
+  connectionSlug: string,
+  model?: string | null
+): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  const params: { connection_slug: string; model?: string | null } = {
+    connection_slug: connectionSlug
+  };
+  if (model !== undefined) {
+    params.model = model?.trim() || null;
+  }
+  return client.request<WorkflowSnapshot>("task_monitor_create", params);
+}
+
+/** Delete one connector monitor and return the refreshed workflow snapshot. */
+export async function deleteMonitor(slug: string): Promise<WorkflowSnapshot> {
+  return deleteWorkflowBinding(slug);
+}
+
+/** Ignore one monitor-created task and return the refreshed workflow snapshot. */
+export async function ignoreMonitorTask(taskId: string, reason?: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_ignore", {
+    task_id: taskId,
+    reason: reason?.trim() || undefined
+  });
+}
+
+/** Save one monitor memory file and return the refreshed workflow snapshot. */
+export async function saveMonitorMemory(connectionSlug: string, content: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("task_monitor_memory_save", {
+    connection_slug: connectionSlug,
+    content
+  });
+}
+
+/** Delete one connection-triggered workflow binding. */
+export async function deleteWorkflowBinding(slug: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_binding_delete", { slug });
+}
+
+/** Delete one connector connection. */
+export async function deleteWorkflowConnection(slug: string): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_connection_delete", { slug });
+}
+
+/** Toggle a native workflow or subscription workflow binding. */
+export async function toggleWorkflow(slug: string, enabled: boolean): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_toggle", { slug, enabled });
 }
 
 /** Load runs for one workflow slug from the daemon. */
@@ -1134,6 +1316,22 @@ export async function runAgentTurn(
     // Fallback: the in-process Tauri command (same behavior, just no daemon).
     return invoke<string>("run_agent_turn", { sessionId, message, ...options });
   }
+}
+
+/** Runs a slash command (e.g. `/connect <slug> <conn>`) through the
+ *  deterministic command dispatcher. No provider/LLM is contacted. Streams
+ *  `user-question-request`, `turn-complete`, and `turn-error` events on the
+ *  same session channel as a regular turn. */
+export async function dispatchSlashCommand(
+  sessionId: string,
+  message: string
+): Promise<string> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ turnId: string }>("dispatch_slash_command", {
+    sessionId,
+    message
+  });
+  return result.turnId;
 }
 
 /** Resolves a pending permission prompt for an in-flight turn. */
@@ -1733,9 +1931,130 @@ export type ModelDescriptorInfo = {
   defaultThinkingOptionId?: string;
 };
 
+export type LocalModelStatus = {
+  id: string;
+  modelId: string;
+  displayName: string;
+  checkedAtMs: number;
+  supported: boolean;
+  recommended: boolean;
+  installed: boolean;
+  configured: boolean;
+  running: boolean;
+  installing: boolean;
+  reason: string;
+  endpoint: string;
+  size: string;
+  installPath: string;
+  providerPath: string;
+  logPath: string;
+  installLogPath: string;
+  serveLogPath: string;
+  checks: LocalModelCheck[];
+};
+
+export type LocalModelCheck = {
+  label: string;
+  state: "ok" | "missing" | "warning" | "error" | string;
+  detail: string;
+};
+
+export type LocalModelInstallJob = {
+  jobId: string;
+  status: LocalModelStatus;
+};
+
+export type LocalModelEvent = {
+  modelId: string;
+  jobId: string;
+  phase: string;
+  message: string;
+  status?: LocalModelStatus | null;
+};
+
 export type PermissionsSnapshot = {
   path: string;
   tools: Record<string, string>;
+};
+
+export type LambdaSkillLibraryInfo = {
+  id: string;
+  root: string;
+  generatedSubpath?: string | null;
+  hostCatalogueSubpath?: string | null;
+  compilerPath?: string | null;
+  allowedTools: string[];
+  hostToolBindings: Record<string, string[]>;
+  skillHostToolBindings: Record<string, Record<string, string[]>>;
+  userInvocable: boolean;
+  disableModelInvocation: boolean;
+  requireApproval: boolean;
+  disabledSkills: string[];
+  sourceKind: string;
+  sourcePath: string;
+};
+
+export type LambdaVerifiedSkillInfo = {
+  name: string;
+  description: string;
+  libraryId?: string | null;
+  libraryRoot?: string | null;
+  sourceKind?: string | null;
+  sourcePath?: string | null;
+  generatedPath?: string | null;
+  ready: boolean;
+  enabled: boolean;
+  modelInvocable: boolean;
+  gateSource?: string | null;
+  failureReason?: string | null;
+  allowedTools: string[];
+  requireApproval: boolean;
+  tools?: number | null;
+  actions?: number | null;
+};
+
+export type LambdaSkillLibrariesSnapshot = {
+  directories: {
+    workspace: string;
+    user: string;
+  };
+  libraries: LambdaSkillLibraryInfo[];
+  skills: LambdaVerifiedSkillInfo[];
+  doctor: string;
+  warnings: string[];
+};
+
+export type SaveLambdaSkillLibraryInput = {
+  id: string;
+  root: string;
+  generatedSubpath?: string | null;
+  hostCatalogueSubpath?: string | null;
+  compilerPath?: string | null;
+  allowedTools?: string[];
+  hostToolBindings?: Record<string, string[]>;
+  skillHostToolBindings?: Record<string, Record<string, string[]>>;
+  userInvocable?: boolean;
+  disableModelInvocation?: boolean;
+  requireApproval?: boolean;
+  scope?: "workspace" | "user";
+};
+
+export type SetLambdaSkillEnabledInput = {
+  libraryId: string;
+  sourceKind: "workspace" | "user";
+  skillName: string;
+  enabled: boolean;
+};
+
+export type SetLambdaSkillApprovalInput = {
+  libraryId: string;
+  sourceKind: "workspace" | "user";
+  requireApproval: boolean;
+};
+
+export type RemoveLambdaSkillLibraryInput = {
+  libraryId: string;
+  sourceKind: "workspace" | "user";
 };
 
 export type ConfigPatch = {
@@ -1743,7 +2062,18 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
+  browserChromeProfile?: string | null;
 };
+
+export async function localModelStatus(modelId = "minicpm5"): Promise<LocalModelStatus> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LocalModelStatus>("local_model_status", { modelId });
+}
+
+export async function installLocalModel(modelId = "minicpm5"): Promise<LocalModelInstallJob> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LocalModelInstallJob>("install_local_model", { modelId });
+}
 
 export async function listMcpServers(): Promise<McpServerInfo[]> {
   const client = await ensureLocalDaemonClient();
@@ -1778,10 +2108,64 @@ export async function savePermissions(
   return client.request<PermissionsSnapshot>("save_permissions", { tools });
 }
 
+export async function listLambdaSkillLibraries(): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("list_lambda_skill_libraries");
+}
+
+export async function saveLambdaSkillLibrary(
+  input: SaveLambdaSkillLibraryInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("save_lambda_skill_library", input);
+}
+
+export async function removeLambdaSkillLibrary(
+  input: RemoveLambdaSkillLibraryInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("remove_lambda_skill_library", input);
+}
+
+export async function setLambdaSkillEnabled(
+  input: SetLambdaSkillEnabledInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("set_lambda_skill_enabled", input);
+}
+
+export async function setLambdaSkillApproval(
+  input: SetLambdaSkillApprovalInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("set_lambda_skill_approval", input);
+}
+
 /** Patch the user config file and return the fresh settings snapshot. The
  *  daemon reloads its own in-memory config under the lock, so subsequent
  *  turns pick up the new default_model without a daemon restart. */
 export async function updateConfig(patch: ConfigPatch): Promise<SettingsSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<SettingsSnapshot>("update_config", patch);
+}
+
+export type Minicpm5Recommendation = {
+  recommend: boolean;
+  reason?: string;
+  display_name?: string;
+  why?: string;
+  size?: string;
+  install_cmd?: string;
+};
+
+/** Ask the desktop backend whether to recommend the local MiniCPM5 model on
+ *  this machine (macOS + Apple Silicon + not yet installed). */
+export async function minicpm5Recommend(): Promise<Minicpm5Recommendation> {
+  return await invoke<Minicpm5Recommendation>("minicpm5_recommend");
+}
+
+/** Kick off the local-model install. Progress streams as `minicpm5://install-log`
+ *  events; completion arrives as `minicpm5://install-done` ({ success }). */
+export async function minicpm5Install(): Promise<void> {
+  await invoke("minicpm5_install");
 }

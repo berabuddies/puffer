@@ -498,7 +498,8 @@ fn parse_browser_action(action: &str) -> Option<BrowserActionCategory> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "inspect" | "list" | "snapshot" | "screenshot" => Some(BrowserActionCategory::Inspect),
+        "inspect" | "list" | "snapshot" | "screenshot" | "dominspect" | "networkidle"
+        | "waitnetworkidle" => Some(BrowserActionCategory::Inspect),
         "navigate" | "open" | "new" | "focus" | "close" | "reload" | "back" | "forward" => {
             Some(BrowserActionCategory::Navigate)
         }

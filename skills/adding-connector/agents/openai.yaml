@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adding Connector"
+  short_description: "Implement new Puffer connectors"
+  default_prompt: "Use $adding-connector to implement a new Puffer connector."

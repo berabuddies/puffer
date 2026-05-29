@@ -16,8 +16,9 @@ const areas = [
   { name: "modal-focus-keyboard", seed: "modal-focus-race", priority: "P1" },
   { name: "files-terminal", seed: "files-terminal-race", priority: "P1/P2" },
   { name: "browser-tabs-input", seed: "browser-tab-race", priority: "P1/P2" },
+  { name: "settings-connectors", seed: "settings-connector-race", priority: "P2" },
   { name: "settings-mcp-permissions", seed: "settings-mcp-permission-race", priority: "P2" },
-  { name: "pipelines-drafts", seed: "pipelines-draft-race", priority: "P2" }
+  { name: "workflows-drafts", seed: "workflows-draft-race", priority: "P2" }
 ];
 const selectedAreas = selectAreas(areas);
 

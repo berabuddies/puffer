@@ -15,6 +15,10 @@ use serde_yaml::{Mapping, Value as YamlValue};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+mod lambda_skill;
+
+use self::lambda_skill::{load_lambda_skill_libraries, LambdaSkillLibrarySpec};
+
 /// Built-in `<repo>/resources/` baked into the binary at compile time.
 /// Same pattern as codex's `include_str!("../templates/foo.md")` (used at
 /// e.g. codex-rs/core/src/compact.rs:43), generalized to a directory tree
@@ -47,6 +51,11 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             continue;
         }
         let plugins = load_yaml_dir::<PluginSpec>(runner, &root.join("plugins"), kind)?;
+        let lambda_skill_libraries = load_yaml_dir::<LambdaSkillLibrarySpec>(
+            runner,
+            &root.join("lambda_skill_libraries"),
+            kind,
+        )?;
         merge_by_id(
             &mut loaded.providers,
             load_yaml_dir::<ProviderPack>(runner, &root.join("providers"), kind)?,
@@ -89,6 +98,15 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             "hook",
             &mut loaded.diagnostics,
         );
+        let lambda_skills =
+            load_lambda_skill_libraries(runner, &lambda_skill_libraries, &mut loaded.diagnostics)?;
+        merge_by_id(
+            &mut loaded.skills,
+            lambda_skills,
+            |item| MergeKey::simple(item.value.name.clone()),
+            "skill",
+            &mut loaded.diagnostics,
+        );
         merge_by_id(
             &mut loaded.skills,
             load_skill_dir(runner, &root.join("skills"), kind)?,
@@ -129,6 +147,36 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             load_yaml_dir::<IdeSpec>(runner, &root.join("ides"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "ide",
+            &mut loaded.diagnostics,
+        );
+    }
+    apply_runtime_resource_filters(&mut loaded);
+    Ok(loaded)
+}
+
+/// Loads only tool resources needed to construct the executable tool registry.
+pub fn load_tool_resources(
+    paths: &ConfigPaths,
+    runner: &dyn ToolRunner,
+) -> Result<LoadedResources> {
+    let mut loaded = LoadedResources::default();
+    apply_embedded_tool_resources(&mut loaded)?;
+    for (root, kind) in resource_roots(paths) {
+        if !runner_path_exists(runner, &root) {
+            continue;
+        }
+        merge_by_id(
+            &mut loaded.tools,
+            load_yaml_dir::<ToolSpec>(runner, &root.join("tools"), kind)?,
+            |item| MergeKey::simple(item.value.id.clone()),
+            "tool",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
+            &mut loaded.internal_tools,
+            load_yaml_dir::<ToolSpec>(runner, &root.join("internal_tools"), kind)?,
+            |item| MergeKey::simple(item.value.id.clone()),
+            "internal_tool",
             &mut loaded.diagnostics,
         );
     }
@@ -368,18 +416,12 @@ fn resource_roots(paths: &ConfigPaths) -> Vec<(PathBuf, SourceKind)> {
 /// loader. Filesystem layers in `resource_roots` are merged on top.
 fn apply_embedded_resources(loaded: &mut LoadedResources) -> Result<()> {
     let plugins = load_yaml_embedded::<PluginSpec>("plugins")?;
+    apply_embedded_tool_resources(loaded)?;
     merge_by_id(
         &mut loaded.providers,
         load_yaml_embedded::<ProviderPack>("providers")?,
         |item| MergeKey::simple(item.value.id.clone()),
         "provider",
-        &mut loaded.diagnostics,
-    );
-    merge_by_id(
-        &mut loaded.tools,
-        load_yaml_embedded::<ToolSpec>("tools")?,
-        |item| MergeKey::simple(item.value.id.clone()),
-        "tool",
         &mut loaded.diagnostics,
     );
     merge_by_id(
@@ -443,6 +485,24 @@ fn apply_embedded_resources(loaded: &mut LoadedResources) -> Result<()> {
         load_yaml_embedded::<IdeSpec>("ides")?,
         |item| MergeKey::simple(item.value.id.clone()),
         "ide",
+        &mut loaded.diagnostics,
+    );
+    Ok(())
+}
+
+fn apply_embedded_tool_resources(loaded: &mut LoadedResources) -> Result<()> {
+    merge_by_id(
+        &mut loaded.tools,
+        load_yaml_embedded::<ToolSpec>("tools")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "tool",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.internal_tools,
+        load_yaml_embedded::<ToolSpec>("internal_tools")?,
+        |item| MergeKey::simple(item.value.id.clone()),
+        "internal_tool",
         &mut loaded.diagnostics,
     );
     Ok(())
@@ -545,6 +605,7 @@ fn load_skill_embedded() -> Result<Vec<LoadedItem<SkillSpec>>> {
                 effort,
                 context,
                 disable_model_invocation,
+                verification: None,
             },
             source_info: SourceInfo {
                 path: PathBuf::from("<embedded>").join(&skill_path),
@@ -748,6 +809,7 @@ fn load_skill_dir(
                 effort,
                 context,
                 disable_model_invocation,
+                verification: None,
             },
             source_info: SourceInfo {
                 path: skill_path,
@@ -1173,6 +1235,40 @@ mod tests {
     }
 
     #[test]
+    fn load_tool_resources_reads_tools_without_scanning_skills() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let resources_dir = root.join("resources");
+        fs::create_dir_all(resources_dir.join("tools")).unwrap();
+        fs::create_dir_all(resources_dir.join("skills/reviewer")).unwrap();
+        fs::create_dir_all(resources_dir.join("plugins")).unwrap();
+        fs::write(
+            resources_dir.join("tools/custom.yaml"),
+            "id: CustomTool\nname: CustomTool\ndescription: Custom tool\nhandler: runtime:sleep\n",
+        )
+        .unwrap();
+        fs::write(
+            resources_dir.join("skills/reviewer/SKILL.md"),
+            "---\nname: reviewer\ndescription: Review changes\n---\nBody\n",
+        )
+        .unwrap();
+        fs::write(
+            resources_dir.join("plugins/example.yaml"),
+            "id: example\ndisplay_name: Example\ncommands: []\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_tool_resources(&paths, &FsTestRunner).unwrap();
+        assert!(loaded
+            .tools
+            .iter()
+            .any(|tool| tool.value.id == "CustomTool"));
+        assert!(loaded.skills.is_empty());
+        assert!(loaded.plugins.is_empty());
+    }
+
+    #[test]
     fn plugin_agents_are_loaded_into_agent_inventory() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
@@ -1314,6 +1410,191 @@ mod tests {
         assert_eq!(skill.context.as_deref(), Some("fork"));
         assert!(!skill.user_invocable);
         assert!(skill.disable_model_invocation);
+    }
+
+    #[test]
+    fn lambda_skill_library_imports_generated_external_skills() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let external_root = temp.path().join("lambda-library");
+        let skill_dir = external_root.join("source-pack/gh-fix-ci");
+        fs::create_dir_all(skill_dir.join("out")).unwrap();
+        fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\n# Runtime body\nUse generated prompt.\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/stats.json"),
+            "{\n  \"slug\": \"gh_fix_ci\",\n  \"tools\": 10,\n  \"actions\": 2\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"gh auth status"}}}]}"#,
+        )
+        .unwrap();
+
+        let manifest_dir = root.join(".puffer/resources/lambda_skill_libraries");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("verified.yaml"),
+            format!(
+                "id: verified\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\nrequire_approval: true\nhost_tool_bindings:\n  gh_auth_status:\n    - Bash\nskill_host_tool_bindings:\n  gh-fix-ci:\n    gh_pr_view:\n      - Bash\n",
+                external_root.display()
+            ),
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
+        let skill = skill_by_name(&loaded, "gh-fix-ci")
+            .expect("lambda skill should import")
+            .clone();
+
+        assert_eq!(skill.value.description, "Verified CI repair");
+        assert_eq!(skill.value.allowed_tools, vec!["Bash", "Read"]);
+        assert!(!skill.value.disable_model_invocation);
+        assert_eq!(skill.source_info.path, skill_dir.join("skill.lskill"));
+        assert!(skill
+            .value
+            .content
+            .contains("Lambda Skill verification:\n- system: lambda-skill"));
+        assert!(skill.value.content.contains("Use generated prompt."));
+        assert!(!skill.value.content.contains("---\nname:"));
+
+        let verification = skill
+            .value
+            .verification
+            .expect("lambda skill should carry verification metadata");
+        assert_eq!(verification.system, "lambda-skill");
+        assert_eq!(verification.tools, Some(10));
+        assert_eq!(verification.actions, Some(2));
+        assert_eq!(
+            verification.source_path,
+            Some(skill_dir.join("skill.lskill").display().to_string())
+        );
+        assert_eq!(verification.compiler_path, None);
+        assert_eq!(
+            verification.host_catalogue_path,
+            Some(skill_dir.join("out/host.json").display().to_string())
+        );
+        assert_eq!(
+            verification.host_tool_bindings.get("gh_auth_status"),
+            Some(&vec!["Bash".to_string()])
+        );
+        assert_eq!(
+            verification.host_tool_bindings.get("gh_pr_view"),
+            Some(&vec!["Bash".to_string()])
+        );
+        assert!(verification.require_approval);
+    }
+
+    #[test]
+    fn lambda_skill_library_ignores_nested_duplicate_roots() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let external_root = temp.path().join("lambda-library");
+        let nested_root = external_root.join("source-pack");
+        let skill_dir = nested_root.join("gh-fix-ci");
+        fs::create_dir_all(skill_dir.join("out")).unwrap();
+        fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"gh auth status"}}}]}"#,
+        )
+        .unwrap();
+
+        let manifest_dir = root.join(".puffer/resources/lambda_skill_libraries");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("parent.yaml"),
+            format!(
+                "id: parent\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n",
+                external_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            manifest_dir.join("nested.yaml"),
+            format!(
+                "id: nested\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n",
+                nested_root.display()
+            ),
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
+        let expected_source = skill_dir.join("skill.lskill").display().to_string();
+        let lambda_skill_count = loaded
+            .skills
+            .iter()
+            .filter(|skill| {
+                skill.value.name == "gh-fix-ci"
+                    && skill
+                        .value
+                        .verification
+                        .as_ref()
+                        .is_some_and(|verification| {
+                            verification.system == "lambda-skill"
+                                && verification.source_path.as_deref()
+                                    == Some(expected_source.as_str())
+                        })
+            })
+            .count();
+
+        assert_eq!(lambda_skill_count, 1);
+    }
+
+    #[test]
+    fn lambda_skill_library_disables_named_generated_skill() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let external_root = temp.path().join("lambda-library");
+        let skill_dir = external_root.join("source-pack/gh-fix-ci");
+        fs::create_dir_all(skill_dir.join("out")).unwrap();
+        fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\n# Runtime body\nUse generated prompt.\n",
+        )
+        .unwrap();
+
+        let manifest_dir = root.join(".puffer/resources/lambda_skill_libraries");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("verified.yaml"),
+            format!(
+                "id: verified\nroot: '{}'\nallowed_tools:\n  - Bash\ndisabled_skills:\n  - gh-fix-ci\n",
+                external_root.display()
+            ),
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
+        let skill = skill_by_name(&loaded, "gh-fix-ci").expect("lambda skill should import");
+
+        assert!(skill.value.disable_model_invocation);
     }
 
     #[test]

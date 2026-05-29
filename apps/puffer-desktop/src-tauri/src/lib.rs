@@ -6,7 +6,9 @@ mod dtos;
 mod events;
 mod files;
 mod fs_watch;
+mod local_model;
 mod lsp;
+mod minicpm5;
 mod pty;
 mod remote_client;
 mod repo_actions;
@@ -48,6 +50,8 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "resolve_permission",
     "resolve_user_question",
     "cancel_turn",
+    "minicpm5_recommend",
+    "minicpm5_install",
 ];
 
 fn backend_call(
@@ -413,6 +417,8 @@ pub fn run() {
             resolve_permission,
             resolve_user_question,
             cancel_turn,
+            minicpm5::minicpm5_recommend,
+            minicpm5::minicpm5_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Corbina desktop");

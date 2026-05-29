@@ -1,0 +1,45 @@
+id: ImageGeneration
+name: ImageGeneration
+description: |-
+  Generate one image through Puffer's configured OpenAI image backend and
+  write the resulting image into the workspace.
+
+  Use this for verified Lambda Skill contracts that have a concrete image
+  prompt and optional aspect ratio. The tool reads a workspace-relative prompt
+  file when the prompt value names one; otherwise it treats prompt as literal
+  text. Output paths must be workspace-relative.
+handler: runtime:workflow:image_generation
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: Literal prompt text or a workspace-relative prompt file path.
+    promptReference:
+      type: string
+      description: Optional workspace-relative prompt/reference file to prepend as generation context.
+    aspect:
+      type: string
+      description: Aspect ratio such as square, landscape, portrait, 1:1, 16:9, 9:16, or auto.
+    outputPath:
+      type: string
+      description: Workspace-relative PNG output path. Defaults to .puffer/workflows/images/.
+    purpose:
+      type: string
+      description: Optional caller purpose preserved in the result metadata.
+    retryFromError:
+      description: Optional previous error payload for retrying the same prompt.
+  required:
+    - prompt
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: true
+  may_write_files: true
+  may_access_network: true
+display:
+  group: media
+  title: ImageGeneration
+  show_in_status: true

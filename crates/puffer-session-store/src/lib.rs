@@ -9,7 +9,7 @@ pub use events::MessageActorKind;
 pub use events::TranscriptEvent;
 pub use events::TranscriptRewrite;
 pub use metadata::{SessionMetadata, SessionRecord, SessionSummary};
-pub use store::SessionStore;
+pub use store::{SessionListPage, SessionStore, BACKGROUND_SESSION_TAG};
 
 /// Trace-name tag used by the reflection runtime for the per-session sidecar
 /// JSONL file (`{session-id}.runtime_trace.jsonl`). Kept as a shared constant

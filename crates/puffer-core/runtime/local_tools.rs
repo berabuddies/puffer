@@ -57,7 +57,7 @@ pub(super) fn is_runtime_local_tool(definition: &ToolDefinition) -> bool {
 }
 
 pub(super) fn execute_runtime_local_tool(
-    state: &AppState,
+    state: &mut AppState,
     resources: &LoadedResources,
     registry: &ToolRegistry,
     definition: &ToolDefinition,
@@ -66,7 +66,7 @@ pub(super) fn execute_runtime_local_tool(
     input: Value,
 ) -> Result<String> {
     match definition.handler.as_str() {
-        "runtime:skill" => execute_skill_tool(resources, input),
+        "runtime:skill" => execute_skill_tool(state, resources, input),
         "runtime:tool_search" => execute_tool_search(registry, input),
         "runtime:browser" => {
             browser::execute_browser_tool(cwd, &state.browser_root_session_id(), input)
@@ -121,8 +121,12 @@ fn execute_mcp_call(
     }
 }
 
-fn execute_skill_tool(resources: &LoadedResources, input: Value) -> Result<String> {
-    super::claude_tools::skill::execute_claude_skill_tool(resources, input)
+fn execute_skill_tool(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    input: Value,
+) -> Result<String> {
+    super::claude_tools::skill::execute_claude_skill_tool(state, resources, input)
 }
 
 fn execute_tool_search(registry: &ToolRegistry, input: Value) -> Result<String> {
@@ -536,6 +540,10 @@ mod tests {
             endpoint: String::new(),
             target: "builtin:filesystem".to_string(),
             description: "Filesystem server".to_string(),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         }
@@ -577,6 +585,7 @@ mod tests {
 
     #[test]
     fn skill_tool_loads_enabled_skill() {
+        let mut state = crate::runtime::tests::state();
         let resources = LoadedResources {
             skills: vec![LoadedItem {
                 value: SkillSpec {
@@ -594,6 +603,7 @@ mod tests {
             ..LoadedResources::default()
         };
         let output = execute_skill_tool(
+            &mut state,
             &resources,
             json!({"skill": "reviewer", "args": "focus on tests"}),
         )

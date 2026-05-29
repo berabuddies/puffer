@@ -9,6 +9,12 @@ use super::browser_auto_review::{
 use super::claude_tools::{self, ProviderToolContext};
 use super::filesystem_access::{ensure_filesystem_path_access, runtime_filesystem_policy};
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
+use super::lambda_gate::merge_tool_metadata;
+use super::lambda_tool::{
+    commit_successful_lambda_skill_gate_call, lambda_skill_gate_scopes_tool_call,
+    lambda_skill_skips_concrete_approval, prepare_lambda_host_call,
+    reject_lambda_skill_gate_preflight, LAMBDA_HOST_CALL_TOOL_ID,
+};
 use super::local_tools::{
     enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
 };
@@ -42,7 +48,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const BROWSER_REVIEW_METADATA_KEY: &str = "__pufferBrowserReview";
-
 /// Identifies which provider loop is currently executing a tool call.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum ToolExecutionBackend<'a> {
@@ -70,6 +75,9 @@ pub(super) fn execute_tool_call(
     tool_id: &str,
     input: Value,
 ) -> Result<ToolExecutionResult> {
+    let gate_scopes_tool =
+        lambda_skill_gate_scopes_tool_call(state, registry, cwd, tool_id, &input);
+    let effective_tool_filter = active_tool_filter(state, tool_filter, gate_scopes_tool, tool_id);
     let structured_output = match backend {
         ToolExecutionBackend::Anthropic {
             structured_output, ..
@@ -84,13 +92,29 @@ pub(super) fn execute_tool_call(
             .filter(|definition| definition.id == tool_id)
             .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?,
     };
+    if definition.id == LAMBDA_HOST_CALL_TOOL_ID {
+        return Ok(prepare_lambda_host_call(
+            state,
+            registry,
+            cwd,
+            effective_tool_filter.as_ref(),
+            tool_id,
+            input,
+        ));
+    }
+    if let Some(denied) = reject_lambda_skill_gate_preflight(state, registry, cwd, tool_id, &input)
+    {
+        return Ok(denied);
+    }
+    let skip_verified_approval =
+        lambda_skill_skips_concrete_approval(state, registry, tool_id, &input);
     let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
         resources,
         state,
         RuntimePermissionInputs {
-            request_tool_filter: tool_filter.cloned(),
+            request_tool_filter: effective_tool_filter.clone(),
         },
     )?;
     let mut filesystem_policy = permission_context.derived_policy().filesystem().clone();
@@ -105,27 +129,29 @@ pub(super) fn execute_tool_call(
             ));
         }
         ToolPermissionBehavior::Ask => {
-            match resolve_ask_behavior(
-                state,
-                resources,
-                providers,
-                auth_store,
-                cwd,
-                tool_filter,
-                &definition,
-                &input,
-                permission_decision.reason.as_deref(),
-                &permission_context.effective_profile().current_session_id,
-                &permission_context.effective_profile().workspace_roots,
-            )? {
-                AskResolution::AllowOnce => {}
-                AskResolution::AllowSession => {}
-                AskResolution::Deny => {
-                    return Ok(blocked_runtime_tool(
-                        tool_id,
-                        ToolPermissionBehavior::Deny,
-                        Some("permission denied by user".to_string()),
-                    ));
+            if !skip_verified_approval {
+                match resolve_ask_behavior(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    cwd,
+                    effective_tool_filter.as_ref(),
+                    &definition,
+                    &input,
+                    permission_decision.reason.as_deref(),
+                    &permission_context.effective_profile().current_session_id,
+                    &permission_context.effective_profile().workspace_roots,
+                )? {
+                    AskResolution::AllowOnce => {}
+                    AskResolution::AllowSession => {}
+                    AskResolution::Deny => {
+                        return Ok(blocked_runtime_tool(
+                            tool_id,
+                            ToolPermissionBehavior::Deny,
+                            Some("permission denied by user".to_string()),
+                        ));
+                    }
                 }
             }
         }
@@ -138,8 +164,9 @@ pub(super) fn execute_tool_call(
         cwd,
         &definition,
         &input,
-        tool_filter,
+        effective_tool_filter.as_ref(),
         filesystem_policy,
+        skip_verified_approval,
     )? {
         Ok(policy) => policy,
         Err(denied) => return Ok(denied),
@@ -164,7 +191,20 @@ pub(super) fn execute_tool_call(
     };
     let hook_input = input.clone();
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
-    let result = if definition.handler == "runtime:agent" {
+    let lambda_skill_target_snapshot = if tool_id == "Skill"
+        && state
+            .pending_lambda_host_call
+            .as_ref()
+            .is_some_and(|pending| pending.concrete_tool() == "Skill")
+    {
+        Some((
+            state.lambda_gate.clone(),
+            state.pending_lambda_host_call.clone(),
+        ))
+    } else {
+        None
+    };
+    let mut result = if definition.handler == "runtime:agent" {
         let output =
             execute_agent_tool(state, resources, providers, auth_store, cwd, input.clone())?;
         successful_runtime_tool(tool_id, output)
@@ -184,6 +224,30 @@ pub(super) fn execute_tool_call(
             provider_context,
         )?
     };
+    if result.success {
+        let post_skill_gate = lambda_skill_target_snapshot.as_ref().map(|_| {
+            (
+                state.lambda_gate.clone(),
+                state.pending_lambda_host_call.clone(),
+            )
+        });
+        if let Some((saved_gate, saved_pending)) = lambda_skill_target_snapshot {
+            state.lambda_gate = saved_gate;
+            state.pending_lambda_host_call = saved_pending;
+        }
+        let lambda_metadata =
+            match commit_successful_lambda_skill_gate_call(state, tool_id, &result.output) {
+                Ok(metadata) => metadata,
+                Err(denied) => return Ok(denied),
+            };
+        if let Some((next_gate, next_pending)) = post_skill_gate {
+            state.lambda_gate = next_gate;
+            state.pending_lambda_host_call = next_pending;
+        }
+        if let Some(metadata) = lambda_metadata {
+            merge_tool_metadata(&mut result.output.metadata, metadata);
+        }
+    }
     remember_browser_target(state, &definition, &input);
     run_tool_end_hooks(
         resources,
@@ -197,14 +261,43 @@ pub(super) fn execute_tool_call(
     Ok(result)
 }
 
+fn active_tool_filter(
+    state: &AppState,
+    tool_filter: Option<&RequestToolFilter>,
+    gate_scopes_tool: bool,
+    tool_id: &str,
+) -> Option<RequestToolFilter> {
+    if let Some(tool_filter) = tool_filter {
+        return Some(tool_filter.clone());
+    }
+    if tool_id == "Skill" {
+        return None;
+    }
+    if !gate_scopes_tool {
+        return None;
+    }
+    state
+        .lambda_gate
+        .as_ref()
+        .and_then(|gate| gate.request_tool_filter().cloned())
+}
+
 fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult {
+    successful_runtime_tool_with_metadata(tool_id, stdout, Value::Null)
+}
+
+fn successful_runtime_tool_with_metadata(
+    tool_id: &str,
+    stdout: String,
+    metadata: Value,
+) -> ToolExecutionResult {
     ToolExecutionResult {
         tool_id: tool_id.to_string(),
         success: true,
         output: ToolOutput {
             stdout,
             stderr: String::new(),
-            metadata: Value::Null,
+            metadata,
         },
     }
 }
@@ -252,6 +345,8 @@ pub(super) fn resolve_tool_permission(
     input: &Value,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<PermissionOutcome> {
+    let gate_scopes_tool = lambda_skill_gate_scopes_tool_call(state, registry, cwd, tool_id, input);
+    let effective_tool_filter = active_tool_filter(state, tool_filter, gate_scopes_tool, tool_id);
     let definition = match registry.definition(tool_id) {
         Some(d) => d.clone(),
         None => {
@@ -262,13 +357,15 @@ pub(super) fn resolve_tool_permission(
             )));
         }
     };
+    let skip_verified_approval =
+        lambda_skill_skips_concrete_approval(state, registry, tool_id, input);
     let input = prepare_browser_permission_input(state, cwd, &definition, input.clone())?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
         resources,
         state,
         RuntimePermissionInputs {
-            request_tool_filter: tool_filter.cloned(),
+            request_tool_filter: effective_tool_filter.clone(),
         },
     )?;
     let permission_decision = permission_context.decision_for_tool_call(&definition, &input);
@@ -282,32 +379,41 @@ pub(super) fn resolve_tool_permission(
             )));
         }
         ToolPermissionBehavior::Ask => {
-            match resolve_ask_behavior(
-                state,
-                resources,
-                providers,
-                auth_store,
-                cwd,
-                tool_filter,
-                &definition,
-                &input,
-                permission_decision.reason.as_deref(),
-                &permission_context.effective_profile().current_session_id,
-                &permission_context.effective_profile().workspace_roots,
-            )? {
-                AskResolution::AllowOnce => {
-                    permission_context.derived_policy().filesystem().clone()
-                }
-                AskResolution::AllowSession => {
-                    remember_browser_target(state, &definition, &input);
-                    runtime_filesystem_policy(cwd, resources, state, tool_filter)?
-                }
-                AskResolution::Deny => {
-                    return Ok(PermissionOutcome::Denied(blocked_runtime_tool(
-                        tool_id,
-                        ToolPermissionBehavior::Deny,
-                        Some("permission denied by user".to_string()),
-                    )));
+            if skip_verified_approval {
+                permission_context.derived_policy().filesystem().clone()
+            } else {
+                match resolve_ask_behavior(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    cwd,
+                    effective_tool_filter.as_ref(),
+                    &definition,
+                    &input,
+                    permission_decision.reason.as_deref(),
+                    &permission_context.effective_profile().current_session_id,
+                    &permission_context.effective_profile().workspace_roots,
+                )? {
+                    AskResolution::AllowOnce => {
+                        permission_context.derived_policy().filesystem().clone()
+                    }
+                    AskResolution::AllowSession => {
+                        remember_browser_target(state, &definition, &input);
+                        runtime_filesystem_policy(
+                            cwd,
+                            resources,
+                            state,
+                            effective_tool_filter.as_ref(),
+                        )?
+                    }
+                    AskResolution::Deny => {
+                        return Ok(PermissionOutcome::Denied(blocked_runtime_tool(
+                            tool_id,
+                            ToolPermissionBehavior::Deny,
+                            Some("permission denied by user".to_string()),
+                        )));
+                    }
                 }
             }
         }
@@ -320,8 +426,9 @@ pub(super) fn resolve_tool_permission(
         cwd,
         &definition,
         &input,
-        tool_filter,
+        effective_tool_filter.as_ref(),
         base_policy,
+        skip_verified_approval,
     )
     .map(|outcome| match outcome {
         Ok(policy) => PermissionOutcome::Allowed(policy),

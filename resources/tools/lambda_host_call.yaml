@@ -1,0 +1,31 @@
+id: LambdaHostCall
+name: LambdaHostCall
+description: |-
+  Admit one formal Lambda Skill host call before running the concrete Puffer tool that implements it.
+
+  Use this only while executing a verified Lambda Skill. Set `host_tool` to the exact formal tool name from the Lambda Skill host catalogue. Set `args` to the formal host-call arguments keyed by the catalogue parameter names. Set `tool` to the target Puffer tool. Omit `input` unless you already know the exact next input; Puffer materializes it from the precompiled concrete input contract and returns it in the result. Puffer will allow only that next concrete call and will commit the formal host-call facts at that boundary.
+
+  This tool does not execute the concrete operation itself. After a successful LambdaHostCall, immediately invoke the declared concrete tool with the exact input returned by LambdaHostCall.
+handler: runtime:lambda_host_call
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    host_tool:
+      type: string
+      description: Exact formal host tool name from the active Lambda Skill catalogue.
+    args:
+      type: object
+      description: Formal host-call arguments keyed by the active catalogue parameter names.
+    tool:
+      type: string
+      description: Exact Puffer tool id to call next.
+    input:
+      type: object
+      description: Optional exact JSON input that will be passed to the next Puffer tool call. If omitted, Puffer derives it from the verified host catalogue contract.
+  required:
+    - host_tool
+    - args
+    - tool
+  additionalProperties: false

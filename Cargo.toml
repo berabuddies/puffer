@@ -9,7 +9,6 @@ members = [
     "crates/puffer-connector-matrix",
     "crates/puffer-connector-slack",
     "crates/puffer-connector-telegram",
-    "crates/puffer-connector-webhook",
     "crates/puffer-core",
     "crates/puffer-mcp-oauth",
     "crates/puffer-observability",
@@ -19,6 +18,8 @@ members = [
     "crates/puffer-runner-api",
     "crates/puffer-runner-local",
     "crates/puffer-runner-grpc",
+    "crates/puffer-lark",
+    "crates/puffer-slack",
     "crates/puffer-tool-runner",
     "crates/puffer-session-store",
     "crates/puffer-skill-evolution",
@@ -33,6 +34,9 @@ members = [
     "crates/puffer-workflow",
 ]
 default-members = ["crates/puffer-cli"]
+# Vendored third-party (MIT) — its own cargo workspace, built separately via
+# scripts/build-cua-driver.sh. Excluded so it never folds into puffer's build.
+exclude = ["vendor/cua-driver"]
 resolver = "2"
 
 [workspace.package]
@@ -86,7 +90,7 @@ tokio = { version = "1.51", features = [
     "time",
 ] }
 tracing = "0.1"
-reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
 serde_yaml = "0.9.34"
@@ -95,7 +99,7 @@ sha2 = "0.10.9"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 regex = "1.10"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 time = { version = "0.3.44", features = ["formatting", "local-offset", "parsing"] }
 toml = "0.9.8"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }

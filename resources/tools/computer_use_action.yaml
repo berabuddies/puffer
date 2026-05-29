@@ -1,0 +1,89 @@
+id: ComputerUseAction
+name: ComputerUseAction
+description: |-
+  Execute one macOS computer-use action through Puffer's configured
+  computer_use MCP server.
+
+  Use this for verified Lambda Skill contracts that operate on a current app
+  capture. Actions with an explicit app update the current app binding; actions
+  without an app fail closed until capture or focusApp establishes it.
+handler: runtime:workflow:computer_use_action
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - capture
+        - focusApp
+        - clickElement
+        - clickCoord
+        - doubleClick
+        - rightClick
+        - drag
+        - scroll
+        - typeText
+        - keyCombo
+      description: Computer-use action to perform.
+    mode:
+      type: string
+      description: Capture mode requested by the skill, retained for contract binding.
+    app:
+      type: string
+      description: macOS app name or bundle id.
+    raiseWindow:
+      type: boolean
+      description: For focusApp, whether to raise/capture the app window. Defaults to false.
+    element:
+      type: integer
+      description: Element index from the current capture.
+    fromElement:
+      type: integer
+      description: Source element index for drag, resolved from the current capture.
+    toElement:
+      type: integer
+      description: Destination element index for drag, resolved from the current capture.
+    x:
+      type: integer
+      description: X coordinate for clickCoord.
+    y:
+      type: integer
+      description: Y coordinate for clickCoord.
+    direction:
+      type: string
+      enum:
+        - up
+        - down
+        - left
+        - right
+      description: Scroll direction.
+    amount:
+      type: integer
+      description: Scroll page count.
+    text:
+      type: string
+      description: Text to type.
+    keys:
+      type: string
+      description: Key or key combination to press.
+    modifiers:
+      type: array
+      items:
+        type: string
+      description: Modifier keys requested for clickElement. Non-empty values fail closed.
+    captureAfter:
+      type: boolean
+      description: Whether clickElement should capture app state after clicking.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: false
+display:
+  group: computer-use
+  title: ComputerUseAction
+  show_in_status: true

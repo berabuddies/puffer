@@ -1,0 +1,30 @@
+id: Recall
+name: Recall
+description: |-
+  Recall relevant earlier context from THIS session that may have scrolled out of
+  the live window or been compacted/summarized away. Auxiliary memory with replay:
+  you give a query, and the exact most-relevant past messages (user asks, tool
+  outputs, diffs, decisions) are retrieved and replayed back verbatim.
+
+  Use when you need a detail from earlier in the session that you no longer have
+  in front of you — e.g. "what did the failing test output say", "the path the
+  user gave for the config", "the diff we applied to auth.py". Prefer this over
+  guessing or re-running work you already did.
+
+  Input: { query: string, k?: number (default 5, max 20) }
+  Returns the top-k matching earlier messages with their content.
+handler: runtime:workflow:recall
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  required:
+    - query
+  properties:
+    query:
+      type: string
+      description: What earlier context to recall (keywords or a short description).
+    k:
+      type: integer
+      description: How many past messages to replay (default 5, max 20).
+  additionalProperties: false

@@ -50,6 +50,21 @@ type PtySet = {
 type WorkflowSnapshotFixture = {
   workflows: JsonRecord[];
   runs: JsonRecord[];
+  connectors?: JsonRecord[];
+  connections?: JsonRecord[];
+  connector_error?: string | null;
+  workflow_bindings?: JsonRecord[];
+  workflow_binding_error?: string | null;
+  monitor_tasks?: JsonRecord[];
+  monitor_task_error?: string | null;
+};
+
+type ConnectorSetupQuestionFixture = {
+  type: "input" | "choice";
+  header: string;
+  question: string;
+  options?: JsonRecord[];
+  multiSelect?: boolean;
 };
 
 type SessionDetailOverrides = {
@@ -253,6 +268,7 @@ export class FakeDaemon {
   private readonly browserRecordings = new Map<string, JsonRecord[]>();
   private readonly ptys = new Map<string, PtySet>();
   private readonly sessions = new Map<string, JsonRecord>();
+  private readonly projectTags = new Map<string, string[]>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
@@ -275,6 +291,27 @@ export class FakeDaemon {
     path: "/tmp/puffer/.puffer/permissions.json",
     tools: { bash: "ask" }
   };
+  private localModelStatus: JsonRecord = {
+    id: "minicpm5",
+    modelId: "minicpm5-1b",
+    displayName: "MiniCPM5-1B (local)",
+    checkedAtMs: Date.now(),
+    supported: true,
+    recommended: true,
+    installed: false,
+    configured: false,
+    running: false,
+    installing: false,
+    reason: "macOS Apple Silicon, model not yet installed",
+    endpoint: "http://127.0.0.1:8088/v1",
+    size: "~589MB",
+    installPath: "/tmp/puffer-home/models/minicpm5-1b",
+    providerPath: "/tmp/puffer-home/resources/providers/minicpm5.yaml",
+    logPath: "/tmp/puffer-home/minicpm5-serve.log",
+    installLogPath: "/tmp/puffer-home/minicpm5-install.log",
+    serveLogPath: "/tmp/puffer-home/minicpm5-serve.log",
+    checks: []
+  };
   private desktopPins: JsonRecord = {
     pinnedAgentIds: [],
     pinnedWorkspacePaths: []
@@ -293,15 +330,37 @@ export class FakeDaemon {
   ];
   private readonly protocol: "legacy" | "real";
   private readonly activeTurnIds = new Set<string>();
+  private readonly pendingConnectorTurns = new Map<string, {
+    sessionId: string;
+    connectorSlug: string;
+    connectionSlug: string;
+  }>();
+  private connectorSetupQuestions: ConnectorSetupQuestionFixture[] = [
+    {
+      type: "input",
+      header: "Credential",
+      question: "Connector credential",
+      options: []
+    },
+    {
+      type: "choice",
+      header: "Mode",
+      question: "Setup mode",
+      options: [
+        { label: "Default", description: "Standard setup" },
+        { label: "Strict", description: "Extra validation" }
+      ]
+    }
+  ];
   private workflowSnapshot: WorkflowSnapshotFixture = {
     workflows: [
       {
         schema: "puffer.workflow.v1",
-        slug: "agent-review-pipeline",
+        slug: "agent-review-workflow",
         enabled: true,
         trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review" },
         pipeline: {
-          name: "Agent review pipeline",
+          name: "Agent review workflow",
           working_dir: "/tmp/puffer",
           concurrency: 1,
           nodes: [
@@ -335,7 +394,209 @@ export class FakeDaemon {
         }
       }
     ],
-    runs: []
+    runs: [],
+    connectors: [
+      {
+        connector_slug: "telegram-login",
+        description: "Telegram personal account over MTProto",
+        skill: "telegram",
+        runtime_hints: ["subscriber", "internal-tool"],
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        can_trigger_workflow: true,
+        suggested_connection_slug: "telegram-user",
+        connect_command: "/connect telegram-login telegram-user",
+        action_slugs: ["send_message", "edit_message", "delete_messages", "vote_poll"]
+      },
+      {
+        connector_slug: "telegram-bot",
+        description: "Telegram bot connector for agent proxy and bot chats",
+        skill: "telegram-bot",
+        runtime_hints: ["serve"],
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: true,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "telegram-bot",
+        connect_command: "/connect telegram-bot telegram-bot",
+        action_slugs: ["send_message"]
+      },
+      {
+        connector_slug: "discord-bot",
+        description: "Discord bot connector configured through puffer serve",
+        skill: "discord",
+        runtime_hints: ["serve"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "discord-bot",
+        connect_command: "/connect discord-bot discord-bot",
+        action_slugs: []
+      },
+      {
+        connector_slug: "lark-app",
+        description: "Lark custom app connector over OpenAPI",
+        skill: "lark",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "lark-app",
+        connect_command: "/connect lark-app lark-app",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "lark-login",
+        description: "Lark user-token account connector over OpenAPI",
+        skill: "lark",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "lark-login",
+        connect_command: "/connect lark-login lark-login",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "matrix-bot",
+        description: "Matrix room connector configured through puffer serve",
+        skill: "matrix",
+        runtime_hints: ["serve"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "matrix-bot",
+        connect_command: "/connect matrix-bot matrix-bot",
+        action_slugs: []
+      },
+      {
+        connector_slug: "slack-app",
+        description: "Slack app connector for bot-token Web API actions",
+        skill: "slack",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-app",
+        connect_command: "/connect slack-app slack-app",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "slack-login",
+        description: "Slack workspace account over Web API or local app session",
+        skill: "slack",
+        runtime_hints: ["internal-tool"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-login",
+        connect_command: "/connect slack-login slack-login",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "slack-bot",
+        description: "Legacy Slack bot connector placeholder; use slack-app or slack-login actions",
+        skill: "slack",
+        runtime_hints: ["connector"],
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-bot",
+        connect_command: "/connect slack-bot slack-bot",
+        action_slugs: []
+      },
+      {
+        connector_slug: "email",
+        description: "Email connector over SMTP and IMAP-compatible polling",
+        skill: "email",
+        runtime_hints: ["subscriber", "internal-tool"],
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        can_trigger_workflow: true,
+        suggested_connection_slug: "email",
+        connect_command: "/connect email email",
+        action_slugs: ["send_message"]
+      }
+    ],
+    connections: [
+      {
+        slug: "slack-app",
+        connector_slug: "slack-app",
+        description: "Workspace Slack",
+        state: "authenticated",
+        has_consumer: false,
+        auth_failure_notified: false,
+        can_trigger_workflow: false,
+        connect_command: "/connect slack-app slack-app",
+        monitor_command: null
+      },
+      {
+        slug: "telegram-user",
+        connector_slug: "telegram-login",
+        description: "Personal Telegram",
+        state: "active",
+        has_consumer: true,
+        auth_failure_notified: false,
+        can_trigger_workflow: true,
+        connect_command: "/connect telegram-login telegram-user",
+        monitor_command: "/monitor telegram-user"
+      }
+    ],
+    connector_error: null,
+    workflow_bindings: [
+      {
+        slug: "monitor-telegram-user",
+        description: "Monitor telegram-user for actionable tasks",
+        connection_slug: "telegram-user",
+        connector_slug: "telegram-login",
+        status: "enabled",
+        enabled: true,
+        action_type: "triage_agent",
+        monitor: true,
+        monitor_memory_path: "/tmp/telegram-user.md",
+        created_at_ms: now - 45_000
+      }
+    ],
+    workflow_binding_error: null,
+    monitor_tasks: [
+      {
+        task_id: "monitor-1",
+        subject: "Reply to Telegram support ping",
+        description: "Alice asked whether the deployment is finished.",
+        status: "pending",
+        monitor_connection: "telegram-user",
+        monitor_connector: "telegram-login",
+        monitor_memory_path: "/tmp/telegram-user.md",
+        ignored: false,
+        actions: [
+          {
+            name: "Draft reply",
+            prompt: "Draft a concise reply to Alice with the deployment status."
+          },
+          {
+            name: "Open context",
+            prompt: "Open the Telegram thread and summarize the latest deployment question."
+          },
+          {
+            name: "Escalate owner",
+            prompt: "Escalate the deployment question to the on-call owner with the latest context."
+          }
+        ],
+        possible_ignore_reasons: ["duplicate support ping", "already answered in thread", "not actionable"],
+        started_at_ms: now - 15_000,
+        updated_at_ms: now - 5_000
+      }
+    ],
+    monitor_task_error: null
   };
   private nextTab = 2;
   private nextPty = 1;
@@ -468,8 +729,22 @@ export class FakeDaemon {
   setWorkflowSnapshot(snapshot: WorkflowSnapshotFixture): void {
     this.workflowSnapshot = {
       workflows: snapshot.workflows.map((workflow) => ({ ...workflow })),
-      runs: snapshot.runs.map((run) => ({ ...run }))
+      runs: snapshot.runs.map((run) => ({ ...run })),
+      connectors: snapshot.connectors?.map((connector) => ({ ...connector })),
+      connections: snapshot.connections?.map((connection) => ({ ...connection })),
+      connector_error: snapshot.connector_error ?? null,
+      workflow_bindings: snapshot.workflow_bindings?.map((binding) => ({ ...binding })),
+      workflow_binding_error: snapshot.workflow_binding_error ?? null,
+      monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
+      monitor_task_error: snapshot.monitor_task_error ?? null
     };
+  }
+
+  setConnectorSetupQuestions(questions: ConnectorSetupQuestionFixture[]): void {
+    this.connectorSetupQuestions = questions.map((question) => ({
+      ...question,
+      options: question.options?.map((option) => ({ ...option })) ?? []
+    }));
   }
 
   socketCount(): number {
@@ -729,9 +1004,19 @@ export class FakeDaemon {
         return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
       case "rename_session":
         return this.renameSession(request.params);
+      case "delete_session":
+        return this.deleteSessionRpc(request.params);
+      case "set_session_tags":
+        return this.setSessionTagsRpc(request.params);
+      case "delete_project":
+        return this.deleteProjectRpc(request.params);
+      case "set_project_tags":
+        return this.setProjectTagsRpc(request.params);
       case "create_session":
         return this.createSession(request.params);
       case "run_agent_turn":
+        return this.runAgentTurn(request.params);
+      case "dispatch_slash_command":
         return this.runAgentTurn(request.params);
       case "cancel_turn": {
         const turnId = String(request.params.turnId ?? "");
@@ -741,8 +1026,9 @@ export class FakeDaemon {
         return { ok: false, error: "turn not found" };
       }
       case "resolve_permission":
-      case "resolve_user_question":
         return {};
+      case "resolve_user_question":
+        return this.resolveUserQuestion(request.params);
       case "list_provider_models":
         return {
           providerId: String(request.params.providerId ?? "codex"),
@@ -750,6 +1036,10 @@ export class FakeDaemon {
         };
       case "update_config":
         return this.updateConfig(request.params);
+      case "local_model_status":
+        return this.localModelSnapshot();
+      case "install_local_model":
+        return this.installLocalModel();
       case "list_permissions":
         return this.permissions;
       case "save_permissions":
@@ -792,10 +1082,15 @@ export class FakeDaemon {
       case "browser_recording":
         return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
       case "workflow_list":
-        return {
-          workflows: this.workflowSnapshot.workflows.map((workflow) => ({ ...workflow })),
-          runs: this.workflowSnapshot.runs.map((run) => ({ ...run }))
-        };
+        return this.workflowListResponse();
+      case "workflow_save":
+        return this.saveWorkflow(request.params);
+      case "workflow_binding_create":
+        return this.createWorkflowBinding(request.params);
+      case "workflow_binding_delete":
+        return this.deleteWorkflowBinding(request.params);
+      case "workflow_toggle":
+        return this.toggleWorkflow(request.params);
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
@@ -815,6 +1110,201 @@ export class FakeDaemon {
       default:
         throw new Error(`Unhandled fake daemon method: ${request.method}`);
     }
+  }
+
+  private installLocalModel(): JsonRecord {
+    this.localModelStatus = {
+      ...this.localModelStatus,
+      installing: true,
+      reason: "installing"
+    };
+    setTimeout(() => {
+      this.emit("local-model:minicpm5:event", {
+        modelId: "minicpm5-1b",
+        jobId: "fixture-job",
+        phase: "configure",
+        message: "Installing shim and registering the Puffer provider",
+        status: this.localModelSnapshot()
+      });
+    }, 20);
+    setTimeout(() => {
+      this.localModelStatus = {
+        ...this.localModelStatus,
+        installed: true,
+        configured: true,
+        running: true,
+        installing: false,
+        recommended: false,
+        reason: "ready"
+      };
+      this.emit("local-model:minicpm5:event", {
+        modelId: "minicpm5-1b",
+        jobId: "fixture-job",
+        phase: "done",
+        message: "MiniCPM5 is installed, registered, and running",
+        status: this.localModelSnapshot()
+      });
+    }, 60);
+    return { jobId: "fixture-job", status: this.localModelSnapshot() };
+  }
+
+  private localModelSnapshot(): JsonRecord {
+    this.localModelStatus = {
+      ...this.localModelStatus,
+      checkedAtMs: Date.now(),
+      checks: this.localModelChecks()
+    };
+    return { ...this.localModelStatus };
+  }
+
+  private localModelChecks(): JsonRecord[] {
+    const installed = this.localModelStatus.installed === true;
+    const configured = this.localModelStatus.configured === true;
+    const running = this.localModelStatus.running === true;
+    return [
+      { label: "Platform", state: "ok", detail: "macos arm64 supports MiniCPM5 MLX" },
+      {
+        label: "Python venv",
+        state: installed ? "ok" : "missing",
+        detail: installed
+          ? "found /tmp/puffer-home/venvs/minicpm5/bin/python"
+          : "missing /tmp/puffer-home/venvs/minicpm5/bin/python"
+      },
+      {
+        label: "Python deps",
+        state: installed ? "ok" : "missing",
+        detail: installed
+          ? "mlx_lm and huggingface_hub import successfully"
+          : "venv is missing; installer will create it"
+      },
+      {
+        label: "Model weights",
+        state: installed ? "ok" : "missing",
+        detail: installed
+          ? "config.json present in /tmp/puffer-home/models/minicpm5-1b"
+          : "missing /tmp/puffer-home/models/minicpm5-1b/config.json"
+      },
+      {
+        label: "Provider YAML",
+        state: configured ? "ok" : "missing",
+        detail: configured
+          ? "provider registration present at /tmp/puffer-home/resources/providers/minicpm5.yaml"
+          : "provider registration missing at /tmp/puffer-home/resources/providers/minicpm5.yaml"
+      },
+      {
+        label: "Server health",
+        state: running ? "ok" : "warning",
+        detail: running
+          ? "http://127.0.0.1:8088/v1/models advertises minicpm5-1b"
+          : "http://127.0.0.1:8088/v1/models is not reachable"
+      }
+    ];
+  }
+
+  private workflowListResponse(): JsonRecord {
+    return {
+      workflows: this.workflowSnapshot.workflows.map((workflow) => ({ ...workflow })),
+      runs: this.workflowSnapshot.runs.map((run) => ({ ...run })),
+      connectors: this.workflowSnapshot.connectors?.map((connector) => ({ ...connector })) ?? [],
+      connections: this.workflowSnapshot.connections?.map((connection) => ({ ...connection })) ?? [],
+      connector_error: this.workflowSnapshot.connector_error ?? null,
+      workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => ({ ...binding })) ?? [],
+      workflow_binding_error: this.workflowSnapshot.workflow_binding_error ?? null,
+      monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
+      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
+    };
+  }
+
+  private saveWorkflow(params: JsonRecord): JsonRecord {
+    const workflow = params.workflow as JsonRecord | undefined;
+    const slug = String(workflow?.slug ?? "");
+    if (!workflow || !slug) throw new Error("missing workflow");
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflows: [
+        ...this.workflowSnapshot.workflows.filter((candidate) => candidate.slug !== slug),
+        { ...workflow }
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
+    };
+    return this.workflowListResponse();
+  }
+
+  private createWorkflowBinding(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "");
+    const connectorSlug = String(params.connector_slug ?? "");
+    const path = String(params.file_append_path ?? params.path ?? "");
+    const slug = String(params.slug ?? `append-${connectionSlug}-${path.split("/").filter(Boolean).at(-1) ?? "events"}`);
+    if (!connectionSlug || !path) throw new Error("missing workflow binding");
+    const enabled = params.enabled !== false;
+    const pattern = typeof params.pattern === "string" && params.pattern.trim() ? params.pattern.trim() : null;
+    const binding = {
+      slug,
+      description: String(params.description ?? `Append ${connectionSlug} messages to ${path}`),
+      connection_slug: connectionSlug,
+      connector_slug: connectorSlug || null,
+      status: enabled ? "enabled" : "paused",
+      enabled,
+      action_type: "file_append",
+      action_path: path,
+      action_format: "text",
+      filter_pattern: pattern,
+      monitor: false,
+      monitor_memory_path: null,
+      created_at_ms: Date.now()
+    };
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflow_bindings: [
+        ...(this.workflowSnapshot.workflow_bindings ?? []).filter((candidate) => candidate.slug !== slug),
+        binding
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? ""))),
+      connections: this.workflowSnapshot.connections?.map((connection) => {
+        if (connection.slug !== connectionSlug) return connection;
+        return {
+          ...connection,
+          has_consumer: enabled || Boolean(connection.has_consumer),
+          state: enabled && connection.state === "authenticated" ? "active" : connection.state
+        };
+      })
+    };
+    return this.workflowListResponse();
+  }
+
+  private deleteWorkflowBinding(params: JsonRecord): JsonRecord {
+    const slug = String(params.slug ?? "");
+    if (!slug) throw new Error("missing workflow binding slug");
+    const before = this.workflowSnapshot.workflow_bindings?.length ?? 0;
+    const workflow_bindings = (this.workflowSnapshot.workflow_bindings ?? []).filter(
+      (binding) => binding.slug !== slug
+    );
+    if (workflow_bindings.length === before) throw new Error(`workflow binding ${slug} not found`);
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflow_bindings
+    };
+    return this.workflowListResponse();
+  }
+
+  private toggleWorkflow(params: JsonRecord): JsonRecord {
+    const slug = String(params.slug ?? "");
+    const enabled = Boolean(params.enabled);
+    if (!slug) throw new Error("missing workflow slug");
+    let matched = false;
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflows: this.workflowSnapshot.workflows.map((workflow) => {
+        if (workflow.slug !== slug) return workflow;
+        matched = true;
+        return { ...workflow, enabled };
+      }),
+      workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => {
+        if (binding.slug !== slug) return binding;
+        matched = true;
+        return { ...binding, enabled, status: enabled ? "enabled" : "paused" };
+      })
+    };
+    if (!matched) throw new Error(`workflow ${slug} not found`);
+    return this.workflowListResponse();
   }
 
   private throwQueuedFailure(method: string): void {
@@ -895,6 +1385,7 @@ export class FakeDaemon {
   private runAgentTurn(params: JsonRecord): JsonRecord {
     const sessionId = String(params.sessionId ?? session.sessionId);
     const turnId = `turn-${sessionId}`;
+    const message = String(params.message ?? "").trim();
     const metadata = this.sessions.get(sessionId);
     if (metadata) {
       const providerId = typeof params.providerId === "string" ? params.providerId.trim() : "";
@@ -905,7 +1396,108 @@ export class FakeDaemon {
       this.sessions.set(sessionId, metadata);
     }
     this.activeTurnIds.add(turnId);
+    const connectMatch = /^\/connect\s+([a-z0-9-]+)\s+([a-z0-9-]+)$/i.exec(message);
+    if (connectMatch) {
+      const [, connectorSlug, connectionSlug] = connectMatch;
+      this.pendingConnectorTurns.set(turnId, { sessionId, connectorSlug, connectionSlug });
+      setTimeout(() => {
+        this.emit(`session:${sessionId}:event`, {
+          type: "user-question-request",
+          turnId,
+          requestId: "connector-setup",
+          questions: this.connectorSetupQuestions.map((question) => ({
+            ...question,
+            options: question.options?.map((option) => ({ ...option })) ?? []
+          }))
+        });
+      }, 0);
+    }
     return { turnId };
+  }
+
+  private resolveUserQuestion(params: JsonRecord): JsonRecord {
+    const turnId = String(params.turnId ?? "");
+    const pending = this.pendingConnectorTurns.get(turnId);
+    if (!pending) return {};
+    this.pendingConnectorTurns.delete(turnId);
+    const connector = (this.workflowSnapshot.connectors ?? []).find(
+      (candidate) => candidate.connector_slug === pending.connectorSlug
+    );
+    const connection = {
+      slug: pending.connectionSlug,
+      connector_slug: pending.connectorSlug,
+      description: connector?.description ?? `${pending.connectorSlug} connection`,
+      state: "authenticated",
+      has_consumer: false,
+      auth_failure_notified: false,
+      can_trigger_workflow: connector?.can_trigger_workflow ?? connector?.can_subscribe ?? false,
+      connect_command: `/connect ${pending.connectorSlug} ${pending.connectionSlug}`,
+      monitor_command: connector?.can_subscribe ? `/monitor ${pending.connectionSlug}` : null
+    };
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      connections: [
+        ...(this.workflowSnapshot.connections ?? []).filter((candidate) => candidate.slug !== pending.connectionSlug),
+        connection
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
+    };
+    setTimeout(() => {
+      this.emit(`session:${pending.sessionId}:event`, {
+        type: "turn-complete",
+        turnId,
+        assistantText: `Created connector connection ${pending.connectionSlug}.`
+      });
+    }, 0);
+    return {};
+  }
+
+  private deleteSessionRpc(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? "");
+    this.sessions.delete(sessionId);
+    this.timelines.delete(sessionId);
+    this.details.delete(sessionId);
+    return { ok: true, sessionId };
+  }
+
+  private setSessionTagsRpc(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? "");
+    const rawTags = Array.isArray(params.tags) ? params.tags : [];
+    const cleaned = rawTags
+      .map((tag) => String(tag).trim())
+      .filter((tag) => tag.length > 0);
+    const dedup = Array.from(new Set(cleaned)).sort();
+    const metadata = this.sessions.get(sessionId) ?? sessionMeta({ sessionId });
+    metadata.tags = dedup;
+    metadata.updatedAtMs = Date.now();
+    this.sessions.set(sessionId, metadata);
+    return this.sessionDetail(sessionId);
+  }
+
+  private deleteProjectRpc(params: JsonRecord): JsonRecord {
+    const folderPath = String(params.folderPath ?? "").trim();
+    if (!folderPath) return { ok: false, removedSessions: 0, folderPath };
+    let removed = 0;
+    for (const [id, metadata] of Array.from(this.sessions.entries())) {
+      if (String(metadata.folderPath ?? metadata.cwd ?? "") === folderPath) {
+        this.sessions.delete(id);
+        this.timelines.delete(id);
+        this.details.delete(id);
+        removed += 1;
+      }
+    }
+    this.projectTags.delete(folderPath);
+    return { ok: true, folderPath, removedSessions: removed };
+  }
+
+  private setProjectTagsRpc(params: JsonRecord): JsonRecord {
+    const folderPath = String(params.folderPath ?? "").trim();
+    const rawTags = Array.isArray(params.tags) ? params.tags : [];
+    const cleaned = rawTags
+      .map((tag) => String(tag).trim())
+      .filter((tag) => tag.length > 0);
+    const dedup = Array.from(new Set(cleaned)).sort();
+    this.projectTags.set(folderPath, dedup);
+    return { ok: true, folderPath, tags: dedup };
   }
 
   private renameSession(params: JsonRecord): JsonRecord {
@@ -1114,6 +1706,8 @@ export class FakeDaemon {
       (group.sessions as JsonRecord[]).sort(
         (left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0)
       );
+      const folderPath = String(group.folderPath ?? "");
+      group.tags = this.projectTags.get(folderPath) ?? [];
     }
     return Array.from(groups.values());
   }

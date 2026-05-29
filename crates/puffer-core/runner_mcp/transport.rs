@@ -44,6 +44,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Spec for a stdio MCP server before the process is actually spawned.
 ///
@@ -57,6 +58,12 @@ pub struct StdioTransportSpec {
     pub args: Vec<String>,
     /// Extra environment variables merged on top of the inherited env.
     pub env: BTreeMap<String, String>,
+    /// Whether the child inherits the full Puffer process environment.
+    pub inherit_env: bool,
+    /// Per-tool-call timeout for requests routed to this server.
+    pub timeout: Duration,
+    /// Timeout for the initial MCP initialize handshake.
+    pub connect_timeout: Duration,
     /// Working directory the child should start in. `None` means inherit
     /// from the parent (typical for in-process tests).
     pub cwd: Option<PathBuf>,
@@ -85,6 +92,10 @@ pub struct HttpTransportSpec {
     /// tests can pin it to a `TempDir` without round-tripping through
     /// the manifest.
     pub oauth: Option<HttpOAuthSpec>,
+    /// Per-tool-call timeout for requests routed to this server.
+    pub timeout: Duration,
+    /// Timeout for HTTP connection setup and the MCP initialize handshake.
+    pub connect_timeout: Duration,
 }
 
 /// Per-server OAuth runtime state derived from the manifest.
@@ -118,6 +129,14 @@ impl TransportRecipe {
         match self {
             TransportRecipe::Stdio(_) => "stdio",
             TransportRecipe::Http(_) => "http",
+        }
+    }
+
+    /// Returns the per-tool-call timeout configured for this server.
+    pub fn timeout(&self) -> Duration {
+        match self {
+            TransportRecipe::Stdio(spec) => spec.timeout,
+            TransportRecipe::Http(spec) => spec.timeout,
         }
     }
 }

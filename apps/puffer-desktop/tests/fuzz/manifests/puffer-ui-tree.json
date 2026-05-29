@@ -16,7 +16,7 @@
       "id": "app",
       "kind": "root",
       "parent": null,
-      "children": ["workspace", "agent-detail", "settings", "secondary-panes", "pipelines"],
+      "children": ["workspace", "agent-detail", "settings", "secondary-panes", "workflows"],
       "entrypoint": "launch-app",
       "priority": 10,
       "tags": ["invariant:app-no-crash"]
@@ -160,10 +160,10 @@
       "id": "settings",
       "kind": "route-group",
       "parent": "app",
-      "children": ["settings/provider-auth", "settings/default-model", "settings/mcp", "settings/permissions"],
+      "children": ["settings/provider-auth", "settings/default-model", "settings/connectors", "settings/mcp", "settings/permissions"],
       "entrypoint": "open-settings",
       "priority": 9,
-      "tags": ["route:settings-providers", "route:settings-mcp", "route:settings-permissions"]
+      "tags": ["route:settings-providers", "route:settings-connectors", "route:settings-mcp", "route:settings-permissions"]
     },
     {
       "id": "settings/provider-auth",
@@ -182,6 +182,15 @@
       "entrypoint": "settings.default-model-save",
       "priority": 9,
       "tags": ["control:settings.default-model-save", "invariant:no-cross-provider-model"]
+    },
+    {
+      "id": "settings/connectors",
+      "kind": "subtree",
+      "parent": "settings",
+      "children": [],
+      "entrypoint": "open-settings-connectors",
+      "priority": 8,
+      "tags": ["route:settings-connectors", "control:settings.connector-setup", "control:settings.connector-answer", "state:settings.saving", "async:stale-session-event"]
     },
     {
       "id": "settings/mcp",
@@ -283,22 +292,22 @@
       "tags": ["control:terminal.input", "control:terminal.close-tab", "state:terminal.active", "state:terminal.closing"]
     },
     {
-      "id": "pipelines",
+      "id": "workflows",
       "kind": "route",
       "parent": "app",
-      "children": ["pipelines/draft-graph"],
-      "entrypoint": "open-pipelines",
+      "children": ["workflows/draft-graph"],
+      "entrypoint": "open-workflows",
       "priority": 6,
-      "tags": ["route:pipelines"]
+      "tags": ["route:workflows"]
     },
     {
-      "id": "pipelines/draft-graph",
+      "id": "workflows/draft-graph",
       "kind": "subtree",
-      "parent": "pipelines",
+      "parent": "workflows",
       "children": [],
-      "entrypoint": "pipelines.node-editor",
+      "entrypoint": "workflows.node-editor",
       "priority": 6,
-      "tags": ["control:pipelines.node-editor", "control:pipelines.trigger-editor", "invariant:draft-preserved-on-failure"]
+      "tags": ["control:workflows.node-editor", "control:workflows.trigger-editor", "invariant:draft-preserved-on-failure"]
     }
   ]
 }

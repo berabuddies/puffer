@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+use std::fmt;
 use uuid::Uuid;
 
 /// Describes one append-only transcript rewrite operation.
@@ -32,8 +35,62 @@ pub struct GitDiffSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ClaudeReadSnapshotEvent {
     pub path: String,
+    #[serde(
+        serialize_with = "serialize_json_u128",
+        deserialize_with = "deserialize_json_u128"
+    )]
     pub timestamp_ms: u128,
     pub is_partial_view: bool,
+}
+
+fn serialize_json_u128<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if let Ok(number) = u64::try_from(*value) {
+        serializer.serialize_u64(number)
+    } else {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
+fn deserialize_json_u128<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct JsonU128Visitor;
+
+    impl<'de> Visitor<'de> for JsonU128Visitor {
+        type Value = u128;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a non-negative integer as a JSON number or decimal string")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(u128::from(value))
+        }
+
+        fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            u128::try_from(value).map_err(|_| E::custom("timestamp_ms must not be negative"))
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            value.parse::<u128>().map_err(E::custom)
+        }
+    }
+
+    deserializer.deserialize_any(JsonU128Visitor)
 }
 
 /// Identifies the actor that produced or owns a transcript message.
@@ -99,6 +156,8 @@ pub enum TranscriptEvent {
         input: String,
         output: String,
         success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,7 +228,7 @@ pub enum TranscriptEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{MessageActor, MessageActorKind, TranscriptEvent};
+    use super::{ClaudeReadSnapshotEvent, MessageActor, MessageActorKind, TranscriptEvent};
 
     #[test]
     fn user_message_without_actor_deserializes_for_old_sessions() {
@@ -218,6 +277,7 @@ mod tests {
                 input: "{}".to_string(),
                 output: "ok".to_string(),
                 success: true,
+                metadata: None,
                 actor: None,
                 subject: None,
             }
@@ -269,6 +329,7 @@ mod tests {
             input: "{}".to_string(),
             output: "ok".to_string(),
             success: true,
+            metadata: None,
             actor: Some(actor),
             subject: None,
         };
@@ -277,5 +338,69 @@ mod tests {
         assert!(encoded.contains(r#""agentId":"agent-1""#));
         let decoded: TranscriptEvent = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn tool_invocation_metadata_round_trips() {
+        let event = TranscriptEvent::ToolInvocation {
+            call_id: "call-1".to_string(),
+            tool_id: "ToolSearch".to_string(),
+            input: r#"{"query":"skills"}"#.to_string(),
+            output: "ok".to_string(),
+            success: true,
+            metadata: Some(serde_json::json!({
+                "lambda_skill": {
+                    "event": "host_call_committed",
+                    "host_tool": "formal_search"
+                }
+            })),
+            actor: None,
+            subject: None,
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains(r#""metadata""#));
+        let decoded: TranscriptEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn state_snapshot_claude_read_timestamp_is_json_compatible() {
+        let raw = concat!(
+            r#"{"type":"state_snapshot","current_model":null,"current_provider":"anthropic","#,
+            r#""theme":"puffer","prompt_color":"default","effort_level":"auto","#,
+            r#""fast_mode":false,"sandbox_mode":"workspace-write","remote_name":null,"#,
+            r#""remote_environment":null,"statusline_enabled":true,"working_dirs":[],"#,
+            r#""claude_read_state":[{"path":"src/lib.rs","timestamp_ms":1780032433023,"#,
+            r#""is_partial_view":false}]}"#
+        );
+        let event: TranscriptEvent = serde_json::from_str(raw).unwrap();
+        let TranscriptEvent::StateSnapshot {
+            claude_read_state, ..
+        } = &event
+        else {
+            panic!("expected state snapshot");
+        };
+        assert_eq!(claude_read_state[0].timestamp_ms, 1_780_032_433_023);
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            value["claude_read_state"][0]["timestamp_ms"],
+            serde_json::json!(1_780_032_433_023u64)
+        );
+    }
+
+    #[test]
+    fn claude_read_timestamp_supports_large_decimal_strings() {
+        let raw = format!(
+            r#"{{"path":"src/lib.rs","timestamp_ms":"{}","is_partial_view":true}}"#,
+            u128::MAX
+        );
+        let event: ClaudeReadSnapshotEvent = serde_json::from_str(&raw).unwrap();
+        assert_eq!(event.timestamp_ms, u128::MAX);
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains(&format!(r#""timestamp_ms":"{}""#, u128::MAX)));
     }
 }

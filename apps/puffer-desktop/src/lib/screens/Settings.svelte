@@ -1,8 +1,11 @@
 <script lang="ts">
   import "../design/settings.css";
 
+  import { onDestroy } from "svelte";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
+  import LocalModelSetupCard from "../components/LocalModelSetupCard.svelte";
+  import { focusTrap } from "../focusTrap";
   import {
     providerIdCanRunAgent,
     providerIsAvailableForAgent,
@@ -12,21 +15,39 @@
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
     addMcpServer,
+    cancelTurn,
+    deleteWorkflowConnection,
     isDaemonReachable,
+    listLambdaSkillLibraries,
     listMcpServers,
+    dispatchSlashCommand,
     listPermissions,
     listProviderModels,
+    loadWorkflowSnapshot,
+    removeLambdaSkillLibrary,
+    resolveUserQuestion,
+    createSession,
+    saveLambdaSkillLibrary,
     savePermissions,
+    setLambdaSkillApproval,
+    setLambdaSkillEnabled,
     updateConfig,
+    type LambdaSkillLibraryInfo,
+    type LambdaSkillLibrariesSnapshot,
+    type LambdaVerifiedSkillInfo,
     type McpServerInfo,
     type ModelDescriptorInfo,
     type PermissionsSnapshot
   } from "../api/desktop";
+  import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
+  import { subscribeSessionEvents, type SessionStreamEvent } from "../api/sessionEvents";
   import type {
     DesktopPreferences,
     ExternalCredential,
     RemoteOperation,
-    SettingsSnapshot
+    SettingsSnapshot,
+    WorkflowConnector,
+    WorkflowSnapshot
   } from "../types";
 
   type Props = {
@@ -67,21 +88,51 @@
     if (section === "mcp" && daemonReachable && !mcpLoading && !mcpSaving) {
       void loadMcpServers();
     }
+    if (section === "skills" && daemonReachable && !lambdaLoading && !lambdaSaving && lambdaRemovingLibrary === null) {
+      void loadLambdaSkillLibraries();
+    }
+    if (section === "connectors" && daemonReachable && !connectorLoading && !connectorCreating) {
+      void loadConnectorSnapshot();
+    }
     props.onRefresh();
   }
 
-  type Section = "general" | "providers" | "permissions" | "mcp" | "git" | "appearance" | "shortcuts";
+  type Section = "general" | "providers" | "connectors" | "permissions" | "skills" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
 
   const navItems: { id: Section; label: string; icon: IconName }[] = [
     { id: "general",     label: "General",    icon: "settings" },
     { id: "providers",   label: "Providers",  icon: "plug" },
+    { id: "connectors",  label: "Connectors", icon: "server" },
     { id: "permissions", label: "Permissions", icon: "bolt" },
+    { id: "skills",      label: "Verified Skills", icon: "shield" },
     { id: "mcp",         label: "MCP Servers", icon: "plug" },
     { id: "git",         label: "Git & PRs",  icon: "git" },
     { id: "appearance",  label: "Appearance", icon: "layers" },
     { id: "shortcuts",   label: "Shortcuts",  icon: "panel" }
   ];
+
+  type ConnectorQuestionOption = {
+    label: string;
+    description?: string;
+    preview?: string;
+  };
+
+  type ConnectorQuestion = {
+    header: string;
+    question: string;
+    type: "input" | "choice";
+    options: ConnectorQuestionOption[];
+    multiSelect: boolean;
+  };
+
+  type ConnectorQuestionRequest = {
+    turnId: string;
+    requestId: string;
+    questions: ConnectorQuestion[];
+  };
+
+  type ConnectorTab = "connections" | "catalog";
 
   // Live permissions loaded from the daemon. `permissionRows` is the
   // editable working copy — changes are staged in memory and flushed on
@@ -115,6 +166,38 @@
     scope: "local" as "local" | "user"
   });
 
+  let connectorSnapshot = $state<WorkflowSnapshot | null>(null);
+  let connectorLoaded = $state(false);
+  let connectorLoading = $state(false);
+  let connectorLoadGeneration = 0;
+  let connectorError = $state<string | null>(null);
+  let connectorSaved = $state<string | null>(null);
+  let connectorCreateOpen = $state(false);
+  let connectorTab = $state<ConnectorTab>("connections");
+  let connectorSlug = $state("");
+  let connectorConnectionSlug = $state("");
+  let connectorCreating = $state(false);
+  let connectorCreateSessionId = $state<string | null>(null);
+  let connectorTurnId = $state<string | null>(null);
+  let connectorSetupSlug = $state<string | null>(null);
+  let connectorQuestionRequest = $state<ConnectorQuestionRequest | null>(null);
+  let connectorQuestionAnswers = $state<Record<string, string | string[]>>({});
+  let connectorUnlisten: (() => void) | null = null;
+  let connectorCancelledTurnIds = new Set<string>();
+  let connectorDeleting = $state<string | null>(null);
+  let lastConnectorSlug = "";
+
+  let lambdaSnapshot = $state<LambdaSkillLibrariesSnapshot | null>(null);
+  let lambdaLoaded = $state(false);
+  let lambdaLoading = $state(false);
+  let lambdaLoadGeneration = 0;
+  let lambdaSaving = $state(false);
+  let lambdaRemovingLibrary = $state<string | null>(null);
+  let lambdaTogglingSkill = $state<string | null>(null);
+  let lambdaTogglingApproval = $state<string | null>(null);
+  let lambdaError = $state<string | null>(null);
+  let lambdaSaved = $state<string | null>(null);
+
   // Per-provider model listings cached by providerId. Populated on demand
   // when the user expands the Providers pane.
   let providerModels = $state<Record<string, ModelDescriptorInfo[]>>({});
@@ -123,6 +206,24 @@
   let modelPickerModel = $state<string>("");
   let modelSaving = $state(false);
   let modelError = $state<string | null>(null);
+  let browserProfileSaving = $state(false);
+  let browserProfileError = $state<string | null>(null);
+  let connectors = $derived(connectorSnapshot?.connectors ?? []);
+  let connections = $derived(connectorSnapshot?.connections ?? []);
+  let selectedConnector = $derived(
+    connectors.find((connector) => connector.connector_slug === connectorSlug) ?? connectors[0] ?? null
+  );
+  let selectedConnectorConnections = $derived(
+    selectedConnector
+      ? connections.filter((connection) => connection.connector_slug === selectedConnector.connector_slug)
+      : []
+  );
+  let connectorConnectionSlugInvalid = $derived(!connectionSlugValid(connectorConnectionSlug));
+  let connectorCommandPreview = $derived(
+    selectedConnector && !connectorConnectionSlugInvalid
+      ? `/connect ${selectedConnector.connector_slug} ${connectorConnectionSlug.trim()}`
+      : ""
+  );
 
   function ruleIcon(tool: string): IconName {
     if (tool === "read_file") return "file";
@@ -203,6 +304,609 @@
       mcpError = (e as Error).message ?? String(e);
     } finally {
       mcpSaving = false;
+    }
+  }
+
+  async function loadConnectorSnapshot() {
+    const generation = ++connectorLoadGeneration;
+    connectorLoading = true;
+    connectorError = null;
+    try {
+      const snap = await loadWorkflowSnapshot();
+      if (generation !== connectorLoadGeneration) return;
+      connectorSnapshot = snap;
+      connectorLoaded = true;
+      ensureConnectorSelection(snap.connectors ?? []);
+    } catch (e) {
+      if (generation === connectorLoadGeneration) {
+        connectorError = (e as Error).message ?? String(e);
+      }
+    } finally {
+      if (generation === connectorLoadGeneration) {
+        connectorLoading = false;
+      }
+    }
+  }
+
+  function ensureConnectorSelection(list = connectors) {
+    const selected = list.find((connector) => connector.connector_slug === connectorSlug) ?? list[0] ?? null;
+    if (!selected) {
+      connectorSlug = "";
+      connectorConnectionSlug = "";
+      return;
+    }
+    if (connectorSlug !== selected.connector_slug) {
+      connectorSlug = selected.connector_slug;
+    }
+    if (!connectorConnectionSlug.trim() || lastConnectorSlug !== connectorSlug) {
+      connectorConnectionSlug = connectorConnectionHint(selected);
+    }
+    lastConnectorSlug = connectorSlug;
+  }
+
+  function selectConnector(slug: string) {
+    const next = connectors.find((connector) => connector.connector_slug === slug) ?? null;
+    connectorSlug = slug;
+    connectorConnectionSlug = next ? connectorConnectionHint(next) : "";
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    connectorSaved = null;
+    lastConnectorSlug = slug;
+  }
+
+  function openConnectorCreate() {
+    if (!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0) return;
+    ensureConnectorSelection();
+    connectorError = null;
+    connectorSaved = null;
+    connectorCreateOpen = true;
+  }
+
+  function closeConnectorCreate() {
+    connectorCreateOpen = false;
+  }
+
+  function connectorConnectionHint(connector: WorkflowConnector): string {
+    return connector.suggested_connection_slug || connector.connector_slug;
+  }
+
+  function connectionSlugValid(value: string): boolean {
+    return /^[a-z0-9][a-z0-9-]*$/.test(value.trim());
+  }
+
+  function connectorStatusLabel(connector: WorkflowConnector): string {
+    if (connector.can_trigger_workflow ?? connector.can_subscribe) return "workflow";
+    if (connector.can_proxy_agent) return "proxy";
+    return connector.requires_auth ? "auth" : "available";
+  }
+
+  function connectorQuestionKey(question: ConnectorQuestion): string {
+    return question.question;
+  }
+
+  function normalizeConnectorQuestions(rawQuestions: unknown[]): ConnectorQuestion[] {
+    return rawQuestions
+      .map((raw): ConnectorQuestion | null => {
+        if (typeof raw !== "object" || raw === null) return null;
+        const record = raw as Record<string, unknown>;
+        const question = typeof record.question === "string" ? record.question : "";
+        if (!question.trim()) return null;
+        const options = Array.isArray(record.options)
+          ? record.options
+              .map((option): ConnectorQuestionOption | null => {
+                if (typeof option !== "object" || option === null) return null;
+                const optionRecord = option as Record<string, unknown>;
+                const label = typeof optionRecord.label === "string" ? optionRecord.label : "";
+                if (!label.trim()) return null;
+                return {
+                  label,
+                  description: typeof optionRecord.description === "string" ? optionRecord.description : undefined,
+                  preview: typeof optionRecord.preview === "string" ? optionRecord.preview : undefined
+                };
+              })
+              .filter((option): option is ConnectorQuestionOption => option !== null)
+          : [];
+        const type = record.type === "input" || options.length === 0 ? "input" : "choice";
+        return {
+          header: typeof record.header === "string" && record.header.trim() ? record.header : "Question",
+          question,
+          type,
+          options,
+          multiSelect: record.multiSelect === true
+        };
+      })
+      .filter((question): question is ConnectorQuestion => question !== null);
+  }
+
+  function defaultConnectorAnswers(questions: ConnectorQuestion[]): Record<string, string | string[]> {
+    const answers: Record<string, string | string[]> = {};
+    for (const question of questions) {
+      const key = connectorQuestionKey(question);
+      answers[key] = question.multiSelect
+        ? []
+        : question.type === "choice"
+          ? question.options[0]?.label ?? ""
+          : "";
+    }
+    return answers;
+  }
+
+  function connectorQuestionInputType(question: ConnectorQuestion): "text" | "password" {
+    const text = `${question.header} ${question.question}`.toLowerCase();
+    return /password|secret|token|cookie|key|code|xox|credential/.test(text) ? "password" : "text";
+  }
+
+  function updateConnectorAnswer(question: ConnectorQuestion, value: string) {
+    connectorQuestionAnswers = {
+      ...connectorQuestionAnswers,
+      [connectorQuestionKey(question)]: value
+    };
+  }
+
+  function connectorAnswerText(question: ConnectorQuestion): string {
+    const value = connectorQuestionAnswers[connectorQuestionKey(question)];
+    return typeof value === "string" ? value : "";
+  }
+
+  function connectorAnswerIncludes(question: ConnectorQuestion, value: string): boolean {
+    const current = connectorQuestionAnswers[connectorQuestionKey(question)];
+    return Array.isArray(current) ? current.includes(value) : current === value;
+  }
+
+  function toggleConnectorMultiAnswer(question: ConnectorQuestion, value: string, checked: boolean) {
+    const key = connectorQuestionKey(question);
+    const current = Array.isArray(connectorQuestionAnswers[key])
+      ? connectorQuestionAnswers[key] as string[]
+      : [];
+    const next = checked
+      ? Array.from(new Set([...current, value]))
+      : current.filter((item) => item !== value);
+    connectorQuestionAnswers = {
+      ...connectorQuestionAnswers,
+      [key]: next
+    };
+  }
+
+  function connectorAnswersComplete(): boolean {
+    if (!connectorQuestionRequest) return false;
+    return connectorQuestionRequest.questions.every((question) => {
+      const value = connectorQuestionAnswers[connectorQuestionKey(question)];
+      if (Array.isArray(value)) return question.options.length === 0 || value.length > 0;
+      return question.type === "choice" || Boolean(value?.trim());
+    });
+  }
+
+  function activeConnectorSetupSlug(): string {
+    return connectorSetupSlug ?? selectedConnector?.connector_slug ?? connectorSlug;
+  }
+
+  function connectorQuestionStatusMessage(questions: ConnectorQuestion[]): string {
+    if (activeConnectorSetupSlug() !== "telegram-login") {
+      return "Answer the connector setup questions to continue.";
+    }
+    const prompt = questions
+      .map((question) => `${question.header} ${question.question}`)
+      .join(" ")
+      .toLowerCase();
+    if (prompt.includes("authenticate")) {
+      return "Telegram setup is waiting for you to choose Desktop import, QR login, or phone login.";
+    }
+    if (prompt.includes("qr")) {
+      return "Telegram setup is waiting for QR approval in an already logged-in Telegram app.";
+    }
+    if (prompt.includes("phone")) {
+      return "Telegram setup is waiting for the account phone number.";
+    }
+    if (prompt.includes("code")) {
+      return "Telegram setup is waiting for the one-time login code from Telegram.";
+    }
+    if (prompt.includes("password")) {
+      return "Telegram setup is waiting for the account's Telegram 2FA cloud password.";
+    }
+    return "Telegram setup is waiting for the next login answer.";
+  }
+
+  function connectorSetupErrorMessage(error: string): string {
+    if (activeConnectorSetupSlug() !== "telegram-login") return error;
+    const lower = error.toLowerCase();
+    if (lower.includes("telegram-user subscriber manifest not found")) {
+      return [
+        "Telegram setup could not start because the local telegram-user subscriber manifest is unavailable.",
+        error,
+        "The daemon log now includes a [telegram-connect] line with the searched paths."
+      ].join(" ");
+    }
+    if (lower.includes("telegram subscriber manifest")) {
+      return [
+        "Telegram setup found a subscriber manifest but could not read it.",
+        error,
+        "Check the manifest path and daemon stderr for [telegram-connect] details."
+      ].join(" ");
+    }
+    if (lower.includes("start telegram subscriber")) {
+      return [
+        "Telegram setup found its manifest but could not start the local subscriber process.",
+        error,
+        "Check the daemon stderr for [telegram-connect] details."
+      ].join(" ");
+    }
+    return error;
+  }
+
+  function handleConnectorSessionEvent(event: SessionStreamEvent) {
+    if (connectorTurnId && "turnId" in event && event.turnId !== connectorTurnId) return;
+    if (event.type === "user-question-request") {
+      const questions = normalizeConnectorQuestions(event.questions);
+      connectorQuestionRequest = {
+        turnId: event.turnId,
+        requestId: event.requestId,
+        questions
+      };
+      connectorQuestionAnswers = defaultConnectorAnswers(questions);
+      connectorCreating = false;
+      connectorCreateOpen = false;
+      connectorSaved = connectorQuestionStatusMessage(questions);
+      return;
+    }
+    if (event.type === "turn-complete") {
+      connectorCreating = false;
+      connectorCreateOpen = false;
+      connectorQuestionRequest = null;
+      connectorQuestionAnswers = {};
+      connectorSaved = `Connector setup finished for ${connectorConnectionSlug.trim()}.`;
+      connectorSetupSlug = null;
+      connectorTab = "connections";
+      void loadConnectorSnapshot();
+      return;
+    }
+    if (event.type === "turn-error") {
+      connectorCreating = false;
+      connectorCreateOpen = false;
+      connectorQuestionRequest = null;
+      if ("turnId" in event && connectorCancelledTurnIds.has(event.turnId)) {
+        connectorCancelledTurnIds.delete(event.turnId);
+        return;
+      }
+      connectorError = connectorSetupErrorMessage(event.error);
+      connectorSaved = null;
+      connectorSetupSlug = null;
+    }
+  }
+
+  async function startConnectorSetup() {
+    if (!canStartConnectorSetup) return;
+    connectorCreating = true;
+    connectorError = null;
+    connectorSaved = `Starting ${connectorCommandPreview}...`;
+    connectorSetupSlug = selectedConnector?.connector_slug ?? connectorSlug;
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    connectorCreateOpen = false;
+    try {
+      connectorUnlisten?.();
+      connectorUnlisten = null;
+      const created = await createSession(
+        props.snapshot?.workspaceRoot ?? undefined,
+        props.snapshot?.config.defaultProvider ?? undefined,
+        props.snapshot?.config.defaultModel ?? undefined
+      );
+      connectorCreateSessionId = created.sessionId;
+      connectorUnlisten = await subscribeSessionEvents(created.sessionId, handleConnectorSessionEvent);
+      connectorTurnId = await dispatchSlashCommand(created.sessionId, connectorCommandPreview);
+    } catch (e) {
+      connectorCreating = false;
+      connectorError = connectorSetupErrorMessage((e as Error).message ?? String(e));
+      connectorSaved = null;
+      connectorSetupSlug = null;
+    }
+  }
+
+  async function submitConnectorAnswers() {
+    if (!connectorQuestionRequest || !connectorAnswersComplete()) return;
+    connectorCreating = true;
+    connectorSaved = "Continuing connector setup...";
+    try {
+      await resolveUserQuestion(
+        connectorQuestionRequest.turnId,
+        connectorQuestionRequest.requestId,
+        connectorQuestionAnswers,
+        {}
+      );
+      connectorQuestionRequest = null;
+      connectorQuestionAnswers = {};
+    } catch (e) {
+      connectorCreating = false;
+      connectorError = connectorSetupErrorMessage((e as Error).message ?? String(e));
+      connectorSaved = null;
+    }
+  }
+
+  async function cancelConnectorSetup() {
+    const turnId = connectorTurnId;
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    connectorCreating = false;
+    connectorSaved = "Connector setup cancelled.";
+    connectorSetupSlug = null;
+    if (turnId) {
+      connectorCancelledTurnIds.add(turnId);
+      try {
+        await cancelTurn(turnId);
+      } catch (e) {
+        connectorError = (e as Error).message ?? String(e);
+      }
+    }
+    connectorTurnId = null;
+  }
+
+  async function removeConnectorConnection(slug: string) {
+    if (!daemonReachable || !slug || connectorDeleting) return;
+    connectorDeleting = slug;
+    connectorError = null;
+    try {
+      const snap = await deleteWorkflowConnection(slug);
+      connectorSnapshot = snap;
+      ensureConnectorSelection(snap.connectors ?? []);
+      connectorSaved = `Removed connection ${slug}.`;
+    } catch (e) {
+      connectorError = (e as Error).message ?? String(e);
+    } finally {
+      connectorDeleting = null;
+    }
+  }
+
+  async function loadLambdaSkillLibraries() {
+    const generation = ++lambdaLoadGeneration;
+    lambdaLoading = true;
+    lambdaError = null;
+    try {
+      const snap = await withTimeout(
+        listLambdaSkillLibraries(),
+        15000,
+        "Verified Skills are still loading. Try Refresh again in a moment."
+      );
+      if (generation !== lambdaLoadGeneration) return;
+      lambdaSnapshot = snap;
+    } catch (e) {
+      if (generation === lambdaLoadGeneration) {
+        lambdaError = (e as Error).message ?? String(e);
+      }
+    } finally {
+      if (generation === lambdaLoadGeneration) {
+        lambdaLoaded = true;
+        lambdaLoading = false;
+      }
+    }
+  }
+
+  function basenameFromPath(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).at(-1) ?? "Verified Skills";
+  }
+
+  function slugFromPath(path: string): string {
+    const slug = basenameFromPath(path)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return slug || "verified-skills";
+  }
+
+  function shortPathHash(path: string): string {
+    let hash = 2166136261;
+    for (let i = 0; i < path.length; i += 1) {
+      hash ^= path.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36).slice(0, 6);
+  }
+
+  function verifiedSkillIdFromPath(path: string): string {
+    return `${slugFromPath(path)}-${shortPathHash(path)}`;
+  }
+
+  function normalizedFolderPath(path: string): string {
+    return path.replace(/\\/g, "/").replace(/\/+$/g, "");
+  }
+
+  function pathContains(parent: string, child: string): boolean {
+    const normalizedParent = normalizedFolderPath(parent);
+    const normalizedChild = normalizedFolderPath(child);
+    return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}/`);
+  }
+
+  function coveringVerifiedSkillLibrary(path: string): LambdaSkillLibraryInfo | null {
+    const libraries = lambdaSnapshot?.libraries ?? [];
+    return libraries.find((library) => pathContains(library.root, path)) ?? null;
+  }
+
+  function lambdaLibraryKey(library: LambdaSkillLibraryInfo): string {
+    return `${library.sourceKind}:${library.id}`;
+  }
+
+  function verifiedSkillStatus(library: LambdaSkillLibraryInfo): string {
+    if (library.disableModelInvocation) return "Installed";
+    if (library.allowedTools.length > 0 && library.hostCatalogueSubpath) {
+      return "Ready for model use";
+    }
+    return "Needs verification output";
+  }
+
+  function verifiedSkillScopeLabel(library: LambdaSkillLibraryInfo): string {
+    return library.sourceKind === "user" ? "User" : "Workspace";
+  }
+
+  function verifiedSkillKey(skill: LambdaVerifiedSkillInfo): string {
+    return `${skill.sourceKind ?? "unknown"}:${skill.libraryId ?? "none"}:${skill.name}`;
+  }
+
+  function verifiedSkillReadinessLabel(skill: LambdaVerifiedSkillInfo): string {
+    if (skill.modelInvocable) return "Enabled";
+    if (!skill.enabled) return "Disabled";
+    if (skill.ready) return "Configured";
+    return "Needs attention";
+  }
+
+  function verifiedSkillDetailLabel(skill: LambdaVerifiedSkillInfo): string {
+    const scope = skill.sourceKind === "user" ? "User" : "Workspace";
+    const counts = [
+      skill.tools != null ? `${skill.tools} tools` : null,
+      skill.actions != null ? `${skill.actions} actions` : null
+    ].filter(Boolean);
+    const approval = skill.requireApproval ? "asks before tools" : "no extra approval";
+    return counts.length > 0
+      ? `${scope} Verified Skill · ${counts.join(" · ")} · ${approval}`
+      : `${scope} Verified Skill · ${approval}`;
+  }
+
+  function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        setTimeout(() => reject(new Error(message)), ms);
+      })
+    ]);
+  }
+
+  async function pickVerifiedSkillsFolder(): Promise<string | null> {
+    if (!canInvokeTauri()) {
+      throw new Error("Folder picker is only available in the desktop app.");
+    }
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false });
+    return typeof picked === "string" && picked.length > 0 ? picked : null;
+  }
+
+  async function addVerifiedSkillsFolder() {
+    if (lambdaSaving) return;
+    let root: string | null = null;
+    try {
+      root = await pickVerifiedSkillsFolder();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      return;
+    }
+    if (!root) return;
+    const coveringLibrary = coveringVerifiedSkillLibrary(root);
+    if (coveringLibrary) {
+      lambdaError = null;
+      lambdaSaved = pathContains(root, coveringLibrary.root)
+        ? `${basenameFromPath(root)} is already added.`
+        : `${basenameFromPath(root)} is already covered by ${basenameFromPath(coveringLibrary.root)}.`;
+      return;
+    }
+    lambdaLoadGeneration += 1;
+    lambdaLoading = false;
+    lambdaSaving = true;
+    lambdaError = null;
+    lambdaSaved = null;
+    try {
+      lambdaSnapshot = await withTimeout(
+        saveLambdaSkillLibrary({
+          id: verifiedSkillIdFromPath(root),
+          root,
+          scope: "workspace",
+          userInvocable: true,
+          disableModelInvocation: false,
+          requireApproval: false
+        }),
+        15000,
+        "Adding this Verified Skills folder is still running. Try Refresh again in a moment."
+      );
+      lambdaLoaded = true;
+      lambdaSaved = `Added ${basenameFromPath(root)}`;
+      props.onRefresh();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+    } finally {
+      lambdaSaving = false;
+    }
+  }
+
+  async function removeVerifiedSkillsFolder(library: LambdaSkillLibraryInfo) {
+    if (lambdaRemovingLibrary || lambdaSaving) return;
+    if (library.sourceKind !== "workspace" && library.sourceKind !== "user") return;
+    const key = lambdaLibraryKey(library);
+    lambdaLoadGeneration += 1;
+    lambdaLoading = false;
+    lambdaRemovingLibrary = key;
+    lambdaError = null;
+    lambdaSaved = null;
+    try {
+      lambdaSnapshot = await withTimeout(
+        removeLambdaSkillLibrary({
+          libraryId: library.id,
+          sourceKind: library.sourceKind
+        }),
+        15000,
+        "Removing this Verified Skills folder is still running. Try Refresh again in a moment."
+      );
+      lambdaLoaded = true;
+      lambdaSaved = `Removed ${basenameFromPath(library.root)}`;
+      props.onRefresh();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      void loadLambdaSkillLibraries();
+    } finally {
+      lambdaRemovingLibrary = null;
+    }
+  }
+
+  async function toggleVerifiedSkill(skill: LambdaVerifiedSkillInfo, enabled: boolean) {
+    if (!skill.libraryId || (skill.sourceKind !== "workspace" && skill.sourceKind !== "user")) {
+      lambdaError = "This Verified Skill is not backed by an editable folder config.";
+      return;
+    }
+    const key = verifiedSkillKey(skill);
+    lambdaTogglingSkill = key;
+    lambdaError = null;
+    lambdaSaved = null;
+    try {
+      lambdaSnapshot = await setLambdaSkillEnabled({
+        libraryId: skill.libraryId,
+        sourceKind: skill.sourceKind,
+        skillName: skill.name,
+        enabled
+      });
+      lambdaLoaded = true;
+      lambdaSaved = `${enabled ? "Enabled" : "Disabled"} ${skill.name}`;
+      props.onRefresh();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      void loadLambdaSkillLibraries();
+    } finally {
+      lambdaTogglingSkill = null;
+    }
+  }
+
+  async function toggleVerifiedSkillApproval(library: LambdaSkillLibraryInfo, requireApproval: boolean) {
+    if (library.sourceKind !== "workspace" && library.sourceKind !== "user") {
+      lambdaError = "This Verified Skills folder is not backed by an editable config.";
+      return;
+    }
+    const key = lambdaLibraryKey(library);
+    lambdaTogglingApproval = key;
+    lambdaError = null;
+    lambdaSaved = null;
+    try {
+      lambdaSnapshot = await withTimeout(
+        setLambdaSkillApproval({
+          libraryId: library.id,
+          sourceKind: library.sourceKind,
+          requireApproval
+        }),
+        15000,
+        "Updating this Verified Skills approval setting is still running. Try Refresh again in a moment."
+      );
+      lambdaLoaded = true;
+      lambdaSaved = requireApproval
+        ? `Extra approval enabled for ${basenameFromPath(library.root)}`
+        : `Verified calls now run without extra approval for ${basenameFromPath(library.root)}`;
+      props.onRefresh();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      void loadLambdaSkillLibraries();
+    } finally {
+      lambdaTogglingApproval = null;
     }
   }
 
@@ -341,6 +1045,20 @@
     }
   }
 
+  async function saveBrowserProfile(value: string) {
+    if (!daemonReachable || browserProfileSaving) return;
+    browserProfileSaving = true;
+    browserProfileError = null;
+    try {
+      await updateConfig({ browserChromeProfile: value || null });
+      props.onRefresh();
+    } catch (e) {
+      browserProfileError = (e as Error).message ?? String(e);
+    } finally {
+      browserProfileSaving = false;
+    }
+  }
+
   let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
   let defaultRouteProviders = $derived.by(() => {
     const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
@@ -401,6 +1119,13 @@
     if (nextKey === settingsSourceKey) return;
     settingsSourceKey = nextKey;
 
+    lambdaSnapshot = null;
+    lambdaLoaded = false;
+    lambdaLoading = false;
+    lambdaLoadGeneration += 1;
+    lambdaError = null;
+    lambdaSaved = null;
+
     permissionLoadGeneration += 1;
     permissionSnapshot = null;
     permissionRows = [];
@@ -416,6 +1141,26 @@
     mcpError = null;
     mcpSaved = null;
 
+    connectorUnlisten?.();
+    connectorUnlisten = null;
+    connectorSnapshot = null;
+    connectorLoaded = false;
+    connectorLoading = false;
+    connectorLoadGeneration += 1;
+    connectorError = null;
+    connectorSaved = null;
+    connectorCreateOpen = false;
+    connectorTab = "connections";
+    connectorSlug = "";
+    connectorConnectionSlug = "";
+    connectorCreating = false;
+    connectorCreateSessionId = null;
+    connectorTurnId = null;
+    connectorSetupSlug = null;
+    connectorQuestionRequest = null;
+    connectorQuestionAnswers = {};
+    lastConnectorSlug = "";
+
     providerModels = {};
     modelLoadingByProvider = {};
     const nextProvider = defaultRouteProviderId();
@@ -429,8 +1174,18 @@
   // Skip RPC calls when the daemon isn't reachable — web previews render
   // static panes with a friendly "connect daemon" banner instead of a red
   // error. In Tauri the singleton connects on first `ensureLocalDaemonClient`.
-  let daemonReachable = isDaemonReachable();
+  let daemonReachable = $state(isDaemonReachable());
+  $effect(() => {
+    daemonReachable = isDaemonReachable();
+    const client = currentDaemonClient();
+    if (!client) return;
+    return client.onConnectionChange(() => {
+      daemonReachable = isDaemonReachable();
+    });
+  });
   let mcpFormDisabled = $derived(!daemonReachable || mcpLoading || mcpSaving);
+  let lambdaRefreshDisabled = $derived(!daemonReachable || lambdaLoading || lambdaSaving || lambdaRemovingLibrary !== null);
+  let lambdaChooseDisabled = $derived(lambdaSaving || lambdaRemovingLibrary !== null || !canInvokeTauri());
   let modelPickerLoading = $derived(
     Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
   );
@@ -446,6 +1201,17 @@
       ?.displayName ?? modelPickerProvider
   );
   let modelPickerDisabled = $derived(!daemonReachable || modelSaving || credentialBusy);
+  let browserProfileOptions = $derived(props.snapshot?.browserProfiles ?? []);
+  let selectedBrowserProfile = $derived(
+    browserProfileOptions.find((profile) => profile.isSelected) ?? null
+  );
+  let configuredBrowserProfile = $derived(props.snapshot?.config.browserChromeProfile ?? "");
+  let browserProfileValue = $derived(
+    configuredBrowserProfile &&
+      browserProfileOptions.some((profile) => profile.id === configuredBrowserProfile)
+      ? configuredBrowserProfile
+      : ""
+  );
   let canSaveDefaultModel = $derived(
     Boolean(
       daemonReachable &&
@@ -455,6 +1221,16 @@
         !modelPickerLoading &&
         !modelSaving &&
         !credentialBusy
+    )
+  );
+  let canStartConnectorSetup = $derived(
+    Boolean(
+      daemonReachable &&
+        selectedConnector &&
+        !connectorLoading &&
+        !connectorCreating &&
+        !connectorConnectionSlugInvalid &&
+        connectorCommandPreview
     )
   );
 
@@ -468,12 +1244,23 @@
     if (section === "permissions" && permissionSnapshot === null && !permissionLoading && !permissionLoaded) {
       void loadPermissionSnapshot();
     }
+    if (section === "skills" && !lambdaLoaded && !lambdaLoading) {
+      void loadLambdaSkillLibraries();
+    }
     if (section === "mcp" && !mcpLoaded && !mcpLoading) {
       void loadMcpServers();
+    }
+    if (section === "connectors" && !connectorLoaded && !connectorLoading) {
+      void loadConnectorSnapshot();
     }
     if (section === "providers" && modelPickerProvider) {
       void loadModelsForProvider(modelPickerProvider);
     }
+  });
+
+  onDestroy(() => {
+    connectorUnlisten?.();
+    connectorUnlisten = null;
   });
 </script>
 
@@ -527,6 +1314,39 @@
           {:else}
             <span style="color: var(--muted-foreground);">not connected</span>
           {/if}
+        </div>
+      </div>
+
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Browser profile</div>
+          <div class="desc">Chrome profile used to seed Puffer browser sessions.</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px; justify-self: end; min-width: 320px;">
+          <select
+            class="sc-input"
+            value={browserProfileValue}
+            disabled={!daemonReachable || browserProfileSaving || browserProfileOptions.length === 0}
+            onchange={(e) => void saveBrowserProfile((e.currentTarget as HTMLSelectElement).value)}
+          >
+            <option value="">Most recently used Chrome profile</option>
+            {#each browserProfileOptions as profile (profile.id)}
+              <option value={profile.id}>
+                {profile.name}{profile.email ? ` · ${profile.email}` : ""}{profile.isLastUsed ? " · recent" : ""}
+              </option>
+            {/each}
+          </select>
+          <div style="color: var(--muted-foreground); font-size: 11.5px; text-align: right;">
+            {#if browserProfileError}
+              <span style="color: var(--destructive, #c03232);">{browserProfileError}</span>
+            {:else if browserProfileSaving}
+              Saving profile...
+            {:else if selectedBrowserProfile}
+              Using {selectedBrowserProfile.name}{selectedBrowserProfile.email ? ` · ${selectedBrowserProfile.email}` : ""}.
+            {:else}
+              No local Chrome profiles found.
+            {/if}
+          </div>
         </div>
       </div>
 
@@ -619,6 +1439,8 @@
           resources reload.
         </div>
       {/if}
+      <LocalModelSetupCard onRefresh={props.onRefresh} />
+
       <div class="pf-settings-row" style="align-items: start;">
         <div class="meta">
           <div class="label">Default routing</div>
@@ -703,6 +1525,360 @@
         onImportExternal={props.onImportExternal ?? (() => {})}
         onRefresh={props.onRefresh}
       />
+
+    {:else if section === "connectors"}
+      <h2>Connectors</h2>
+      <p class="lead">Connector catalog, saved connections, and setup flows backed by AskUserQuestion.</p>
+      <div class="pf-connector-toolbar">
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="outline"
+          data-size="sm"
+          disabled={!daemonReachable || connectorLoading || connectorCreating}
+          onclick={refreshIfIdle}
+        >
+          <Icon name="refresh" size={13} />Refresh connectors
+        </button>
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="default"
+          data-size="sm"
+          disabled={!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0}
+          onclick={openConnectorCreate}
+        >
+          <Icon name="plug" size={13} />New connection
+        </button>
+      </div>
+      {#if connectorError}
+        <div class="pf-settings-note warn">{connectorError}</div>
+      {:else if connectorSaved}
+        <div class="pf-settings-note">{connectorSaved}</div>
+      {:else if !daemonReachable}
+        <div class="pf-settings-note">Preview mode - launch Puffer in the desktop app to configure connectors.</div>
+      {:else if connectorLoading}
+        <div class="pf-settings-note">Loading connector catalog...</div>
+      {:else}
+        <div class="pf-settings-note">{connectors.length} connector{connectors.length === 1 ? "" : "s"} and {connections.length} connection{connections.length === 1 ? "" : "s"}.</div>
+      {/if}
+
+      {#if connectorCreateOpen && !connectorQuestionRequest}
+        <div
+          class="pf-modal-scrim pf-connector-create-scrim"
+          role="presentation"
+          onclick={closeConnectorCreate}
+          onkeydown={() => {}}
+        >
+          <div
+            class="pf-modal pf-connector-create-modal"
+            role="dialog"
+            aria-label="Create connector connection"
+            aria-modal="true"
+            tabindex="-1"
+            use:focusTrap
+            onclick={(event) => event.stopPropagation()}
+            onkeydown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeConnectorCreate();
+              }
+            }}
+          >
+            <form
+              class="pf-connector-create-form"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void startConnectorSetup();
+              }}
+            >
+              <div class="pf-modal-head">
+                <div class="pf-modal-title-group">
+                  <div class="pf-modal-title">Create connection</div>
+                </div>
+                <button type="button" class="pf-modal-close" onclick={closeConnectorCreate} aria-label="Close">
+                  <Icon name="x" size={14} />
+                </button>
+              </div>
+              <div class="pf-modal-body pf-connector-create-body">
+                <div class="pf-connector-form">
+                  <label>
+                    Connector
+                    <select
+                      class="sc-input"
+                      value={connectorSlug}
+                      disabled={!daemonReachable || connectorLoading || connectorCreating || connectors.length === 0}
+                      data-autofocus
+                      onchange={(e) => selectConnector((e.currentTarget as HTMLSelectElement).value)}
+                    >
+                      {#if connectors.length === 0}
+                        <option value="">No connectors</option>
+                      {/if}
+                      {#each connectors as connector (connector.connector_slug)}
+                        <option value={connector.connector_slug}>{connector.connector_slug}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label>
+                    Connection slug
+                    <input
+                      class="sc-input"
+                      aria-label="Connector connection slug"
+                      aria-invalid={connectorConnectionSlugInvalid}
+                      value={connectorConnectionSlug}
+                      disabled={!daemonReachable || connectorLoading || connectorCreating || !selectedConnector}
+                      oninput={(e) => {
+                        connectorConnectionSlug = (e.currentTarget as HTMLInputElement).value;
+                        connectorSaved = null;
+                      }}
+                    />
+                  </label>
+                  {#if connectorConnectionSlugInvalid && connectorConnectionSlug.trim()}
+                    <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
+                  {/if}
+                  {#if selectedConnector}
+                    <div class="pf-connector-selected">
+                      <div>
+                        <strong>{selectedConnector.connector_slug}</strong>
+                        <span>{selectedConnector.description}</span>
+                        <span>{selectedConnectorConnections.length} existing connection{selectedConnectorConnections.length === 1 ? "" : "s"}</span>
+                      </div>
+                      <span class="pf-status-pill ready">{connectorStatusLabel(selectedConnector)}</span>
+                    </div>
+                  {/if}
+                  <div class="pf-connector-command" aria-label="Connector setup command">
+                    <Icon name="terminal" size={12} />
+                    <code>{connectorCommandPreview || "Enter a valid connection slug."}</code>
+                  </div>
+                </div>
+              </div>
+              <div class="pf-modal-foot">
+                <div class="pf-modal-foot-btns">
+                  <button
+                    type="button"
+                    class="sc-btn"
+                    data-variant="outline"
+                    data-size="sm"
+                    onclick={closeConnectorCreate}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    class="sc-btn"
+                    data-variant="default"
+                    data-size="sm"
+                    disabled={!canStartConnectorSetup}
+                    aria-busy={connectorCreating && !connectorQuestionRequest}
+                  >
+                    <Icon name="plug" size={12} />{connectorCreating && !connectorQuestionRequest ? "Starting..." : "Start setup"}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      {/if}
+
+      {#if connectorQuestionRequest}
+        <div class="pf-modal-scrim pf-connector-question-scrim" role="presentation" onkeydown={() => {}}>
+          <div
+            class="pf-modal pf-connector-question-modal"
+            role="dialog"
+            aria-label="Connector setup questions"
+            aria-modal="true"
+            tabindex="-1"
+            use:focusTrap
+            onclick={(event) => event.stopPropagation()}
+            onkeydown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                void cancelConnectorSetup();
+              }
+            }}
+          >
+            <form
+              class="pf-connector-question-form"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void submitConnectorAnswers();
+              }}
+            >
+              <div class="pf-modal-head pf-connector-question-head">
+                <div class="pf-modal-title-group">
+                  <div class="pf-modal-title">Setup questions</div>
+                </div>
+                <span class="pf-status-pill">{connectorQuestionRequest.questions.length} question{connectorQuestionRequest.questions.length === 1 ? "" : "s"}</span>
+              </div>
+              <div class="pf-modal-body pf-connector-question-list">
+                {#each connectorQuestionRequest.questions as question, questionIndex (connectorQuestionKey(question))}
+                  {@const key = connectorQuestionKey(question)}
+                  <fieldset class="pf-connector-question">
+                    <legend>
+                      <span>{question.header}</span>
+                      <strong>{question.question}</strong>
+                    </legend>
+                    {#if question.type === "input"}
+                      <input
+                        class="sc-input"
+                        type={connectorQuestionInputType(question)}
+                        value={connectorAnswerText(question)}
+                        data-autofocus={questionIndex === 0 ? "true" : undefined}
+                        oninput={(e) => updateConnectorAnswer(question, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    {:else if question.multiSelect}
+                      <div class="pf-connector-options">
+                        {#each question.options as option, optionIndex (option.label)}
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={connectorAnswerIncludes(question, option.label)}
+                              data-autofocus={questionIndex === 0 && optionIndex === 0 ? "true" : undefined}
+                              onchange={(e) => toggleConnectorMultiAnswer(question, option.label, (e.currentTarget as HTMLInputElement).checked)}
+                            />
+                            <span>
+                              <strong>{option.label}</strong>
+                              {#if option.description}<small>{option.description}</small>{/if}
+                              {#if option.preview}<code>{option.preview}</code>{/if}
+                            </span>
+                          </label>
+                        {/each}
+                      </div>
+                    {:else}
+                      <div class="pf-connector-options">
+                        {#each question.options as option, optionIndex (option.label)}
+                          <label>
+                            <input
+                              type="radio"
+                              name={`connector-${connectorQuestionRequest.requestId}-${key}`}
+                              checked={connectorAnswerIncludes(question, option.label)}
+                              data-autofocus={questionIndex === 0 && optionIndex === 0 ? "true" : undefined}
+                              onchange={() => updateConnectorAnswer(question, option.label)}
+                            />
+                            <span>
+                              <strong>{option.label}</strong>
+                              {#if option.description}<small>{option.description}</small>{/if}
+                              {#if option.preview}<code>{option.preview}</code>{/if}
+                            </span>
+                          </label>
+                        {/each}
+                      </div>
+                    {/if}
+                  </fieldset>
+                {/each}
+              </div>
+              <div class="pf-modal-foot pf-connector-question-actions">
+                <div class="pf-modal-foot-btns">
+                  <button
+                    type="button"
+                    class="sc-btn"
+                    data-variant="outline"
+                    data-size="sm"
+                    onclick={() => void cancelConnectorSetup()}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    class="sc-btn"
+                    data-variant="default"
+                    data-size="sm"
+                    disabled={!connectorAnswersComplete() || connectorCreating}
+                    aria-busy={connectorCreating}
+                  >
+                    <Icon name="check" size={12} />{connectorCreating ? "Submitting..." : "Submit answers"}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      {/if}
+
+      <div class="pf-connector-tabs" role="tablist" aria-label="Connector views">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={connectorTab === "connections"}
+          data-active={connectorTab === "connections"}
+          onclick={() => connectorTab = "connections"}
+        >
+          Connections
+          <span>{connections.length}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={connectorTab === "catalog"}
+          data-active={connectorTab === "catalog"}
+          onclick={() => connectorTab = "catalog"}
+        >
+          Catalog
+          <span>{connectors.length}</span>
+        </button>
+      </div>
+
+      {#if connectorTab === "connections"}
+        <section class="pf-connector-panel" aria-label="Connector connections">
+          <div class="pf-mcp-list">
+            {#each connections as connection (connection.slug)}
+              <div class="pf-mcp-card pf-connector-card-settings">
+                <span class="ico"><Icon name="plug" size={16} /></span>
+                <div>
+                  <div class="title">{connection.slug}</div>
+                  <div class="desc">{connection.description || connection.connector_slug}</div>
+                </div>
+                <span class:ready={connection.state === "active" || connection.state === "authenticated"} class="pf-status-pill">
+                  {connection.state}
+                </span>
+                <span class="pf-connector-source">{connection.connector_slug}</span>
+                <button
+                  type="button"
+                  class="sc-btn"
+                  data-variant="outline"
+                  data-size="sm"
+                  aria-label={`Remove connection ${connection.slug}`}
+                  disabled={!daemonReachable || connectorDeleting !== null}
+                  aria-busy={connectorDeleting === connection.slug}
+                  onclick={() => void removeConnectorConnection(connection.slug)}
+                >
+                  <Icon name="x" size={12} />{connectorDeleting === connection.slug ? "Removing..." : "Remove"}
+                </button>
+              </div>
+            {/each}
+            {#if !connectorLoading && connections.length === 0}
+              <div class="pf-empty">No connector connections configured.</div>
+            {/if}
+          </div>
+        </section>
+      {:else}
+        <section class="pf-connector-panel" aria-label="Connector catalog">
+          <div class="pf-mcp-list">
+            {#each connectors as connector (connector.connector_slug)}
+              <button
+                type="button"
+                class="pf-mcp-card pf-connector-card-settings pf-connector-catalog-button"
+                data-selected={connector.connector_slug === connectorSlug}
+                onclick={() => {
+                  selectConnector(connector.connector_slug);
+                  openConnectorCreate();
+                }}
+              >
+                <span class="ico"><Icon name="server" size={16} /></span>
+                <div>
+                  <div class="title">{connector.connector_slug}</div>
+                  <div class="desc">{connector.description}</div>
+                </div>
+                <span class:ready={connector.requires_auth} class="pf-status-pill">{connectorStatusLabel(connector)}</span>
+                <span class="pf-connector-source">{connector.skill}</span>
+              </button>
+            {/each}
+            {#if !connectorLoading && connectors.length === 0}
+              <div class="pf-empty">No connectors discovered.</div>
+            {/if}
+          </div>
+        </section>
+      {/if}
 
     {:else if section === "permissions"}
       <h2>Permissions</h2>
@@ -808,6 +1984,142 @@
         >
           {permissionSaving ? "Saving…" : "Save"}
         </button>
+      </div>
+
+    {:else if section === "skills"}
+      <h2>Verified Skills</h2>
+      <p class="lead">Add folders that contain Verified Skills with generated host catalogues. Puffer keeps the files outside the app and loads them from config.</p>
+      <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="outline"
+          data-size="sm"
+          disabled={lambdaRefreshDisabled}
+          onclick={refreshIfIdle}
+        >
+          <Icon name="refresh" size={13} />Refresh
+        </button>
+      </div>
+      {#if lambdaError}
+        <div class="pf-settings-note warn">{lambdaError}</div>
+      {/if}
+      {#if lambdaSaved}
+        <div class="pf-settings-note">{lambdaSaved}</div>
+      {/if}
+      <div class="pf-settings-note">
+        {#if !daemonReachable}
+          Launch Puffer in the desktop app to add Verified Skills folders.
+        {:else if lambdaLoading}
+          Loading Verified Skills folders…
+        {:else}
+          Choose a folder once. Puffer will keep using it from this workspace.
+        {/if}
+      </div>
+
+      {#if lambdaSnapshot?.warnings.length}
+        <div class="pf-settings-note warn">
+          Some Verified Skills need generated verification output before the model can use them.
+        </div>
+      {/if}
+
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Add folder</div>
+          <div class="desc">Choose the folder that contains your Verified Skills. It must already include generated verification files and host catalogues.</div>
+        </div>
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="default"
+          data-size="sm"
+          disabled={lambdaChooseDisabled}
+          onclick={addVerifiedSkillsFolder}
+        >
+          <Icon name="folder" size={13} />{lambdaSaving ? "Adding…" : "Choose folder"}
+        </button>
+      </div>
+
+      <h3 class="pf-settings-subhead">Folders</h3>
+      <div class="pf-mcp-list">
+        {#each lambdaSnapshot?.libraries ?? [] as library (library.sourcePath)}
+          <div class="pf-mcp-card pf-verified-folder-card">
+            <span class="ico"><Icon name="shield" size={16} /></span>
+            <div>
+              <div class="title">{basenameFromPath(library.root)}</div>
+              <div class="desc">
+                {verifiedSkillScopeLabel(library)} Verified Skills folder
+                · {library.requireApproval ? "asks before verified tools" : "runs verified tools without extra approval"}
+              </div>
+            </div>
+            <span class:ready={verifiedSkillStatus(library) === "Ready for model use"} class="pf-status-pill">
+              {verifiedSkillStatus(library)}
+            </span>
+            <label class="pf-inline-switch">
+              <span>Ask before tools</span>
+              <input
+                type="checkbox"
+                class="sc-switch"
+                checked={library.requireApproval}
+                disabled={lambdaTogglingApproval === lambdaLibraryKey(library) || lambdaSaving || (library.sourceKind !== "workspace" && library.sourceKind !== "user")}
+                aria-label={`Require approval for ${basenameFromPath(library.root)} verified tools`}
+                onchange={(e) => toggleVerifiedSkillApproval(library, (e.currentTarget as HTMLInputElement).checked)}
+              />
+            </label>
+            <input
+              type="checkbox"
+              class="sc-switch"
+              checked={lambdaRemovingLibrary !== lambdaLibraryKey(library)}
+              disabled={lambdaRemovingLibrary === lambdaLibraryKey(library) || lambdaSaving || (library.sourceKind !== "workspace" && library.sourceKind !== "user")}
+              aria-label={`Remove ${basenameFromPath(library.root)} Verified Skills folder`}
+              onchange={(e) => {
+                if (!(e.currentTarget as HTMLInputElement).checked) {
+                  void removeVerifiedSkillsFolder(library);
+                }
+              }}
+            />
+          </div>
+        {/each}
+        {#if !lambdaLoading && (lambdaSnapshot?.libraries.length ?? 0) === 0}
+          <div class="pf-empty">No Verified Skills folders added.</div>
+        {/if}
+      </div>
+
+      <h3 class="pf-settings-subhead">Recognized Verified Skills</h3>
+      <div class="pf-mcp-list">
+        {#each lambdaSnapshot?.skills ?? [] as skill (verifiedSkillKey(skill))}
+          <div class="pf-mcp-card pf-skill-card">
+            <span class="ico"><Icon name="shield" size={16} /></span>
+            <div>
+              <div class="title">{skill.name}</div>
+              {#if skill.description}
+                <div class="desc">{skill.description}</div>
+              {/if}
+              <div class="desc">
+                {verifiedSkillDetailLabel(skill)}
+                {#if skill.failureReason && skill.enabled}
+                  · {skill.failureReason}
+                {/if}
+              </div>
+            </div>
+            <span
+              class:ready={skill.modelInvocable}
+              class="pf-status-pill"
+            >
+              {verifiedSkillReadinessLabel(skill)}
+            </span>
+            <input
+              type="checkbox"
+              class="sc-switch"
+              checked={skill.enabled}
+              disabled={lambdaTogglingSkill === verifiedSkillKey(skill) || !skill.libraryId || (skill.sourceKind !== "workspace" && skill.sourceKind !== "user")}
+              onchange={(e) => toggleVerifiedSkill(skill, (e.currentTarget as HTMLInputElement).checked)}
+            />
+          </div>
+        {/each}
+        {#if !lambdaLoading && (lambdaSnapshot?.skills.length ?? 0) === 0}
+          <div class="pf-empty">No Verified Skills recognized yet.</div>
+        {/if}
       </div>
 
     {:else if section === "mcp"}

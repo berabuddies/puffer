@@ -1,6 +1,6 @@
 use crate::browser_args::BrowserArgs;
 use crate::non_interactive::NonInteractiveArgs;
-use crate::subscriber_tool_args::{EmailArgs, TelegramArgs};
+use crate::subscriber_tool_args::{EmailArgs, LarkArgs, SlackArgs, TelegramArgs};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -77,6 +77,12 @@ pub(crate) enum Command {
     },
     /// Control the managed Chrome browser for this workspace.
     Browser(#[command(flatten)] BrowserArgs),
+    /// Authenticate a connector (Telegram, Email) without a running puffer
+    /// REPL. Targets GUI hosts that drive the auth flow over stdin/stdout.
+    Connect {
+        #[command(subcommand)]
+        command: ConnectCommand,
+    },
     /// Execute an internal third-party tool through a CLI surface.
     #[command(hide = true, name = "internal-tool")]
     InternalTool {
@@ -164,7 +170,7 @@ pub(crate) enum Command {
     },
     /// Run the Puffer daemon — a WebSocket/NDJSON server that exposes the
     /// runtime (conversations, turns, permissions) to desktop / web / remote
-    /// clients. One daemon per workspace; auth is a pre-shared token.
+    /// clients. One daemon per host/user config; auth is a pre-shared token.
     Daemon {
         /// Bind address. Defaults to `127.0.0.1:0` (ephemeral localhost).
         #[arg(long = "bind", default_value = "127.0.0.1:0")]
@@ -253,7 +259,11 @@ pub(crate) enum InternalToolCommand {
     Browser(#[command(flatten)] BrowserArgs),
     /// Configure the email subscriber through the parent runtime.
     Email(#[command(flatten)] EmailArgs),
-    /// Log in the Telegram personal-account subscriber through the parent runtime.
+    /// Log in to Lark or look up Lark chats/users through the parent runtime.
+    Lark(#[command(flatten)] LarkArgs),
+    /// Log in to Slack or look up Slack conversations through the parent runtime.
+    Slack(#[command(flatten)] SlackArgs),
+    /// Log in to Telegram or look up Telegram peers through the parent runtime.
     Telegram(#[command(flatten)] TelegramArgs),
 }
 
@@ -315,12 +325,16 @@ pub(crate) enum WorkflowCommand {
         /// Cron trigger for raw AgentFlow pipeline imports.
         #[arg(long = "cron", conflicts_with = "subscription_topic")]
         cron: Option<String>,
-        /// Subscription source topic for raw AgentFlow pipeline imports.
-        #[arg(long = "subscription-topic", conflicts_with = "cron")]
-        subscription_topic: Option<String>,
-        /// Optional subscription regex prefilter.
-        #[arg(long = "subscription-pattern")]
-        subscription_pattern: Option<String>,
+        /// Connection slug for raw AgentFlow pipeline imports.
+        #[arg(
+            long = "connection-slug",
+            alias = "subscription-topic",
+            conflicts_with = "cron"
+        )]
+        connection_slug: Option<String>,
+        /// Optional connection regex filter.
+        #[arg(long = "connection-pattern", alias = "subscription-pattern")]
+        connection_pattern: Option<String>,
         /// Optional subscription classifier prompt.
         #[arg(long = "classify-prompt")]
         classify_prompt: Option<String>,
@@ -714,4 +728,64 @@ pub(crate) enum McpTransport {
     Stdio,
     Sse,
     Http,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConnectCommand {
+    /// Drive a Telegram personal-account login via a JSON-stdio REPL.
+    ///
+    /// Stdin accepts newline-delimited JSON objects, one per line.
+    /// Recognised actions: `login_start { phone, [api_id], [api_hash] }`,
+    /// `submit_code { code }`, `submit_password { password }`, `exit`.
+    /// Stdout emits the subscriber's control events (`login_awaiting_code`,
+    /// `login_awaiting_password`, `login_complete`, `login_error`).
+    Telegram {
+        /// Telegram connection slug. Distinct slugs scope independent
+        /// account sessions. Defaults to `telegram-user`.
+        #[arg(long = "connection", default_value = "telegram-user")]
+        connection_slug: String,
+    },
+    /// Persist Email (IMAP/SMTP) credentials for the email subscriber.
+    Email {
+        #[command(subcommand)]
+        command: ConnectEmailCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConnectEmailCommand {
+    /// Writes IMAP/SMTP credentials to the email subscriber's config file.
+    Configure {
+        /// IMAP server host, e.g. `imap.gmail.com`.
+        #[arg(long = "imap-host")]
+        imap_host: String,
+        /// IMAP server port. `0` lets the subscriber default it (993).
+        #[arg(long = "imap-port", default_value_t = 0)]
+        imap_port: u16,
+        /// SMTP server host, e.g. `smtp.gmail.com`.
+        #[arg(long = "smtp-host")]
+        smtp_host: String,
+        /// SMTP server port. `0` lets the subscriber default it (587).
+        #[arg(long = "smtp-port", default_value_t = 0)]
+        smtp_port: u16,
+        /// IMAP/SMTP login (usually the full email address).
+        #[arg(long)]
+        username: String,
+        /// IMAP/SMTP password or app-specific password.
+        #[arg(
+            long,
+            required_unless_present = "password_stdin",
+            conflicts_with = "password_stdin"
+        )]
+        password: Option<String>,
+        /// Read the password from stdin (newline-terminated).
+        #[arg(long = "password-stdin", default_value_t = false)]
+        password_stdin: bool,
+        /// From address used on outbound mail.
+        #[arg(long = "from-address")]
+        from_address: String,
+        /// Optional allow-listed sender; repeat for multiple entries.
+        #[arg(long = "allowed-sender")]
+        allowed_senders: Vec<String>,
+    },
 }

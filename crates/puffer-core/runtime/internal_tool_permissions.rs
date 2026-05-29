@@ -106,6 +106,14 @@ fn redacted_internal_permission_input(tool_id: &str, mut input: Value) -> Value 
         "telegram" => {
             if let Some(object) = input.as_object_mut() {
                 match object.get("action").and_then(Value::as_str) {
+                    Some("import_desktop") => {
+                        if object.get("passcode").is_some_and(|value| !value.is_null()) {
+                            object.insert(
+                                "passcode".to_string(),
+                                Value::String("<redacted>".to_string()),
+                            );
+                        }
+                    }
                     Some("login_submit_code") => {
                         object.insert("code".to_string(), Value::String("<redacted>".to_string()));
                     }

@@ -27,3 +27,8 @@ mod smtp_send;
 mod state;
 
 pub use crate::run::run;
+
+/// Narrow re-exports for external callers (see `puffer-cli`'s `connect
+/// email configure`). Keeps the rest of `config` (`load`, `config_path`,
+/// `is_valid`, port constants) module-internal.
+pub use crate::config::{save as save_email_config, EmailConfig};

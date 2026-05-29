@@ -47,14 +47,7 @@ fn tmux_resume_overlay_lists_workspace_sessions() {
     )
     .unwrap();
     wait_for_tmux_text(&session, "Puffer Code", TMUX_WAIT_TIMEOUT).unwrap();
-    send_tmux_keys(&session, &["/resu"]).unwrap();
-    wait_for_tmux_visible_text(
-        &session,
-        "Resume a previous conversation",
-        TMUX_WAIT_TIMEOUT,
-    )
-    .unwrap();
-    send_tmux_keys(&session, &["Enter"]).unwrap();
+    send_tmux_keys(&session, &["/resume"]).unwrap();
     wait_for_tmux_visible_text(&session, "\u{276f} /resume", TMUX_WAIT_TIMEOUT).unwrap();
     send_tmux_keys(&session, &["Enter"]).unwrap();
     wait_for_tmux_text(&session, "dockyard", TMUX_WAIT_TIMEOUT).unwrap();

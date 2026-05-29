@@ -1,3 +1,7 @@
+use crate::runtime::lambda_skill_activation::{
+    allowed_tools_for_verified_skill, gate_for_verified_skill_activation, is_lambda_verified_skill,
+};
+use crate::AppState;
 use anyhow::{anyhow, bail, Result};
 use puffer_resources::{skill_by_name, LoadedResources};
 use serde::Deserialize;
@@ -29,9 +33,15 @@ fn normalize_skill_name(raw: &str) -> Result<String> {
     Ok(without_alias.to_string())
 }
 
-/// Executes Claude-style `Skill` tool input by resolving one loaded skill and
-/// returning an inline command payload suitable for model consumption.
-pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> Result<String> {
+/// Executes Claude-style `Skill` tool input and installs any verified Lambda gate.
+///
+/// The returned inline command payload is suitable for model consumption in the
+/// same turn.
+pub fn execute_claude_skill_tool(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    input: Value,
+) -> Result<String> {
     let parsed: SkillToolInput = serde_json::from_value(input)?;
     let normalized_skill = normalize_skill_name(&parsed.skill)?;
     let skill = skill_by_name(resources, &normalized_skill)
@@ -42,6 +52,19 @@ pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> R
             "skill `{}` cannot be used with Skill tool due to disable-model-invocation",
             skill.value.name
         );
+    }
+    if state.lambda_gate.is_some() && !is_lambda_verified_skill(&skill.value) {
+        bail!(
+            "active Lambda Skill gate cannot switch to unverified skill `{}`",
+            skill.value.name
+        );
+    }
+    if is_lambda_verified_skill(&skill.value) {
+        state.lambda_gate = gate_for_verified_skill_activation(&skill.value)?;
+        state.pending_lambda_host_call = None;
+    } else {
+        state.lambda_gate = None;
+        state.pending_lambda_host_call = None;
     }
 
     let rendered = crate::skill_support::render_skill_prompt(
@@ -57,12 +80,28 @@ pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> R
     );
     let _ = writeln!(&mut output, "Skill {}", skill.value.name);
     let _ = writeln!(&mut output, "{}", skill.value.description);
-    if !skill.value.allowed_tools.is_empty() {
-        let _ = writeln!(
-            &mut output,
-            "allowed-tools: {}",
-            skill.value.allowed_tools.join(", ")
-        );
+    let allowed_tools = allowed_tools_for_verified_skill(&skill.value)?;
+    if !allowed_tools.is_empty() {
+        let _ = writeln!(&mut output, "allowed-tools: {}", allowed_tools.join(", "));
+    }
+    if let Some(verification) = skill.value.verification.as_ref() {
+        let _ = writeln!(&mut output, "verified-skill: {}", verification.system);
+        if let Some(source_path) = verification.source_path.as_deref() {
+            let _ = writeln!(&mut output, "formal-source: {source_path}");
+        }
+        if let Some(generated_path) = verification.generated_path.as_deref() {
+            let _ = writeln!(&mut output, "generated-descriptor: {generated_path}");
+        }
+        let mut stats = Vec::new();
+        if let Some(tools) = verification.tools {
+            stats.push(format!("tools={tools}"));
+        }
+        if let Some(actions) = verification.actions {
+            stats.push(format!("actions={actions}"));
+        }
+        if !stats.is_empty() {
+            let _ = writeln!(&mut output, "verified-stats: {}", stats.join(", "));
+        }
     }
     let _ = writeln!(
         &mut output,
@@ -76,7 +115,8 @@ pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_resources::{LoadedItem, SkillSpec, SourceInfo, SourceKind};
+    use crate::runtime::tests::state;
+    use puffer_resources::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind};
     use serde_json::json;
 
     fn sample_resources() -> LoadedResources {
@@ -108,6 +148,33 @@ mod tests {
                         kind: SourceKind::Builtin,
                     },
                 },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "verified-ci".to_string(),
+                        description: "Fix verified CI failures".to_string(),
+                        content: "Verified prompt body".to_string(),
+                        verification: Some(SkillVerificationSpec {
+                            system: "lambda-skill".to_string(),
+                            source_path: Some(
+                                "fixtures/skills/verified-ci/skill.lskill".to_string(),
+                            ),
+                            generated_path: Some(
+                                "fixtures/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                            ),
+                            host_catalogue_path: None,
+                            compiler_path: None,
+                            host_tool_bindings: Default::default(),
+                            require_approval: false,
+                            tools: Some(10),
+                            actions: Some(2),
+                        }),
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: "skills/verified-ci/skill.lskill".into(),
+                        kind: SourceKind::Workspace,
+                    },
+                },
             ],
             ..LoadedResources::default()
         }
@@ -115,7 +182,9 @@ mod tests {
 
     #[test]
     fn executes_skill_with_command_tag_and_args() {
+        let mut state = state();
         let output = execute_claude_skill_tool(
+            &mut state,
             &sample_resources(),
             json!({"skill": "/review-pr", "args": "123"}),
         )
@@ -127,26 +196,49 @@ mod tests {
 
     #[test]
     fn accepts_compatibility_skill_alias_prefix() {
-        let output =
-            execute_claude_skill_tool(&sample_resources(), json!({"skill": "/skill:review-pr"}))
-                .unwrap();
+        let mut state = state();
+        let output = execute_claude_skill_tool(
+            &mut state,
+            &sample_resources(),
+            json!({"skill": "/skill:review-pr"}),
+        )
+        .unwrap();
         assert!(output.contains("<command-name>review-pr</command-name>"));
     }
 
     #[test]
     fn rejects_unknown_skill() {
-        let error =
-            execute_claude_skill_tool(&sample_resources(), json!({"skill": "does-not-exist"}))
-                .unwrap_err()
-                .to_string();
+        let mut state = state();
+        let error = execute_claude_skill_tool(
+            &mut state,
+            &sample_resources(),
+            json!({"skill": "does-not-exist"}),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("unknown skill"));
     }
 
     #[test]
     fn rejects_skill_with_disabled_model_invocation() {
-        let error = execute_claude_skill_tool(&sample_resources(), json!({"skill": "hidden"}))
-            .unwrap_err()
-            .to_string();
+        let mut state = state();
+        let error =
+            execute_claude_skill_tool(&mut state, &sample_resources(), json!({"skill": "hidden"}))
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("disable-model-invocation"));
+    }
+
+    #[test]
+    fn rejects_verified_lambda_skill_without_gate_config() {
+        let mut state = state();
+        let error = execute_claude_skill_tool(
+            &mut state,
+            &sample_resources(),
+            json!({"skill": "verified-ci"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("requires a precompiled host catalogue"));
     }
 }

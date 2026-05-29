@@ -1,13 +1,11 @@
-use crate::cli_args::{AutoModeCommand, McpCommand, McpTransport, PluginCommand, ResourceScope};
+use crate::cli_args::{McpCommand, McpTransport, PluginCommand, ResourceScope};
 use crate::resource_fs::{
     disabled_variant, enabled_variant, find_yaml_file_by_id, is_disabled_yaml_path,
     plugin_manifest_path, remove_if_exists, sorted_dir_entries,
 };
 use anyhow::{Context, Result};
-use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-use puffer_core::load_agent_catalog;
+use puffer_config::{ConfigPaths, PufferConfig};
 use puffer_mcp_oauth::PersistedTokens;
-use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry};
 use puffer_resources::{LoadedResources, McpServerSpec, PluginSpec, SourceKind};
 use puffer_runner_api::{OAuthStatus, OAuthTokensPayload, ToolRunner};
 use serde::{Deserialize, Serialize};
@@ -18,98 +16,6 @@ use std::sync::Arc;
 
 const DISABLED_PLUGIN_PLACEHOLDER_PREFIX: &str =
     "Disabled plugin placeholder created by `puffer plugin disable`.";
-
-/// Lists the configured workspace agents file in a CLI-friendly format.
-pub(crate) fn run_agents_command(
-    paths: &ConfigPaths,
-    config: &PufferConfig,
-    setting_sources: Option<&str>,
-) -> Result<()> {
-    ensure_workspace_dirs(paths)?;
-    let agents = load_agent_catalog(&paths.workspace_root, config.default_model.as_deref())?;
-    let agents_path = paths
-        .workspace_config_dir
-        .join("resources/agents/workspace.yaml");
-    let mut text = String::new();
-    if let Some(setting_sources) = setting_sources {
-        let _ = writeln!(
-            &mut text,
-            "setting_sources={setting_sources} (Puffer loads builtin, user, and workspace agent resources; project/local map to workspace)"
-        );
-    }
-    if agents.is_empty() {
-        let _ = writeln!(&mut text, "No configured agents.");
-    } else {
-        let _ = writeln!(&mut text, "Configured agents:");
-        for agent in agents {
-            let _ = writeln!(
-                &mut text,
-                "- {} [{}] model={} {}",
-                agent.selector,
-                source_kind_label(agent.source_kind),
-                agent.model.as_deref().unwrap_or("<inherit>"),
-                agent.description
-            );
-        }
-    }
-    let _ = writeln!(&mut text, "path={}", agents_path.display());
-    print!("{text}");
-    Ok(())
-}
-
-/// Prints a non-interactive doctor summary for the current workspace.
-pub(crate) fn run_doctor_command(
-    config: &PufferConfig,
-    resources: &LoadedResources,
-    providers: &ProviderRegistry,
-    auth_store: &AuthStore,
-    cwd: &Path,
-) -> Result<()> {
-    let mut text = String::from("Puffer doctor summary:\n");
-    let _ = writeln!(&mut text, "version={}", env!("CARGO_PKG_VERSION"));
-    let _ = writeln!(&mut text, "cwd={}", cwd.display());
-    let _ = writeln!(
-        &mut text,
-        "default_provider={}",
-        config.default_provider.as_deref().unwrap_or("<unset>")
-    );
-    let _ = writeln!(
-        &mut text,
-        "default_model={}",
-        config.default_model.as_deref().unwrap_or("<unset>")
-    );
-    let _ = writeln!(&mut text, "providers={}", providers.providers().count());
-    let _ = writeln!(
-        &mut text,
-        "stored_auth_providers={}",
-        auth_store.provider_ids().count()
-    );
-    let _ = writeln!(&mut text, "tools={}", resources.tools.len());
-    let _ = writeln!(
-        &mut text,
-        "internal_tools={}",
-        resources.internal_tools.len()
-    );
-    let _ = writeln!(&mut text, "prompts={}", resources.prompts.len());
-    let _ = writeln!(&mut text, "skills={}", resources.skills.len());
-    let _ = writeln!(&mut text, "plugins={}", resources.plugins.len());
-    let _ = writeln!(&mut text, "mcp_servers={}", resources.mcp_servers.len());
-    let _ = writeln!(&mut text, "ides={}", resources.ides.len());
-    let _ = writeln!(&mut text, "hooks={}", resources.hooks.len());
-    let _ = writeln!(
-        &mut text,
-        "resource_diagnostics={}",
-        resources.diagnostics.len()
-    );
-    if !resources.diagnostics.is_empty() {
-        let _ = writeln!(&mut text, "diagnostics:");
-        for diagnostic in &resources.diagnostics {
-            let _ = writeln!(&mut text, "- {diagnostic}");
-        }
-    }
-    print!("{text}");
-    Ok(())
-}
 
 /// Handles top-level MCP management commands.
 ///
@@ -370,105 +276,6 @@ pub(crate) fn run_plugin_command(
     }
 }
 
-/// Prints Puffer's current auto-mode compatibility status.
-pub(crate) fn run_auto_mode_command(
-    command: Option<AutoModeCommand>,
-    paths: &ConfigPaths,
-) -> Result<()> {
-    match command.unwrap_or(AutoModeCommand::Config) {
-        AutoModeCommand::Config => {
-            let value = serde_json::json!({
-                "supported": true,
-                "mode": "acl",
-                "permissions_acl": paths.workspace_config_dir.join("permissions.acl"),
-                "message": "Auto mode uses the same project ACL evaluator as normal permission prompts."
-            });
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            Ok(())
-        }
-        AutoModeCommand::Defaults => {
-            let value = serde_json::json!({
-                "supported": true,
-                "mode": "acl",
-                "allow_rules": [
-                    "cwd read/write",
-                    "preapproved shell commands",
-                    "project ACL allow rules"
-                ],
-                "deny_rules": [],
-            });
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            Ok(())
-        }
-        AutoModeCommand::Critique => {
-            let mut text = String::from("Auto-mode permission critique:\n");
-            let _ = writeln!(
-                &mut text,
-                "permissions_acl={}",
-                paths.workspace_config_dir.join("permissions.acl").display()
-            );
-            let _ = writeln!(&mut text, "read_write_default=cwd");
-            let _ = writeln!(&mut text, "bash_default=preapproved commands only");
-            let _ = writeln!(&mut text, "browser_default=ask per domain/action");
-            print!("{text}");
-            Ok(())
-        }
-    }
-}
-
-/// Prints source-install instructions for the current checkout.
-pub(crate) fn run_install_command(target: Option<&str>, force: bool, cwd: &Path) -> Result<()> {
-    let mut command = String::from("cargo install --path crates/puffer-cli");
-    if force {
-        command.push_str(" --force");
-    }
-    anyhow::bail!(
-        "Puffer does not ship a self-installer.\nrequested_target={}\nworkspace={}\nrun:\n{command}",
-        target.unwrap_or("stable"),
-        cwd.display()
-    )
-}
-
-/// Prints manual update instructions for the current checkout.
-pub(crate) fn run_update_command(cwd: &Path) -> Result<()> {
-    anyhow::bail!(
-        "Puffer does not include a self-updater.\nworkspace={}\nupdate steps:\n1. git pull --ff-only\n2. cargo install --path crates/puffer-cli --force",
-        cwd.display()
-    )
-}
-
-/// Stores a long-lived API token for a provider.
-pub(crate) fn run_setup_token_command(
-    provider: &str,
-    token: String,
-    auth_store: &mut AuthStore,
-    auth_path: &Path,
-    providers: &ProviderRegistry,
-) -> Result<()> {
-    ensure_provider_supports_auth_mode(provider, providers, AuthMode::ApiKey, "setup-token")?;
-    auth_store.set_api_key(provider.to_string(), token);
-    auth_store.save(auth_path)?;
-    println!("stored api token for {provider}");
-    Ok(())
-}
-
-/// Returns true when the provider explicitly supports the requested auth mode.
-pub(crate) fn provider_supports_auth_mode(
-    provider: &str,
-    providers: &ProviderRegistry,
-    mode: &AuthMode,
-) -> bool {
-    providers
-        .provider(provider)
-        .map(|descriptor| {
-            descriptor
-                .auth_modes
-                .iter()
-                .any(|candidate| candidate == mode)
-        })
-        .unwrap_or(false)
-}
-
 fn print_mcp_list(resources: &LoadedResources) -> Result<()> {
     let mut text = String::from("MCP servers:\n");
     let mut count = 0usize;
@@ -602,6 +409,10 @@ fn add_mcp_server(
             endpoint: String::new(),
             target: stdio_target(command_or_url, args),
             description: format!("Workspace MCP server `{name}`"),
+            env: Default::default(),
+            inherit_env: true,
+            timeout: None,
+            connect_timeout: None,
             headers: Default::default(),
             oauth: None,
         },
@@ -621,6 +432,10 @@ fn add_mcp_server(
                 endpoint: command_or_url.to_string(),
                 target: String::new(),
                 description: format!("Workspace MCP server `{name}`"),
+                env: Default::default(),
+                inherit_env: true,
+                timeout: None,
+                connect_timeout: None,
                 headers: Default::default(),
                 oauth: None,
             }
@@ -652,6 +467,10 @@ fn add_mcp_server_from_json(
         endpoint: input.endpoint.unwrap_or_default(),
         target: input.target.unwrap_or_default(),
         description: input.description.unwrap_or_default(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: input.headers.unwrap_or_default(),
         oauth: None,
     };
@@ -945,23 +764,6 @@ fn update_plugin(paths: &ConfigPaths, scope: ResourceScope, plugin_id: &str) -> 
         source_path.display()
     );
     Ok(())
-}
-
-fn ensure_provider_supports_auth_mode(
-    provider: &str,
-    providers: &ProviderRegistry,
-    mode: AuthMode,
-    command_name: &str,
-) -> Result<()> {
-    if provider_supports_auth_mode(provider, providers, &mode) {
-        return Ok(());
-    }
-    let mode_name = match mode {
-        AuthMode::ApiKey => "API key",
-        AuthMode::OAuth => "OAuth",
-        AuthMode::SessionIngress => "session ingress",
-    };
-    anyhow::bail!("{command_name} requires {mode_name} support for provider `{provider}`")
 }
 
 fn resource_dir(paths: &ConfigPaths, scope: ResourceScope, kind: &str) -> PathBuf {

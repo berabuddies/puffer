@@ -4,14 +4,14 @@ mod model;
 use std::collections::BTreeSet;
 
 pub use loader::{
-    agent_by_id, hook_by_id, load_resources, plugin_by_id, plugin_lsp_servers, plugin_mcp_servers,
-    prompt_by_id, prompt_for, skill_by_name,
+    agent_by_id, hook_by_id, load_resources, load_tool_resources, plugin_by_id, plugin_lsp_servers,
+    plugin_mcp_servers, prompt_by_id, prompt_for, skill_by_name,
 };
 pub use model::{
     AgentMcpServerSpec, AgentMemoryScope, AgentSpec, HookSpec, IdeSpec, LoadedItem,
     LoadedResources, LspServerSpec, MascotSpec, McpOAuthDetail, McpOAuthSpec, McpServerSpec,
     PluginCommandSpec, PluginSpec, PromptTemplate, PromptVariableSpec, ProviderPack, SkillSpec,
-    SourceInfo, SourceKind, ToolDisplaySpec, ToolMetadataSpec, ToolSpec,
+    SkillVerificationSpec, SourceInfo, SourceKind, ToolDisplaySpec, ToolMetadataSpec, ToolSpec,
 };
 
 /// Looks up a mascot by id.

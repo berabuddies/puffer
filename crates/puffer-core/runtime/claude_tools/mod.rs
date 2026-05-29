@@ -234,7 +234,7 @@ pub(crate) fn execute_tool(
         "Skill" => Ok(tool_result(
             definition,
             true,
-            skill::execute_claude_skill_tool(resources, input)?,
+            skill::execute_claude_skill_tool(state, resources, input)?,
         )),
         "ToolSearch" => Ok(tool_result(
             definition,
@@ -333,9 +333,9 @@ pub(crate) fn execute_tool(
 /// `Glob | Grep | WebFetch` in the parallel path), execution is routed through the supplied
 /// `Arc<dyn ToolRunner>` so a `RemoteToolRunner` can intercept parallel
 /// batches the same way it intercepts serial calls. The remaining
-/// parallel-safe tools (`WebSearch | ToolSearch | Skill`) intentionally stay
-/// on the in-process path: WebSearch needs provider context that isn't on
-/// the runner trait, and Skill / ToolSearch are local-only.
+/// parallel-safe tools (`WebSearch | ToolSearch`) intentionally stay on the
+/// in-process path: WebSearch needs provider context that isn't on the runner
+/// trait, and ToolSearch is local-only.
 pub(crate) fn execute_parallel_tool(
     definition: &ToolDefinition,
     cwd: &Path,
@@ -406,11 +406,6 @@ pub(crate) fn execute_parallel_tool(
             definition,
             true,
             tool_search::execute_claude_tool_search_tool(registry, input)?,
-        )),
-        "Skill" => Ok(tool_result(
-            definition,
-            true,
-            skill::execute_claude_skill_tool(resources, input)?,
         )),
         other => bail!("tool {other} is not parallel-safe"),
     }
@@ -719,10 +714,38 @@ pub fn execute_workflow_tool(
 ) -> Result<String> {
     match tool_id {
         "Agent" => workflow::agent::execute_agent(state, cwd, input),
+        "AnthropicStream" => {
+            workflow::anthropic_stream::execute_anthropic_stream(state, cwd, input)
+        }
         "AskUserQuestion" => {
             workflow::ask_user_question::execute_ask_user_question(state, cwd, input)
         }
+        "Canvas" => workflow::canvas::execute_canvas(state, cwd, input),
+        "ComfyUiAction" => workflow::comfyui_action::execute_comfyui_action(state, cwd, input),
+        "ComputerUseAction" => {
+            workflow::computer_use_action::execute_computer_use_action(state, cwd, input)
+        }
         "Config" => workflow::config::execute_config(state, cwd, input),
+        "ConnectionCreate" => {
+            workflow::connector_tools::execute_connection_create(state, cwd, input)
+        }
+        "ConnectionDelete" => {
+            workflow::connector_tools::execute_connection_delete(state, cwd, input)
+        }
+        "ConnectionList" => workflow::connector_tools::execute_connection_list(state, cwd, input),
+        "ConnectorAct" => workflow::connector_tools::execute_connector_act(state, cwd, input),
+        "ConnectorCreation" => {
+            workflow::connector_tools::execute_connector_creation(state, cwd, input)
+        }
+        "ConnectorDelete" => workflow::connector_tools::execute_connector_delete(state, cwd, input),
+        "ConnectorList" => workflow::connector_tools::execute_connector_list(state, cwd, input),
+        "ConnectorRegister" => {
+            workflow::connector_tools::execute_connector_register(state, cwd, input)
+        }
+        "ConnectorTemplate" => {
+            workflow::connector_tools::execute_connector_template(state, cwd, input)
+        }
+        "ConnectorUpdate" => workflow::connector_tools::execute_connector_update(state, cwd, input),
         "CronCreate" => workflow::cron_create::execute_cron_create(state, cwd, input),
         "CronDelete" => workflow::cron_delete::execute_cron_delete(state, cwd, input),
         "CronList" => workflow::cron_list::execute_cron_list(state, cwd, input),
@@ -735,18 +758,39 @@ pub fn execute_workflow_tool(
         "get_goal" => workflow::goal::execute_get_goal(state, cwd, input),
         "create_goal" => workflow::goal::execute_create_goal(state, cwd, input),
         "update_goal" => workflow::goal::execute_update_goal(state, cwd, input),
+        "HttpRequest" => workflow::http_request::execute_http_request(state, cwd, input),
+        "ImageGeneration" => {
+            workflow::image_generation::execute_image_generation(state, cwd, input)
+        }
+        "DebugpyAction" => workflow::debugpy_action::execute_debugpy_action(state, cwd, input),
+        "DiscordAction" => workflow::discord_action::execute_discord_action(state, cwd, input),
+        "Lark" => workflow::lark::execute_lark(state, cwd, input),
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),
+        "McpToolCall" => workflow::mcp_tool_call::execute_mcp_tool_call(state, cwd, input),
+        "McpStatus" => workflow::mcp_status::execute_mcp_status(state, cwd, input),
+        "ModalAction" => workflow::modal_action::execute_modal_action(state, cwd, input),
+        "NativeMcpAction" => {
+            workflow::native_mcp_action::execute_native_mcp_action(state, cwd, input)
+        }
+        "ProcessControl" => workflow::process_control::execute_process_control(state, cwd, input),
         "PowerShell" => workflow::powershell::execute_powershell(state, cwd, input),
+        "Recall" => workflow::recall::execute_recall(state, cwd, input),
+        "SecretValue" => workflow::secret_value::execute_secret_value(state, cwd, input),
         "SendMessage" => workflow::send_message::execute_send_message(state, cwd, input),
         "SendUserMessage" | "Brief" => {
             workflow::send_user_message::execute_send_user_message(state, cwd, input)
         }
+        "ShopifyAction" => workflow::shopify_action::execute_shopify_action(state, cwd, input),
+        "Slack" => workflow::slack::execute_slack(state, cwd, input),
+        "SlackAction" => workflow::slack_action::execute_slack_action(state, cwd, input),
+        "SpotifyAction" => workflow::spotify_action::execute_spotify_action(state, cwd, input),
         "StructuredOutput" => workflow::structured_output::execute_structured_output(
             state,
             cwd,
             input,
             structured_output,
         ),
+        "VisionAnalyze" => workflow::vision_analyze::execute_vision_analyze(state, cwd, input),
         "SubscriberInstall" => {
             workflow::subscriber_install::execute_subscriber_install(state, cwd, input)
         }
@@ -766,10 +810,18 @@ pub fn execute_workflow_tool(
         "SubscriptionPause" => {
             workflow::subscription_pause::execute_subscription_pause(state, cwd, input)
         }
-        "WorkflowRegister" => {
-            workflow::workflow_register::execute_workflow_register(state, cwd, input)
+        "TouchDesignerAction" => {
+            workflow::touchdesigner_action::execute_touchdesigner_action(state, cwd, input)
+        }
+        "WorkflowInspect" => workflow::workflow_tools::execute_workflow_inspect(state, cwd, input),
+        "WorkflowList" => workflow::workflow_tools::execute_workflow_list(state, cwd, input),
+        "WorkflowToggle" => workflow::workflow_tools::execute_workflow_toggle(state, cwd, input),
+        "WorkflowCreate" => workflow::workflow_tools::execute_workflow_create(state, cwd, input),
+        "WorkflowValidate" => {
+            workflow::workflow_tools::execute_workflow_validate(state, cwd, input)
         }
         "TaskCreate" => workflow::task_create::execute_task_create(state, cwd, input),
+        "TaskFlow" => workflow::task_flow::execute_task_flow(state, cwd, input),
         "TaskGet" => workflow::task_get::execute_task_get(state, cwd, input),
         "TaskList" => workflow::task_list::execute_task_list(state, cwd, input),
         "TaskOutput" => workflow::task_output::execute_task_output(state, cwd, input),
@@ -778,6 +830,13 @@ pub fn execute_workflow_tool(
         "TeamCreate" => workflow::team_create::execute_team_create(state, cwd, input),
         "TeamDelete" => workflow::team_delete::execute_team_delete(state, cwd, input),
         "Telegram" => workflow::telegram_login::execute_telegram(state, cwd, input),
+        "TelegramImportDesktop" => {
+            workflow::telegram_login::execute_telegram_import_desktop(state, cwd, input)
+        }
+        "TelegramLoginQr" => workflow::telegram_login::execute_telegram_login_qr(state, cwd, input),
+        "TelegramLoginQrWait" => {
+            workflow::telegram_login::execute_telegram_login_qr_wait(state, cwd, input)
+        }
         "TelegramLoginStart" => {
             workflow::telegram_login::execute_telegram_login_start(state, cwd, input)
         }
@@ -787,6 +846,7 @@ pub fn execute_workflow_tool(
         "TelegramLoginSubmitPassword" => {
             workflow::telegram_login::execute_telegram_login_submit_password(state, cwd, input)
         }
+        "LambdaInternal" => workflow::lambda_internal::execute_lambda_internal(state, cwd, input),
         "TodoWrite" => workflow::todo_write::execute_todo_write(state, cwd, input),
         other => bail!("workflow tool `{other}` is not implemented"),
     }
@@ -807,271 +867,4 @@ impl<'a> ProviderToolContext<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::permissions::profile::{EffectiveApprovalPolicy, EffectiveSandboxMode};
-    use crate::permissions::FilesystemPermissionPolicy;
-    use puffer_resources::LoadedResources;
-
-    #[test]
-    fn workflow_terminate_metadata_only_fires_for_completed_update_goal() {
-        // Anything other than update_goal: never set terminate.
-        assert_eq!(
-            workflow_terminate_metadata("create_goal", "{\"goal\":{\"status\":\"complete\"}}"),
-            Value::Null
-        );
-        assert_eq!(
-            workflow_terminate_metadata("get_goal", "{\"goal\":{\"status\":\"complete\"}}"),
-            Value::Null
-        );
-        // update_goal but the goal didn't actually flip to complete:
-        // also no terminate (defensive — shouldn't happen given our
-        // serde lock, but the helper is the only post-process site).
-        assert_eq!(
-            workflow_terminate_metadata("update_goal", "{\"goal\":{\"status\":\"active\"}}"),
-            Value::Null
-        );
-        // update_goal with completed goal: terminate set.
-        let metadata = workflow_terminate_metadata(
-            "update_goal",
-            "{\"goal\":{\"status\":\"complete\",\"objective\":\"x\"}}",
-        );
-        assert_eq!(metadata.get("terminate"), Some(&Value::Bool(true)));
-    }
-
-    #[test]
-    fn workflow_terminate_metadata_handles_malformed_json_gracefully() {
-        // Defensive — workflow handler always emits valid JSON, but
-        // a malformed payload must not panic the dispatcher.
-        assert_eq!(
-            workflow_terminate_metadata("update_goal", "not json"),
-            Value::Null
-        );
-        assert_eq!(workflow_terminate_metadata("update_goal", ""), Value::Null);
-    }
-
-    use puffer_runner_api::{
-        ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-        McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, ToolRequest,
-        ToolResult, ToolRunner,
-    };
-    use puffer_tools::{
-        ToolDefinition, ToolDisplayHints, ToolInputSchema, ToolKind, ToolMetadata, ToolPolicyHints,
-        ToolRegistry,
-    };
-    use serde_json::json;
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use uuid::Uuid;
-
-    /// Records every `execute_tool` call and forwards execution to an inner
-    /// `LocalToolRunner`. Used to prove that the parallel-batch path actually
-    /// dispatches through the trait instead of bypassing it.
-    #[derive(Debug)]
-    struct RecordingRunner {
-        inner: Arc<dyn ToolRunner>,
-        execute_calls: AtomicUsize,
-    }
-
-    impl RecordingRunner {
-        fn new(inner: Arc<dyn ToolRunner>) -> Self {
-            Self {
-                inner,
-                execute_calls: AtomicUsize::new(0),
-            }
-        }
-
-        fn execute_calls(&self) -> usize {
-            self.execute_calls.load(Ordering::SeqCst)
-        }
-    }
-
-    impl ToolRunner for RecordingRunner {
-        fn ping(&self) -> Result<puffer_runner_api::RunnerPing, RunnerError> {
-            self.inner.ping()
-        }
-        fn capabilities(&self) -> RunnerCapabilities {
-            self.inner.capabilities()
-        }
-        fn execute_tool(
-            &self,
-            req: ToolRequest,
-            sink: &mut dyn ChunkSink,
-        ) -> Result<ToolResult, RunnerError> {
-            self.execute_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.execute_tool(req, sink)
-        }
-        fn read_file(&self, path: &Path) -> Result<Vec<u8>, RunnerError> {
-            self.inner.read_file(path)
-        }
-        fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, RunnerError> {
-            self.inner.list_dir(path)
-        }
-        fn glob(&self, root: &Path, pattern: &str) -> Result<Vec<std::path::PathBuf>, RunnerError> {
-            self.inner.glob(root, pattern)
-        }
-        fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {
-            self.inner.list_mcp_servers()
-        }
-        fn list_mcp_tools(&self, server: &str) -> Result<Vec<McpTool>, RunnerError> {
-            self.inner.list_mcp_tools(server)
-        }
-        fn call_mcp_tool(
-            &self,
-            server: &str,
-            tool: &str,
-            args: serde_json::Value,
-            sink: &mut dyn ChunkSink,
-        ) -> Result<McpResult, RunnerError> {
-            self.inner.call_mcp_tool(server, tool, args, sink)
-        }
-        fn list_mcp_resources(
-            &self,
-            server: Option<&str>,
-        ) -> Result<Vec<McpResourceRecord>, RunnerError> {
-            self.inner.list_mcp_resources(server)
-        }
-        fn read_mcp_resource(
-            &self,
-            server: &str,
-            uri: &str,
-        ) -> Result<McpResourceContent, RunnerError> {
-            self.inner.read_mcp_resource(server, uri)
-        }
-        fn list_mcp_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
-            self.inner.list_mcp_prompts(server)
-        }
-        fn get_mcp_prompt(
-            &self,
-            server: &str,
-            name: &str,
-            args: serde_json::Value,
-        ) -> Result<McpPromptContent, RunnerError> {
-            self.inner.get_mcp_prompt(server, name, args)
-        }
-    }
-
-    /// Verifies the parallel-tool path routes runner-supported tools through
-    /// `Arc<dyn ToolRunner>::execute_tool` instead of calling in-process
-    /// helpers directly.
-    #[test]
-    fn parallel_path_dispatches_through_runner() {
-        let inner: Arc<dyn ToolRunner> = Arc::new(crate::runner_adapter::LocalToolRunner::new());
-        let recording = Arc::new(RecordingRunner::new(inner));
-        let runner: Arc<dyn ToolRunner> = recording.clone();
-
-        let resources = LoadedResources::default();
-        let registry = ToolRegistry::default();
-        let provider_context = ProviderToolContext::None;
-        let session_id = Uuid::new_v4();
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let cwd = workspace.path().to_path_buf();
-        let working_dirs: Vec<std::path::PathBuf> = Vec::new();
-
-        // Claude-parity tools use capitalized ids that the dispatcher
-        // matches on; build minimal definitions directly so neither the
-        // builtin lowercase ids nor a `runtime:` handler mismatch
-        // perturbs the dispatch path under test.
-        fn claude_tool_def(id: &str, handler: &str) -> ToolDefinition {
-            ToolDefinition {
-                id: id.to_string(),
-                name: id.to_string(),
-                description: id.to_string(),
-                handler: handler.to_string(),
-                aliases: Vec::new(),
-                handler_args: Vec::new(),
-                kind: ToolKind::Custom,
-                input_schema: ToolInputSchema::default(),
-                metadata: ToolMetadata::default(),
-                policy: ToolPolicyHints::default(),
-                shared_lib: None,
-                enabled_if: None,
-                display: ToolDisplayHints::default(),
-            }
-        }
-        std::fs::write(cwd.join("sample.txt"), "parallel-runner\n").expect("write sample");
-        let grep_def = claude_tool_def("Grep", "runtime:claude_grep");
-        let glob_def = claude_tool_def("Glob", "runtime:claude_glob");
-
-        let filesystem_policy = FilesystemPermissionPolicy {
-            approval: EffectiveApprovalPolicy::Allow,
-            sandbox_mode: EffectiveSandboxMode::DangerFullAccess,
-            workspace_roots: vec![cwd.clone()],
-            session_granted: true,
-            allow_all_paths: true,
-        };
-        let grep_input = json!({"pattern": "parallel-runner", "path": "sample.txt"});
-        let grep_result = execute_parallel_tool(
-            &grep_def,
-            &cwd,
-            &working_dirs,
-            &filesystem_policy,
-            &session_id,
-            grep_input,
-            &resources,
-            &registry,
-            &provider_context,
-            &runner,
-        )
-        .expect("Grep through runner");
-        assert!(grep_result.success, "Grep should succeed");
-        let grep_stdout: Value =
-            serde_json::from_str(&grep_result.output.stdout).expect("Grep JSON stdout");
-        assert_eq!(
-            grep_stdout
-                .get("filenames")
-                .and_then(Value::as_array)
-                .and_then(|filenames| filenames.first())
-                .and_then(Value::as_str),
-            Some("sample.txt")
-        );
-
-        let glob_input = json!({"pattern": "*"});
-        let glob_result = execute_parallel_tool(
-            &glob_def,
-            &cwd,
-            &working_dirs,
-            &filesystem_policy,
-            &session_id,
-            glob_input,
-            &resources,
-            &registry,
-            &provider_context,
-            &runner,
-        )
-        .expect("Glob through runner");
-        assert!(glob_result.success, "Glob should succeed");
-
-        assert_eq!(
-            recording.execute_calls(),
-            2,
-            "expected the runner to be invoked once per parallel-safe runner-supported tool",
-        );
-    }
-
-    #[test]
-    fn blank_pages_do_not_make_read_partial() {
-        let input = json!({
-            "file_path": "/tmp/demo.txt",
-            "pages": "   ",
-        });
-
-        assert!(is_full_read_request(&input));
-        assert!(!read_pages_field_is_present(&input));
-    }
-
-    #[test]
-    fn null_optional_read_fields_are_treated_as_absent() {
-        let input = json!({
-            "file_path": "/tmp/demo.txt",
-            "offset": null,
-            "limit": null,
-            "pages": null,
-        });
-
-        assert!(is_full_read_request(&input));
-        assert!(!read_field_is_present(&input, "offset"));
-        assert!(!read_field_is_present(&input, "limit"));
-    }
-}
+mod tests;

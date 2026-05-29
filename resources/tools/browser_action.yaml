@@ -1,0 +1,154 @@
+id: BrowserAction
+name: BrowserAction
+description: |-
+  Execute one managed Puffer browser action through the typed browser runtime.
+
+  Use this for verified Lambda Skill contracts that need browser session state,
+  DOM snapshots, element refs, screenshots, or browser input. Each call carries
+  one structured browser action and the exact arguments that the runtime will
+  execute. This tool does not expose a shell command surface.
+handler: runtime:browser
+approval_policy: auto
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - list
+        - open
+        - new
+        - focus
+        - close
+        - quit
+        - navigate
+        - reload
+        - back
+        - forward
+        - waitNetworkIdle
+        - snapshot
+        - domInspect
+        - consoleLogs
+        - screenshot
+        - openConsoleLogs
+        - openScreenshot
+        - click
+        - dblclick
+        - hover
+        - focus_ref
+        - type
+        - insertText
+        - fill
+        - select
+        - upload
+        - check
+        - uncheck
+        - press
+        - keydown
+        - keyup
+        - scroll
+        - scrollIntoView
+        - evaluate
+      description: Browser action to perform. Use open for creating or reusing a tab at a URL.
+    sessionId:
+      type: string
+      description: Puffer session id. Defaults to the current agent session.
+    tabId:
+      type: string
+      description: Stable browser tab id such as t1 or t2.
+    label:
+      type: string
+      description: Optional stable label for a newly opened tab.
+    url:
+      type: string
+      description: URL for open, navigate, openConsoleLogs, or openScreenshot actions.
+    page:
+      description: Browser page handle or tab id for actions that read an existing page.
+    query:
+      type: string
+      description: CSS selector for domInspect.
+    clear:
+      type: boolean
+      description: Whether consoleLogs should clear the buffered console entries after reading them.
+    ref:
+      type: string
+      description: Fresh element ref from the latest snapshot for ref-based actions, such as @e1.
+    value:
+      type: string
+      description: Exact option value or label text for select actions.
+    text:
+      type: string
+      description: Text for type, insertText, or fill actions.
+    question:
+      type: string
+      description: Optional caller question preserved for screenshot-style verified skill contracts.
+    key:
+      type: string
+      description: Keyboard key for press, keydown, or keyup.
+    script:
+      type: string
+      description: JavaScript expression for evaluate actions.
+    direction:
+      type: string
+      enum:
+        - up
+        - down
+        - left
+        - right
+      description: Scroll direction for scroll actions.
+    px:
+      type: integer
+      minimum: 0
+      description: Optional scroll distance in pixels for scroll actions. Defaults to 600.
+    width:
+      type: integer
+      minimum: 1
+      description: Optional viewport width for launching a tab.
+    height:
+      type: integer
+      minimum: 1
+      description: Optional viewport height for launching a tab.
+    activate:
+      type: boolean
+      description: Whether a newly opened tab should become active.
+    files:
+      type: array
+      items:
+        type: string
+      description: Files to upload into a native file input ref.
+    annotate:
+      type: boolean
+      description: Whether screenshot should overlay fresh element refs.
+    screenshotFormat:
+      type: string
+      enum:
+        - png
+        - jpeg
+      description: Screenshot image format.
+    screenshotQuality:
+      type: integer
+      minimum: 0
+      maximum: 100
+      description: JPEG screenshot quality. Requires screenshotFormat=jpeg.
+    idleMs:
+      type: integer
+      minimum: 1
+      maximum: 10000
+      description: Quiet network window for waitNetworkIdle. Defaults to 500.
+    timeoutMs:
+      type: integer
+      minimum: 1
+      maximum: 120000
+      description: Maximum wait for waitNetworkIdle. Defaults to 30000.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: false
+display:
+  group: browser
+  title: BrowserAction
+  show_in_status: true

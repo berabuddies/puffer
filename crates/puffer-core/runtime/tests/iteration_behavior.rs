@@ -38,6 +38,7 @@ where
         while handled < expected_requests && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     let mut buffer = [0_u8; 32_768];
                     let bytes = stream.read(&mut buffer).unwrap();
                     let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();

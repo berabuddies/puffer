@@ -310,12 +310,7 @@ pub(crate) fn extract_chat_completions_tool_calls(
         .flat_map(|choice| choice.message.tool_calls.iter())
         .map(|tool_call| {
             let arguments = parse_tool_arguments(&tool_call.function.arguments, &tool_call.id)
-                .with_context(|| {
-                    format!(
-                        "failed to parse OpenAI Chat Completions tool arguments for call {}",
-                        tool_call.id
-                    )
-                })?;
+                .unwrap_or_else(|_| tool_call.function.arguments.clone());
             Ok(OpenAIResponseToolCall {
                 item_id: None,
                 status: None,
@@ -583,5 +578,39 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search_text");
         assert_eq!(calls[0].arguments["query"], "tool schema");
+    }
+
+    #[test]
+    fn preserves_invalid_chat_completions_tool_arguments_for_retry() {
+        let response = parse_chat_completions_response(
+            r#"{
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_bad",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "Bash",
+                                        "arguments": "{\"command\":\"python3 - <<'PY'\nprint('unterminated')"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let calls = extract_chat_completions_tool_calls(&response).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "Bash");
+        assert_eq!(
+            calls[0].arguments,
+            json!("{\"command\":\"python3 - <<'PY'\nprint('unterminated')")
+        );
     }
 }

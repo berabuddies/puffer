@@ -335,6 +335,14 @@ fn reference_task_create_prompt() -> String {
             "${teammateTips}",
             "- Include enough detail in the description for another agent to understand and complete the task\n- New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them\n",
         )
+        .replace(
+            "- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., \"Fixing authentication bug\"). If omitted, the spinner shows the subject instead.\n\nAll tasks are created with status `pending`.",
+            "- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., \"Fixing authentication bug\"). If omitted, the spinner shows the subject instead.\n- **receivedAt** (optional): RFC3339 timestamp for when the task source event was received.\n- **expiresAt** (optional): RFC3339 timestamp for when the task should stop being considered current.\n\nAll tasks are created with status `pending`.",
+        )
+        .replace(
+            "\n## Tips",
+            "\nMonitor triage agents may create workspace-level connector tasks by setting\n`metadata._monitor=true` or `metadata.monitor_connection`. For those tasks,\ninclude `receivedAt`, `expiresAt`, `actions`, and `possibleIgnoreReasons` so\n`/tasks` can offer concrete user choices without another triage pass.\n\n## Tips",
+        )
 }
 
 fn reference_task_update_prompt() -> String {
@@ -496,7 +504,7 @@ fn reference_file_read_schema() -> serde_json::Value {
             },
             "offset": {
                 "type": "integer",
-                "description": "The line number to start reading from. Only provide if the file is too large to read at once",
+                "description": "The line number to start reading from. Only provide if the file is too large to read at once (1-indexed)",
                 "minimum": 0
             },
             "limit": {

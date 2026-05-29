@@ -48,15 +48,34 @@
 //!   favor of the retry + splitter work, which fixes actual correctness
 //!   bugs first.
 
+mod catalog;
 mod commands;
 mod config;
+mod connection;
+mod protocol;
+mod proxy;
 mod runtime;
 mod session_map;
 mod support;
 mod traits;
 
+pub use catalog::{
+    builtin_connector_template, builtin_connector_templates, ConnectorActionDefinition,
+    ConnectorPermissionDefinition, ConnectorSlug, ConnectorTemplate,
+};
 pub use commands::{handle_builtin_command, BuiltinCommandConfig, CommandOutcome};
 pub use config::{ConnectorConfig, ConnectorsConfig};
+pub use connection::{
+    ConnectionRecord, ConnectionSlug, ConnectionState, ConnectionStore, ConnectionStoreError,
+};
+pub use protocol::{
+    ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,
+    ConnectorSubscribeFrame,
+};
+pub use proxy::{
+    handle_agent_proxy_event, AgentProxy, AgentProxyBinding, AgentProxyDecision, AgentProxyStore,
+    AgentProxyStoreError,
+};
 pub use runtime::{ConnectorRuntime, ConnectorRuntimeConfig, DispatchOutcome};
 pub use session_map::{ConversationKey, ConversationSessionMap, GroupKeyPolicy};
 pub use support::{retry_with_backoff, InboundMessage, MessageSplitter};

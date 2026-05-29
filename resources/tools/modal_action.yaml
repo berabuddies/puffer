@@ -1,0 +1,46 @@
+id: ModalAction
+name: ModalAction
+description: |-
+  Execute Modal CLI operations through verified Lambda Skill contracts.
+
+  Secret creation only accepts a SecretValue handle produced earlier in the
+  same session. Raw secret strings fail closed.
+handler: runtime:workflow:modal_action
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - secretCreate
+        - defineFunction
+        - defineClass
+      description: Modal action to perform.
+    name:
+      type: string
+      description: Modal secret name.
+    value:
+      type: object
+      description: SecretValue handle object from SecretValue.prepare.
+    gpu:
+      type: string
+      description: Modal GPU kind such as T4, A10G, A100-80GB, or H100:4.
+    image:
+      type: string
+      description: Modal image expression beginning with modal.Image.
+    schedule:
+      type: string
+      description: Modal schedule expression beginning with modal.Cron or modal.Period.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: false
+display:
+  group: modal
+  title: ModalAction
+  show_in_status: true

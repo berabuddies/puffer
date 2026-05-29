@@ -33,6 +33,19 @@ pub(crate) struct FolderGroupDto {
     pub(crate) folder_path: String,
     pub(crate) session_count: usize,
     pub(crate) sessions: Vec<SessionListItemDto>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionGroupsPageDto {
+    pub(crate) groups: Vec<FolderGroupDto>,
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+    pub(crate) returned_sessions: usize,
+    pub(crate) total_sessions: usize,
+    pub(crate) has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,6 +140,8 @@ pub(crate) enum TimelineItemDto {
         input_text: String,
         input_json: Option<Value>,
         output_text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,6 +264,7 @@ pub(crate) struct SettingsSnapshotDto {
     pub(crate) sessions: SettingsSessionSummaryDto,
     pub(crate) auth: Vec<AuthProviderStatusDto>,
     pub(crate) providers: Vec<ProviderSummaryDto>,
+    pub(crate) browser_profiles: Vec<BrowserProfileDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -264,6 +280,7 @@ pub(crate) struct SettingsConfigDto {
     pub(crate) mascot_enabled: bool,
     pub(crate) ui_no_alt_screen: bool,
     pub(crate) ui_tmux_golden_mode: bool,
+    pub(crate) browser_chrome_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -312,6 +329,26 @@ pub(crate) struct ProviderSummaryDto {
     pub(crate) auth_modes: Vec<String>,
     pub(crate) source_kind: String,
     pub(crate) source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserProfileDto {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) email: Option<String>,
+    pub(crate) google_accounts: Vec<BrowserGoogleAccountDto>,
+    pub(crate) path: String,
+    pub(crate) is_last_used: bool,
+    pub(crate) is_selected: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserGoogleAccountDto {
+    pub(crate) email: String,
+    pub(crate) name: Option<String>,
+    pub(crate) gaia_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

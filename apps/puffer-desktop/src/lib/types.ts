@@ -37,6 +37,16 @@ export type FolderGroup = {
   path: string;
   sessionCount: number;
   sessions: SessionListItem[];
+  tags: string[];
+};
+
+export type SessionGroupsPage = {
+  groups: FolderGroup[];
+  offset: number;
+  limit: number;
+  returnedSessions: number;
+  totalSessions: number;
+  hasMore: boolean;
 };
 
 export type DesktopPinState = {
@@ -147,6 +157,7 @@ export type ToolTimelineItem = TimelineBase & {
   input: string;
   output: string;
   inputJson: Record<string, unknown> | null;
+  metadata?: unknown;
   subject?: MessageActor | null;
 };
 
@@ -168,8 +179,10 @@ export type AskUserQuestionOption = {
 export type AskUserQuestionItem = {
   question: string;
   header: string;
+  type?: "choice" | "input";
   options: AskUserQuestionOption[];
   multiSelect?: boolean;
+  searchable?: boolean;
 };
 
 export type UserQuestionTimelineItem = TimelineBase & {
@@ -272,6 +285,7 @@ export type SettingsConfig = {
   mascotEnabled: boolean;
   uiNoAltScreen: boolean;
   uiTmuxGoldenMode: boolean;
+  browserChromeProfile: string | null;
 };
 
 export type ResourceCounts = {
@@ -313,6 +327,22 @@ export type ProviderSummary = {
   sourcePath: string | null;
 };
 
+export type BrowserProfile = {
+  id: string;
+  name: string;
+  email: string | null;
+  googleAccounts: BrowserGoogleAccount[];
+  path: string;
+  isLastUsed: boolean;
+  isSelected: boolean;
+};
+
+export type BrowserGoogleAccount = {
+  email: string;
+  name: string | null;
+  gaiaId: string | null;
+};
+
 export type SettingsSnapshot = {
   workspaceRoot: string;
   workspaceConfigFile: string;
@@ -324,6 +354,7 @@ export type SettingsSnapshot = {
   sessions: SettingsSessionSummary;
   auth: AuthProviderStatus[];
   providers: ProviderSummary[];
+  browserProfiles: BrowserProfile[];
 };
 
 export type WorkflowTrigger =
@@ -331,6 +362,13 @@ export type WorkflowTrigger =
   | {
       type: "subscription";
       source_topic: string;
+      pattern?: string | null;
+      classify_prompt?: string | null;
+    }
+  | {
+      type: "connection";
+      connection_slug: string;
+      filter?: Record<string, unknown> | null;
       pattern?: string | null;
       classify_prompt?: string | null;
     };
@@ -383,9 +421,135 @@ export type WorkflowRun = {
   trigger_key?: string | null;
 };
 
+export type WorkflowConnector = {
+  connector_slug: string;
+  description: string;
+  skill: string;
+  runtime_hints?: string[];
+  requires_auth: boolean;
+  can_subscribe: boolean;
+  can_proxy_agent: boolean;
+  can_trigger_workflow?: boolean;
+  suggested_connection_slug?: string;
+  connect_command?: string;
+  action_slugs: string[];
+};
+
+export type WorkflowConnection = {
+  slug: string;
+  connector_slug: string;
+  description: string;
+  state: string;
+  has_consumer: boolean;
+  auth_failure_notified?: boolean;
+  can_trigger_workflow?: boolean;
+  connect_command?: string | null;
+  monitor_command?: string | null;
+};
+
+export type WorkflowMonitorTaskAction = {
+  name: string;
+  prompt: string;
+};
+
+export type WorkflowMonitorTask = {
+  task_id: string;
+  subject: string;
+  description: string;
+  status: string;
+  monitor_connection?: string | null;
+  monitor_connector?: string | null;
+  monitor_memory_path?: string | null;
+  ignored?: boolean;
+  actions?: WorkflowMonitorTaskAction[];
+  possible_ignore_reasons?: string[];
+  started_at_ms?: number | null;
+  updated_at_ms?: number | null;
+};
+
+export type WorkflowTaskSource = "agent" | "monitor";
+
+export type WorkflowTask = {
+  task_id: string;
+  subject: string;
+  description: string;
+  active_form?: string;
+  status: string;
+  source: WorkflowTaskSource;
+  task_scope?: string | null;
+  task_scope_label?: string | null;
+  task_type?: string | null;
+  owner?: string | null;
+  blocks?: string[];
+  blocked_by?: string[];
+  command?: string | null;
+  process_id?: number | null;
+  output_file?: string | null;
+  received_at?: string | null;
+  expires_at?: string | null;
+  started_at_ms?: number | null;
+  updated_at_ms?: number | null;
+  exit_code?: number | null;
+  ignored?: boolean;
+  monitor_connection?: string | null;
+  monitor_connector?: string | null;
+  monitor_memory_path?: string | null;
+  actions?: WorkflowMonitorTaskAction[];
+  possible_ignore_reasons?: string[];
+};
+
+export type WorkflowFilterRule = Record<string, unknown>;
+
+export type WorkflowBinding = {
+  slug: string;
+  description: string;
+  connection_slug: string;
+  connector_slug?: string | null;
+  status: string;
+  enabled: boolean;
+  action_type: string;
+  action_path?: string | null;
+  action_format?: string | null;
+  model?: string | null;
+  filter_pattern?: string | null;
+  ignore_filters?: WorkflowFilterRule[];
+  monitor?: boolean;
+  monitor_memory_path?: string | null;
+  created_at_ms?: number | null;
+};
+
+export type WorkflowBindingCreateRequest = {
+  slug?: string;
+  description?: string;
+  connection_slug: string;
+  connector_slug?: string | null;
+  pattern?: string | null;
+  file_append_path: string;
+  enabled?: boolean;
+};
+
 export type WorkflowSnapshot = {
   workflows: WorkflowDefinition[];
   runs: WorkflowRun[];
+  connectors?: WorkflowConnector[];
+  connections?: WorkflowConnection[];
+  connector_error?: string | null;
+  workflow_bindings?: WorkflowBinding[];
+  workflow_binding_error?: string | null;
+  tasks?: WorkflowTask[];
+  task_error?: string | null;
+  monitor_tasks?: WorkflowMonitorTask[];
+  monitor_task_error?: string | null;
+  monitor_memories?: WorkflowMonitorMemory[];
+  monitor_memory_error?: string | null;
+  monitor_ignore_filter_error?: string | null;
+};
+
+export type WorkflowMonitorMemory = {
+  connection_slug: string;
+  path: string;
+  content: string;
+  truncated?: boolean;
 };
 
 export type ExternalCredential = {

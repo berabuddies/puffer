@@ -1,0 +1,33 @@
+id: LambdaInternal
+name: LambdaInternal
+description: |-
+  Record a verified Lambda Skill internal step that has no external host-side
+  effect.
+
+  Use this only while executing a verified Lambda Skill and only after
+  LambdaHostCall has admitted the exact input. This tool is for formal host
+  steps such as parsing, drafting, classification, or summarization that are
+  represented in the Lambda Skill trace but do not map to a filesystem,
+  network, shell, or user-interaction operation.
+handler: runtime:workflow:lambda_internal
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    step:
+      type: string
+      description: Exact skill-qualified internal step name.
+    args:
+      type: object
+      description: Formal host-call arguments recorded for this internal step.
+      additionalProperties: true
+    result:
+      description: Optional deterministic result value to expose to the model.
+    note:
+      type: string
+      description: Optional short source comment for the internal step.
+  required:
+    - step
+    - args
+  additionalProperties: false

@@ -3,6 +3,8 @@ target/
 .worktree/
 .worktrees/
 .puffer/
+.DS_Store
+**/.DS_Store
 resources/subscribers/*/state/
 # Generated Terminal Bench harness artifacts.
 benchmark/.venv-harbor/

@@ -34,8 +34,6 @@ The repo is a Cargo workspace with these main crates and component crates:
   Slack Socket Mode connector.
 - `puffer-connector-telegram`
   Telegram bot connector.
-- `puffer-connector-webhook`
-  HTTP webhook connector.
 - `puffer-core`
   Command registry, app state, slash-command dispatch, and provider execution.
 - `puffer-observability`

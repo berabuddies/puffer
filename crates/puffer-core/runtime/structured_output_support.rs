@@ -136,7 +136,9 @@ pub(super) fn openai_tool_definitions_for_request(
                     name: definition.id.clone(),
                     description: rendered_openai_tool_description(&definition),
                     strict: false,
-                    parameters: openai_compatible_schema(definition.input_schema.as_json_schema()),
+                    parameters: openai_tool_parameters_schema(
+                        definition.input_schema.as_json_schema(),
+                    ),
                     filters: None,
                     user_location: None,
                     external_web_access: None,
@@ -215,7 +217,7 @@ pub(super) fn openai_chat_completion_tools_for_request(
             function: OpenAIChatCompletionToolFunction {
                 name: definition.id.clone(),
                 description: rendered_openai_tool_description(&definition),
-                parameters: openai_compatible_schema(definition.input_schema.as_json_schema()),
+                parameters: openai_tool_parameters_schema(definition.input_schema.as_json_schema()),
                 strict: false,
             },
         })
@@ -472,6 +474,28 @@ fn openai_compatible_schema(schema: Value) -> Value {
     }
 }
 
+fn openai_tool_parameters_schema(schema: Value) -> Value {
+    const DISALLOWED_ROOT_KEYS: [&str; 5] = ["oneOf", "anyOf", "allOf", "enum", "not"];
+
+    let normalized = openai_compatible_schema(schema);
+    let Value::Object(mut object) = normalized else {
+        return json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        });
+    };
+
+    object.insert("type".to_string(), json!("object"));
+    object
+        .entry("properties".to_string())
+        .or_insert_with(|| json!({}));
+    for key in DISALLOWED_ROOT_KEYS {
+        object.remove(key);
+    }
+    Value::Object(object)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,6 +606,61 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, STRUCTURED_OUTPUT_TOOL_ID);
         assert_eq!(tools[0].parameters["required"], json!(["answer"]));
+    }
+
+    #[test]
+    fn openai_tool_parameters_strip_root_schema_combinators() {
+        let registry = ToolRegistry::from_definitions(vec![ToolDefinition {
+            id: "WorkflowCreate".to_string(),
+            name: "WorkflowCreate".to_string(),
+            description: "Create workflow".to_string(),
+            handler: "runtime:workflow:workflow_create".to_string(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: ToolKind::Custom,
+            input_schema: ToolInputSchema {
+                properties: BTreeMap::new(),
+                raw_json_schema: Some(
+                    serde_json::to_string(&json!({
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "object",
+                                "anyOf": [
+                                    { "required": ["prompt"] },
+                                    { "required": ["command"] }
+                                ]
+                            },
+                            "yaml_action": { "type": "string" }
+                        },
+                        "required": ["slug"],
+                        "anyOf": [
+                            { "required": ["action"] },
+                            { "required": ["yaml_action"] }
+                        ],
+                        "additionalProperties": false
+                    }))
+                    .unwrap(),
+                ),
+            },
+            metadata: ToolMetadata::default(),
+            policy: ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: ToolDisplayHints::default(),
+        }]);
+
+        let responses_tools = openai_tool_definitions(&registry, None, false).unwrap();
+        let chat_tools = openai_chat_completion_tools(&registry, None, false).unwrap();
+        let parameters = &responses_tools[0].parameters;
+
+        assert_eq!(parameters["type"], "object");
+        assert!(parameters.get("anyOf").is_none());
+        assert_eq!(
+            parameters["properties"]["action"]["anyOf"][0]["required"],
+            json!(["prompt"])
+        );
+        assert_eq!(chat_tools[0].function.parameters, *parameters);
     }
 
     #[test]

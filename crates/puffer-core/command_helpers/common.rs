@@ -1,4 +1,9 @@
+use super::lambda_skill_status::lambda_skill_status;
 use super::{append_tool_invocations, append_trace_events};
+use crate::runtime::lambda_gate::LambdaGateState;
+use crate::runtime::lambda_skill_activation::{
+    allowed_tools_for_verified_skill, gate_for_verified_skill_activation,
+};
 use crate::{AppState, MessageRole};
 use anyhow::{Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
@@ -16,7 +21,11 @@ pub(crate) fn list_skills(
     state: &mut AppState,
     resources: &LoadedResources,
     session_store: &SessionStore,
+    args: &str,
 ) -> Result<()> {
+    if args.trim().eq_ignore_ascii_case("config") {
+        return emit_system(state, session_store, render_skills_config_panel(&state.cwd));
+    }
     emit_system(state, session_store, render_skills_panel(resources))
 }
 
@@ -31,6 +40,7 @@ pub fn render_skills_panel(resources: &LoadedResources) -> String {
             "- .puffer/resources/skills/",
             "",
             "Use /skill:<name> as a compatibility alias after adding a user-invocable skill.",
+            "Use /skills config to show Lambda Skill library manifest locations and a config template.",
         ]
         .join("\n");
     }
@@ -52,8 +62,28 @@ pub fn render_skills_panel(resources: &LoadedResources) -> String {
         &mut text,
         "Use /skill:<name> as a compatibility alias for any user-invocable skill."
     );
+    let _ = writeln!(
+        &mut text,
+        "Use /skills config to show Lambda Skill library manifest locations and a config template."
+    );
 
     text.trim_end().to_string()
+}
+
+/// Renders install/config guidance for external Lambda Skill libraries.
+pub fn render_skills_config_panel(cwd: &Path) -> String {
+    let paths = puffer_config::ConfigPaths::discover(cwd);
+    let workspace_dir = paths
+        .workspace_config_dir
+        .join("resources/lambda_skill_libraries");
+    let user_dir = paths
+        .user_config_dir
+        .join("resources/lambda_skill_libraries");
+    format!(
+        "Lambda Skill library config\n\nManifest directories:\n- workspace: {}\n- user: {}\n\nCreate one YAML file per external library, for example:\n\n```yaml\nid: my-lambda-skills\nroot: /absolute/path/to/lambda-skill-library\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\nrequire_approval: false\n```\n\nPuffer expects each Verified Skill folder to include precompiled verification output such as out/GENERATED.SKILL.md and out/host.json. After saving, run /reload-plugins or restart the session. Use /skills or /doctor to verify gate readiness.",
+        workspace_dir.display(),
+        user_dir.display()
+    )
 }
 
 /// Prints a compact summary of transcript and loaded-resource context.
@@ -189,16 +219,46 @@ pub(crate) fn execute_skill_command(
             ),
         );
     }
+    let lambda_gate = match lambda_gate_for_skill_command(&skill.value) {
+        Ok(gate) => gate,
+        Err(error) => {
+            return emit_system(
+                state,
+                session_store,
+                format!(
+                    "Skill command /skill:{} failed to load Lambda Skill gate: {error:#}",
+                    skill.value.name
+                ),
+            )
+        }
+    };
 
     let _ = providers.discover_and_merge_all(auth_store);
     let saved_provider = state.current_provider.clone();
     let saved_model = state.current_model.clone();
     let saved_effort = state.effort_level.clone();
+    let saved_lambda_gate = state.lambda_gate.clone();
+    let saved_pending_lambda_host_call = state.pending_lambda_host_call.clone();
     apply_skill_runtime_overrides(state, providers, &skill.value);
+    state.lambda_gate = lambda_gate;
+    state.pending_lambda_host_call = None;
 
     let rendered =
         crate::skill_support::render_skill_prompt(skill, args, &state.session.id.to_string());
-    let tool_filter = crate::runtime::build_request_tool_filter(&skill.value.allowed_tools)?;
+    let allowed_tools = match skill_allowed_tools_for_side_turn(&skill.value) {
+        Ok(allowed_tools) => allowed_tools,
+        Err(error) => {
+            return emit_system(
+                state,
+                session_store,
+                format!(
+                    "Skill command /skill:{} failed to load Lambda Skill tool scope: {error:#}",
+                    skill.value.name
+                ),
+            )
+        }
+    };
+    let tool_filter = crate::runtime::build_request_tool_filter(&allowed_tools)?;
 
     state.push_message(MessageRole::User, rendered.clone());
     session_store.append_event(
@@ -221,6 +281,8 @@ pub(crate) fn execute_skill_command(
     state.current_provider = saved_provider;
     state.current_model = saved_model;
     state.effort_level = saved_effort;
+    state.lambda_gate = saved_lambda_gate;
+    state.pending_lambda_host_call = saved_pending_lambda_host_call;
 
     match outcome {
         Ok(turn) => {
@@ -264,6 +326,14 @@ fn apply_skill_runtime_overrides(
     if let Some(effort) = skill.effort.as_deref() {
         state.effort_level = effort.to_string();
     }
+}
+
+fn skill_allowed_tools_for_side_turn(skill: &SkillSpec) -> Result<Vec<String>> {
+    allowed_tools_for_verified_skill(skill)
+}
+
+fn lambda_gate_for_skill_command(skill: &SkillSpec) -> Result<Option<LambdaGateState>> {
+    gate_for_verified_skill_activation(skill)
 }
 
 /// Appends a system message to the in-memory transcript and session log.
@@ -492,6 +562,7 @@ fn append_skill_group(text: &mut String, resources: &LoadedResources, kind: Sour
         if skill.value.disable_model_invocation {
             details.push("model invocation disabled".to_string());
         }
+        append_skill_verification_details(&mut details, &skill.value);
         if let Some(argument_hint) = skill.value.argument_hint.as_deref() {
             details.push(format!("args {argument_hint}"));
         }
@@ -505,6 +576,36 @@ fn append_skill_group(text: &mut String, resources: &LoadedResources, kind: Sour
             details.join(" · ")
         );
     }
+}
+
+fn append_skill_verification_details(details: &mut Vec<String>, skill: &SkillSpec) {
+    let Some(verification) = skill.verification.as_ref() else {
+        return;
+    };
+    if let Some(status) = lambda_skill_status(skill) {
+        details.push(lambda_verified_label(verification));
+        details.push(status.readiness_label());
+        details.push(status.model_invocation_label().to_string());
+        details.push(status.allowed_tools_label());
+        details.push(status.approval_label().to_string());
+        return;
+    }
+    details.push(lambda_verified_label(verification));
+}
+
+fn lambda_verified_label(verification: &puffer_resources::SkillVerificationSpec) -> String {
+    let mut label = format!("verified {}", verification.system);
+    let mut counts = Vec::new();
+    if let Some(tools) = verification.tools {
+        counts.push(format!("{tools} tools"));
+    }
+    if let Some(actions) = verification.actions {
+        counts.push(format!("{actions} actions"));
+    }
+    if !counts.is_empty() {
+        label.push_str(&format!(" ({})", counts.join(", ")));
+    }
+    label
 }
 
 fn skill_source_heading(kind: SourceKind) -> &'static str {
@@ -601,105 +702,8 @@ fn append_patch_section(text: &mut String, cwd: &PathBuf, title: &str, args: &[&
 }
 
 #[cfg(test)]
-mod tests {
-    use super::render_skills_panel;
-    use puffer_resources::{LoadedItem, LoadedResources, SkillSpec, SourceInfo, SourceKind};
-    use std::path::PathBuf;
-
-    fn loaded_skill(
-        name: &str,
-        description: &str,
-        path: &str,
-        kind: SourceKind,
-    ) -> LoadedItem<SkillSpec> {
-        LoadedItem {
-            value: SkillSpec {
-                name: name.to_string(),
-                description: description.to_string(),
-                content: "content".to_string(),
-                disable_model_invocation: false,
-                ..SkillSpec::default()
-            },
-            source_info: SourceInfo {
-                path: PathBuf::from(path),
-                kind,
-            },
-        }
-    }
-
-    #[test]
-    fn render_skills_panel_groups_skills_by_source() {
-        let resources = LoadedResources {
-            skills: vec![
-                loaded_skill(
-                    "workspace-review",
-                    "Review workspace changes",
-                    "/tmp/project/.puffer/resources/skills/workspace-review/SKILL.md",
-                    SourceKind::Workspace,
-                ),
-                loaded_skill(
-                    "user-review",
-                    "Review shared changes",
-                    "/home/test/.puffer/resources/skills/user-review/SKILL.md",
-                    SourceKind::User,
-                ),
-                loaded_skill(
-                    "builtin-review",
-                    "Review builtin changes",
-                    "/app/resources/skills/builtin-review/SKILL.md",
-                    SourceKind::Builtin,
-                ),
-            ],
-            ..LoadedResources::default()
-        };
-
-        let rendered = render_skills_panel(&resources);
-        assert!(rendered.contains("3 skills"));
-        assert!(rendered.contains("Workspace skills (/tmp/project/.puffer/resources/skills)"));
-        assert!(rendered.contains("/workspace-review · ~6 description tokens"));
-        assert!(rendered.contains("User skills (/home/test/.puffer/resources/skills)"));
-        assert!(rendered.contains("/user-review · ~6 description tokens"));
-        assert!(rendered.contains("Built-in skills (/app/resources/skills)"));
-        assert!(rendered.contains("/builtin-review · ~6 description tokens"));
-        assert!(rendered
-            .contains("Use /skill:<name> as a compatibility alias for any user-invocable skill."));
-    }
-
-    #[test]
-    fn render_skills_panel_reports_missing_skills() {
-        let rendered = render_skills_panel(&LoadedResources::default());
-        assert!(rendered.contains("No skills found."));
-        assert!(rendered.contains("~/.puffer/resources/skills/"));
-        assert!(rendered.contains("/skill:<name>"));
-    }
-
-    #[test]
-    fn render_skills_panel_marks_hidden_and_model_disabled_skills() {
-        let resources = LoadedResources {
-            skills: vec![LoadedItem {
-                value: SkillSpec {
-                    name: "hidden-review".to_string(),
-                    description: "Hidden review entry".to_string(),
-                    user_invocable: false,
-                    disable_model_invocation: true,
-                    ..SkillSpec::default()
-                },
-                source_info: SourceInfo {
-                    path: PathBuf::from(
-                        "/tmp/project/.puffer/resources/skills/hidden-review/SKILL.md",
-                    ),
-                    kind: SourceKind::Workspace,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-
-        let rendered = render_skills_panel(&resources);
-        assert!(rendered.contains(
-            "- hidden-review · ~5 description tokens · hidden from slash-command invocation · model invocation disabled"
-        ));
-    }
-}
+#[path = "common_tests.rs"]
+mod common_tests;
 
 fn truncate_lines(content: &str, max_lines: usize) -> (String, bool) {
     let lines = content.lines().collect::<Vec<_>>();

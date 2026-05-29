@@ -472,6 +472,119 @@
         questions: UserQuestionTimelineItem[];
       };
   type ActivityChild = ToolTimelineItem | DiffTimelineItem | MessageTimelineItem;
+  type GateDisplay = {
+    state: "success" | "error";
+    label: string;
+    detail: string;
+  };
+  type GateDetailRow = {
+    label: string;
+    value: string;
+    code: boolean;
+  };
+
+  function isVerifiedSkillGateItem(item: TimelineItem): item is MessageTimelineItem {
+    if (item.kind !== "system") return false;
+    return (
+      item.title === "Verified Skill Gate" ||
+      item.meta.includes("verified skill") ||
+      item.body.trim().startsWith("Verified Skill Gate")
+    );
+  }
+
+  function normalizedGateKey(value: string | null | undefined): string {
+    return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function gateField(item: MessageTimelineItem, name: string): string | null {
+    const target = normalizedGateKey(name);
+    for (const line of item.body.split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      const key = normalizedGateKey(line.slice(0, idx));
+      if (key === target) {
+        const value = line.slice(idx + 1).trim();
+        return value || null;
+      }
+    }
+    return null;
+  }
+
+  function firstGateMetaEvent(item: MessageTimelineItem): string | null {
+    return item.meta.find((value) => normalizedGateKey(value) !== "verifiedskill") ?? null;
+  }
+
+  function compactGateText(item: MessageTimelineItem): string {
+    return item.body
+      .replace(/^Verified Skill Gate\s*/i, "")
+      .replace(/\s+/g, " ")
+      .replace(/\.$/, "")
+      .trim();
+  }
+
+  function verifiedSkillGateDisplay(item: MessageTimelineItem): GateDisplay {
+    const event = normalizedGateKey(gateField(item, "event") ?? firstGateMetaEvent(item));
+    const hostTool = gateField(item, "host_tool") ?? gateField(item, "hosttool");
+    const concreteTool = gateField(item, "concrete_tool") ?? gateField(item, "concretetool");
+    const reason = gateField(item, "reason");
+    const retryTool = gateField(item, "retry_tool") ?? gateField(item, "retrytool");
+    const compact = compactGateText(item);
+    if (event.includes("reject") || item.status === "error") {
+      const retry = retryTool ? ` Retry with ${retryTool}.` : "";
+      return {
+        state: "error",
+        label: "Gate rejected",
+        detail: reason ? `${reason}.${retry}` : compact || "Call did not satisfy the Verified Skill gate."
+      };
+    }
+    if (event.includes("commit")) {
+      return {
+        state: "success",
+        label: "Gate committed",
+        detail: hostTool || concreteTool ? [hostTool ?? "host call", concreteTool].filter(Boolean).join(" -> ") : compact
+      };
+    }
+    if (event.includes("admit")) {
+      return {
+        state: "success",
+        label: "Gate admitted",
+        detail: hostTool || concreteTool ? [hostTool ?? "host call", concreteTool].filter(Boolean).join(" -> ") : compact
+      };
+    }
+    return {
+      state: "success",
+      label: "Gate checked",
+      detail: compact
+    };
+  }
+
+  function addGateDetailRow(
+    rows: GateDetailRow[],
+    label: string,
+    value: string | null,
+    code = false
+  ) {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    rows.push({ label, value: trimmed, code });
+  }
+
+  function gateDetailRows(item: MessageTimelineItem): GateDetailRow[] {
+    const display = verifiedSkillGateDisplay(item);
+    const rows: GateDetailRow[] = [];
+    addGateDetailRow(rows, "Event", gateField(item, "event") ?? firstGateMetaEvent(item), true);
+    addGateDetailRow(rows, "Check", gateField(item, "check") ?? display.detail);
+    addGateDetailRow(rows, "Host tool", gateField(item, "host_tool") ?? gateField(item, "hosttool"), true);
+    addGateDetailRow(rows, "Host args", gateField(item, "host_args") ?? gateField(item, "hostargs"), true);
+    addGateDetailRow(rows, "Concrete tool", gateField(item, "concrete_tool") ?? gateField(item, "concretetool"), true);
+    addGateDetailRow(rows, "Concrete input", gateField(item, "concrete_input") ?? gateField(item, "concreteinput"), true);
+    addGateDetailRow(rows, "Registered facts", gateField(item, "registered_facts") ?? gateField(item, "registeredfacts"), true);
+    addGateDetailRow(rows, "Reason", gateField(item, "reason"));
+    addGateDetailRow(rows, "Retry with", gateField(item, "retry_tool") ?? gateField(item, "retrytool"), true);
+    addGateDetailRow(rows, "How Puffer confirmed it", gateField(item, "confirmation"));
+    if (rows.length === 0) addGateDetailRow(rows, display.label, display.detail);
+    return rows;
+  }
 
   function isActivityMessage(child: ActivityChild): child is MessageTimelineItem {
     return child.kind === "assistant" || child.kind === "command";
@@ -580,12 +693,17 @@
         lastUserKey = nextRowKey(timelineItemKeyBase(item), keyCounts);
         rows.push({ key: lastUserKey, kind: "user", item: item as MessageTimelineItem });
       } else if (item.kind === "system") {
-        flushCurrent();
-        rows.push({
-          key: nextRowKey(timelineItemKeyBase(item), keyCounts),
-          kind: "system",
-          item: item as MessageTimelineItem
-        });
+        if (isVerifiedSkillGateItem(item)) {
+          if (!current) current = startAgentRow(item);
+          current.children.push(item as MessageTimelineItem);
+        } else {
+          flushCurrent();
+          rows.push({
+            key: nextRowKey(timelineItemKeyBase(item), keyCounts),
+            kind: "system",
+            item: item as MessageTimelineItem
+          });
+        }
       } else if (item.kind === "assistant" || item.kind === "command") {
         if (!current) current = startAgentRow(item);
         current.children.push(item as MessageTimelineItem);
@@ -919,7 +1037,7 @@
     return out;
   });
 
-  type ActivityCategory = "thought" | "message" | "agent" | "write" | "read" | "browser" | "terminal" | "search" | "diff" | "other";
+  type ActivityCategory = "thought" | "message" | "gate" | "agent" | "write" | "read" | "browser" | "terminal" | "search" | "diff" | "other";
 
   type ActivitySummary = {
     icons: IconName[];
@@ -927,7 +1045,7 @@
     failed: number;
   };
 
-  const activityOrder: ActivityCategory[] = ["thought", "message", "agent", "write", "read", "browser", "terminal", "search", "diff", "other"];
+  const activityOrder: ActivityCategory[] = ["thought", "message", "gate", "agent", "write", "read", "browser", "terminal", "search", "diff", "other"];
 
   let activeTurnAgentRowIndex = $derived.by(() => {
     if (!turnRunning) return -1;
@@ -973,6 +1091,7 @@
 
   function shouldCollapseActivity(row: Extract<RowKind, { kind: "agent" }>, idx: number): boolean {
     const isActiveTurn = idx === activeTurnAgentRowIndex;
+    if (row.children.some(isGateActivity)) return true;
     return !isActiveTurn && row.children.length > 0 && Boolean(row.item?.body.trim());
   }
 
@@ -1022,6 +1141,7 @@
   function activityIcon(category: ActivityCategory): IconName {
     if (category === "thought") return "sparkles";
     if (category === "message") return "sparkles";
+    if (category === "gate") return "shield";
     if (category === "agent") return "plug";
     if (category === "write") return "edit";
     if (category === "read") return "file";
@@ -1060,6 +1180,7 @@
   }
 
   function childActivityCategory(child: ActivityChild): ActivityCategory {
+    if (isGateActivity(child)) return "gate";
     if (child.kind === "diff") return "diff";
     if (child.kind !== "tool") return "message";
     const name = child.toolName.toLowerCase();
@@ -1081,6 +1202,10 @@
     return name === "bash" || name === "shell" || name === "powershell";
   }
 
+  function isGateActivity(child: ActivityChild): child is MessageTimelineItem & { kind: "system" } {
+    return child.kind === "system" && isVerifiedSkillGateItem(child);
+  }
+
   function activityActionSelected(activityId: string, child: ActivityChild): boolean {
     return activityChildSelected(activityId, child.id);
   }
@@ -1090,12 +1215,14 @@
   }
 
   function childFailed(child: ActivityChild): boolean {
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).state === "error";
     if (child.kind === "assistant" || child.kind === "command") return false;
     const status = (child.status ?? "").toLowerCase();
     return status.includes("err") || status.includes("fail");
   }
 
   function activityStatus(child: ActivityChild): string {
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).state === "error" ? "failed" : "done";
     if (child.kind === "assistant" || child.kind === "command") return "done";
     const status = (child.status ?? "").toLowerCase();
     if (status.includes("run") || status === "pending") return "running";
@@ -1217,12 +1344,16 @@
     name: string,
     input: Record<string, unknown> | null
   ): { server: string; tool: string } | null {
+    const match = /^mcp__(.*?)__(.*)$/.exec(name);
+    if (match) return { server: match[1] || "mcp", tool: match[2] || "tool" };
     const server = inputString(input, ["server"]);
     const tool = inputString(input, ["tool"]);
-    if (server || tool) return { server: server ?? "mcp", tool: tool ?? "tool" };
-    const match = /^mcp__(.*?)__(.*)$/.exec(name);
-    if (!match) return null;
-    return { server: match[1] || "mcp", tool: match[2] || "tool" };
+    if (server) return { server, tool: tool ?? "tool" };
+    const compactName = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (tool && (compactName === "mcp" || compactName === "mcptoolcall")) {
+      return { server: "mcp", tool };
+    }
+    return null;
   }
 
   function mcpActivityName(name: string, input: Record<string, unknown> | null): string | null {
@@ -1455,6 +1586,7 @@
 
   function activityActionName(child: ActivityChild): string {
     if (child.kind === "diff") return "Diff";
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).label;
     if (child.kind !== "tool") return "Message";
     const input = parseInputObject(child);
     const fileChange = fileChangeDisplay(child);
@@ -1504,6 +1636,7 @@
 
   function activityActionArg(child: ActivityChild): string {
     if (child.kind === "diff") return child.diff.title;
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).detail;
     if (child.kind !== "tool") {
       const compact = child.body.replace(/\s+/g, " ").trim();
       return compact.length > 96 ? `${compact.slice(0, 95)}...` : compact || "Assistant message";
@@ -1552,6 +1685,8 @@
     if (searchCount > 0) parts.push(searchCount === 1 ? "Searched" : `Searched ${searchCount} times`);
     const diffCount = counts.get("diff") ?? 0;
     if (diffCount > 0) parts.push(`Updated ${plural(diffCount, "diff", "diffs")}`);
+    const gateCount = counts.get("gate") ?? 0;
+    if (gateCount > 0) parts.push(gateCount === 1 ? "Checked 1 gate" : `Checked ${gateCount} gates`);
     const messageCount = counts.get("message") ?? 0;
     if (messageCount > 0) parts.push(messageCount === 1 ? "Intermediate message" : `${messageCount} intermediate messages`);
     const agentCount = counts.get("agent") ?? 0;
@@ -1708,6 +1843,19 @@
                                     />
                                   {:else if selected.child.kind === "diff"}
                                     <DiffCard item={selected.child as DiffTimelineItem} defaultCollapsed={false} />
+                                  {:else if isGateActivity(selected.child)}
+                                    <div class="gate-detail-panel pf-msg-text">
+                                      {#each gateDetailRows(selected.child) as row (row.label)}
+                                        <div class="gate-detail-row">
+                                          <span class="gate-detail-label">{row.label}</span>
+                                          {#if row.code}
+                                            <code class="gate-detail-value">{row.value}</code>
+                                          {:else}
+                                            <span class="gate-detail-value">{row.value}</span>
+                                          {/if}
+                                        </div>
+                                      {/each}
+                                    </div>
                                   {:else}
                                     <div class="activity-message pf-msg-text">
                                       <MessageBody body={(selected.child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
@@ -1727,6 +1875,19 @@
                             />
                           {:else if child.kind === "diff"}
                             <DiffCard item={child as DiffTimelineItem} />
+                          {:else if isGateActivity(child)}
+                            <div class="gate-detail-panel pf-msg-text">
+                              {#each gateDetailRows(child) as row (row.label)}
+                                <div class="gate-detail-row">
+                                  <span class="gate-detail-label">{row.label}</span>
+                                  {#if row.code}
+                                    <code class="gate-detail-value">{row.value}</code>
+                                  {:else}
+                                    <span class="gate-detail-value">{row.value}</span>
+                                  {/if}
+                                </div>
+                              {/each}
+                            </div>
                           {:else}
                             <div class="activity-message pf-msg-text">
                               <MessageBody body={(child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
@@ -2139,6 +2300,44 @@
   }
   .activity-panel :global(.pf-tool-body) {
     max-height: 360px;
+  }
+  .gate-detail-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in oklab, oklch(0.7 0.18 145) 24%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, oklch(0.7 0.18 145) 6%, var(--background));
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: var(--pf-chat-detail-size);
+    line-height: 1.5;
+  }
+  .gate-detail-row {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(112px, 0.24fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+  }
+  .gate-detail-label {
+    color: var(--muted-foreground);
+    font-size: var(--pf-chat-meta-size);
+    font-weight: 650;
+  }
+  .gate-detail-value {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  code.gate-detail-value {
+    display: inline;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: color-mix(in oklab, var(--muted) 38%, var(--background));
+    font-family: var(--font-mono);
+    font-size: 0.92em;
   }
   .typing {
     display: flex;

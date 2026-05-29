@@ -1,15 +1,15 @@
 //! Agent-facing browser actions layered over the managed Chrome sessions.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::thread;
 use std::time::Duration;
 
 use crate::events::EventEmitter;
 
 use super::params::{optional_u32, required_string};
-use super::tabs::{backend_session_id, BrowserTabInfo, BrowserTabsState};
+use super::tabs::{BrowserTabInfo, BrowserTabsState, backend_session_id};
 use super::{
     BrowserHistoryDirection, BrowserInputEvent, BrowserRegistry, DEFAULT_URL, INITIAL_HEIGHT,
     INITIAL_WIDTH,
@@ -126,6 +126,27 @@ pub(crate) fn handle_browser_agent(
             browsers.history(&backend_id, direction)?;
             Ok(json!({ "ok": true }))
         }
+        "waitNetworkIdle" => {
+            let (_, backend_id) = ensure_target_tab(
+                browsers,
+                events.clone(),
+                &root_session_id,
+                params,
+                width,
+                height,
+            )?;
+            browsers.arm_agent_recording(&backend_id);
+            let idle_ms = optional_u32(params, "idleMs")
+                .unwrap_or(500)
+                .clamp(1, 10_000) as u64;
+            let timeout_ms = optional_u32(params, "timeoutMs")
+                .unwrap_or(30_000)
+                .clamp(1, 120_000) as u64;
+            browsers
+                .get(&backend_id)?
+                .wait_network_idle(idle_ms, timeout_ms)?;
+            Ok(json!({ "ok": true, "idleMs": idle_ms, "timeoutMs": timeout_ms }))
+        }
         "snapshot" => {
             let (_, backend_id) = ensure_target_tab(
                 browsers,
@@ -137,6 +158,23 @@ pub(crate) fn handle_browser_agent(
             )?;
             browsers.arm_agent_recording(&backend_id);
             browsers.agent_snapshot(&backend_id)
+        }
+        "domInspect" => {
+            let (_, backend_id) = ensure_target_tab(
+                browsers,
+                events.clone(),
+                &root_session_id,
+                params,
+                width,
+                height,
+            )?;
+            browsers.arm_agent_recording(&backend_id);
+            let query = required_string(params, "query")?;
+            let value = browsers
+                .get(&backend_id)?
+                .evaluate(dom_inspect_expression(&query)?)?
+                .value;
+            Ok(json!({ "query": query, "matches": value }))
         }
         "click" => {
             let (_, backend_id) = ensure_target_tab(
@@ -283,11 +321,7 @@ fn resolve_open_target_tab_id(
     if let Some(tab) = active_or_first(&browsers.list_tabs(root_session_id)) {
         return tab.tab_id;
     }
-    browsers
-        .tabs
-        .lock()
-        .unwrap()
-        .next_tab_id(root_session_id)
+    browsers.tabs.lock().unwrap().next_tab_id(root_session_id)
 }
 
 impl BrowserRegistry {
@@ -386,7 +420,7 @@ fn ensure_target_tab(
     width: u32,
     height: u32,
 ) -> Result<(String, String)> {
-    if let Some(tab_id) = optional_string(params, "tabId") {
+    if let Some(tab_id) = optional_string(params, "tabId").or_else(|| page_tab_id(params)) {
         let backend_id = backend_session_id(root_session_id, &tab_id);
         ensure_backend_session(
             browsers,
@@ -424,6 +458,17 @@ fn ensure_target_tab(
     )?;
     publish_tabs(browsers, &events, root_session_id);
     Ok((tab.tab_id, tab.backend_session_id))
+}
+
+fn page_tab_id(params: &Value) -> Option<String> {
+    match params.get("page")? {
+        Value::String(tab_id) => non_empty(tab_id),
+        Value::Object(page) => page
+            .get("tabId")
+            .and_then(Value::as_str)
+            .and_then(non_empty),
+        _ => None,
+    }
 }
 
 fn ensure_backend_session(
@@ -474,12 +519,12 @@ fn publish_tabs(browsers: &BrowserRegistry, events: &EventEmitter, root_session_
 }
 
 fn optional_string(params: &Value, key: &str) -> Option<String> {
-    params
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+    params.get(key).and_then(Value::as_str).and_then(non_empty)
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn snapshot_expression() -> &'static str {
@@ -551,6 +596,48 @@ fn fill_expression(x: f64, y: f64, text: &str) -> Result<String> {
     throw new Error('Target is not editable');
   }}
   return true;
+}})()"#
+    ))
+}
+
+fn dom_inspect_expression(query: &str) -> Result<String> {
+    let query = serde_json::to_string(query)?;
+    Ok(format!(
+        r#"(() => {{
+  const query = {query};
+  let nodes;
+  try {{
+    nodes = Array.from(document.querySelectorAll(query));
+  }} catch (error) {{
+    throw new Error(`Invalid selector ${{query}}: ${{error && error.message ? error.message : error}}`);
+  }}
+  const selectorFor = (el) => {{
+    if (el.id) return `#${{CSS.escape(el.id)}}`;
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {{
+      let part = current.tagName.toLowerCase();
+      const parent = current.parentElement;
+      if (!parent) break;
+      const siblings = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
+      if (siblings.length > 1) part += `:nth-of-type(${{siblings.indexOf(current) + 1}})`;
+      parts.unshift(part);
+      current = parent;
+    }}
+    return parts.length ? parts.join(' > ') : el.tagName.toLowerCase();
+  }};
+  const textFor = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  return nodes.slice(0, 100).map((el) => {{
+    const rect = el.getBoundingClientRect();
+    return {{
+      selector: selectorFor(el),
+      tag: el.tagName.toLowerCase(),
+      text: textFor(el).slice(0, 240),
+      visible: rect.width > 0 && rect.height > 0,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    }};
+  }});
 }})()"#
     ))
 }

@@ -1,0 +1,37 @@
+id: VisionAnalyze
+name: VisionAnalyze
+description: |-
+  Analyze a local image through Puffer's configured OpenAI vision backend and
+  return a concise text report.
+
+  Use this for verified Lambda Skill contracts that bind a screenshot/image
+  path and a concrete question. The tool reads the image bytes locally and
+  sends them as a base64 data URL in a Responses API input_image item.
+handler: runtime:workflow:vision_analyze
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    image:
+      type: string
+      description: Absolute image path, or workspace-relative image path.
+    question:
+      type: string
+      description: Concrete question to answer from the image.
+    detail:
+      type: string
+      description: "Vision detail level: auto, low, or high."
+  required:
+    - image
+    - question
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: true
+  may_write_files: false
+  may_access_network: true
+display:
+  group: media
+  title: VisionAnalyze
+  show_in_status: true

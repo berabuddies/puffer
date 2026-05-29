@@ -141,6 +141,7 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
         input: "{\"path\":\"src/main.rs\"}".to_string(),
         output: "fn main() {}".to_string(),
         success: true,
+        metadata: serde_json::Value::Null,
         terminate: false,
     };
     sender

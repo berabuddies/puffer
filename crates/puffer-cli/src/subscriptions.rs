@@ -3,22 +3,49 @@
 //!
 //! The subscription manager owns the in-process event bus, the spec
 //! store on disk, the supervised subscriber children, and the router
-//! task. Workflow tools and internal tools (`SubscriptionCreate`, `Telegram`, …)
+//! task. Workflow tools and internal tools (`SubscriptionCreate`, `Telegram`, ...)
 //! reach into it through a `OnceLock` installed here.
+
+#[path = "lark_connector_actions.rs"]
+mod lark_connector_actions;
+#[path = "slack_connector_actions.rs"]
+mod slack_connector_actions;
+#[path = "telegram_connector_actions.rs"]
+mod telegram_connector_actions;
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::install_subscription_manager;
 use puffer_provider_registry::{AuthStore, StoredCredential};
-use puffer_subscriber_runtime::{Manifest, SubscriberCommand};
+use puffer_subscriber_runtime::{Manifest, SendMediaAttachment, SendMediaKind, SubscriberCommand};
 use puffer_subscriptions::{
-    install_outbound, ClassifyDecision, Outbound, RemoteClassifier, SubscriptionManager,
-    SubscriptionManagerBuilder,
+    connection_subscriber_manifest, direct_subscriber_manifest, find_subscriber_manifest,
+    install_connector_action_executor, install_outbound, ClassifyDecision, ConnectionRecord,
+    ConnectorActionExecutor, ConnectorActionRequest, ConnectorTemplate, Outbound, RemoteClassifier,
+    SubscriberManifestRoots, SubscriptionManager, SubscriptionManagerBuilder,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
+use std::thread;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+
+use self::lark_connector_actions::{
+    is_lark_action, is_lark_connector, run_lark_action, LarkConnectionAuthChecker,
+};
+use self::slack_connector_actions::{
+    is_slack_action, is_slack_connector, run_slack_action, SlackConnectionAuthChecker,
+};
+use self::telegram_connector_actions::{
+    is_telegram_action, is_telegram_connector, telegram_action_via_subscriber,
+    telegram_subscriber_for_action, telegram_subscriber_for_platform,
+    TelegramConnectionAuthChecker,
+};
+#[cfg(test)]
+use self::telegram_connector_actions::{telegram_subscriber_id, validate_telegram_connection_slug};
+
+const SUBSCRIBER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Owned wrapper around the dedicated Tokio runtime used by the
 /// subscription manager and its supervised subscribers. Dropping it
@@ -26,6 +53,8 @@ use tokio::runtime::Runtime;
 pub(crate) struct SubscriptionRuntime {
     runtime: Option<Runtime>,
     manager: Arc<SubscriptionManager>,
+    auth_stop: Arc<AtomicBool>,
+    auth_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl SubscriptionRuntime {
@@ -44,6 +73,10 @@ impl SubscriptionRuntime {
         let Some(runtime) = self.runtime.take() else {
             return;
         };
+        self.auth_stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.auth_thread.take() {
+            let _ = thread.join();
+        }
         shutdown_manager(&self.manager);
         runtime.shutdown_background();
     }
@@ -81,6 +114,9 @@ pub(crate) fn install(
     if let Some(classifier) = build_anthropic_classifier(auth_store, anthropic_base_url) {
         builder = builder.with_classifier(classifier);
     }
+    builder = builder.with_connection_auth_checker(Arc::new(BuiltinConnectionAuthChecker {
+        paths: paths.clone(),
+    }));
     let manager = Arc::new(
         builder
             .build(handle)
@@ -93,13 +129,79 @@ pub(crate) fn install(
         manager: Arc::downgrade(&manager),
     }))
     .context("failed to install subscription outbound")?;
+    install_connector_action_executor(Arc::new(ManagerConnectorActionExecutor {
+        manager: Arc::downgrade(&manager),
+        paths: paths.clone(),
+    }))
+    .context("failed to install connector action executor")?;
 
     autostart_subscribers(&manager, paths);
+    let auth_stop = Arc::new(AtomicBool::new(false));
+    let auth_thread = spawn_auth_monitor(manager.clone(), paths.clone(), auth_stop.clone())?;
 
     Ok(SubscriptionRuntime {
         runtime: Some(runtime),
         manager,
+        auth_stop,
+        auth_thread: Some(auth_thread),
     })
+}
+
+fn spawn_auth_monitor(
+    manager: Arc<SubscriptionManager>,
+    paths: ConfigPaths,
+    stop: Arc<AtomicBool>,
+) -> Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("puffer-connection-auth".to_string())
+        .spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Err(error) = run_auth_monitor_tick(&manager, &paths) {
+                    eprintln!("connection auth check failed: {error:#}");
+                }
+                for _ in 0..60 {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+        })
+        .context("failed to start connection auth monitor")
+}
+
+fn run_auth_monitor_tick(manager: &SubscriptionManager, paths: &ConfigPaths) -> Result<()> {
+    manager.refresh_connection_consumers()?;
+    ensure_auth_checkable_subscribers(manager, paths);
+    let notices = manager.refresh_connection_auth()?;
+    manager.refresh_connection_consumers()?;
+    for connection in notices {
+        eprintln!(
+            "connection `{}` ({}) auth is no longer functioning; run `/connect {} {}` to repair it",
+            connection.slug, connection.connector_slug, connection.connector_slug, connection.slug
+        );
+    }
+    Ok(())
+}
+
+fn ensure_auth_checkable_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {
+    for connection in manager.connection_store().list() {
+        if !connection.has_consumer {
+            continue;
+        }
+        let Some(template) = manager.connector_store().get(&connection.connector_slug) else {
+            continue;
+        };
+        if template.subscriber.is_none() {
+            continue;
+        }
+        if let Err(error) = start_connection_subscriber(manager, paths, &connection, &template) {
+            eprintln!(
+                "subscription: failed to start auth probe subscriber for `{}`: {error:#}",
+                connection.slug
+            );
+        }
+    }
 }
 
 fn shutdown_manager(manager: &Arc<SubscriptionManager>) {
@@ -125,7 +227,7 @@ const DEFAULT_CLASSIFY_MODEL: &str = "claude-haiku-4-5";
 
 /// Returns a classifier backed by Anthropic's `/v1/messages` endpoint
 /// using the API key already in the auth store. Returns `None` when no
-/// Anthropic API key is stored — the manager then falls back to the
+/// Anthropic API key is stored - the manager then falls back to the
 /// default `NullClassifier`, and subscriptions with `classify_prompt`
 /// will simply pass every event.
 fn build_anthropic_classifier(
@@ -211,9 +313,9 @@ fn decision_from_anthropic(parsed: &serde_json::Value) -> ClassifyDecision {
 /// into [`SubscriberCommand::SendMessage`] commands routed through the
 /// subscriber that owns the platform.
 ///
-/// Today this is a fixed mapping: `"telegram"` -> `"telegram-user"`. The
-/// table is intentionally tiny — adding a new platform means adding one
-/// entry plus a subscriber that handles `SendMessage`.
+/// The compatibility outbound path is still platform based; connector
+/// actions below use connection slugs when the caller needs a specific
+/// authorized account.
 struct ManagerOutbound {
     manager: Weak<SubscriptionManager>,
 }
@@ -227,26 +329,403 @@ impl Outbound for ManagerOutbound {
             .manager
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("subscription manager is no longer running"))?;
-        manager.send_command(
+        let command = SubscriberCommand::SendMessage {
+            peer: target.to_string(),
+            text: text.to_string(),
+            reply_to: None,
+            media: Vec::new(),
+        };
+        let event = manager.send_command_and_wait(
             subscriber_id,
-            &SubscriberCommand::SendMessage {
-                peer: target.to_string(),
-                text: text.to_string(),
-            },
+            subscriber_id,
+            &command,
+            &["send_complete", "send_error", "send_unsupported"],
+            SUBSCRIBER_ACTION_TIMEOUT,
         )?;
-        Ok(format!(
-            "queued send via {subscriber_id} -> {platform}:{target} ({} bytes)",
-            text.len()
-        ))
+        send_event_summary(&event, subscriber_id, platform, target, text.len(), 0)
     }
 }
 
+struct ManagerConnectorActionExecutor {
+    manager: Weak<SubscriptionManager>,
+    paths: ConfigPaths,
+}
+
+struct BuiltinConnectionAuthChecker {
+    paths: ConfigPaths,
+}
+
+impl puffer_subscriptions::ConnectionAuthChecker for BuiltinConnectionAuthChecker {
+    fn check(
+        &self,
+        manager: &SubscriptionManager,
+        template: &puffer_subscriptions::ConnectorTemplate,
+        connection_slug: &str,
+    ) -> Result<Option<bool>> {
+        if template.slug == crate::gmail_browser::CONNECTOR_SLUG {
+            let configured = crate::gmail_browser::load_config(&self.paths, connection_slug)?
+                .is_some_and(|config| config.is_configured());
+            return Ok(Some(configured));
+        }
+        let slack = SlackConnectionAuthChecker {
+            paths: self.paths.clone(),
+        }
+        .check(manager, template, connection_slug)?;
+        if slack.is_some() {
+            return Ok(slack);
+        }
+        let lark = LarkConnectionAuthChecker {
+            paths: self.paths.clone(),
+        }
+        .check(manager, template, connection_slug)?;
+        if lark.is_some() {
+            return Ok(lark);
+        }
+        TelegramConnectionAuthChecker.check(manager, template, connection_slug)
+    }
+}
+
+impl ConnectorActionExecutor for ManagerConnectorActionExecutor {
+    fn run_connector_action(
+        &self,
+        connector_slug: &str,
+        action: &str,
+        input: serde_json::Value,
+        trigger: serde_json::Value,
+    ) -> Result<String> {
+        let manager = self
+            .manager
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("subscription manager is no longer running"))?;
+        let template = manager
+            .connector_store()
+            .get(connector_slug)
+            .ok_or_else(|| anyhow::anyhow!("connector `{connector_slug}` not found"))?;
+        let action_definition = template.actions.get(action).ok_or_else(|| {
+            anyhow::anyhow!("connector `{connector_slug}` does not define action `{action}`")
+        })?;
+        let connection = input
+            .get("connection_slug")
+            .or_else(|| input.get("account_slug"))
+            .or_else(|| input.get("connection"))
+            .or_else(|| input.get("account"))
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| {
+                trigger
+                    .get("connection_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| connector_slug.to_string());
+        let request = ConnectorActionRequest {
+            connection: connection.clone(),
+            action: action.to_string(),
+            input: input.clone(),
+            idempotency_key: trigger
+                .get("envelope_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string),
+        };
+        if let Some(response) = manager.run_connector_action(&template, &request)? {
+            if response.success {
+                return Ok(format!(
+                    "{} [{}]",
+                    response.summary, action_definition.permission.category
+                ));
+            }
+            anyhow::bail!(
+                "{} [{}; retryable={}]",
+                response.summary,
+                action_definition.permission.category,
+                response.retryable
+            );
+        }
+        if is_slack_connector(connector_slug) && is_slack_action(action) {
+            let summary = run_slack_action(&self.paths, &connection, action, &input)?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
+        }
+        if is_lark_connector(connector_slug) && is_lark_action(action) {
+            let summary = run_lark_action(&self.paths, &connection, action, &input)?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
+        }
+        if action == "send_message" {
+            let summary = send_message_via_subscriber(
+                &manager,
+                &self.paths,
+                connector_slug,
+                &connection,
+                &input,
+            )?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
+        }
+        if is_telegram_connector(connector_slug) && is_telegram_action(action) {
+            let summary = telegram_action_via_subscriber(
+                &manager,
+                &self.paths,
+                connector_slug,
+                &connection,
+                action,
+                &input,
+            )?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
+        }
+        anyhow::bail!("connector `{connector_slug}` has no `act` command for action `{action}`")
+    }
+}
+
+fn send_message_via_subscriber(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connector_slug: &str,
+    connection_slug: &str,
+    input: &serde_json::Value,
+) -> Result<String> {
+    let target = input
+        .get("to")
+        .or_else(|| input.get("target"))
+        .or_else(|| input.get("channel"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let text = input
+        .get("message")
+        .or_else(|| input.get("text"))
+        .or_else(|| input.get("caption"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let media = parse_media_attachments(input)?;
+    if target.trim().is_empty() || (text.trim().is_empty() && media.is_empty()) {
+        anyhow::bail!("send_message requires `to`/`channel` and `message`, `caption`, or `media`");
+    }
+    let reply_to = parse_reply_to(input)?;
+    let subscriber_id = subscriber_for_action(manager, paths, connector_slug, connection_slug)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no subscriber is configured for connector `{connector_slug}`")
+        })?;
+    let command = SubscriberCommand::SendMessage {
+        peer: target.to_string(),
+        text: text.to_string(),
+        reply_to,
+        media: media.clone(),
+    };
+    let event = manager.send_command_and_wait(
+        &subscriber_id,
+        &subscriber_id,
+        &command,
+        &["send_complete", "send_error", "send_unsupported"],
+        SUBSCRIBER_ACTION_TIMEOUT,
+    )?;
+    send_event_summary(
+        &event,
+        &subscriber_id,
+        connector_slug,
+        target,
+        text.len(),
+        media.len(),
+    )
+}
+
+fn send_event_summary(
+    event: &puffer_subscriber_runtime::EventEnvelope,
+    subscriber_id: &str,
+    connector_slug: &str,
+    target: &str,
+    bytes: usize,
+    media_count: usize,
+) -> Result<String> {
+    match event.event.kind.as_str() {
+        "send_complete" => Ok(format!(
+            "sent via {subscriber_id} -> {connector_slug}:{target} ({bytes} bytes, {media_count} media)"
+        )),
+        "send_error" | "send_unsupported" => {
+            anyhow::bail!("send via {subscriber_id} failed: {}", event_error(event))
+        }
+        other => anyhow::bail!("send via {subscriber_id} returned unexpected event `{other}`"),
+    }
+}
+
+fn event_error(event: &puffer_subscriber_runtime::EventEnvelope) -> String {
+    event
+        .event
+        .payload
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| {
+            if event.event.text.trim().is_empty() {
+                "unknown error"
+            } else {
+                event.event.text.as_str()
+            }
+        })
+        .to_string()
+}
+
+fn parse_media_attachments(input: &serde_json::Value) -> Result<Vec<SendMediaAttachment>> {
+    let mut media = Vec::new();
+    for key in ["media", "attachments", "files"] {
+        if let Some(value) = input.get(key) {
+            parse_media_value(value, &mut media)?;
+        }
+    }
+    for key in ["file", "path"] {
+        if let Some(value) = input.get(key) {
+            parse_media_value(value, &mut media)?;
+        }
+    }
+    Ok(media)
+}
+
+fn parse_media_value(
+    value: &serde_json::Value,
+    media: &mut Vec<SendMediaAttachment>,
+) -> Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    if let Some(items) = value.as_array() {
+        for item in items {
+            media.push(parse_media_attachment(item)?);
+        }
+        return Ok(());
+    }
+    media.push(parse_media_attachment(value)?);
+    Ok(())
+}
+
+fn parse_media_attachment(value: &serde_json::Value) -> Result<SendMediaAttachment> {
+    if let Some(path) = value.as_str() {
+        return Ok(SendMediaAttachment {
+            path: path.to_string(),
+            ..SendMediaAttachment::default()
+        });
+    }
+    let Some(object) = value.as_object() else {
+        anyhow::bail!("media attachment must be a string path/URL or object");
+    };
+    let path = object
+        .get("path")
+        .or_else(|| object.get("file"))
+        .or_else(|| object.get("url"))
+        .or_else(|| object.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if path.trim().is_empty() {
+        anyhow::bail!("media attachment object requires `path`, `file`, or `url`");
+    }
+    let caption = object
+        .get("caption")
+        .or_else(|| object.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let kind = object
+        .get("kind")
+        .or_else(|| object.get("type"))
+        .or_else(|| object.get("media_type"))
+        .and_then(serde_json::Value::as_str)
+        .map(parse_media_kind)
+        .transpose()?;
+    let mime_type = object
+        .get("mime_type")
+        .or_else(|| object.get("mime"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let thumbnail = object
+        .get("thumbnail")
+        .or_else(|| object.get("thumb"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    Ok(SendMediaAttachment {
+        path: path.to_string(),
+        caption,
+        kind,
+        mime_type,
+        thumbnail,
+    })
+}
+
+fn parse_media_kind(kind: &str) -> Result<SendMediaKind> {
+    match kind.trim().to_lowercase().as_str() {
+        "" | "auto" => Ok(SendMediaKind::Auto),
+        "photo" | "image" => Ok(SendMediaKind::Photo),
+        "document" | "doc" => Ok(SendMediaKind::Document),
+        "file" => Ok(SendMediaKind::File),
+        "audio" | "voice" | "video" | "media" => Ok(SendMediaKind::Document),
+        other => anyhow::bail!("unsupported media kind `{other}`"),
+    }
+}
+
+fn parse_reply_to(input: &serde_json::Value) -> Result<Option<i32>> {
+    let Some(value) = input
+        .get("reply_to")
+        .or_else(|| input.get("reply_to_message_id"))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(id) = value.as_i64() {
+        return i32::try_from(id)
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("reply_to message id is outside i32 range"));
+    }
+    if let Some(id) = value.as_str() {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        return trimmed
+            .parse::<i32>()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("reply_to must be a Telegram message id"));
+    }
+    if let Some(id) = value
+        .get("message_id")
+        .or_else(|| value.get("id"))
+        .and_then(serde_json::Value::as_i64)
+    {
+        return i32::try_from(id)
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("reply_to message id is outside i32 range"));
+    }
+    anyhow::bail!("reply_to must be a message id or object with `message_id`")
+}
+
 fn subscriber_for_platform(platform: &str) -> Option<&'static str> {
+    if let Some(subscriber) = telegram_subscriber_for_platform(platform) {
+        return Some(subscriber);
+    }
     match platform {
-        "telegram" | "telegram-user" => Some("telegram-user"),
         "email" => Some("email"),
         _ => None,
     }
+}
+
+fn subscriber_for_action(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connector_slug: &str,
+    connection_slug: &str,
+) -> Result<Option<String>> {
+    if let Some(subscriber_id) =
+        telegram_subscriber_for_action(manager, paths, connector_slug, connection_slug)?
+    {
+        return Ok(Some(subscriber_id));
+    }
+    Ok(subscriber_for_platform(connector_slug).map(ToString::to_string))
 }
 
 fn subscriptions_path(paths: &ConfigPaths) -> PathBuf {
@@ -254,92 +733,131 @@ fn subscriptions_path(paths: &ConfigPaths) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::panic;
-
-    fn test_subscription_runtime() -> SubscriptionRuntime {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("puffer-subscriptions-test")
-            .build()
-            .expect("subscription runtime");
-        let manager = Arc::new(
-            SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
-                .build(runtime.handle().clone())
-                .expect("subscription manager"),
-        );
-        SubscriptionRuntime {
-            runtime: Some(runtime),
-            manager,
-        }
-    }
-
-    #[test]
-    fn subscription_runtime_can_drop_inside_tokio_context() {
-        let outer = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("outer runtime");
-        let runtime = test_subscription_runtime();
-        let result = panic::catch_unwind(|| {
-            outer.block_on(async { drop(runtime) });
-        });
-        assert!(
-            result.is_ok(),
-            "dropping SubscriptionRuntime inside Tokio must not panic"
-        );
-    }
-}
+#[path = "subscriptions_tests.rs"]
+mod tests;
 
 fn autostart_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {
-    let mut needed: Vec<String> = match manager.store().list() {
-        list => list.into_iter().map(|spec| spec.source_topic).collect(),
-    };
-    needed.sort();
-    needed.dedup();
-    for topic in needed {
-        match find_subscriber_manifest(paths, &topic) {
-            Some(dir) => match Manifest::load(&dir) {
-                Ok(manifest) => {
-                    if let Err(error) = manager.start_subscriber(manifest) {
-                        eprintln!("subscription: failed to start subscriber `{topic}`: {error:#}");
-                    }
+    for topic in autostart_topics(manager, paths) {
+        match autostart_manifest(manager, paths, &topic) {
+            Ok(Some(manifest)) => {
+                if let Err(error) = manager.start_subscriber(manifest) {
+                    eprintln!("subscription: failed to start subscriber `{topic}`: {error:#}");
                 }
-                Err(error) => {
-                    eprintln!("subscription: invalid manifest for `{topic}`: {error}");
-                }
-            },
-            None => {
+            }
+            Ok(None) => {
                 eprintln!(
                     "subscription: no manifest installed for source `{topic}` referenced by an existing subscription; events will not flow until one is added"
                 );
+            }
+            Err(error) => {
+                eprintln!("subscription: invalid manifest for `{topic}`: {error}");
             }
         }
     }
 }
 
-fn find_subscriber_manifest(paths: &ConfigPaths, topic: &str) -> Option<PathBuf> {
-    let workspace = paths.workspace_config_dir.join("subscribers").join(topic);
-    if workspace.join("manifest.toml").exists() {
-        return Some(workspace);
+fn autostart_manifest(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    topic: &str,
+) -> Result<Option<Manifest>> {
+    if let Some(connection) = manager.connection_store().get(topic) {
+        if let Some(template) = manager.connector_store().get(&connection.connector_slug) {
+            return connection_subscriber_manifest(
+                &subscriber_manifest_roots(paths),
+                &connection,
+                &template,
+            );
+        }
     }
-    let user = paths.user_config_dir.join("subscribers").join(topic);
-    if user.join("manifest.toml").exists() {
-        return Some(user);
-    }
-    let bundled = bundled_resources_root().join("subscribers").join(topic);
-    if bundled.join("manifest.toml").exists() {
-        return Some(bundled);
-    }
-    None
+    direct_subscriber_manifest(&subscriber_manifest_roots(paths), topic)
 }
 
-fn bundled_resources_root() -> PathBuf {
-    if let Some(env) = std::env::var_os("PUFFER_RESOURCES_DIR") {
-        return PathBuf::from(env);
+fn autostart_topics(manager: &SubscriptionManager, paths: &ConfigPaths) -> Vec<String> {
+    let mut needed = std::collections::BTreeSet::new();
+    for binding in manager.store().list() {
+        if binding.status != puffer_subscriptions::WorkflowBindingStatus::Enabled {
+            continue;
+        }
+        needed.insert(resolve_autostart_topic(
+            manager,
+            paths,
+            &binding.connection_slug,
+            binding.connector_slug.as_deref(),
+        ));
     }
-    PathBuf::from("resources")
+    for binding in manager.proxy_store().list() {
+        if !binding.enabled {
+            continue;
+        }
+        let connector_slug = manager
+            .connection_store()
+            .get(&binding.connection_slug)
+            .map(|connection| connection.connector_slug);
+        needed.insert(resolve_autostart_topic(
+            manager,
+            paths,
+            &binding.connection_slug,
+            connector_slug.as_deref(),
+        ));
+    }
+    needed.into_iter().collect()
+}
+
+fn resolve_autostart_topic(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connection_slug: &str,
+    connector_slug: Option<&str>,
+) -> String {
+    if find_subscriber_manifest(&subscriber_manifest_roots(paths), connection_slug).is_some()
+        || connection_has_instantiated_subscriber(manager, paths, connection_slug)
+    {
+        return connection_slug.to_string();
+    }
+    if let Some(connector_slug) = connector_slug {
+        if find_subscriber_manifest(&subscriber_manifest_roots(paths), connector_slug).is_some() {
+            return connector_slug.to_string();
+        }
+    }
+    connection_slug.to_string()
+}
+
+fn connection_has_instantiated_subscriber(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connection_slug: &str,
+) -> bool {
+    let Some(connection) = manager.connection_store().get(connection_slug) else {
+        return false;
+    };
+    let Some(template) = manager.connector_store().get(&connection.connector_slug) else {
+        return false;
+    };
+    let Some(subscriber) = &template.subscriber else {
+        return false;
+    };
+    find_subscriber_manifest(&subscriber_manifest_roots(paths), &subscriber.manifest_slug).is_some()
+}
+
+fn start_connection_subscriber(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connection: &ConnectionRecord,
+    template: &ConnectorTemplate,
+) -> Result<()> {
+    if let Some(manifest) =
+        connection_subscriber_manifest(&subscriber_manifest_roots(paths), connection, template)?
+    {
+        manager.start_subscriber(manifest)?;
+    }
+    Ok(())
+}
+
+fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
+    SubscriberManifestRoots::new(
+        paths.workspace_config_dir.clone(),
+        paths.user_config_dir.clone(),
+        paths.builtin_resources_dir.clone(),
+    )
 }

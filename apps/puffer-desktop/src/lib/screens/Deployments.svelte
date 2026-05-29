@@ -372,7 +372,6 @@
         >
           <div class="pf-modal-head">
             <div class="pf-modal-title-group">
-              <div class="pf-modal-eyebrow">Deployment</div>
               <div class="pf-modal-title">New deployment</div>
             </div>
             <button type="button" class="pf-modal-close" onclick={closeNewDeployment} aria-label="Close">
@@ -438,9 +437,6 @@
           </div>
 
           <div class="pf-modal-foot">
-            <div class="pf-modal-foot-hint">
-              Drafts stay local until provider deployment RPCs are connected.
-            </div>
             <div class="pf-modal-foot-btns">
               <button type="button" class="sc-btn" data-variant="ghost" onclick={closeNewDeployment}>
                 Cancel

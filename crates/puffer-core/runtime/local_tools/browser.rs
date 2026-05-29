@@ -97,12 +97,18 @@ struct BrowserToolInput {
     label: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    page: Option<Value>,
+    #[serde(default)]
+    query: Option<String>,
     #[serde(default, rename = "ref")]
     ref_id: Option<String>,
     #[serde(default)]
     value: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
     #[serde(default)]
     key: Option<String>,
     #[serde(default)]
@@ -117,6 +123,20 @@ struct BrowserToolInput {
     height: Option<u32>,
     #[serde(default)]
     activate: Option<bool>,
+    #[serde(default)]
+    clear: Option<bool>,
+    #[serde(default)]
+    files: Option<Vec<String>>,
+    #[serde(default)]
+    annotate: Option<bool>,
+    #[serde(default, rename = "screenshotFormat")]
+    screenshot_format: Option<String>,
+    #[serde(default, rename = "screenshotQuality")]
+    screenshot_quality: Option<u32>,
+    #[serde(default, rename = "idleMs")]
+    idle_ms: Option<u32>,
+    #[serde(default, rename = "timeoutMs")]
+    timeout_ms: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -307,7 +327,12 @@ fn browser_action_uses_explicit_url(payload: &Map<String, Value>) -> bool {
         .get("action")
         .and_then(Value::as_str)
         .map(normalize_browser_action)
-        .is_some_and(|action| matches!(action.as_str(), "open" | "new" | "navigate"))
+        .is_some_and(|action| {
+            matches!(
+                action.as_str(),
+                "open" | "new" | "navigate" | "openconsolelogs" | "openscreenshot"
+            )
+        })
 }
 
 fn browser_action_has_url(payload: &Map<String, Value>) -> bool {
@@ -405,9 +430,12 @@ mod tests {
                 tab_id: None,
                 label: None,
                 url: None,
+                page: None,
+                query: None,
                 ref_id: None,
                 value: None,
                 text: None,
+                question: None,
                 key: None,
                 script: None,
                 direction: None,
@@ -415,6 +443,13 @@ mod tests {
                 width: None,
                 height: None,
                 activate: None,
+                clear: None,
+                files: None,
+                annotate: None,
+                screenshot_format: None,
+                screenshot_quality: None,
+                idle_ms: None,
+                timeout_ms: None,
             };
             normalize_session_id(&mut params, &current);
             assert_eq!(params.session_id.as_deref(), Some(current_string.as_str()));
@@ -431,9 +466,12 @@ mod tests {
             tab_id: None,
             label: None,
             url: None,
+            page: None,
+            query: None,
             ref_id: None,
             value: None,
             text: None,
+            question: None,
             key: None,
             script: None,
             direction: None,
@@ -441,6 +479,13 @@ mod tests {
             width: None,
             height: None,
             activate: None,
+            clear: None,
+            files: None,
+            annotate: None,
+            screenshot_format: None,
+            screenshot_quality: None,
+            idle_ms: None,
+            timeout_ms: None,
         };
         normalize_session_id(&mut params, &current);
         assert_eq!(params.session_id.as_deref(), Some(explicit));
@@ -454,7 +499,17 @@ mod tests {
             "ref": "@e5",
             "value": "New York",
             "direction": "down",
-            "px": 480
+            "px": 480,
+            "page": {"tabId": "t2"},
+            "clear": true,
+            "files": ["/tmp/upload.txt"],
+            "annotate": true,
+            "screenshotFormat": "jpeg",
+            "screenshotQuality": 70,
+            "query": "button",
+            "question": "What changed visually?",
+            "idleMs": 500,
+            "timeoutMs": 30000
         }))
         .unwrap();
 
@@ -468,6 +523,60 @@ mod tests {
             Some("down")
         );
         assert_eq!(roundtrip.get("px").and_then(Value::as_u64), Some(480));
+        assert_eq!(
+            roundtrip
+                .get("page")
+                .and_then(|page| page.get("tabId"))
+                .and_then(Value::as_str),
+            Some("t2")
+        );
+        assert_eq!(roundtrip.get("clear").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            roundtrip
+                .get("files")
+                .and_then(Value::as_array)
+                .and_then(|files| files.first())
+                .and_then(Value::as_str),
+            Some("/tmp/upload.txt")
+        );
+        assert_eq!(
+            roundtrip.get("annotate").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            roundtrip.get("screenshotFormat").and_then(Value::as_str),
+            Some("jpeg")
+        );
+        assert_eq!(
+            roundtrip.get("screenshotQuality").and_then(Value::as_u64),
+            Some(70)
+        );
+        assert_eq!(
+            roundtrip.get("query").and_then(Value::as_str),
+            Some("button")
+        );
+        assert_eq!(
+            roundtrip.get("question").and_then(Value::as_str),
+            Some("What changed visually?")
+        );
+        assert_eq!(roundtrip.get("idleMs").and_then(Value::as_u64), Some(500));
+        assert_eq!(
+            roundtrip.get("timeoutMs").and_then(Value::as_u64),
+            Some(30000)
+        );
+    }
+
+    #[test]
+    fn composite_browser_actions_keep_explicit_url() {
+        for action in ["openConsoleLogs", "openScreenshot"] {
+            let payload = serde_json::json!({
+                "action": action,
+                "url": "https://example.com"
+            });
+            assert!(browser_action_uses_explicit_url(
+                payload.as_object().unwrap()
+            ));
+        }
     }
 
     #[test]

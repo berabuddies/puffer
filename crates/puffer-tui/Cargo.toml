@@ -26,6 +26,7 @@ puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
 puffer-session-store = { path = "../puffer-session-store" }
+puffer-subscriptions = { path = "../puffer-subscriptions" }
 puffer-tools = { path = "../puffer-tools" }
 puffer-transport-anthropic = { path = "../puffer-transport-anthropic" }
 

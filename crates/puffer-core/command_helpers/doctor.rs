@@ -1,4 +1,5 @@
 use super::emit_system;
+use super::lambda_doctor::{append_lambda_skill_section, lambda_skill_doctor_warnings};
 use crate::AppState;
 use anyhow::Result;
 use puffer_config::ConfigPaths;
@@ -350,6 +351,7 @@ fn append_resource_section(
             )?;
         }
     }
+    append_lambda_skill_section(text, resources)?;
     writeln!(text)?;
     Ok(())
 }
@@ -528,6 +530,15 @@ fn collect_doctor_warnings(
             detail: resources.diagnostics.first().cloned(),
         });
     }
+
+    warnings.extend(
+        lambda_skill_doctor_warnings(resources)
+            .into_iter()
+            .map(|warning| DoctorWarning {
+                summary: warning.summary,
+                detail: Some(warning.detail),
+            }),
+    );
 
     if git.root.is_none() {
         warnings.push(DoctorWarning {

@@ -1,0 +1,75 @@
+import { Meta, Canvas } from "@storybook/addon-docs/blocks";
+import * as ButtonStories from "./ButtonGallery.stories";
+
+<Meta title="Design/Buttons/Documentation" />
+
+# Buttons
+
+Puffer currently uses button styles as design primitives rather than a dedicated `Button.svelte` component.
+The shared baseline is the global `.sc-btn` class from `src/app.css`; feature-specific flows add narrower
+classes such as `.pf-send-btn`, `.pf-modal-close`, and `.pf-modal-seg-btn`.
+
+Use the gallery below as the visual contract for the current button system.
+
+<Canvas of={ButtonStories.Gallery} />
+
+## Shared Button
+
+Use `.sc-btn` for ordinary product actions across workspace, settings, deployments, tasks, and modal footers.
+
+```svelte
+<button type="button" class="sc-btn" data-variant="default">
+  Save
+</button>
+```
+
+Always set `type="button"` unless the control intentionally submits a form.
+
+## Variants
+
+| Variant | Use |
+| --- | --- |
+| `default` | Primary action in the current surface, such as create, save, or connect. |
+| `outline` | Secondary action that still needs visible affordance. |
+| `secondary` | Low-emphasis action on neutral surfaces. |
+| `ghost` | Quiet action in dense toolbars, modal footers, or rows. |
+| `destructive` | Irreversible or risky actions such as delete or reset. |
+
+```svelte
+<button type="button" class="sc-btn" data-variant="destructive">
+  Delete
+</button>
+```
+
+## Sizes
+
+| Size | Use |
+| --- | --- |
+| default | Normal form and page actions. |
+| `sm` | Dense toolbars and panel headers. |
+| `xs` | Compact inline actions. |
+| `icon-sm` | Icon-only actions. Requires an accessible label. |
+
+```svelte
+<button type="button" class="sc-btn" data-variant="outline" data-size="icon-sm" aria-label="Search">
+  <Icon name="search" />
+</button>
+```
+
+## Accessibility
+
+Icon-only buttons must include an `aria-label` or equivalent visible text.
+Disabled actions should use the native `disabled` attribute.
+Button labels should describe the action directly: use `Create project`, `Save`, `Refresh`, `Delete`, not vague labels like `OK`.
+
+## Specialized Buttons
+
+Use specialized classes only when the control belongs to a specific interaction pattern:
+
+| Class | Use |
+| --- | --- |
+| `.pf-send-btn` | Agent composer send and stop controls. |
+| `.pf-modal-close` | Modal close icon button. |
+| `.pf-modal-seg-btn` | Workspace modal segmented navigation. |
+
+If a specialized button appears in more than one unrelated product area, promote it into a shared component before adding more local CSS.

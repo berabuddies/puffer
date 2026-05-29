@@ -35,12 +35,13 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    default_effort_level, enter_plan_mode, execute_user_turn_streaming_with_permissions_and_cancel,
-    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
-    AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
+    command_surface, default_effort_level, dispatch_command, enter_plan_mode,
+    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
+    supported_effort_levels, with_user_question_prompt_handler, AppState,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
-    PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
-    UserQuestionPromptResponse,
+    PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
+    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -56,11 +57,10 @@ use puffer_transport_anthropic::{
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
     ANTHROPIC_MANUAL_REDIRECT_URL,
 };
-use puffer_workflow::WorkflowStore;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -80,6 +80,11 @@ use crate::auth_provider::{
 };
 use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
+use crate::daemon_lambda_skills::{
+    handle_list_lambda_skill_libraries, handle_remove_lambda_skill_library,
+    handle_save_lambda_skill_library, handle_set_lambda_skill_approval,
+    handle_set_lambda_skill_enabled,
+};
 use crate::daemon_pty::PtyRegistry;
 use crate::daemon_turn_routing::persist_explicit_turn_routing;
 use crate::daemon_ui_state::{
@@ -107,6 +112,7 @@ pub(crate) struct Handshake {
 }
 
 pub(crate) struct DaemonOptions {
+    pub host_guard: crate::daemon_singleton::DaemonHostGuard,
     pub bind: String,
     pub handshake_file: Option<String>,
     pub token: Option<String>,
@@ -126,31 +132,40 @@ pub(crate) fn run(options: DaemonOptions) -> Result<()> {
 }
 
 async fn run_async(options: DaemonOptions) -> Result<()> {
+    let DaemonOptions {
+        host_guard,
+        bind,
+        handshake_file,
+        token,
+        print_handshake,
+        no_browser,
+        system_prompt_1,
+        disable_auto_title,
+        yolo,
+    } = options;
+    let daemon_host_guard = host_guard;
     let cwd = std::env::current_dir()?;
     let paths = ConfigPaths::discover(&cwd);
     ensure_workspace_dirs(&paths)?;
 
-    let token = options
-        .token
-        .unwrap_or_else(|| load_or_generate_token(&paths));
+    let token = token.unwrap_or_else(|| load_or_generate_token(&paths));
 
     let state = DaemonState::load(
         cwd.clone(),
         paths.clone(),
         token.clone(),
-        options.no_browser,
-        options.disable_auto_title,
-        options.yolo,
+        no_browser,
+        disable_auto_title,
+        yolo,
     )?;
-    if let Some(prompt) = options
-        .system_prompt_1
+    if let Some(prompt) = system_prompt_1
         .as_deref()
         .map(str::trim)
         .filter(|prompt| !prompt.is_empty())
     {
         std::env::set_var("PUFFER_SYSTEM_PROMPT_1", prompt);
     }
-    if options.no_browser {
+    if no_browser {
         std::env::set_var("PUFFER_NO_BROWSER", "1");
     } else {
         std::env::remove_var("PUFFER_NO_BROWSER");
@@ -161,7 +176,7 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
-    let addr: SocketAddr = options.bind.parse().context("bind address")?;
+    let addr: SocketAddr = bind.parse().context("bind address")?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     let url = format!("ws://{bound}/ws");
@@ -174,8 +189,7 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
     };
 
     // Handshake file (machine-readable + surviving parent-process restart).
-    let handshake_path = options
-        .handshake_file
+    let handshake_path = handshake_file
         .clone()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| paths.user_config_dir.join("daemon.handshake"));
@@ -185,7 +199,7 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
     let handshake_json = serde_json::to_string(&handshake)?;
     std::fs::write(&handshake_path, &handshake_json)?;
 
-    if options.print_handshake {
+    if print_handshake {
         // One-line NDJSON so Tauri (or shell scripts) can `read` a line,
         // parse, and act. We continue to serve after printing.
         println!("{handshake_json}");
@@ -196,7 +210,9 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
         paths.workspace_root.display()
     );
 
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app).await;
+    drop(daemon_host_guard);
+    serve_result?;
     Ok(())
 }
 
@@ -260,6 +276,8 @@ pub(crate) struct DaemonState {
     pub(crate) fs_watches: Arc<FsWatchRegistry>,
     /// Chrome-backed browser sessions used by the desktop Browser tab.
     pub(crate) browsers: Arc<BrowserRegistry>,
+    /// Local model setup/status jobs used by the desktop MiniCPM card.
+    pub(crate) local_models: crate::daemon_local_model::LocalModelInstaller,
     disable_auto_title: bool,
     yolo: bool,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
@@ -302,6 +320,15 @@ struct TurnHandle {
     pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>>,
     pending_questions:
         Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>>,
+    progress: Arc<Mutex<TurnProgress>>,
+}
+
+#[derive(Default)]
+struct TurnProgress {
+    assistant_text: String,
+    tool_invocations: Vec<ToolInvocation>,
+    pending_tool_calls: Vec<ToolCallRequest>,
+    persisted_on_cancel: bool,
 }
 
 impl DaemonState {
@@ -314,6 +341,7 @@ impl DaemonState {
         yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
+        let browser_chrome_profile = config.browser.chrome_profile.clone();
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
         let ptys = Arc::new(PtyRegistry::new());
@@ -328,7 +356,12 @@ impl DaemonState {
             next_request_id: Arc::new(AtomicU64::new(0)),
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
-            browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
+            browsers: Arc::new(BrowserRegistry::new(
+                browser_profile_root,
+                !no_browser,
+                browser_chrome_profile,
+            )),
+            local_models: crate::daemon_local_model::LocalModelInstaller::new(),
             disable_auto_title,
             yolo,
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
@@ -417,6 +450,12 @@ impl DaemonState {
         }
         if discover_all {
             let _ = providers.discover_and_merge_all(&auth_store);
+        } else {
+            // Even on the fast path we apply the on-disk discovery cache
+            // — that's a synchronous file read, no network — so callers
+            // like `create_session` can resolve previously-discovered
+            // model names without paying for a fresh network round-trip.
+            let _stale = providers.apply_discovery_cache();
         }
         let session_store = SessionStore::from_paths(&self.paths)?;
         Ok(RuntimeInputs {
@@ -501,6 +540,39 @@ fn event_payload_with_actor(mut payload: Value, actor: &MessageActor) -> Value {
         map.insert("actor".to_string(), json!(actor));
     }
     payload
+}
+
+fn lambda_gate_stream_payload(turn_id: &str, invocation: &ToolInvocation) -> Option<Value> {
+    let lambda = invocation.metadata.get("lambda_skill")?;
+    let event = lambda.get("event").and_then(Value::as_str)?;
+    Some(json!({
+        "type": "lambda-gate",
+        "turnId": turn_id,
+        "callId": &invocation.call_id,
+        "toolId": &invocation.tool_id,
+        "gateEvent": event,
+        "hostTool": lambda.get("host_tool").and_then(Value::as_str),
+        "hostArgs": lambda.get("host_args").cloned(),
+        "concreteTool": lambda.get("concrete_tool").and_then(Value::as_str),
+        "concreteInput": lambda.get("concrete_input").cloned(),
+        "reason": lambda.get("reason").and_then(Value::as_str),
+        "retryTool": lambda.get("retry_tool").and_then(Value::as_str),
+        "recoverable": lambda.get("recoverable").and_then(Value::as_bool),
+        "registeredFacts": lambda.get("registered_facts").cloned(),
+    }))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LambdaGateStreamPhase {
+    BeforeToolInvocations,
+    AfterToolInvocations,
+}
+
+fn lambda_gate_stream_phase(payload: &Value) -> LambdaGateStreamPhase {
+    match payload.get("gateEvent").and_then(Value::as_str) {
+        Some("host_call_admitted") => LambdaGateStreamPhase::BeforeToolInvocations,
+        _ => LambdaGateStreamPhase::AfterToolInvocations,
+    }
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
@@ -729,12 +801,19 @@ async fn dispatch_request(
         }
 
         "list_grouped_sessions" => respond!(handle_list_grouped_sessions(&state)),
+        "list_grouped_sessions_page" => {
+            respond!(detached!(|s, p| handle_list_grouped_sessions_page(&s, &p)))
+        }
         "load_desktop_pins" => respond!(handle_load_desktop_pins(&state)),
         "set_desktop_pin" => respond!(handle_set_desktop_pin(&state, &params)),
         "load_file_tabs" => respond!(handle_load_file_tabs(&state, &params)),
         "save_file_tabs" => respond!(handle_save_file_tabs(&state, &params)),
         "load_session_detail" => respond!(handle_load_session_detail(&state, &params)),
         "rename_session" => respond!(handle_rename_session(&state, &params)),
+        "delete_session" => respond!(handle_delete_session(&state, &params)),
+        "set_session_tags" => respond!(handle_set_session_tags(&state, &params)),
+        "delete_project" => respond!(handle_delete_project(&state, &params)),
+        "set_project_tags" => respond!(handle_set_project_tags(&state, &params)),
         "refresh_repo_status" => respond!(handle_refresh_repo_status(&state, &params)),
         "load_settings_snapshot" => respond!(detached!(|s| handle_load_settings_snapshot(&s))),
         "login_with_api_key" => {
@@ -752,6 +831,21 @@ async fn dispatch_request(
         "logout_provider" => respond!(detached!(|s, p| handle_logout_provider(&s, &p))),
         "list_mcp_servers" => respond!(detached!(|s| handle_list_mcp_servers(&s))),
         "add_mcp_server" => respond!(detached!(|s, p| handle_add_mcp_server(&s, &p))),
+        "list_lambda_skill_libraries" => {
+            respond!(detached!(|s| handle_list_lambda_skill_libraries(&s)))
+        }
+        "save_lambda_skill_library" => {
+            respond!(detached!(|s, p| handle_save_lambda_skill_library(&s, &p)))
+        }
+        "remove_lambda_skill_library" => {
+            respond!(detached!(|s, p| handle_remove_lambda_skill_library(&s, &p)))
+        }
+        "set_lambda_skill_enabled" => {
+            respond!(detached!(|s, p| handle_set_lambda_skill_enabled(&s, &p)))
+        }
+        "set_lambda_skill_approval" => {
+            respond!(detached!(|s, p| handle_set_lambda_skill_approval(&s, &p)))
+        }
         "list_provider_models" => {
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
         }
@@ -819,9 +913,47 @@ async fn dispatch_request(
         "browser_agent" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_agent(&s, &p)
         })),
-        "workflow_list" => respond!(handle_workflow_list(&state)),
-        "workflow_runs_list" => respond!(handle_workflow_runs_list(&state, &params)),
-        "workflow_run_show" => respond!(handle_workflow_run_show(&state, &params)),
+        "local_model_status" => {
+            respond!(detached!(|s, p| handle_local_model_status(&s, &p)))
+        }
+        "install_local_model" => {
+            respond!(detached!(|s, p| handle_install_local_model(&s, &p)))
+        }
+        "workflow_list" => respond!(crate::daemon_workflows::handle_workflow_list(&state.paths)),
+        "workflow_save" => respond!(crate::daemon_workflows::handle_workflow_save(
+            &state.paths,
+            &params
+        )),
+        "workflow_binding_create" => respond!(
+            crate::daemon_workflows::handle_workflow_binding_create(&state.paths, &params)
+        ),
+        "monitor_create" | "task_monitor_create" => respond!(
+            crate::daemon_workflows::handle_monitor_create(&state.paths, &params)
+        ),
+        "monitor_task_ignore" | "task_monitor_ignore" => respond!(
+            crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
+        ),
+        "monitor_memory_save" | "task_monitor_memory_save" => respond!(
+            crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
+        ),
+        "workflow_binding_delete" => respond!(
+            crate::daemon_workflows::handle_workflow_binding_delete(&state.paths, &params)
+        ),
+        "workflow_connection_delete" => respond!(
+            crate::daemon_workflows::handle_workflow_connection_delete(&state.paths, &params)
+        ),
+        "workflow_toggle" => respond!(crate::daemon_workflows::handle_workflow_toggle(
+            &state.paths,
+            &params
+        )),
+        "workflow_runs_list" => respond!(crate::daemon_workflows::handle_workflow_runs_list(
+            &state.paths,
+            &params
+        )),
+        "workflow_run_show" => respond!(crate::daemon_workflows::handle_workflow_run_show(
+            &state.paths,
+            &params
+        )),
 
         "run_agent_turn" => {
             let tx_clone = tx.clone();
@@ -840,6 +972,31 @@ async fn dispatch_request(
                         result: None,
                         error: Some(RpcError {
                             code: "turn-start-error".to_string(),
+                            message: format!("{e:#}"),
+                        }),
+                    },
+                };
+                let _ = send_envelope(&tx_clone, &env).await;
+            });
+        }
+
+        "dispatch_slash_command" => {
+            let tx_clone = tx.clone();
+            let state_clone = state.clone();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                let result = start_slash_command_turn(state_clone, params).await;
+                let env = match result {
+                    Ok(v) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: Some(v),
+                        error: None,
+                    },
+                    Err(e) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "slash-dispatch-error".to_string(),
                             message: format!("{e:#}"),
                         }),
                     },
@@ -875,9 +1032,43 @@ async fn dispatch_request(
 
 fn handle_list_grouped_sessions(state: &DaemonState) -> Result<Value> {
     let session_store = SessionStore::from_paths(&state.paths)?;
-    let mut groups: Vec<FolderGroupDto> = desktop_api::list_grouped_sessions(&session_store)?;
+    let project_tags = project_tag_map(&state.paths);
+    let mut groups: Vec<FolderGroupDto> =
+        desktop_api::list_grouped_sessions(&session_store, &project_tags)?;
     apply_session_routing_to_groups(state, &mut groups)?;
     Ok(serde_json::to_value(groups)?)
+}
+
+const DEFAULT_SESSION_LIST_PAGE_SIZE: usize = 30;
+const MAX_SESSION_LIST_PAGE_SIZE: usize = 200;
+
+fn handle_list_grouped_sessions_page(state: &DaemonState, params: &Value) -> Result<Value> {
+    let offset = params
+        .get("offset")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(DEFAULT_SESSION_LIST_PAGE_SIZE)
+        .clamp(1, MAX_SESSION_LIST_PAGE_SIZE);
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let project_tags = project_tag_map(&state.paths);
+    let mut page =
+        desktop_api::list_grouped_sessions_page(&session_store, &project_tags, offset, limit)?;
+    apply_session_routing_to_groups(state, &mut page.groups)?;
+    Ok(serde_json::to_value(page)?)
+}
+
+fn project_tag_map(paths: &ConfigPaths) -> BTreeMap<String, Vec<String>> {
+    crate::project_metadata::ProjectMetadataStore::from_paths(paths)
+        .all()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, meta)| (key, meta.tags))
+        .collect()
 }
 
 fn apply_session_routing_to_groups(
@@ -1049,6 +1240,113 @@ fn handle_rename_session(state: &DaemonState, params: &Value) -> Result<Value> {
     Ok(serde_json::to_value(detail)?)
 }
 
+fn handle_delete_session(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?;
+    let session_uuid = Uuid::parse_str(session_id).context("invalid sessionId")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    session_store.delete_session(session_uuid)?;
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "delete_session",
+            "sessionId": session_id,
+        }),
+    });
+    Ok(json!({ "ok": true, "sessionId": session_id }))
+}
+
+fn handle_set_session_tags(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?;
+    let tags = params
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .context("missing tags")?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let session_uuid = Uuid::parse_str(session_id).context("invalid sessionId")?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    session_store.set_tags(session_uuid, tags)?;
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "set_session_tags",
+            "sessionId": session_id,
+        }),
+    });
+    let mut detail: SessionDetailDto =
+        desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_routing_to_detail(state, &mut detail)?;
+    Ok(serde_json::to_value(detail)?)
+}
+
+fn handle_delete_project(state: &DaemonState, params: &Value) -> Result<Value> {
+    let folder_path = params
+        .get("folderPath")
+        .or_else(|| params.get("folder_path"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("missing folderPath")?
+        .to_string();
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let sessions = session_store.list_sessions()?;
+    let target = std::path::Path::new(&folder_path);
+    let mut removed = 0usize;
+    for session in sessions {
+        if desktop_api::session_group_root(&session.cwd) == target {
+            session_store.delete_session(session.id)?;
+            removed += 1;
+        }
+    }
+    let _ = crate::project_metadata::ProjectMetadataStore::from_paths(&state.paths).delete(target);
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "delete_project",
+            "folderPath": folder_path,
+            "removedSessions": removed,
+        }),
+    });
+    Ok(json!({ "ok": true, "folderPath": folder_path, "removedSessions": removed }))
+}
+
+fn handle_set_project_tags(state: &DaemonState, params: &Value) -> Result<Value> {
+    let folder_path = params
+        .get("folderPath")
+        .or_else(|| params.get("folder_path"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("missing folderPath")?
+        .to_string();
+    let tags = params
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .context("missing tags")?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let store = crate::project_metadata::ProjectMetadataStore::from_paths(&state.paths);
+    let meta = store.set_tags(std::path::Path::new(&folder_path), tags)?;
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "set_project_tags",
+            "folderPath": folder_path,
+        }),
+    });
+    Ok(json!({ "ok": true, "folderPath": folder_path, "tags": meta.tags }))
+}
+
 fn handle_refresh_repo_status(state: &DaemonState, params: &Value) -> Result<Value> {
     let session_id = params
         .get("sessionId")
@@ -1073,30 +1371,6 @@ fn handle_load_settings_snapshot(state: &DaemonState) -> Result<Value> {
         &inputs.session_store,
     )?;
     Ok(serde_json::to_value(snapshot)?)
-}
-
-fn handle_workflow_list(state: &DaemonState) -> Result<Value> {
-    let store = WorkflowStore::new(&state.paths.workspace_config_dir);
-    Ok(serde_json::to_value(store.snapshot()?)?)
-}
-
-fn handle_workflow_runs_list(state: &DaemonState, params: &Value) -> Result<Value> {
-    let slug = params
-        .get("workflowSlug")
-        .or_else(|| params.get("workflow_slug"))
-        .and_then(Value::as_str)
-        .context("missing workflowSlug")?;
-    let store = WorkflowStore::new(&state.paths.workspace_config_dir);
-    Ok(serde_json::to_value(store.list_runs_for(slug)?)?)
-}
-
-fn handle_workflow_run_show(state: &DaemonState, params: &Value) -> Result<Value> {
-    let idx = params
-        .get("idx")
-        .and_then(Value::as_u64)
-        .context("missing idx")?;
-    let store = WorkflowStore::new(&state.paths.workspace_config_dir);
-    Ok(serde_json::to_value(store.get_run(idx)?)?)
 }
 
 /// Stores an API key credential in the workspace auth store and returns
@@ -1371,6 +1645,10 @@ fn handle_add_mcp_server(state: &DaemonState, params: &Value) -> Result<Value> {
             .description
             .map(|value| value.trim().to_string())
             .unwrap_or_default(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: Default::default(),
         oauth: None,
     };
@@ -1648,12 +1926,23 @@ fn handle_update_config(state: &DaemonState, params: &Value) -> Result<Value> {
                     _ => anyhow::bail!("openaiBaseUrl must be string or null"),
                 };
             }
+            "browserChromeProfile" | "browser_chrome_profile" => {
+                guard.browser.chrome_profile = match value {
+                    Value::Null => None,
+                    Value::String(s) if s.trim().is_empty() => None,
+                    Value::String(s) => Some(s.clone()),
+                    _ => anyhow::bail!("browserChromeProfile must be string or null"),
+                };
+            }
             other => anyhow::bail!("update_config: unknown key `{other}`"),
         }
     }
     let snapshot_cfg = guard.clone();
     drop(guard);
     save_user_config(&state.paths, &snapshot_cfg).context("save user config")?;
+    state
+        .browsers
+        .set_chrome_profile(snapshot_cfg.browser.chrome_profile.clone());
     // Return the refreshed settings snapshot so the UI re-renders without
     // a second round-trip.
     let inputs = state.build_runtime_inputs()?;
@@ -1792,7 +2081,12 @@ fn resolve_create_session_routing(
         return Ok(DesktopSessionRouting::default());
     }
 
-    let inputs = state.build_runtime_inputs()?;
+    // Creating a session only needs to verify the provider/model exists in
+    // the locally-registered set — we don't need a refreshed model catalog
+    // here. Discovery makes a synchronous network round-trip to every
+    // eligible provider; doing it on every "Start agent" click made the
+    // first click after a daemon restart stall for several seconds.
+    let inputs = state.build_runtime_inputs_without_discovery()?;
     if let Some(provider_id) = provider_id {
         let provider_id = canonical_desktop_provider_id(&provider_id);
         let provider = inputs
@@ -1899,6 +2193,26 @@ fn handle_default_workspace(state: &DaemonState) -> Result<Value> {
         "cwd": state.cwd.display().to_string(),
         "workspaceRoot": state.paths.workspace_root.display().to_string(),
     }))
+}
+
+fn local_model_id_param(params: &Value) -> &str {
+    params
+        .get("modelId")
+        .or_else(|| params.get("model_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("minicpm5")
+}
+
+fn handle_local_model_status(state: &DaemonState, params: &Value) -> Result<Value> {
+    let status = state.local_models.status(local_model_id_param(params))?;
+    serde_json::to_value(status).context("serialize local model status")
+}
+
+fn handle_install_local_model(state: &DaemonState, params: &Value) -> Result<Value> {
+    let job = state
+        .local_models
+        .install_or_start(state.event_sender(), local_model_id_param(params))?;
+    serde_json::to_value(job).context("serialize local model install job")
 }
 
 /// Clones a git repository to a destination directory. Runs in the daemon's
@@ -2346,6 +2660,7 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
             &handle.message,
             &handle.cancel_reported,
             &handle.user_prompt_persisted,
+            &handle.progress,
         )?;
         state.turns.lock().unwrap().remove(turn_id);
         Ok(json!({"ok": true}))
@@ -2365,6 +2680,7 @@ fn report_cancelled_turn(
     message: &str,
     cancel_reported: &AtomicBool,
     user_prompt_persisted: &AtomicBool,
+    progress: &Arc<Mutex<TurnProgress>>,
 ) -> Result<bool> {
     if cancel_reported.swap(true, Ordering::SeqCst) {
         return Ok(false);
@@ -2379,6 +2695,7 @@ fn report_cancelled_turn(
             },
         )?;
     }
+    persist_cancelled_turn_progress(&session_store, session_uuid, progress)?;
     session_store.append_event(
         session_uuid,
         TranscriptEvent::SystemMessage {
@@ -2396,6 +2713,69 @@ fn report_cancelled_turn(
         Some("cancelled"),
     );
     Ok(true)
+}
+
+fn persist_cancelled_turn_progress(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    progress: &Arc<Mutex<TurnProgress>>,
+) -> Result<()> {
+    let (assistant_text, tool_invocations, pending_tool_calls) = {
+        let mut progress = progress.lock().unwrap();
+        if progress.persisted_on_cancel {
+            return Ok(());
+        }
+        progress.persisted_on_cancel = true;
+        (
+            std::mem::take(&mut progress.assistant_text),
+            std::mem::take(&mut progress.tool_invocations),
+            std::mem::take(&mut progress.pending_tool_calls),
+        )
+    };
+
+    if !assistant_text.is_empty() {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::AssistantMessage {
+                text: assistant_text,
+                actor: None,
+            },
+        )?;
+    }
+    for invocation in tool_invocations {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::ToolInvocation {
+                call_id: invocation.call_id,
+                tool_id: invocation.tool_id,
+                input: invocation.input,
+                output: invocation.output,
+                success: invocation.success,
+                metadata: (!invocation.metadata.is_null()).then_some(invocation.metadata),
+                actor: None,
+                subject: None,
+            },
+        )?;
+    }
+    for request in pending_tool_calls {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::ToolInvocation {
+                call_id: request.call_id,
+                tool_id: request.tool_id,
+                input: request.input,
+                output: CANCELLED_TURN_MESSAGE.to_string(),
+                success: false,
+                metadata: Some(json!({
+                    "cancelled": true,
+                    "reason": "interrupted_by_user"
+                })),
+                actor: None,
+                subject: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2461,6 +2841,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let cancel = CancelToken::new();
     let cancel_reported = Arc::new(AtomicBool::new(false));
     let user_prompt_persisted = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(TurnProgress::default()));
 
     {
         let mut turns = state.turns.lock().unwrap();
@@ -2482,6 +2863,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 user_prompt_persisted: user_prompt_persisted.clone(),
                 pending: pending.clone(),
                 pending_questions: pending_questions.clone(),
+                progress: progress.clone(),
             },
         );
     }
@@ -2493,6 +2875,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let next_req_id = state.next_request_id.clone();
     let cancel_reported_thread = cancel_reported.clone();
     let user_prompt_persisted_thread = user_prompt_persisted.clone();
+    let progress_thread = progress.clone();
 
     // Run the synchronous agent loop on a fresh OS thread, *completely
     // detached* from tokio. `ProviderRegistry::discover_and_merge_all` +
@@ -2550,12 +2933,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .events
             .iter()
             .any(|event| matches!(event, TranscriptEvent::UserMessage { .. }));
-        let auto_title = if !setup_state.disable_auto_title
-            && crate::daemon_title::should_auto_title(
-                record.metadata.display_name.as_deref(),
-                record.metadata.generated_title.as_deref(),
-                has_user_message,
-            ) {
+        let auto_title = if crate::daemon_title::should_generate_title_for_turn(
+            &inputs.resources,
+            record.metadata.display_name.as_deref(),
+            record.metadata.generated_title.as_deref(),
+            has_user_message,
+            setup_state.disable_auto_title,
+            &message_for_thread,
+        ) {
             match crate::daemon_title::generate_title_with_model(
                 &AppState::from_session_record(
                     setup_state.config.lock().unwrap().clone(),
@@ -2661,6 +3046,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 &message_for_thread,
                 &cancel_reported_thread,
                 &user_prompt_persisted_thread,
+                &progress_thread,
             );
             setup_state.turns.lock().unwrap().remove(&turn_id_thread);
             return;
@@ -2725,34 +3111,88 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let ev_channel = channel_thread.clone();
         let ev_turn = turn_id_thread.clone();
         let ev_actor = stream_actor.clone();
+        let ev_progress = progress_thread.clone();
+        let ev_cancel_reported = cancel_reported_thread.clone();
         let on_event = move |event: TurnStreamEvent| {
+            if ev_cancel_reported.load(Ordering::SeqCst) {
+                return;
+            }
             let payload = match event {
                 TurnStreamEvent::TextDelta(delta) => {
+                    ev_progress.lock().unwrap().assistant_text.push_str(&delta);
                     json!({"type": "text-delta", "turnId": ev_turn, "delta": delta})
                 }
                 TurnStreamEvent::ThinkingDelta(delta) => {
                     json!({"type": "thinking-delta", "turnId": ev_turn, "delta": delta})
                 }
-                TurnStreamEvent::ToolCallsRequested(reqs) => json!({
-                    "type": "tool-calls-requested",
-                    "turnId": ev_turn,
-                    "requests": reqs.iter().map(|r| json!({
-                        "callId": r.call_id,
-                        "toolId": r.tool_id,
-                        "input": r.input,
-                    })).collect::<Vec<_>>(),
-                }),
-                TurnStreamEvent::ToolInvocations(invs) => json!({
-                    "type": "tool-invocations",
-                    "turnId": ev_turn,
-                    "invocations": invs.iter().map(|i| json!({
-                        "callId": i.call_id,
-                        "toolId": i.tool_id,
-                        "input": i.input,
-                        "output": i.output,
-                        "success": i.success,
-                    })).collect::<Vec<_>>(),
-                }),
+                TurnStreamEvent::ToolCallsRequested(reqs) => {
+                    ev_progress
+                        .lock()
+                        .unwrap()
+                        .pending_tool_calls
+                        .extend(reqs.clone());
+                    json!({
+                        "type": "tool-calls-requested",
+                        "turnId": ev_turn,
+                        "requests": reqs.iter().map(|r| json!({
+                            "callId": r.call_id,
+                            "toolId": r.tool_id,
+                            "input": r.input,
+                        })).collect::<Vec<_>>(),
+                    })
+                }
+                TurnStreamEvent::ToolInvocations(invs) => {
+                    {
+                        let mut progress = ev_progress.lock().unwrap();
+                        let completed = invs.len().min(progress.pending_tool_calls.len());
+                        progress.pending_tool_calls.drain(0..completed);
+                        progress.tool_invocations.extend(invs.clone());
+                    }
+                    let mut before_gates = Vec::new();
+                    let mut after_gates = Vec::new();
+                    for gate_payload in invs
+                        .iter()
+                        .filter_map(|inv| lambda_gate_stream_payload(&ev_turn, inv))
+                    {
+                        match lambda_gate_stream_phase(&gate_payload) {
+                            LambdaGateStreamPhase::BeforeToolInvocations => {
+                                before_gates.push(gate_payload);
+                            }
+                            LambdaGateStreamPhase::AfterToolInvocations => {
+                                after_gates.push(gate_payload);
+                            }
+                        }
+                    }
+                    for gate_payload in before_gates {
+                        ev_state.publish_event(ServerEnvelope::Event {
+                            event: ev_channel.clone(),
+                            payload: event_payload_with_actor(gate_payload, &ev_actor),
+                        });
+                    }
+                    let tool_payload = json!({
+                        "type": "tool-invocations",
+                        "turnId": ev_turn.clone(),
+                        "invocations": invs.iter().map(|i| json!({
+                            "callId": i.call_id,
+                            "toolId": i.tool_id,
+                            "input": i.input,
+                            "output": i.output,
+                            "success": i.success,
+                            "metadata": if i.metadata.is_null() { Value::Null } else { i.metadata.clone() },
+                        })).collect::<Vec<_>>(),
+                    });
+                    ev_state.publish_event(ServerEnvelope::Event {
+                        event: ev_channel.clone(),
+                        payload: event_payload_with_actor(tool_payload, &ev_actor),
+                    });
+                    for gate_payload in after_gates {
+                        ev_state.publish_event(ServerEnvelope::Event {
+                            event: ev_channel.clone(),
+                            payload: event_payload_with_actor(gate_payload, &ev_actor),
+                        });
+                    }
+                    return;
+                }
                 TurnStreamEvent::PlanUpdated { file_path, content } => json!({
                     "type": "plan-updated",
                     "turnId": ev_turn,
@@ -2880,6 +3320,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
         match outcome {
             Ok(turn) => {
+                if cancel_reported_thread.load(Ordering::SeqCst) {
+                    state_for_thread
+                        .turns
+                        .lock()
+                        .unwrap()
+                        .remove(&turn_id_thread);
+                    return;
+                }
                 for inv in &turn.tool_invocations {
                     let _ = inputs.session_store.append_event(
                         session_uuid,
@@ -2889,6 +3337,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                             input: inv.input.clone(),
                             output: inv.output.clone(),
                             success: inv.success,
+                            metadata: (!inv.metadata.is_null()).then(|| inv.metadata.clone()),
                             actor: Some(stream_actor.clone()),
                             subject: app_state.tool_subject_actor(&inv.tool_id, &inv.output),
                         },
@@ -2935,12 +3384,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 });
             }
             Err(err) => {
-                eprintln!("turn {turn_id_thread} failed: {err:#}");
-                let _ = inputs
-                    .session_store
-                    .append_event(session_uuid, app_state.snapshot_event());
-                let (friendly, category) = classify_turn_error(&err);
-                if category == "cancelled" && cancel_reported_thread.load(Ordering::SeqCst) {
+                if cancel_reported_thread.load(Ordering::SeqCst) {
                     state_for_thread
                         .turns
                         .lock()
@@ -2948,6 +3392,11 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         .remove(&turn_id_thread);
                     return;
                 }
+                eprintln!("turn {turn_id_thread} failed: {err:#}");
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
+                let (friendly, category) = classify_turn_error(&err);
                 let raw = format!("{err:#}");
                 let _ = inputs.session_store.append_event(
                     session_uuid,
@@ -2973,6 +3422,222 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .lock()
             .unwrap()
             .remove(&turn_id_thread);
+    });
+
+    Ok(json!({"turnId": turn_id_resp}))
+}
+
+/// Runs a slash command (`/connect ...`, `/workflows ...`, etc.) through
+/// `puffer_core::dispatch_command` without contacting any provider. AskUser-
+/// Question prompts emitted by deterministic flows like `/connect` reach the
+/// UI via the same `session:{id}:event` channel as a regular turn.
+async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?
+        .to_string();
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .context("missing message")?
+        .to_string();
+    if !message.trim_start().starts_with('/') {
+        anyhow::bail!("dispatch_slash_command expects a leading '/' command");
+    }
+
+    let session_uuid = Uuid::parse_str(&session_id).context("invalid sessionId")?;
+    let turn_id = Uuid::new_v4().to_string();
+    let channel = format!("session:{session_id}:event");
+    let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: Arc<
+        Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let cancel = CancelToken::new();
+    let cancel_reported = Arc::new(AtomicBool::new(false));
+    let user_prompt_persisted = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(TurnProgress::default()));
+
+    {
+        let mut turns = state.turns.lock().unwrap();
+        if let Some((existing_turn_id, _)) = turns
+            .iter()
+            .find(|(_, handle)| handle.session_uuid == session_uuid)
+        {
+            anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
+        }
+        turns.insert(
+            turn_id.clone(),
+            TurnHandle {
+                session_id: session_id.clone(),
+                session_uuid,
+                channel: channel.clone(),
+                message: message.clone(),
+                cancel: cancel.clone(),
+                cancel_reported: cancel_reported.clone(),
+                user_prompt_persisted: user_prompt_persisted.clone(),
+                pending: pending.clone(),
+                pending_questions: pending_questions.clone(),
+                progress: progress.clone(),
+            },
+        );
+    }
+
+    let setup_state = state.clone();
+    let turn_id_thread = turn_id.clone();
+    let turn_id_resp = turn_id.clone();
+    let channel_thread = channel.clone();
+    let next_req_id = state.next_request_id.clone();
+    let session_id_for_thread = session_id.clone();
+    let message_for_thread = message.clone();
+
+    std::thread::spawn(move || {
+        setup_state.publish_event(ServerEnvelope::Event {
+            event: channel_thread.clone(),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread}),
+        });
+
+        let mut inputs = match setup_state.build_runtime_inputs_without_discovery() {
+            Ok(v) => v,
+            Err(err) => {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("build_runtime_inputs: {err:#}"),
+                    None,
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        };
+        let record = match inputs.session_store.load_session(session_uuid) {
+            Ok(v) => v,
+            Err(err) => {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("load_session: {err:#}"),
+                    None,
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        };
+        let cfg_for_turn = setup_state.config.lock().unwrap().clone();
+        let mut app_state = AppState::from_session_record(cfg_for_turn, record);
+        let stream_actor = app_state.assistant_actor();
+
+        let question_state = setup_state.clone();
+        let question_channel = channel_thread.clone();
+        let question_turn = turn_id_thread.clone();
+        let question_pending = pending_questions.clone();
+        let question_next_id = next_req_id.clone();
+        let question_actor = stream_actor.clone();
+        let on_user_question = move |req: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
+            let request_id = question_next_id.fetch_add(1, Ordering::SeqCst).to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            question_pending
+                .lock()
+                .unwrap()
+                .insert(request_id.clone(), tx);
+
+            question_state.publish_event(ServerEnvelope::Event {
+                event: question_channel.clone(),
+                payload: event_payload_with_actor(
+                    json!({
+                        "type": "user-question-request",
+                        "turnId": question_turn.clone(),
+                        "requestId": request_id,
+                        "questions": req.questions,
+                    }),
+                    &question_actor,
+                ),
+            });
+
+            rx.recv().unwrap_or(UserQuestionPromptResponse {
+                answers: serde_json::Map::new(),
+                annotations: serde_json::Map::new(),
+            })
+        };
+
+        let mut auth_store = inputs.auth_store.clone();
+        let commands = command_surface(&inputs.resources);
+        let outcome = with_user_question_prompt_handler(on_user_question, || {
+            dispatch_command(
+                &mut app_state,
+                &commands,
+                &inputs.resources,
+                &mut inputs.providers,
+                &mut auth_store,
+                &inputs.session_store,
+                &message_for_thread,
+            )
+        });
+
+        match outcome {
+            Ok(()) => {
+                let assistant_text = app_state
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m.role, MessageRole::System | MessageRole::Assistant))
+                    .map(|m| m.text.clone())
+                    .unwrap_or_default();
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: channel_thread.clone(),
+                    payload: event_payload_with_actor(
+                        json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread,
+                            "assistantText": assistant_text,
+                        }),
+                        &stream_actor,
+                    ),
+                });
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: "workspace:sessions:changed".to_string(),
+                    payload: json!({
+                        "reason": "turn_complete",
+                        "sessionId": session_id_for_thread.clone(),
+                    }),
+                });
+            }
+            Err(err) => {
+                eprintln!("slash command {turn_id_thread} failed: {err:#}");
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("{err:#}"),
+                    None,
+                    None,
+                );
+            }
+        }
+
+        let _ = (
+            cancel.clone(),
+            cancel_reported.clone(),
+            user_prompt_persisted.clone(),
+            progress.clone(),
+            pending.clone(),
+        );
+        setup_state.turns.lock().unwrap().remove(&turn_id_thread);
     });
 
     Ok(json!({"turnId": turn_id_resp}))
@@ -3308,20 +3973,24 @@ mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, handle_create_session, handle_import_external_credential,
-        handle_list_permissions, handle_list_provider_models, handle_login_with_api_key,
-        handle_logout_provider, handle_save_permissions, model_descriptor_dto,
-        permission_review_payload_json, requires_explicit_subscription,
-        resolve_create_session_model_id, run_off_runtime,
-        DaemonState, TurnRequestOptions,
+        handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
+        handle_local_model_status, handle_login_with_api_key, handle_logout_provider,
+        handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
+        handle_save_permissions, handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled,
+        model_descriptor_dto, permission_review_payload_json, report_cancelled_turn,
+        requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
+        DaemonState, TurnProgress, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-    use puffer_core::{AppState, ModelPreferenceFamily};
+    use puffer_core::{AppState, ModelPreferenceFamily, ToolCallRequest, ToolInvocation};
     use puffer_provider_registry::{
         AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
-    use puffer_session_store::{SessionMetadata, SessionStore};
+    use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use uuid::Uuid;
 
@@ -3367,6 +4036,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lambda_gate_stream_payload_maps_tool_metadata() {
+        let invocation = ToolInvocation {
+            call_id: "call-1".to_string(),
+            tool_id: "LambdaHostCall".to_string(),
+            input: "{}".to_string(),
+            output: "admitted".to_string(),
+            success: true,
+            metadata: json!({
+                "lambda_skill": {
+                    "event": "host_call_admitted",
+                    "host_tool": "gh_pr_view",
+                    "host_args": {"owner": "acme"},
+                    "concrete_tool": "Bash",
+                    "concrete_input": {"command": "gh pr view"}
+                }
+            }),
+            terminate: false,
+        };
+
+        let payload =
+            super::lambda_gate_stream_payload("turn-1", &invocation).expect("lambda gate event");
+
+        assert_eq!(payload["type"], "lambda-gate");
+        assert_eq!(payload["turnId"], "turn-1");
+        assert_eq!(payload["callId"], "call-1");
+        assert_eq!(payload["gateEvent"], "host_call_admitted");
+        assert_eq!(payload["hostTool"], "gh_pr_view");
+        assert_eq!(payload["concreteTool"], "Bash");
+    }
+
+    #[test]
+    fn lambda_gate_stream_phase_places_admit_before_commit_after_batch() {
+        let admitted = json!({
+            "type": "lambda-gate",
+            "gateEvent": "host_call_admitted"
+        });
+        let committed = json!({
+            "type": "lambda-gate",
+            "gateEvent": "host_call_committed"
+        });
+        let rejected = json!({
+            "type": "lambda-gate",
+            "gateEvent": "gate_rejected"
+        });
+
+        assert_eq!(
+            super::lambda_gate_stream_phase(&admitted),
+            super::LambdaGateStreamPhase::BeforeToolInvocations
+        );
+        assert_eq!(
+            super::lambda_gate_stream_phase(&committed),
+            super::LambdaGateStreamPhase::AfterToolInvocations
+        );
+        assert_eq!(
+            super::lambda_gate_stream_phase(&rejected),
+            super::LambdaGateStreamPhase::AfterToolInvocations
+        );
+    }
+
     impl Drop for DiscoveryCacheEnvGuard {
         fn drop(&mut self) {
             match self.previous.as_ref() {
@@ -3374,6 +4103,35 @@ mod tests {
                 None => std::env::remove_var("PUFFER_DISCOVERY_CACHE_PATH"),
             }
             let _ = std::fs::remove_file(&self.cache_path);
+        }
+    }
+
+    struct PufferHomeEnvGuard {
+        previous: Option<std::ffi::OsString>,
+        _temp: tempfile::TempDir,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl PufferHomeEnvGuard {
+        fn set() -> Self {
+            let lock = discovery_cache_env_lock();
+            let previous = std::env::var_os("PUFFER_HOME");
+            let temp = tempfile::tempdir().expect("temp puffer home");
+            std::env::set_var("PUFFER_HOME", temp.path());
+            Self {
+                previous,
+                _temp: temp,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for PufferHomeEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var("PUFFER_HOME", value),
+                None => std::env::remove_var("PUFFER_HOME"),
+            }
         }
     }
 
@@ -3393,6 +4151,32 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn local_model_status_handler_returns_minicpm5_contract() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let status =
+            handle_local_model_status(&state, &json!({"modelId": "minicpm5"})).expect("status");
+
+        assert_eq!(status["id"], "minicpm5");
+        assert_eq!(status["modelId"], "minicpm5-1b");
+        assert_eq!(status["displayName"], "MiniCPM5-1B (local)");
+        assert!(status["checks"]
+            .as_array()
+            .is_some_and(|checks| !checks.is_empty()));
+    }
+
     fn spawn_openai_discovery_server() -> (String, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind discovery server");
         listener
@@ -3403,8 +4187,7 @@ mod tests {
             for _ in 0..100 {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut buf = [0_u8; 1024];
-                        let _ = std::io::Read::read(&mut stream, &mut buf);
+                        read_discovery_http_request(&mut stream).expect("read discovery request");
                         let body = r#"{"data":[{"id":"gpt-local-discovered","name":"GPT Local"}]}"#;
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3424,6 +4207,65 @@ mod tests {
             panic!("discovery server was not contacted");
         });
         (format!("http://{address}"), handle)
+    }
+
+    fn read_discovery_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        let mut body_offset = None;
+        let mut expected_len = None;
+        loop {
+            let bytes = match std::io::Read::read(stream, &mut chunk) {
+                Ok(bytes) => bytes,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) && !buffer.is_empty() =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+            if bytes == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..bytes]);
+            if body_offset.is_none() {
+                if let Some(offset) = test_http_body_offset(&buffer) {
+                    body_offset = Some(offset);
+                    expected_len = test_content_length(&buffer[..offset]);
+                    if expected_len.is_none() {
+                        break;
+                    }
+                }
+            }
+            if let (Some(offset), Some(length)) = (body_offset, expected_len) {
+                if buffer.len() >= offset + length {
+                    break;
+                }
+            }
+        }
+        Ok(buffer)
+    }
+
+    fn test_http_body_offset(buffer: &[u8]) -> Option<usize> {
+        buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+    }
+
+    fn test_content_length(headers: &[u8]) -> Option<usize> {
+        let text = String::from_utf8_lossy(headers);
+        text.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
     }
 
     #[test]
@@ -3509,9 +4351,161 @@ mod tests {
     }
 
     #[test]
+    fn report_cancelled_turn_persists_streamed_progress_before_interrupt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let session = store
+            .create_session(workspace_root.clone())
+            .expect("create session");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        let progress = Arc::new(Mutex::new(TurnProgress {
+            assistant_text: "partial answer".to_string(),
+            tool_invocations: vec![ToolInvocation {
+                call_id: "call-done".to_string(),
+                tool_id: "Bash".to_string(),
+                input: "{\"command\":\"pwd\"}".to_string(),
+                output: "/tmp\n".to_string(),
+                success: true,
+                metadata: serde_json::Value::Null,
+                terminate: false,
+            }],
+            pending_tool_calls: vec![ToolCallRequest {
+                call_id: "call-pending".to_string(),
+                tool_id: "Bash".to_string(),
+                input: "{\"command\":\"sleep 10\"}".to_string(),
+            }],
+            persisted_on_cancel: false,
+        }));
+        let cancel_reported = AtomicBool::new(false);
+        let user_prompt_persisted = AtomicBool::new(false);
+
+        assert!(report_cancelled_turn(
+            &state,
+            session.id,
+            &session.id.to_string(),
+            "session:test:event",
+            "turn-1",
+            "question",
+            &cancel_reported,
+            &user_prompt_persisted,
+            &progress,
+        )
+        .expect("report cancelled"));
+
+        let record = store.load_session(session.id).expect("stored session");
+        let user_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(event, TranscriptEvent::UserMessage { text, .. } if text == "question")
+            })
+            .expect("user message");
+        let assistant_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::AssistantMessage { text, .. } if text == "partial answer"
+                )
+            })
+            .expect("assistant progress");
+        let done_tool_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::ToolInvocation { call_id, success, .. }
+                        if call_id == "call-done" && *success
+                )
+            })
+            .expect("completed tool");
+        let pending_tool_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::ToolInvocation {
+                        call_id,
+                        success,
+                        output,
+                        ..
+                    } if call_id == "call-pending"
+                        && !*success
+                        && output == "Interrupted by user."
+                )
+            })
+            .expect("cancelled pending tool");
+        let interrupt_index = record
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TranscriptEvent::SystemMessage { text, .. } if text == "Interrupted by user."
+                )
+            })
+            .expect("interrupt");
+        assert!(user_index < assistant_index);
+        assert!(assistant_index < done_tool_index);
+        assert!(done_tool_index < pending_tool_index);
+        assert!(pending_tool_index < interrupt_index);
+    }
+
+    /// Writes a single discovered model into the discovery cache file
+    /// pointed at by `PUFFER_DISCOVERY_CACHE_PATH`. `create_session`
+    /// reads this cache synchronously instead of firing a network
+    /// discovery request, which is what these tests exercise.
+    fn prewarm_discovery_cache(provider_id: &str, model_id: &str) {
+        let path = std::env::var("PUFFER_DISCOVERY_CACHE_PATH")
+            .expect("PUFFER_DISCOVERY_CACHE_PATH must be set via DiscoveryCacheEnvGuard");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let cache = json!({
+            "entries": {
+                provider_id: {
+                    "models": [
+                        {
+                            "id": model_id,
+                            "display_name": model_id,
+                            "provider": provider_id,
+                            "api": "openai",
+                            "context_window": 8192,
+                            "max_output_tokens": 4096,
+                        }
+                    ],
+                    "cached_at_ms": now_ms,
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&cache).unwrap())
+            .expect("write discovery cache");
+    }
+
+    #[test]
     fn create_session_provider_routing_runs_off_tokio_runtime() {
         let _cache_guard = DiscoveryCacheEnvGuard::set();
-        let (openai_base_url, server) = spawn_openai_discovery_server();
+        prewarm_discovery_cache("openai", "gpt-local-discovered");
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let paths = ConfigPaths {
@@ -3530,7 +4524,6 @@ mod tests {
             false,
         )
         .expect("daemon state");
-        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3546,7 +4539,6 @@ mod tests {
             })
             .expect("create session");
 
-        server.join().expect("discovery server");
         assert_eq!(response["providerId"], "openai");
         assert_eq!(response["modelId"], "gpt-local-discovered");
     }
@@ -3554,7 +4546,7 @@ mod tests {
     #[test]
     fn create_session_accepts_desktop_provider_aliases_off_tokio_runtime() {
         let _cache_guard = DiscoveryCacheEnvGuard::set();
-        let (openai_base_url, server) = spawn_openai_discovery_server();
+        prewarm_discovery_cache("openai", "gpt-local-discovered");
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let paths = ConfigPaths {
@@ -3573,7 +4565,6 @@ mod tests {
             false,
         )
         .expect("daemon state");
-        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3590,7 +4581,6 @@ mod tests {
             })
             .expect("create session");
 
-        server.join().expect("discovery server");
         assert_eq!(response["providerId"], "openai");
         assert_eq!(response["modelId"], "gpt-local-discovered");
     }
@@ -3598,7 +4588,7 @@ mod tests {
     #[test]
     fn create_session_accepts_display_case_provider_names_off_tokio_runtime() {
         let _cache_guard = DiscoveryCacheEnvGuard::set();
-        let (openai_base_url, server) = spawn_openai_discovery_server();
+        prewarm_discovery_cache("openai", "gpt-local-discovered");
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let paths = ConfigPaths {
@@ -3617,7 +4607,6 @@ mod tests {
             false,
         )
         .expect("daemon state");
-        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3634,7 +4623,94 @@ mod tests {
             })
             .expect("create session");
 
-        server.join().expect("discovery server");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-local-discovered");
+    }
+
+    /// Binds a local TCP listener whose only job is to verify that nobody
+    /// connects to it. If `create_session` ever fires a network discovery
+    /// call, this listener accepts the connection and the test thread
+    /// panics. Used by `create_session_does_not_fire_network_discovery`.
+    fn spawn_unexpected_discovery_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind unexpected discovery server");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking unexpected discovery server");
+        let address = listener
+            .local_addr()
+            .expect("unexpected discovery server address");
+        let handle = std::thread::spawn(move || {
+            // Sample for ~500ms — long enough for any network discovery to
+            // land, short enough to keep the test fast.
+            for _ in 0..50 {
+                match listener.accept() {
+                    Ok(_) => {
+                        panic!("create_session should not contact the provider discovery URL")
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("unexpected listener error: {error}"),
+                }
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn create_session_does_not_fire_network_discovery() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        // Pre-populate the cache so the discovered model is resolvable
+        // synchronously — exactly the path real `create_session` calls take
+        // after the daemon has run any earlier model-list refresh.
+        prewarm_discovery_cache("openai", "gpt-local-discovered");
+        let (unreachable_base_url, server) = spawn_unexpected_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(unreachable_base_url);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let start = std::time::Instant::now();
+        let response = runtime
+            .block_on(async move {
+                let params = json!({
+                    "cwd": workspace_root.display().to_string(),
+                    "providerId": "openai",
+                    "modelId": "gpt-local-discovered",
+                });
+                run_off_runtime(move || handle_create_session(&state, &params)).await
+            })
+            .expect("create session");
+        let elapsed = start.elapsed();
+
+        // The "unexpected" server must finish its sampling window without
+        // ever accepting a connection — that's the regression assertion.
+        server.join().expect("unexpected discovery server panicked");
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "create_session took {elapsed:?} — should resolve from cache without network"
+        );
         assert_eq!(response["providerId"], "openai");
         assert_eq!(response["modelId"], "gpt-local-discovered");
     }
@@ -4254,6 +5330,927 @@ mod tests {
             stored["browser"]["deny_domains"][0].as_str(),
             Some("example.com")
         );
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_writes_manifest_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "WebSearch"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "WebSearch": {"query": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string(),
+                "hostCatalogueSubpath": "out/host.json",
+                "allowedTools": [" Bash ", "Read"],
+                "hostToolBindings": {
+                    " formal_search ": [" Bash "]
+                },
+                "skillHostToolBindings": {
+                    "gh-fix-ci": {
+                        " gh_pr_view ": [" Bash "]
+                    }
+                }
+            }),
+        )
+        .expect("save lambda skill library");
+
+        assert_eq!(saved["libraries"][0]["id"], "verified");
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
+        assert!(saved["libraries"][0]["hostToolBindings"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        let manifest_path = state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        assert!(manifest.contains("host_catalogue_subpath: out/host.json"));
+        assert!(manifest.contains("host_tool_bindings:"));
+        assert!(manifest.contains("skill_host_tool_bindings:"));
+
+        let listed = handle_list_lambda_skill_libraries(&state).expect("list libraries");
+        assert_eq!(listed["libraries"][0]["sourceKind"], "workspace");
+        assert!(listed["doctor"]
+            .as_str()
+            .unwrap()
+            .contains("lambda_skills=1"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_infers_folder_defaults() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "WebSearch"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "WebSearch": {"query": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+
+        assert_eq!(
+            saved["libraries"][0]["hostCatalogueSubpath"],
+            "out/host.json"
+        );
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
+        assert_eq!(saved["libraries"][0]["allowedTools"][1], "WebSearch");
+        assert!(saved["warnings"].as_array().unwrap().is_empty());
+        assert_eq!(saved["skills"][0]["name"], "gh-fix-ci");
+        assert_eq!(saved["skills"][0]["enabled"], true);
+        assert_eq!(saved["skills"][0]["modelInvocable"], true);
+        assert_eq!(saved["skills"][0]["libraryId"], "verified");
+        assert!(saved["doctor"]
+            .as_str()
+            .unwrap()
+            .contains("lambda_skills=1 model_invocable=1 missing_gate_config=0"));
+
+        let manifest_path = state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        assert!(manifest.contains("host_catalogue_subpath: out/host.json"));
+        assert!(manifest.contains("- Bash"));
+        assert!(manifest.contains("- WebSearch"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_snapshot_infers_legacy_manifest_defaults() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let manifest_dir = paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries");
+        std::fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        std::fs::write(
+            manifest_dir.join("legacy.yaml"),
+            format!(
+                "id: legacy\nroot: {}\ncompiler_path: /tmp/lskillc\nhost_tool_bindings:\n  gh_pr_view:\n  - Bash\n",
+                lambda_root.display()
+            ),
+        )
+        .expect("legacy manifest");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let listed = handle_list_lambda_skill_libraries(&state).expect("list libraries");
+
+        assert_eq!(
+            listed["libraries"][0]["hostCatalogueSubpath"],
+            "out/host.json"
+        );
+        assert_eq!(listed["libraries"][0]["allowedTools"][0], "Bash");
+        assert!(listed["libraries"][0]["hostToolBindings"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        assert_eq!(listed["skills"][0]["modelInvocable"], true);
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_snapshot_deduplicates_same_config_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let config_dir = temp.path().join("shared").join(".puffer");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: config_dir.clone(),
+            user_config_dir: config_dir,
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+
+        assert_eq!(saved["libraries"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["skills"][0]["sourceKind"], "workspace");
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_prunes_nested_folder_configs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let nested_root = lambda_root.join("vendor");
+        let skill_dir = nested_root.join("gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "nested",
+                "root": nested_root.display().to_string()
+            }),
+        )
+        .expect("save nested lambda skill library");
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "parent",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save parent lambda skill library");
+
+        assert_eq!(saved["libraries"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["libraries"][0]["id"], "parent");
+        assert_eq!(saved["skills"].as_array().unwrap().len(), 1);
+        assert!(!state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/nested.yaml")
+            .exists());
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_ignores_folder_covered_by_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let nested_root = lambda_root.join("vendor");
+        let skill_dir = nested_root.join("gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "parent",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save parent lambda skill library");
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "nested",
+                "root": nested_root.display().to_string()
+            }),
+        )
+        .expect("covered nested save should return snapshot");
+
+        assert_eq!(saved["libraries"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["libraries"][0]["id"], "parent");
+        assert!(!state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/nested.yaml")
+            .exists());
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_remove_deletes_manifest_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+        let removed = handle_remove_lambda_skill_library(
+            &state,
+            &json!({
+                "libraryId": "verified",
+                "sourceKind": "workspace"
+            }),
+        )
+        .expect("remove lambda skill library");
+
+        assert!(removed["libraries"].as_array().unwrap().is_empty());
+        assert!(removed["skills"].as_array().unwrap().is_empty());
+        assert!(!state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml")
+            .exists());
+    }
+
+    #[test]
+    fn desktop_lambda_skill_enabled_toggle_updates_manifest_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+
+        let approval_required = handle_set_lambda_skill_approval(
+            &state,
+            &json!({
+                "libraryId": "verified",
+                "sourceKind": "workspace",
+                "requireApproval": true
+            }),
+        )
+        .expect("enable verified approval prompt");
+
+        assert_eq!(approval_required["libraries"][0]["requireApproval"], true);
+        assert_eq!(approval_required["skills"][0]["requireApproval"], true);
+        let manifest_path = state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        assert!(manifest.contains("require_approval: true"));
+
+        let disabled = handle_set_lambda_skill_enabled(
+            &state,
+            &json!({
+                "libraryId": "verified",
+                "sourceKind": "workspace",
+                "skillName": "gh-fix-ci",
+                "enabled": false
+            }),
+        )
+        .expect("disable lambda skill");
+
+        assert_eq!(disabled["libraries"][0]["disabledSkills"][0], "gh-fix-ci");
+        assert_eq!(disabled["skills"][0]["enabled"], false);
+        assert_eq!(disabled["skills"][0]["modelInvocable"], false);
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        assert!(manifest.contains("disabled_skills:"));
+
+        let enabled = handle_set_lambda_skill_enabled(
+            &state,
+            &json!({
+                "libraryId": "verified",
+                "sourceKind": "workspace",
+                "skillName": "gh-fix-ci",
+                "enabled": true
+            }),
+        )
+        .expect("enable lambda skill");
+
+        assert!(enabled["libraries"][0]["disabledSkills"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(enabled["skills"][0]["enabled"], true);
+        assert_eq!(enabled["skills"][0]["modelInvocable"], true);
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_rejects_missing_host_catalogue() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let external_project = temp.path().join("external-project");
+        let lambda_root = external_project.join("skills");
+        let skill_dir = lambda_root.join("vendor/web-check");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool fetch_page(url: Str) -> Str {\n    effects: [net_r]\n  }\n  tool ask_for_approval() -> Unit {\n    effects: [user_in]\n  }\n}\nskill web_check {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect_err("missing host catalogue should reject import");
+
+        assert!(error
+            .to_string()
+            .contains("missing precompiled host catalogues"));
+        assert!(!state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml")
+            .exists());
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_rejects_host_without_concrete_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/web-check");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool fetch_page(url: Str) -> Str {\n    effects: [net_r]\n  }\n}\nskill web_check {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "fetch_page", "params": [{"name": "url", "ty": "str"}], "result": "str", "effects": ["net_r"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("raw host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect_err("raw host catalogue should reject import");
+
+        assert!(error.to_string().contains("lacks concreteTools bindings"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_rejects_unsupported_concrete_tool() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/touchdesigner");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool run_td(code: Str) -> Str {\n    effects: [net_w]\n  }\n}\nskill touchdesigner {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: touchdesigner\ndescription: TD\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_w"],
+              "domains": [],
+              "tools": [
+                {"name": "run_td", "params": [{"name": "code", "ty": "str"}], "result": "str", "effects": ["net_w"], "concreteTools": ["td_execute_python"], "concreteInputContracts": {"td_execute_python": {"script": {"$arg": "code"}}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect_err("unsupported concrete tool should reject import");
+
+        assert!(error
+            .to_string()
+            .contains("binds unsupported concrete tool td_execute_python"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_uses_tool_registry_for_concrete_tool_support() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/custom-tool");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool wait() -> Unit {\n    effects: []\n  }\n}\nskill custom_tool {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: custom-tool\ndescription: Custom concrete tool\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": [],
+              "domains": [],
+              "tools": [
+                {"name": "wait", "params": [], "result": "unit", "effects": [], "concreteTools": ["VerifiedSleep"], "concreteInputContracts": {"VerifiedSleep": {"duration_ms": 1}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let tool_dir = paths.workspace_config_dir.join("resources/tools");
+        std::fs::create_dir_all(&tool_dir).expect("tool dir");
+        std::fs::write(
+            tool_dir.join("verified_sleep.yaml"),
+            r#"id: VerifiedSleep
+name: VerifiedSleep
+description: Workspace registered sleep tool.
+handler: runtime:sleep
+approval_policy: never
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    duration_ms:
+      type: integer
+  required:
+    - duration_ms
+  additionalProperties: false
+"#,
+        )
+        .expect("workspace tool");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("workspace registry tool should support verified import");
+
+        assert_eq!(saved["skills"][0]["ready"], true);
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "VerifiedSleep");
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_accepts_verified_bridge_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/bridge-tools");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool bridge(value: Str, port: Int) -> Str {\n    effects: [proc]\n  }\n}\nskill bridge_tools {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: bridge-tools\ndescription: Bridge tools\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["proc"],
+              "domains": [],
+              "tools": [
+                {"name": "comfy_cloud", "params": [{"name": "choice", "ty": "str"}, {"name": "api_key", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ComfyUiAction"], "concreteInputContracts": {"ComfyUiAction": {"action": "configureCloud", "choice": {"$arg": "choice"}, "apiKey": {"$arg": "api_key"}}}, "registers": [], "contextReq": null},
+                {"name": "debugpy_attach", "params": [{"name": "port", "ty": "int"}], "result": "unit", "effects": ["proc"], "concreteTools": ["DebugpyAction"], "concreteInputContracts": {"DebugpyAction": {"action": "attach", "port": {"$int_arg": "port"}}}, "registers": [], "contextReq": null},
+                {"name": "mcp_check", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["McpStatus"], "concreteInputContracts": {"McpStatus": {"server": {"$arg": "value"}}}, "registers": [], "contextReq": null},
+                {"name": "modal_run", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ModalAction"], "concreteInputContracts": {"ModalAction": {"action": "createSecret", "value": {"$arg": "value"}}}, "registers": [], "contextReq": null},
+                {"name": "native_mcp_discover", "params": [], "result": "str", "effects": ["proc"], "concreteTools": ["NativeMcpAction"], "concreteInputContracts": {"NativeMcpAction": {"action": "discoverTools"}}, "registers": [], "contextReq": null},
+                {"name": "secret_prepare", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["SecretValue"], "concreteInputContracts": {"SecretValue": {"action": "prepare", "value": {"$arg": "value"}}}, "registers": [], "contextReq": null},
+                {"name": "shopify_fulfill", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["ShopifyAction"], "concreteInputContracts": {"ShopifyAction": {"action": "fulfillmentCreate", "orderId": {"$arg": "value"}, "inputJson": "{}"}}, "registers": [], "contextReq": null},
+                {"name": "td_validate", "params": [{"name": "value", "ty": "str"}], "result": "str", "effects": ["proc"], "concreteTools": ["TouchDesignerAction"], "concreteInputContracts": {"TouchDesignerAction": {"action": "validateScript", "code": {"$arg": "value"}}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("verified bridge tools should import");
+
+        assert_eq!(saved["skills"][0]["ready"], true);
+        assert_eq!(saved["skills"][0]["modelInvocable"], true);
+        assert_eq!(
+            saved["libraries"][0]["allowedTools"],
+            json!([
+                "ComfyUiAction",
+                "DebugpyAction",
+                "McpStatus",
+                "ModalAction",
+                "NativeMcpAction",
+                "SecretValue",
+                "ShopifyAction",
+                "TouchDesignerAction"
+            ])
+        );
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_accepts_not_ready_runtime_contracts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/web-check");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool fetch_page(url: Str) -> Str {\n    effects: [net_r]\n  }\n}\nskill web_check {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "fetch_page", "params": [{"name": "url", "ty": "str"}], "result": "str", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "registers": [], "contextReq": null},
+                {"name": "send_embed", "params": [{"name": "to", "ty": "str"}, {"name": "body", "ty": "str"}, {"name": "embeds", "ty": "str"}], "result": "str", "effects": ["net_w"], "concreteTools": ["DiscordAction"], "concreteInputContracts": {"DiscordAction": {"action": "sendEmbeds", "service": "discord", "channelId": {"$arg": "to"}, "body": {"$arg": "body"}, "embeds": {"$arg": "embeds"}}}, "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("runtime-not-ready host should still import");
+
+        assert_eq!(saved["skills"][0]["ready"], false);
+        assert_eq!(saved["skills"][0]["modelInvocable"], false);
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "DiscordAction");
+        assert!(saved["skills"][0]["failureReason"]
+            .as_str()
+            .unwrap()
+            .contains("lacks a concrete input contract"));
+        assert!(state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml")
+            .exists());
     }
 
     #[test]

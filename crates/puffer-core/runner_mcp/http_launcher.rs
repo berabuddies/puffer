@@ -21,8 +21,6 @@
 //!   underlying call and (via the rmcp `streamable_http_client` impl)
 //!   triggers a refresh on missing-token responses.
 
-use std::time::Duration;
-
 use puffer_runner_api::RunnerError;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rmcp::transport::auth::AuthClient;
@@ -31,12 +29,6 @@ use rmcp::transport::streamable_http_client::{
 };
 
 use super::transport::HttpTransportSpec;
-
-/// Reasonable connection / request timeout for an MCP HTTP backend. Longer
-/// than typical REST APIs because some MCP servers stream tool output back
-/// inline (especially before a `progressToken` was negotiated). Capped so
-/// a wedged backend doesn't block puffer's tokio runtime indefinitely.
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Build an `rmcp` streamable-HTTP transport for the given spec.
 ///
@@ -86,7 +78,7 @@ pub(crate) fn build_oauth_streamable_http_transport(
 
 /// Build the bare reqwest client used by both transport flavours. Folds
 /// the manifest's `headers` map into the default-header set and pins the
-/// shared timeout.
+/// configured connection and request timeouts.
 pub(crate) fn build_reqwest_client(
     server_id: &str,
     spec: &HttpTransportSpec,
@@ -108,7 +100,8 @@ pub(crate) fn build_reqwest_client(
 
     reqwest::Client::builder()
         .default_headers(header_map)
-        .timeout(HTTP_REQUEST_TIMEOUT)
+        .connect_timeout(spec.connect_timeout)
+        .timeout(spec.timeout)
         .build()
         .map_err(|e| {
             RunnerError::Mcp(format!(

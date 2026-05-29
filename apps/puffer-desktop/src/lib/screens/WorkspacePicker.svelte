@@ -131,7 +131,6 @@
   >
     <div class="pf-modal-head">
       <div class="pf-modal-title-group">
-        <div class="pf-modal-eyebrow">Workspace</div>
         <div class="pf-modal-title">Switch workspace</div>
       </div>
       <button type="button" class="pf-modal-close" onclick={onClose} aria-label="Close" disabled={busy}>
@@ -293,15 +292,6 @@
     </div>
 
     <div class="pf-modal-foot">
-      <div class="pf-modal-foot-hint">
-        {#if mode === "local"}
-          Replaces the local daemon subprocess.
-        {:else if mode === "remote"}
-          Spawns <span class="pf-mono">puffer daemon</span> over SSH.
-        {:else}
-          Switch to Local or Remote to change workspace.
-        {/if}
-      </div>
       <div class="pf-modal-foot-btns">
         <button type="button" class="sc-btn" data-variant="ghost" onclick={onClose} disabled={busy}>
           Close

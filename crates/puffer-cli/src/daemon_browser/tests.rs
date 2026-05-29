@@ -100,6 +100,39 @@ fn browser_recording_requires_agent_activity_window() {
 }
 
 #[test]
+fn browser_console_registry_records_and_clears_console_payloads() {
+    let mut console_logs = console::BrowserConsoleRegistry::default();
+    let payload = devtools::devtools_event_payload(
+        "Runtime.consoleAPICalled",
+        &json!({
+            "params": {
+                "type": "error",
+                "args": [{ "value": "boom" }],
+                "timestamp": 12.0
+            }
+        }),
+    )
+    .unwrap();
+    console_logs.record("root-session:browser:t1", &payload);
+    console_logs.record(
+        "root-session:browser:t1",
+        &json!({ "kind": "network", "url": "https://example.com" }),
+    );
+
+    let logs = console_logs.read("root-session:browser:t1", false);
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].get("level").and_then(Value::as_str), Some("error"));
+    assert_eq!(logs[0].get("text").and_then(Value::as_str), Some("boom"));
+    assert!(logs[0].get("recordedAtMs").is_some());
+
+    let cleared = console_logs.read("root-session:browser:t1", true);
+    assert_eq!(cleared.len(), 1);
+    assert!(console_logs
+        .read("root-session:browser:t1", false)
+        .is_empty());
+}
+
+#[test]
 fn cleanup_root_metadata_preserves_disconnected_tab_handles() {
     let tabs = std::sync::Arc::new(std::sync::Mutex::new(BrowserTabRegistry::default()));
     let agent_refs =
@@ -107,6 +140,9 @@ fn cleanup_root_metadata_preserves_disconnected_tab_handles() {
             "root-session:browser:t1".to_string(),
             Vec::<BrowserElementRef>::new(),
         )])));
+    let console_logs = std::sync::Arc::new(std::sync::Mutex::new(
+        console::BrowserConsoleRegistry::default(),
+    ));
     let browser_state = BrowserState {
         url: "https://example.com".to_string(),
         title: "Example".to_string(),
@@ -126,6 +162,7 @@ fn cleanup_root_metadata_preserves_disconnected_tab_handles() {
     cleanup_root_metadata(
         &tabs,
         &agent_refs,
+        &console_logs,
         "root-session",
         &["root-session:browser:t1".to_string()],
         true,
@@ -145,6 +182,9 @@ fn cleanup_root_metadata_drops_tab_set_on_root_close() {
             "root-session:browser:t1".to_string(),
             Vec::<BrowserElementRef>::new(),
         )])));
+    let console_logs = std::sync::Arc::new(std::sync::Mutex::new(
+        console::BrowserConsoleRegistry::default(),
+    ));
     let browser_state = BrowserState {
         url: "https://example.com".to_string(),
         title: "Example".to_string(),
@@ -164,6 +204,7 @@ fn cleanup_root_metadata_drops_tab_set_on_root_close() {
     cleanup_root_metadata(
         &tabs,
         &agent_refs,
+        &console_logs,
         "root-session",
         &["root-session:browser:t1".to_string()],
         false,

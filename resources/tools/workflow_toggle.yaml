@@ -1,0 +1,16 @@
+id: WorkflowToggle
+name: WorkflowToggle
+description: |-
+  Enable or disable a workflow and update its connection trigger binding.
+handler: runtime:workflow:workflow_toggle
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    slug:
+      type: string
+    enabled:
+      type: boolean
+  required: [slug, enabled]
+  additionalProperties: false

@@ -115,7 +115,7 @@ mod tests {
     use crate::AppState;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
     use puffer_session_store::SessionStore;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::{tempdir, TempDir};
 
     fn plan_state() -> (TempDir, AppState) {
@@ -146,6 +146,7 @@ mod tests {
             input: input.to_string(),
             output: output.to_string(),
             success: true,
+            metadata: Value::Null,
             terminate: false,
         }
     }

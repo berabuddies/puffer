@@ -14,8 +14,7 @@ use std::time::Duration;
 pub struct InboundMessage {
     /// Conversation id (channel/chat/thread root/email message-id).
     pub conversation_id: String,
-    /// Sender identity — `None` when the platform doesn't expose one
-    /// (anonymous webhooks, some email forwards, etc.).
+    /// Sender identity, or `None` when the platform does not expose one.
     pub user_id: Option<String>,
     /// Text body after trimming and mention stripping.
     pub text: String,

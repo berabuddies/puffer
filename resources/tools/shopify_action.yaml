@@ -1,0 +1,45 @@
+id: ShopifyAction
+name: ShopifyAction
+description: |-
+  Execute one Shopify Admin GraphQL action through Puffer's typed Shopify runtime.
+
+  Use this for verified Lambda Skill contracts that need narrowly declared
+  Shopify writes. Puffer owns credential lookup, resource-scoped validation,
+  API execution, and GraphQL error handling.
+handler: runtime:workflow:shopify_action
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - fulfillmentCreate
+        - inventoryAdjustSingleLocation
+      description: Shopify action to perform.
+    orderId:
+      type: string
+      description: Shopify order gid that scopes the fulfillment.
+    inputJson:
+      description: JSON variables object with fulfillment and optional message fields.
+      oneOf:
+        - type: string
+        - type: object
+    itemId:
+      type: string
+      description: Shopify inventory item gid for single-location inventory adjustment.
+    delta:
+      type: integer
+      description: Inventory quantity delta for inventoryAdjustSingleLocation.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+display:
+  group: commerce
+  title: ShopifyAction
+  show_in_status: true

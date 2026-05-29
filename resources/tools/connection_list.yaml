@@ -1,0 +1,13 @@
+id: ConnectionList
+name: ConnectionList
+description: |-
+  List authorized connections. A connection is a specific authenticated
+  instance of a connector, such as a Telegram login, Lark app install, Lark
+  user token, Slack app install, or Slack workspace account.
+handler: runtime:workflow:connection_list
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

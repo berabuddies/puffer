@@ -9,8 +9,18 @@ use serde_json::{Map, Value};
 pub(crate) struct UserQuestion {
     header: String,
     question: String,
+    question_type: UserQuestionType,
     options: Vec<UserQuestionOption>,
     multi_select: bool,
+    searchable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum UserQuestionType {
+    #[default]
+    Choice,
+    Input,
 }
 
 /// One selectable answer option in an `AskUserQuestion` prompt.
@@ -19,6 +29,7 @@ pub(crate) struct UserQuestionOption {
     label: String,
     description: String,
     preview: Option<String>,
+    search_text: String,
 }
 
 /// Modal list state for answering `AskUserQuestion` prompts.
@@ -50,16 +61,19 @@ impl UserQuestionOverlay {
             .map(|raw| UserQuestion {
                 header: raw.header,
                 question: raw.question,
+                question_type: raw.question_type,
                 options: raw
                     .options
                     .into_iter()
                     .map(|option| UserQuestionOption {
+                        search_text: searchable_option_text(&option.label, &option.description),
                         label: option.label,
                         description: option.description,
                         preview: option.preview,
                     })
                     .collect(),
                 multi_select: raw.multi_select,
+                searchable: raw.searchable,
             })
             .collect::<Vec<_>>();
         let lists = questions
@@ -81,7 +95,10 @@ impl UserQuestionOverlay {
             .collect::<Vec<_>>();
         let selected_multi = vec![Vec::new(); questions.len()];
         let custom_answers = vec![String::new(); questions.len()];
-        let custom_answer_active = vec![false; questions.len()];
+        let custom_answer_active = questions
+            .iter()
+            .map(|question| question.question_type == UserQuestionType::Input)
+            .collect::<Vec<_>>();
         Ok(Self {
             questions,
             question_index: 0,
@@ -128,6 +145,39 @@ impl UserQuestionOverlay {
         };
         let selection = self.selection();
         let custom_answer = self.current_custom_answer().trim();
+        if question.question_type == UserQuestionType::Input {
+            let body = if custom_answer.is_empty() {
+                "Type answer".to_string()
+            } else {
+                custom_answer.to_string()
+            };
+            return vec![(true, format!("Input  {body}"))];
+        }
+        if question.searchable {
+            let indices = self.filtered_option_indices(question, custom_answer);
+            if indices.is_empty() {
+                let text = if custom_answer.trim().is_empty() {
+                    "No options available".to_string()
+                } else {
+                    format!("No options match \"{}\"", custom_answer.trim())
+                };
+                return vec![(false, text)];
+            }
+            return indices
+                .iter()
+                .enumerate()
+                .filter_map(|(row_index, option_index)| {
+                    question.options.get(*option_index).map(|option| {
+                        let text = if option.description.trim().is_empty() {
+                            option.label.clone()
+                        } else {
+                            format!("{}  {}", option.label, option.description)
+                        };
+                        (row_index == selection, text)
+                    })
+                })
+                .collect();
+        }
         let custom_active = self.is_custom_answer_active();
         let custom_selected =
             custom_active || (!question.multi_select && !custom_answer.is_empty());
@@ -175,15 +225,20 @@ impl UserQuestionOverlay {
     /// Returns the preview for the active single-select option.
     pub(crate) fn selected_preview(&self) -> Option<&str> {
         let question = self.current_question()?;
+        if question.question_type == UserQuestionType::Input {
+            return None;
+        }
         if question.multi_select {
             return None;
         }
-        if self.is_custom_answer_active() || !self.current_custom_answer().trim().is_empty() {
+        if !question.searchable
+            && (self.is_custom_answer_active() || !self.current_custom_answer().trim().is_empty())
+        {
             return None;
         }
         question
             .options
-            .get(self.selection())?
+            .get(self.selected_option_index(question)?)?
             .preview
             .as_deref()
             .filter(|preview| !preview.trim().is_empty())
@@ -191,6 +246,17 @@ impl UserQuestionOverlay {
 
     /// Moves the selection upward.
     pub(crate) fn select_previous(&mut self) {
+        if self.current_question_type() == Some(UserQuestionType::Input) {
+            self.set_custom_answer_active(true);
+            return;
+        }
+        if self
+            .current_question()
+            .is_some_and(|question| question.searchable)
+        {
+            self.select_previous_search_result();
+            return;
+        }
         if self.is_custom_answer_active() {
             if let Some(list) = self.current_list_mut() {
                 list.select_last();
@@ -205,6 +271,17 @@ impl UserQuestionOverlay {
 
     /// Moves the selection downward.
     pub(crate) fn select_next(&mut self) {
+        if self.current_question_type() == Some(UserQuestionType::Input) {
+            self.set_custom_answer_active(true);
+            return;
+        }
+        if self
+            .current_question()
+            .is_some_and(|question| question.searchable)
+        {
+            self.select_next_search_result();
+            return;
+        }
         if self.is_custom_answer_active() {
             return;
         }
@@ -220,6 +297,17 @@ impl UserQuestionOverlay {
 
     /// Moves the selection upward by one page.
     pub(crate) fn page_up(&mut self) {
+        if self.current_question_type() == Some(UserQuestionType::Input) {
+            self.set_custom_answer_active(true);
+            return;
+        }
+        if self
+            .current_question()
+            .is_some_and(|question| question.searchable)
+        {
+            self.page_up_search_results();
+            return;
+        }
         self.set_custom_answer_active(false);
         if let Some(list) = self.current_list_mut() {
             list.page_up();
@@ -228,6 +316,17 @@ impl UserQuestionOverlay {
 
     /// Moves the selection downward by one page.
     pub(crate) fn page_down(&mut self) {
+        if self.current_question_type() == Some(UserQuestionType::Input) {
+            self.set_custom_answer_active(true);
+            return;
+        }
+        if self
+            .current_question()
+            .is_some_and(|question| question.searchable)
+        {
+            self.page_down_search_results();
+            return;
+        }
         if self.is_custom_answer_active() {
             return;
         }
@@ -247,7 +346,7 @@ impl UserQuestionOverlay {
         let Some(question) = self.current_question() else {
             return;
         };
-        if !question.multi_select {
+        if question.question_type == UserQuestionType::Input || !question.multi_select {
             return;
         }
         if self.is_custom_answer_active() {
@@ -265,6 +364,12 @@ impl UserQuestionOverlay {
 
     /// Activates the option matching a numeric shortcut.
     pub(crate) fn activate_shortcut(&mut self, key: char) -> UserQuestionShortcutActivation {
+        if self
+            .current_question()
+            .is_some_and(|question| question.searchable)
+        {
+            return UserQuestionShortcutActivation::Ignored;
+        }
         if self
             .current_list_mut()
             .and_then(|list| list.select_shortcut(key))
@@ -296,7 +401,16 @@ impl UserQuestionOverlay {
             .get(question_index)
             .map(|answer| answer.trim().to_string())
             .unwrap_or_default();
-        let answer = if question.multi_select {
+        let answer = if question.question_type == UserQuestionType::Input {
+            if custom.is_empty() {
+                return None;
+            }
+            Value::String(custom)
+        } else if question.searchable {
+            let option_index = self.selected_option_index(&question)?;
+            let option = question.options.get(option_index)?;
+            Value::String(option.label.clone())
+        } else if question.multi_select {
             if self.selected_multi[question_index].is_empty() && custom.is_empty() {
                 if self
                     .custom_answer_active
@@ -345,6 +459,11 @@ impl UserQuestionOverlay {
         self.questions.get(self.question_index)
     }
 
+    fn current_question_type(&self) -> Option<UserQuestionType> {
+        self.current_question()
+            .map(|question| question.question_type)
+    }
+
     fn current_list(&self) -> Option<&ListSelectionView> {
         self.lists.get(self.question_index)
     }
@@ -364,6 +483,7 @@ impl UserQuestionOverlay {
         if let Some(answer) = self.custom_answers.get_mut(self.question_index) {
             answer.push(ch);
         }
+        self.clamp_search_selection();
     }
 
     /// Removes one character from the active custom answer.
@@ -371,6 +491,7 @@ impl UserQuestionOverlay {
         if let Some(answer) = self.custom_answers.get_mut(self.question_index) {
             answer.pop();
         }
+        self.clamp_search_selection();
     }
 
     /// Returns true when the active custom answer has text.
@@ -381,6 +502,108 @@ impl UserQuestionOverlay {
     /// Returns true when typing should edit the active custom answer.
     pub(crate) fn custom_answer_active(&self) -> bool {
         self.is_custom_answer_active()
+    }
+
+    /// Returns the composer placeholder for the active answer field.
+    pub(crate) fn prompt_placeholder(&self) -> &'static str {
+        if self
+            .current_question()
+            .is_some_and(|question| question.searchable)
+        {
+            return "Search options";
+        }
+        if self.current_question_type() == Some(UserQuestionType::Input) {
+            "Type answer"
+        } else {
+            "Type custom answer"
+        }
+    }
+
+    /// Returns true when the active question filters choices as the user types.
+    pub(crate) fn is_searchable_choice(&self) -> bool {
+        self.current_question()
+            .is_some_and(|question| question.searchable)
+    }
+
+    /// Returns the footer hint for the active question.
+    pub(crate) fn footer_hint(&self) -> String {
+        if self.is_searchable_choice() {
+            let status = self
+                .current_question()
+                .map(|question| {
+                    let visible_count = self
+                        .filtered_option_indices(question, self.current_custom_answer())
+                        .len();
+                    searchable_status(question, self.current_custom_answer(), visible_count)
+                })
+                .unwrap_or_else(|| "0 options".to_string());
+            format!("{status} · Type to search · Arrows to move · Enter to select · Esc to close")
+        } else {
+            "Use arrows or shortcuts · Enter to select · Esc to close".to_string()
+        }
+    }
+
+    fn selected_option_index(&self, question: &UserQuestion) -> Option<usize> {
+        if question.searchable {
+            self.filtered_option_indices(question, self.current_custom_answer())
+                .get(self.selection())
+                .copied()
+        } else {
+            Some(self.selection())
+        }
+    }
+
+    fn filtered_option_indices(&self, question: &UserQuestion, query: &str) -> Vec<usize> {
+        let query = normalize_search_query(query);
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        question
+            .options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| {
+                terms.is_empty() || terms.iter().all(|term| option.search_text.contains(term))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn filtered_option_count(&self) -> usize {
+        self.current_question()
+            .map(|question| {
+                self.filtered_option_indices(question, self.current_custom_answer())
+                    .len()
+            })
+            .unwrap_or(0)
+    }
+
+    fn select_search_index(&mut self, index: usize) {
+        let count = self.filtered_option_count();
+        let selection = index.min(count.saturating_sub(1));
+        if let Some(list) = self.current_list_mut() {
+            list.select_index(selection);
+        }
+    }
+
+    fn select_previous_search_result(&mut self) {
+        self.select_search_index(self.selection().saturating_sub(1));
+    }
+
+    fn select_next_search_result(&mut self) {
+        self.select_search_index(self.selection() + 1);
+    }
+
+    fn page_up_search_results(&mut self) {
+        self.select_search_index(self.selection().saturating_sub(10));
+    }
+
+    fn page_down_search_results(&mut self) {
+        self.select_search_index(self.selection() + 10);
+    }
+
+    fn clamp_search_selection(&mut self) {
+        if self.is_searchable_choice() {
+            self.select_search_index(self.selection());
+        }
     }
 
     fn current_custom_answer(&self) -> &str {
@@ -414,9 +637,14 @@ impl UserQuestionOverlay {
 struct RawUserQuestion {
     question: String,
     header: String,
+    #[serde(default, rename = "type")]
+    question_type: UserQuestionType,
+    #[serde(default)]
     options: Vec<RawUserQuestionOption>,
     #[serde(default, rename = "multiSelect")]
     multi_select: bool,
+    #[serde(default)]
+    searchable: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -433,4 +661,26 @@ fn number_shortcut(index: usize) -> Option<char> {
     } else {
         None
     }
+}
+
+fn normalize_search_query(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn searchable_option_text(label: &str, description: &str) -> String {
+    format!("{} {}", label.trim(), description.trim()).to_ascii_lowercase()
+}
+
+fn searchable_status(question: &UserQuestion, query: &str, visible_count: usize) -> String {
+    let total = question.options.len();
+    if query.trim().is_empty() {
+        if total == 1 {
+            return "1 option".to_string();
+        }
+        return format!("{total} options");
+    }
+    if visible_count == 1 {
+        return format!("1/{total} match");
+    }
+    format!("{visible_count}/{total} matches")
 }

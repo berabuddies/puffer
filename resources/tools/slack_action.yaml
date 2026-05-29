@@ -1,0 +1,55 @@
+id: SlackAction
+name: SlackAction
+description: |-
+  Execute one Slack Web API action through Puffer's typed Slack runtime.
+
+  Use this for verified Lambda Skill contracts that need Slack reads or
+  narrowly declared Slack writes. The model supplies the Slack action and
+  arguments; Puffer owns credential lookup and API execution.
+handler: runtime:workflow:slack_action
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - reactions
+        - readMessages
+        - listPins
+        - memberInfo
+        - emojiList
+        - sendMessage
+      description: Slack action to perform.
+    channel:
+      type: string
+      description: Slack channel id for channel-scoped actions.
+    message:
+      type: string
+      description: Slack message timestamp for message-scoped actions.
+    user:
+      type: string
+      description: Slack user id for user-scoped actions.
+    text:
+      type: string
+      description: Message text for sendMessage.
+    threadTs:
+      type: string
+      description: Optional Slack thread timestamp for threaded sendMessage calls.
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 200
+      description: Maximum number of messages to read.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+display:
+  group: communication
+  title: SlackAction
+  show_in_status: true

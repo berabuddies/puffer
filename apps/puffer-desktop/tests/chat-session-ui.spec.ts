@@ -2610,6 +2610,197 @@ test("completed background turns keep tool activity until persistence catches up
   await expect(panel).toContainText("completed hidden tool output");
 });
 
+test("verified skill gate events render inside agent activity with check details", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-gate-activity",
+        displayName: "Gate activity",
+        title: "Gate activity",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Gate activity/);
+  await page.locator(".pf-composer textarea").fill("Use the arxiv verified skill");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-gate-activity"
+  );
+
+  daemon.emit("session:session-gate-activity:event", {
+    type: "lambda-gate",
+    turnId: "turn-session-gate-activity",
+    callId: "gate-admit",
+    toolId: "LambdaHostCall",
+    gateEvent: "host_call_admitted",
+    hostTool: "arxiv_search",
+    hostArgs: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+    concreteTool: "Bash",
+    concreteInput: { command: "python3 arxiv_search.py" }
+  });
+  daemon.emit("session:session-gate-activity:event", {
+    type: "tool-invocations",
+    turnId: "turn-session-gate-activity",
+    invocations: [
+      {
+        callId: "gate-bash",
+        toolId: "Bash",
+        input: "{\"command\":\"python3 arxiv_search.py\"}",
+        output: "arxiv result",
+        success: true
+      }
+    ]
+  });
+  daemon.emit("session:session-gate-activity:event", {
+    type: "lambda-gate",
+    turnId: "turn-session-gate-activity",
+    callId: "gate-commit",
+    toolId: "Bash",
+    gateEvent: "host_call_committed",
+    hostTool: "arxiv_search",
+    hostArgs: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+    concreteTool: "Bash",
+    concreteInput: { command: "python3 arxiv_search.py" },
+    registeredFacts: [{ pred: "searched", args: ["au:\"Hanzhi Liu\""] }]
+  });
+
+  await expect(page.locator(".gate-toast")).toHaveCount(0);
+  await expect(page.locator(".gate-detail-panel")).toHaveCount(0);
+  const activity = page.getByRole("button", { name: /Agent activity/ });
+  await expect(activity).toContainText("Checked 2 gates");
+  await activity.click();
+
+  const actions = page.locator(".activity-action");
+  await expect(actions).toHaveCount(3);
+  await expect(actions.nth(0)).toContainText("Gate admitted");
+  await expect(actions.nth(1)).toContainText("Shell");
+  await expect(actions.nth(2)).toContainText("Gate committed");
+
+  const admitted = page.locator(".activity-action").filter({ hasText: "Gate admitted" });
+  await expect(admitted).toContainText("arxiv_search -> Bash");
+  await admitted.click();
+  const panel = page.locator(".activity-panel").filter({ hasText: "Host args" });
+  await expect(panel).toContainText("Verified LambdaHostCall may bind formal host tool arxiv_search");
+  await expect(panel).toContainText('"query":"au:\\"Hanzhi Liu\\""');
+  await expect(panel).toContainText("Concrete input");
+  await expect(panel).toContainText("Compare concrete_tool with the next activity row's tool name");
+
+  daemon.setSessionTimeline("session-gate-activity", [
+    {
+      kind: "user_message",
+      id: "gate-user",
+      text: "Use the arxiv verified skill",
+      createdAtMs: baseTime
+    },
+    {
+      kind: "tool_call",
+      id: "gate-skill-tool",
+      toolId: "Skill",
+      status: "ok",
+      summary: "Skill success",
+      inputText: "{\"skill\":\"arxiv\",\"args\":\"Find the latest arXiv paper.\"}",
+      outputText: "Prepared arxiv_search host call.",
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "tool_call",
+      id: "gate-host-call",
+      toolId: "LambdaHostCall",
+      status: "ok",
+      summary: "Lambda host call admitted: arxiv_search",
+      inputText:
+        "{\"host_tool\":\"arxiv_search\",\"args\":{\"query\":\"au:\\\"Hanzhi Liu\\\"\",\"maxresults\":10},\"tool\":\"Bash\",\"input\":{\"command\":\"python3 arxiv_search.py\"}}",
+      outputText: "",
+      createdAtMs: baseTime + 2,
+      metadata: {
+        lambda_skill: {
+          event: "host_call_admitted",
+          host_tool: "arxiv_search",
+          host_args: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+          concrete_tool: "Bash",
+          concrete_input: { command: "python3 arxiv_search.py" }
+        }
+      }
+    },
+    {
+      kind: "system_message",
+      id: "gate-host-call-lambda-gate",
+      text:
+        "Verified Skill Gate\n" +
+        "event: host_call_admitted\n" +
+        "check: Verified LambdaHostCall may bind formal host tool arxiv_search to concrete tool Bash, and recorded the exact concrete input that must run next.\n" +
+        "host_tool: arxiv_search\n" +
+        "host_args: {\"query\":\"au:\\\"Hanzhi Liu\\\"\",\"maxresults\":10}\n" +
+        "concrete_tool: Bash\n" +
+        "concrete_input: {\"command\":\"python3 arxiv_search.py\"}\n" +
+        "confirmation: Compare concrete_tool with the next activity row's tool name and concrete_input with that tool's input.",
+      createdAtMs: baseTime + 3
+    },
+    {
+      kind: "tool_call",
+      id: "gate-bash-tool",
+      toolId: "Bash",
+      status: "ok",
+      summary: "Command: python3 arxiv_search.py",
+      inputText: "{\"command\":\"python3 arxiv_search.py\"}",
+      outputText: "arxiv result",
+      createdAtMs: baseTime + 4,
+      metadata: {
+        lambda_skill: {
+          event: "host_call_committed",
+          host_tool: "arxiv_search",
+          host_args: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+          concrete_tool: "Bash",
+          concrete_input: { command: "python3 arxiv_search.py" }
+        }
+      }
+    },
+    {
+      kind: "system_message",
+      id: "gate-bash-tool-lambda-gate",
+      text:
+        "Verified Skill Gate\n" +
+        "event: host_call_committed\n" +
+        "check: Confirmed the concrete Bash call matched the pending LambdaHostCall bridge for formal host tool arxiv_search.\n" +
+        "host_tool: arxiv_search\n" +
+        "host_args: {\"query\":\"au:\\\"Hanzhi Liu\\\"\",\"maxresults\":10}\n" +
+        "concrete_tool: Bash\n" +
+        "confirmation: Puffer observed the declared concrete tool succeed, then committed the Lambda gate and any registered facts.",
+      createdAtMs: baseTime + 5
+    },
+    {
+      kind: "assistant_message",
+      id: "gate-assistant",
+      text: "Found the arXiv paper.",
+      createdAtMs: baseTime + 6
+    }
+  ]);
+  daemon.emit("session:session-gate-activity:event", {
+    type: "turn-complete",
+    turnId: "turn-session-gate-activity",
+    assistantText: "Found the arXiv paper."
+  });
+  await expect(page.getByText("Found the arXiv paper.")).toBeVisible();
+  await expect(page.locator('.pf-msg[data-role="system"]').filter({ hasText: "Verified Skill Gate" })).toHaveCount(0);
+  await expect(page.getByText("MCP · Bash")).toHaveCount(0);
+  await expect(page.getByText("No result returned.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Agent activity/ })).toContainText("Checked 2 gates");
+});
+
 test("daemon-running background sessions receive approval events", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
@@ -3147,6 +3338,100 @@ test("custom-only question requires a typed answer", async ({ page }) => {
     turnId: "turn-question-custom-only",
     requestId: "question-custom-only",
     answers: { "What exact command should I run?": "npm test" },
+    annotations: {}
+  });
+});
+
+test("input user questions render a direct answer field", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-input",
+    requestId: "question-input",
+    questions: [
+      {
+        type: "input",
+        header: "Connection",
+        question: "What exact connection name should Puffer use?",
+        options: []
+      }
+    ]
+  });
+
+  const block = page.locator(".pf-question-block").filter({ hasText: "What exact connection name should Puffer use?" });
+  await expect(block.getByPlaceholder("Type answer")).toBeVisible();
+  await expect(block.locator(".pf-question-other")).toHaveCount(0);
+  const submit = page.getByRole("button", { name: "Send answer" });
+  await expect(submit).toBeDisabled();
+  await block.getByPlaceholder("Type answer").fill("telegram-user");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question-input",
+    requestId: "question-input",
+    answers: { "What exact connection name should Puffer use?": "telegram-user" },
+    annotations: {}
+  });
+});
+
+test("searchable user question choices filter connector options", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-searchable",
+    requestId: "question-searchable",
+    questions: [
+      {
+        type: "choice",
+        header: "Connector",
+        question: "Which connector should Puffer connect?",
+        searchable: true,
+        options: [
+          { label: "telegram-login", description: "Telegram personal account connector" },
+          { label: "email", description: "IMAP and SMTP email connector" },
+          { label: "slack-login", description: "Slack login connector" }
+        ]
+      }
+    ]
+  });
+
+  const block = page.locator(".pf-question-block").filter({ hasText: "Which connector should Puffer connect?" });
+  await expect(block.getByPlaceholder("Search options")).toBeVisible();
+  await expect(block.locator(".pf-question-other")).toHaveCount(0);
+  await expect(block.locator(".pf-question-search-status")).toHaveText("3 options");
+
+  await block.getByPlaceholder("Search options").fill("matrix connector");
+  await expect(block.locator(".pf-question-search-status")).toHaveText("0/3 matches");
+  await expect(block.locator(".pf-question-option")).toHaveCount(0);
+  await expect(block.locator(".pf-question-empty")).toHaveText('No options match "matrix connector".');
+  await expect(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
+
+  await block.getByPlaceholder("Search options").fill("personal connector");
+  await expect(block.locator(".pf-question-search-status")).toHaveText("1/3 match");
+  const telegram = block.locator(".pf-question-option").filter({ hasText: "telegram-login" });
+  await expect(telegram).toBeVisible();
+  await expect(block.locator(".pf-question-option").filter({ hasText: "slack-login" })).toHaveCount(0);
+  await expect(block.locator(".pf-question-option").filter({ hasText: "email" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
+
+  await telegram.click();
+  await page.getByRole("button", { name: "Send answer" }).click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question-searchable",
+    requestId: "question-searchable",
+    answers: { "Which connector should Puffer connect?": "telegram-login" },
     annotations: {}
   });
 });
@@ -4714,6 +4999,77 @@ test("turn cancellation completion restores send after backend reconnect", async
   await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
   await expect(page.locator(".pf-composer textarea")).toBeEnabled();
+});
+
+test("canceled turn live tool calls do not append after the next message", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-live-tools",
+        displayName: "Cancel live tools",
+        title: "Cancel live tools",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Cancel live tools/);
+  await page.locator(".pf-composer textarea").fill("Start a tool-heavy turn");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-cancel-live-tools"
+  );
+
+  daemon.emit("session:session-cancel-live-tools:event", {
+    type: "tool-calls-requested",
+    turnId: "turn-session-cancel-live-tools",
+    requests: [
+      {
+        callId: "old-tool",
+        toolId: "Bash",
+        input: "{\"command\":\"stale-cancel-tool\"}"
+      }
+    ]
+  });
+  const staleTool = page.locator(".pf-tool").filter({ hasText: "stale-cancel-tool" });
+  await expect(staleTool).toBeVisible();
+
+  await page.getByRole("button", { name: "Stop turn" }).click();
+  await daemon.waitForRequest(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-live-tools"
+  );
+  daemon.emit("session:session-cancel-live-tools:event", {
+    type: "turn-complete",
+    turnId: "turn-session-cancel-live-tools",
+    assistantText: ""
+  });
+
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await expect(staleTool).toHaveCount(0);
+
+  await page.locator(".pf-composer textarea").fill("Follow up after cancel");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Follow up after cancel"
+  );
+
+  await expect(
+    page.locator('.pf-msg[data-role="user"]').filter({ hasText: "Follow up after cancel" })
+  ).toBeVisible();
+  await expect(staleTool).toHaveCount(0);
 });
 
 test("turn completion restores send after backend reconnect", async ({ page }) => {

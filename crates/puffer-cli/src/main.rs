@@ -1,29 +1,38 @@
 mod auth_credentials;
 mod auth_provider;
 mod authflow;
+mod basic_commands;
 mod benchmark_reflection;
 mod benchmark_run;
 mod browser;
 mod browser_args;
 mod browser_output;
+mod browser_profiles;
 mod cli_args;
 mod command_surface;
+mod connect;
 mod connectors;
 mod daemon;
 mod daemon_browser;
 mod daemon_files;
 mod daemon_fs_watch;
+mod daemon_lambda_skills;
+mod daemon_local_model;
 mod daemon_lsp;
 mod daemon_pty;
+mod daemon_singleton;
 mod daemon_title;
 mod daemon_turn_routing;
 mod daemon_ui_state;
+mod daemon_workflows;
 mod desktop_activity;
 mod desktop_api;
 mod desktop_api_types;
+mod gmail_browser;
 mod heartbeat;
 mod internal_tools;
 mod non_interactive;
+mod project_metadata;
 mod resource_fs;
 mod runner_selection;
 mod subscriber_tool_args;
@@ -33,14 +42,14 @@ mod workflow_runtime;
 mod workflows;
 
 use anyhow::{Context, Result};
+use basic_commands::{
+    provider_supports_auth_mode, run_agents_command, run_auto_mode_command, run_doctor_command,
+    run_install_command, run_setup_token_command, run_update_command,
+};
 use benchmark_run::run_benchmark_command;
 use clap::Parser;
 use cli_args::{AuthCommand, Cli, Command, SessionCommand, ToolCommand};
-use command_surface::{
-    provider_supports_auth_mode, run_agents_command, run_auto_mode_command, run_doctor_command,
-    run_install_command, run_mcp_command, run_plugin_command, run_setup_token_command,
-    run_update_command,
-};
+use command_surface::{run_mcp_command, run_plugin_command};
 use non_interactive::run_non_interactive_command;
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_core::{resolve_resume_launch, supported_commands, AppState, ResumeLaunchResolution};
@@ -149,6 +158,17 @@ fn main() -> Result<()> {
     // triggers as a side effect of inspecting state.
     let anthropic_base = providers.provider("anthropic").map(|p| p.base_url.clone());
     let start_background_runtimes = should_start_background_runtimes(&cli.subcommand);
+    // Non-interactive turns still need the subscription manager so agent
+    // tools (Telegram, Email, …) can dispatch through it, but they MUST
+    // NOT spin up the cron / heartbeat threads — those are intended for
+    // long-lived processes only.
+    let install_subscription_manager =
+        start_background_runtimes || matches!(cli.subcommand, Some(Command::NonInteractive(_)));
+    let mut daemon_host_guard = if matches!(cli.subcommand, Some(Command::Daemon { .. })) {
+        Some(daemon_singleton::acquire(&paths)?)
+    } else {
+        None
+    };
     let _heartbeat = if start_background_runtimes {
         match heartbeat::start_from_env() {
             Ok(handle) => handle,
@@ -171,7 +191,7 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let _subscription_runtime = if start_background_runtimes {
+    let _subscription_runtime = if install_subscription_manager {
         match subscriptions::install(&paths, &auth_store, anthropic_base.as_deref()) {
             Ok(rt) => Some(rt),
             Err(error) => {
@@ -297,6 +317,9 @@ fn main() -> Result<()> {
             disable_auto_title,
             yolo,
         }) => daemon::run(daemon::DaemonOptions {
+            host_guard: daemon_host_guard
+                .take()
+                .expect("daemon host guard acquired before daemon startup"),
             bind,
             handshake_file,
             token,
@@ -307,6 +330,7 @@ fn main() -> Result<()> {
             yolo,
         }),
         Some(Command::Browser(args)) => browser::run_browser_command(&cwd, &paths, args),
+        Some(Command::Connect { command }) => connect::run_connect_command(&paths, command),
         Some(Command::InternalTool { command }) => {
             internal_tools::run_internal_tool_command(&cwd, &paths, command)
         }
@@ -1212,6 +1236,7 @@ fn run_subscriber(id: &str) -> Result<()> {
         match id {
             "telegram-user" => puffer_subscriber_telegram_user::run().await,
             "email" => puffer_subscriber_email::run().await,
+            "gmail-browser" => crate::gmail_browser::run_subscriber().await,
             other => Err(anyhow::anyhow!(
                 "unknown subscriber id `{other}`; this puffer build does not bundle a driver for it"
             )),

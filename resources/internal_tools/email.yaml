@@ -3,9 +3,9 @@ name: Email
 aliases:
   - email
 description: |-
-  Internal CLI-only Email subscriber surface. Agents should use the `email`
-  skill and run `email ...` through Bash instead of receiving this as a
-  provider tool call.
+  Email subscriber configuration surface. `/connect email <connection>` calls
+  this typed runtime helper directly for auth; the `email` skill exposes the
+  same operation through the internal CLI for lookup-oriented work.
 
   The internal CLI sends execution back to the parent Puffer runtime so the
   long-lived subscription manager owns the email subscriber process.

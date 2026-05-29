@@ -1,0 +1,365 @@
+use super::{ask_input, ConnectResult};
+use crate::AppState;
+use anyhow::{anyhow, bail, Context, Result};
+use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_resources::LoadedResources;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Configures the Telegram bot serve-mode connector from deterministic questions.
+pub(super) fn connect_telegram_bot(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+) -> Result<ConnectResult> {
+    let token = ask_input(
+        state,
+        resources,
+        "Bot Token",
+        "What Telegram bot token should Puffer use?",
+    )?;
+    let path = write_workspace_connector_config(
+        state,
+        "telegram",
+        connection,
+        &[
+            ("token", toml::Value::String(token)),
+            ("require_mention", toml::Value::Boolean(true)),
+            (
+                "group_key_policy",
+                toml::Value::String("per_user".to_string()),
+            ),
+        ],
+    )?;
+    Ok(serve_summary(
+        "telegram-bot",
+        connection,
+        "Bot token",
+        &path,
+    ))
+}
+
+/// Configures the Discord serve-mode connector from deterministic questions.
+pub(super) fn connect_discord_bot(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+) -> Result<ConnectResult> {
+    let token = ask_input(
+        state,
+        resources,
+        "Bot Token",
+        "What Discord bot token should Puffer use?",
+    )?;
+    let path = write_workspace_connector_config(
+        state,
+        "discord",
+        connection,
+        &[
+            ("token", toml::Value::String(token)),
+            ("require_mention", toml::Value::Boolean(true)),
+            (
+                "group_key_policy",
+                toml::Value::String("per_user".to_string()),
+            ),
+        ],
+    )?;
+    Ok(serve_summary("discord-bot", connection, "Bot token", &path))
+}
+
+/// Configures the Matrix serve-mode connector from deterministic questions.
+pub(super) fn connect_matrix_bot(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+) -> Result<ConnectResult> {
+    let homeserver_url = ask_input(
+        state,
+        resources,
+        "Homeserver",
+        "What Matrix homeserver URL should Puffer use?",
+    )?;
+    let username = ask_input(
+        state,
+        resources,
+        "Username",
+        "What Matrix username should Puffer use?",
+    )?;
+    let password = ask_input(
+        state,
+        resources,
+        "Password",
+        "What Matrix password should Puffer use?",
+    )?;
+    let path = write_workspace_connector_config(
+        state,
+        "matrix",
+        connection,
+        &[
+            ("homeserver_url", toml::Value::String(homeserver_url)),
+            ("username", toml::Value::String(username)),
+            ("password", toml::Value::String(password)),
+            ("require_mention", toml::Value::Boolean(true)),
+            (
+                "group_key_policy",
+                toml::Value::String("per_user".to_string()),
+            ),
+        ],
+    )?;
+    Ok(serve_summary(
+        "matrix-bot",
+        connection,
+        "Password login",
+        &path,
+    ))
+}
+
+fn write_workspace_connector_config(
+    state: &AppState,
+    platform: &str,
+    display_name: &str,
+    fields: &[(&str, toml::Value)],
+) -> Result<PathBuf> {
+    let paths = ConfigPaths::discover(&state.cwd);
+    ensure_workspace_dirs(&paths)?;
+    let path = paths.workspace_config_dir.join("connectors.toml");
+    let (mut root, prefer_wrapped) = load_connector_document(&path)?;
+    upsert_connector_table(&mut root, prefer_wrapped, platform, display_name, fields)?;
+    let rendered =
+        toml::to_string_pretty(&toml::Value::Table(root)).context("serialize connector config")?;
+    fs::write(&path, rendered)
+        .with_context(|| format!("failed to write connector config {}", path.display()))?;
+    Ok(path)
+}
+
+fn load_connector_document(path: &Path) -> Result<(toml::Table, bool)> {
+    if !path.exists() {
+        return Ok((toml::Table::new(), true));
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read connector config {}", path.display()))?;
+    let prefer_wrapped = raw.trim().is_empty();
+    let value: toml::Value = if raw.trim().is_empty() {
+        toml::Value::Table(toml::Table::new())
+    } else {
+        toml::from_str(&raw)
+            .with_context(|| format!("failed to parse connector config {}", path.display()))?
+    };
+    match value {
+        toml::Value::Table(root) => {
+            let prefer_wrapped = prefer_wrapped || root.contains_key("connectors");
+            Ok((root, prefer_wrapped))
+        }
+        other => bail!(
+            "connector config root must be a table, got {}",
+            other.type_str()
+        ),
+    }
+}
+
+fn upsert_connector_table(
+    root: &mut toml::Table,
+    prefer_wrapped: bool,
+    platform: &str,
+    display_name: &str,
+    fields: &[(&str, toml::Value)],
+) -> Result<()> {
+    if prefer_wrapped {
+        let connectors = root
+            .entry("connectors".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let connectors = connectors
+            .as_table_mut()
+            .ok_or_else(|| anyhow!("`connectors` key must be a table"))?;
+        upsert_platform_table(connectors, platform, display_name, fields)
+    } else {
+        upsert_platform_table(root, platform, display_name, fields)
+    }
+}
+
+fn upsert_platform_table(
+    parent: &mut toml::Table,
+    platform: &str,
+    display_name: &str,
+    fields: &[(&str, toml::Value)],
+) -> Result<()> {
+    let mut table = match parent.remove(platform) {
+        Some(toml::Value::Table(table)) => table,
+        Some(other) => bail!(
+            "connector `{platform}` config must be a table, got {}",
+            other.type_str()
+        ),
+        None => toml::Table::new(),
+    };
+    table.insert("enabled".to_string(), toml::Value::Boolean(true));
+    table.insert(
+        "display_name".to_string(),
+        toml::Value::String(display_name.to_string()),
+    );
+    for (key, value) in fields {
+        table.insert((*key).to_string(), value.clone());
+    }
+    parent.insert(platform.to_string(), toml::Value::Table(table));
+    Ok(())
+}
+
+fn serve_summary(
+    connector_slug: &str,
+    connection: &str,
+    method: &str,
+    path: &Path,
+) -> ConnectResult {
+    ConnectResult {
+        summary: format!(
+            "Connector serve configuration written.\nconnector: {connector_slug}\nconnection: {connection}\nmethod: {method}\nconfig: {}\nnext: run `puffer serve` to start the connector.",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{with_user_question_prompt_handler, UserQuestionPromptResponse};
+    use puffer_config::PufferConfig;
+    use puffer_session_store::SessionMetadata;
+    use serde_json::{json, Map, Value};
+    use std::sync::{Arc, Mutex};
+
+    fn temp_state() -> AppState {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cwd = tempdir.keep();
+        let session = SessionMetadata {
+            id: uuid::Uuid::nil(),
+            display_name: None,
+            generated_title: None,
+            cwd: cwd.clone(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        AppState::new(PufferConfig::default(), cwd, session)
+    }
+
+    fn answer_request(request: &crate::UserQuestionPromptRequest) -> UserQuestionPromptResponse {
+        let question = request.questions[0]["question"]
+            .as_str()
+            .expect("question text")
+            .to_string();
+        let answer = match question.as_str() {
+            "What Telegram bot token should Puffer use?" => "telegram-token",
+            "What Discord bot token should Puffer use?" => "discord-token",
+            "What Matrix homeserver URL should Puffer use?" => "https://matrix.example.org",
+            "What Matrix username should Puffer use?" => "puffer-bot",
+            "What Matrix password should Puffer use?" => "matrix-password",
+            other => panic!("unexpected question: {other}"),
+        };
+        UserQuestionPromptResponse {
+            answers: Map::from_iter([(question, json!(answer))]),
+            annotations: Map::new(),
+        }
+    }
+
+    #[test]
+    fn telegram_bot_connect_writes_wrapped_workspace_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let request_log = Arc::clone(&requests);
+
+        let result = with_user_question_prompt_handler(
+            move |request| {
+                request_log.lock().unwrap().push(request.questions.clone());
+                answer_request(&request)
+            },
+            || connect_telegram_bot(&mut state, &resources, "telegram-bot"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: telegram-bot"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.telegram]"));
+        assert!(raw.contains("display_name = \"telegram-bot\""));
+        assert!(raw.contains("token = \"telegram-token\""));
+        assert!(raw.contains("require_mention = true"));
+        assert!(raw.contains("group_key_policy = \"per_user\""));
+        assert_eq!(requests.lock().unwrap()[0][0]["type"], "input");
+    }
+
+    #[test]
+    fn discord_bot_connect_writes_wrapped_workspace_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let request_log = Arc::clone(&requests);
+
+        let result = with_user_question_prompt_handler(
+            move |request| {
+                request_log.lock().unwrap().push(request.questions.clone());
+                answer_request(&request)
+            },
+            || connect_discord_bot(&mut state, &resources, "discord-bot"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.discord]"));
+        assert!(raw.contains("display_name = \"discord-bot\""));
+        assert!(raw.contains("token = \"discord-token\""));
+        assert!(raw.contains("require_mention = true"));
+        assert!(raw.contains("group_key_policy = \"per_user\""));
+        assert_eq!(requests.lock().unwrap()[0][0]["type"], "input");
+    }
+
+    #[test]
+    fn matrix_bot_connect_writes_required_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_matrix_bot(&mut state, &resources, "matrix-bot"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("method: Password login"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.matrix]"));
+        assert!(raw.contains("homeserver_url = \"https://matrix.example.org\""));
+        assert!(raw.contains("username = \"puffer-bot\""));
+        assert!(raw.contains("password = \"matrix-password\""));
+        assert!(raw.contains("require_mention = true"));
+        assert!(raw.contains("group_key_policy = \"per_user\""));
+    }
+
+    #[test]
+    fn writer_preserves_bare_config_shape() {
+        let state = temp_state();
+        let path = state.cwd.join(".puffer/connectors.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "[telegram]\ntoken = \"old\"\n").unwrap();
+        write_workspace_connector_config(
+            &state,
+            "matrix",
+            "matrix-bot",
+            &[(
+                "homeserver_url",
+                toml::Value::String("https://matrix.example.org".to_string()),
+            )],
+        )
+        .expect("write config");
+
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[telegram]"));
+        assert!(raw.contains("[matrix]"));
+        assert!(!raw.contains("[connectors.matrix]"));
+    }
+}

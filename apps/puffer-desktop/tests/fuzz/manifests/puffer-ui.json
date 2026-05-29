@@ -13,9 +13,10 @@
     { "id": "terminal-pane", "priority": 8, "description": "Terminal tabs, close/focus, pty attach, and stale terminal events." },
     { "id": "files-pane", "priority": 8, "description": "File open, edit, dirty state, save, stale restore, and external reload." },
     { "id": "settings-providers", "priority": 9, "description": "Provider auth, credentials, model list, default route, import, refresh, and logout." },
+    { "id": "settings-connectors", "priority": 8, "description": "Connector catalog, deterministic setup command preview, and dynamic setup questions." },
     { "id": "settings-mcp", "priority": 7, "description": "MCP server add, update, remove, test, and stale list refresh." },
     { "id": "settings-permissions", "priority": 7, "description": "Permission edit, save, stale refresh, and failed save recovery." },
-    { "id": "pipelines", "priority": 6, "description": "Workflow graph editing, node fields, trigger fields, and draft preservation." }
+    { "id": "workflows", "priority": 6, "description": "Workflow graph editing, node fields, trigger fields, and draft preservation." }
   ],
   "controls": [
     { "id": "workspace.search", "priority": 8, "description": "Workspace search input." },
@@ -49,10 +50,12 @@
     { "id": "settings.provider-import", "priority": 9, "description": "Provider credential import action." },
     { "id": "settings.provider-refresh", "priority": 9, "description": "Provider credential refresh action." },
     { "id": "settings.default-model-save", "priority": 9, "description": "Default provider/model save action." },
+    { "id": "settings.connector-setup", "priority": 8, "description": "Connector setup command and AskUserQuestion answer flow." },
+    { "id": "settings.connector-answer", "priority": 8, "description": "Dynamic connector setup question answer submission." },
     { "id": "settings.mcp-add", "priority": 7, "description": "MCP add action." },
     { "id": "settings.permissions-save", "priority": 7, "description": "Permission save action." },
-    { "id": "pipelines.node-editor", "priority": 6, "description": "Pipeline node editor controls." },
-    { "id": "pipelines.trigger-editor", "priority": 6, "description": "Pipeline trigger editor controls." }
+    { "id": "workflows.node-editor", "priority": 6, "description": "Workflow node editor controls." },
+    { "id": "workflows.trigger-editor", "priority": 6, "description": "Workflow trigger editor controls." }
   ],
   "states": [
     { "id": "daemon.connected", "priority": 10, "description": "Daemon websocket is connected." },

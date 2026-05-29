@@ -1,6 +1,6 @@
 use crate::AppState;
 use anyhow::Result;
-use puffer_resources::{render_prompt_for, LoadedResources};
+use puffer_resources::{render_prompt_for, LoadedResources, SkillSpec};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -234,8 +234,8 @@ fn build_session_guidance_section(
         let mut model_invocable_skills = resources
             .skills
             .iter()
-            .filter(|skill| !skill.value.disable_model_invocation)
-            .map(|skill| format!("{}: {}", skill.value.name, skill.value.description.trim()))
+            .filter(|skill| is_model_invocable_skill(&skill.value))
+            .map(|skill| model_invocable_skill_summary(&skill.value))
             .collect::<Vec<_>>();
         model_invocable_skills.sort();
         if !model_invocable_skills.is_empty() {
@@ -256,6 +256,38 @@ fn build_session_guidance_section(
     let mut lines = vec!["# Session-specific guidance".to_string()];
     lines.extend(prepend_bullets(items));
     lines.join("\n")
+}
+
+fn model_invocable_skill_summary(skill: &SkillSpec) -> String {
+    let mut summary = format!("{}: {}", skill.name, skill.description.trim());
+    if let Some(verification) = skill.verification.as_ref() {
+        summary.push_str(&format!(" [verified {}]", verification.system));
+    }
+    summary
+}
+
+fn is_model_invocable_skill(skill: &SkillSpec) -> bool {
+    if skill.disable_model_invocation {
+        return false;
+    }
+    if is_lambda_verified_skill(skill) {
+        return lambda_skill_is_gate_ready_for_model(skill);
+    }
+    true
+}
+
+fn is_lambda_verified_skill(skill: &SkillSpec) -> bool {
+    skill
+        .verification
+        .as_ref()
+        .is_some_and(|verification| verification.system == "lambda-skill")
+}
+
+fn lambda_skill_is_gate_ready_for_model(skill: &SkillSpec) -> bool {
+    super::lambda_skill_activation::gate_for_verified_skill_activation(skill)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 fn build_environment_section(state: &AppState, model_id: &str) -> Result<String> {
@@ -431,7 +463,8 @@ mod tests {
     use super::{load_memory_prompt, render_runtime_system_prompt};
     use crate::runtime::tests::state;
     use puffer_resources::{
-        LoadedItem, LoadedResources, PromptTemplate, SkillSpec, SourceInfo, SourceKind,
+        LoadedItem, LoadedResources, PromptTemplate, SkillSpec, SkillVerificationSpec, SourceInfo,
+        SourceKind,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -512,6 +545,11 @@ mod tests {
 
     #[test]
     fn runtime_system_prompt_lists_model_invocable_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_path = temp.path().join("host.json");
+        let broken_host_path = temp.path().join("broken-host.json");
+        std::fs::write(&host_path, r#"{"effects":[],"domains":[],"tools":[]}"#).unwrap();
+        std::fs::write(&broken_host_path, "not-json").unwrap();
         let state = state();
         let enabled_tools = BTreeSet::from(["Skill".to_string()]);
         let resources = LoadedResources {
@@ -520,11 +558,95 @@ mod tests {
                     value: SkillSpec {
                         name: "agent-browser".to_string(),
                         description: "Use AgentEnv platform browsers".to_string(),
+                        allowed_tools: vec!["ToolSearch".to_string()],
                         disable_model_invocation: false,
+                        verification: Some(SkillVerificationSpec {
+                            system: "lambda-skill".to_string(),
+                            source_path: Some(
+                                ".puffer/lambda/agent-browser/skill.lskill".to_string(),
+                            ),
+                            generated_path: Some(
+                                ".puffer/lambda/agent-browser/out/GENERATED.SKILL.md".to_string(),
+                            ),
+                            host_catalogue_path: Some(host_path.display().to_string()),
+                            compiler_path: None,
+                            host_tool_bindings: Default::default(),
+                            require_approval: false,
+                            tools: None,
+                            actions: None,
+                        }),
                         ..SkillSpec::default()
                     },
                     source_info: SourceInfo {
                         path: PathBuf::from(".puffer/resources/skills/agent-browser/SKILL.md"),
+                        kind: SourceKind::Workspace,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "prompt-only-verified".to_string(),
+                        description: "Verified but not gate ready".to_string(),
+                        allowed_tools: vec!["ToolSearch".to_string()],
+                        disable_model_invocation: false,
+                        verification: Some(SkillVerificationSpec {
+                            system: "lambda-skill".to_string(),
+                            source_path: Some(
+                                ".puffer/lambda/prompt-only/skill.lskill".to_string(),
+                            ),
+                            generated_path: Some(
+                                ".puffer/lambda/prompt-only/out/GENERATED.SKILL.md".to_string(),
+                            ),
+                            host_catalogue_path: None,
+                            compiler_path: None,
+                            host_tool_bindings: Default::default(),
+                            require_approval: false,
+                            tools: None,
+                            actions: None,
+                        }),
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from(".puffer/resources/skills/prompt-only/SKILL.md"),
+                        kind: SourceKind::Workspace,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "broken-host-verified".to_string(),
+                        description: "Verified but invalid host catalogue".to_string(),
+                        allowed_tools: vec!["ToolSearch".to_string()],
+                        disable_model_invocation: false,
+                        verification: Some(SkillVerificationSpec {
+                            system: "lambda-skill".to_string(),
+                            source_path: Some(
+                                ".puffer/lambda/broken-host/skill.lskill".to_string(),
+                            ),
+                            generated_path: Some(
+                                ".puffer/lambda/broken-host/out/GENERATED.SKILL.md".to_string(),
+                            ),
+                            host_catalogue_path: Some(broken_host_path.display().to_string()),
+                            compiler_path: None,
+                            host_tool_bindings: Default::default(),
+                            require_approval: false,
+                            tools: None,
+                            actions: None,
+                        }),
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from(".puffer/resources/skills/broken-host/SKILL.md"),
+                        kind: SourceKind::Workspace,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "reviewer".to_string(),
+                        description: "Review source changes".to_string(),
+                        disable_model_invocation: false,
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from(".puffer/resources/skills/reviewer/SKILL.md"),
                         kind: SourceKind::Workspace,
                     },
                 },
@@ -548,8 +670,60 @@ mod tests {
             render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
 
         assert!(prompt.contains("Available model-invocable skills"));
-        assert!(prompt.contains("- agent-browser: Use AgentEnv platform browsers"));
+        assert!(prompt
+            .contains("- agent-browser: Use AgentEnv platform browsers [verified lambda-skill]"));
+        assert!(prompt.contains("- reviewer: Review source changes"));
+        assert!(!prompt.contains("prompt-only-verified"));
+        assert!(!prompt.contains("broken-host-verified"));
         assert!(!prompt.contains("Do not show this one"));
+    }
+
+    #[test]
+    fn runtime_system_prompt_hides_compiler_path_only_lambda_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("skill.lskill");
+        let compiler_path = temp.path().join("lskillc");
+        std::fs::write(&source_path, "host {}\n").unwrap();
+        std::fs::write(&compiler_path, "unused").unwrap();
+        let resources = LoadedResources {
+            skills: vec![LoadedItem {
+                value: SkillSpec {
+                    name: "compiler-path-only".to_string(),
+                    description: "Compiler path only verified skill".to_string(),
+                    allowed_tools: vec!["ToolSearch".to_string()],
+                    disable_model_invocation: false,
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some(source_path.display().to_string()),
+                        generated_path: Some(
+                            temp.path()
+                                .join("out/GENERATED.SKILL.md")
+                                .display()
+                                .to_string(),
+                        ),
+                        host_catalogue_path: None,
+                        compiler_path: Some(compiler_path.display().to_string()),
+                        host_tool_bindings: Default::default(),
+                        require_approval: false,
+                        tools: None,
+                        actions: None,
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: source_path,
+                    kind: SourceKind::Workspace,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+        let state = state();
+        let enabled_tools = BTreeSet::from(["Skill".to_string()]);
+
+        let prompt =
+            render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
+
+        assert!(!prompt.contains("compiler-path-only"));
     }
 
     #[test]

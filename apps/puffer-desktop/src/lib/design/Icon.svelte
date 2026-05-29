@@ -45,12 +45,15 @@
     | "server"
     | "link"
     | "logs"
+    | "listTodo"
     | "external"
     | "copy"
     | "coin"
     | "token"
     | "wrench"
     | "pin"
+    | "trash"
+    | "alert"
     | "bot";
 </script>
 
@@ -87,6 +90,7 @@
   import LinkIcon from "lucide-svelte/icons/link";
   import LockIcon from "lucide-svelte/icons/lock";
   import LogsIcon from "lucide-svelte/icons/logs";
+  import ListTodoIcon from "lucide-svelte/icons/list-todo";
   import MoreHorizontalIcon from "lucide-svelte/icons/more-horizontal";
   import PanelLeftCloseIcon from "lucide-svelte/icons/panel-left-close";
   import PanelLeftOpenIcon from "lucide-svelte/icons/panel-left-open";
@@ -105,6 +109,8 @@
   import SparklesIcon from "lucide-svelte/icons/sparkles";
   import SquarePauseIcon from "lucide-svelte/icons/square-pause";
   import TerminalIcon from "lucide-svelte/icons/terminal";
+  import Trash2Icon from "lucide-svelte/icons/trash-2";
+  import TriangleAlertIcon from "lucide-svelte/icons/triangle-alert";
   import WrenchIcon from "lucide-svelte/icons/wrench";
   import XIcon from "lucide-svelte/icons/x";
   import ZapIcon from "lucide-svelte/icons/zap";
@@ -162,12 +168,15 @@
     server: ServerIcon,
     link: LinkIcon,
     logs: LogsIcon,
+    listTodo: ListTodoIcon,
     external: ExternalLinkIcon,
     copy: CopyIcon,
     coin: CoinsIcon,
     token: BadgeCentIcon,
     wrench: WrenchIcon,
     pin: PinIcon,
+    trash: Trash2Icon,
+    alert: TriangleAlertIcon,
     bot: BotIcon
   };
 

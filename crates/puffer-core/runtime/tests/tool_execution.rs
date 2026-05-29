@@ -9,14 +9,40 @@ use uuid::Uuid;
 
 #[path = "tool_execution/agent_team_e2e.rs"]
 mod agent_team_e2e;
+#[path = "tool_execution/anthropic_stream.rs"]
+mod anthropic_stream;
 #[path = "tool_execution/browser_permissions.rs"]
 mod browser_permissions;
+#[path = "tool_execution/computer_use_action.rs"]
+mod computer_use_action;
+#[path = "tool_execution/debugpy_action.rs"]
+mod debugpy_action;
+#[path = "tool_execution/lambda_arxiv_contract.rs"]
+mod lambda_arxiv_contract;
+#[path = "tool_execution/lambda_gate_scope.rs"]
+mod lambda_gate_scope;
+#[path = "tool_execution/lambda_host_input_contract.rs"]
+mod lambda_host_input_contract;
 #[path = "tool_execution/legacy_alias_permissions.rs"]
 mod legacy_alias_permissions;
+#[path = "tool_execution/modal_secret_action.rs"]
+mod modal_secret_action;
 #[path = "tool_execution/multi_agent_e2e.rs"]
 mod multi_agent_e2e;
+#[path = "tool_execution/native_mcp_action.rs"]
+mod native_mcp_action;
+#[path = "tool_execution/openai_lambda_batch.rs"]
+mod openai_lambda_batch;
+#[path = "tool_execution/request_scope_skill_and_filters.rs"]
+mod request_scope_skill_and_filters;
 #[path = "tool_execution/request_scope_tests.rs"]
 mod request_scope_tests;
+#[path = "tool_execution/shopify_action.rs"]
+mod shopify_action;
+#[path = "tool_execution/task_flow_run_task.rs"]
+mod task_flow_run_task;
+#[path = "tool_execution/touchdesigner_action.rs"]
+mod touchdesigner_action;
 
 fn temp_state() -> AppState {
     let tempdir = tempfile::tempdir().unwrap();
@@ -114,6 +140,8 @@ fn mark_file_fully_read(state: &mut AppState, path: &Path) {
 
 #[path = "tool_execution/workflow.rs"]
 mod workflow;
+#[path = "tool_execution/workflow_ask_user_question.rs"]
+mod workflow_ask_user_question;
 
 #[test]
 fn execute_openai_tool_calls_serializes_outputs() {

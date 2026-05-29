@@ -5,11 +5,15 @@ mod auth;
 mod branch;
 mod common;
 mod config;
+mod connect;
 mod doctor;
 mod ecosystem;
 mod genskill;
 mod goal;
+mod lambda_doctor;
+mod lambda_skill_status;
 mod model;
+mod monitor;
 mod pentest;
 mod plugins;
 pub(crate) mod prompt;
@@ -19,6 +23,7 @@ mod resume;
 mod session;
 mod tasks;
 mod terminal_setup;
+mod workflows;
 
 pub use actions::CommandActionEntry;
 pub(crate) use agents::handle_agents_command;
@@ -41,6 +46,7 @@ pub(crate) use config::{
     persist_user_settings, reload_config_from_disk, render_config_summary,
     render_permissions_panel, render_sandbox_actions,
 };
+pub use connect::execute_connect_flow;
 pub(crate) use doctor::{render_doctor_report, run_doctor};
 pub use ecosystem::McpActionEntry;
 pub(crate) use ecosystem::{
@@ -49,9 +55,13 @@ pub(crate) use ecosystem::{
 };
 pub(crate) use genskill::handle_genskill_command;
 pub(crate) use goal::handle_goal_command;
+pub(crate) use lambda_doctor::{lambda_skill_doctor_warnings, render_lambda_skill_doctor_status};
+pub use lambda_skill_status::{lambda_skill_statuses, LambdaSkillStatus};
 pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
 };
+pub use monitor::execute_monitor_flow;
+pub(crate) use monitor::handle_monitor_command;
 pub use pentest::{
     prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_DISPATCHES_PER_ITER,
     DEFAULT_PENTEST_MAX_ITERATIONS, PENTEST_USAGE,
@@ -79,6 +89,7 @@ pub(crate) use terminal_setup::{
     handle_terminal_setup_command, should_hide_terminal_setup_command,
     terminal_setup_command_description,
 };
+pub(crate) use workflows::handle_workflows_command;
 
 use crate::AppState;
 use anyhow::Result;

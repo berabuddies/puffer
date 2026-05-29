@@ -7,23 +7,31 @@
 
 use crate::AppState;
 use anyhow::{Context, Result};
-use puffer_subscriber_runtime::Manifest;
-use puffer_subscriptions::{ActionSpec, PrefilterSpec, SubscriptionSpec, SubscriptionStatus};
+use puffer_config::ConfigPaths;
+use puffer_subscriptions::{
+    connection_subscriber_manifest, direct_subscriber_manifest, ActionSpec, ConnectorTemplate,
+    FilterSpec, SubscriberManifestRoots, SubscriptionSpec, SubscriptionStatus,
+};
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use time::OffsetDateTime;
 
 use super::subscription_globals;
 
 #[derive(Debug, Deserialize)]
 struct CreateInput {
-    id: String,
+    #[serde(alias = "id")]
+    slug: String,
     #[serde(default)]
     description: String,
-    source_topic: String,
+    #[serde(alias = "source_topic")]
+    connection_slug: String,
     #[serde(default)]
-    prefilter: Option<PrefilterSpec>,
+    connector_slug: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "prefilter")]
+    filter: Option<FilterSpec>,
     #[serde(default)]
     classify_prompt: Option<String>,
     #[serde(default)]
@@ -36,18 +44,20 @@ struct CreateInput {
 /// at the conventional location.
 pub fn execute_subscription_create(
     _state: &mut AppState,
-    _cwd: &Path,
+    cwd: &Path,
     input: Value,
 ) -> Result<String> {
     let parsed: CreateInput =
         serde_json::from_value(input).context("invalid SubscriptionCreate input")?;
     let now_ms = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
     let spec = SubscriptionSpec {
-        id: parsed.id.clone(),
+        slug: parsed.slug.clone(),
         description: parsed.description,
-        source_topic: parsed.source_topic.clone(),
+        connection_slug: parsed.connection_slug.clone(),
+        connector_slug: parsed.connector_slug,
         status: SubscriptionStatus::Enabled,
-        prefilter: parsed.prefilter,
+        filter: parsed.filter,
+        ignore_filters: Vec::new(),
         classify_prompt: parsed.classify_prompt,
         classify_model: parsed.classify_model,
         action: parsed.action,
@@ -58,19 +68,39 @@ pub fn execute_subscription_create(
         .store()
         .create(spec.clone())
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let _ = ensure_subscriber_started(&manager, &parsed.source_topic);
+    manager.refresh_connection_consumers()?;
+    let _ = ensure_subscriber_started(&manager, cwd, &parsed.connection_slug);
     Ok(serde_json::to_string_pretty(&spec)?)
 }
 
 fn ensure_subscriber_started(
     manager: &puffer_subscriptions::SubscriptionManager,
+    cwd: &Path,
     source_topic: &str,
 ) -> Result<()> {
     if manager.subscriber_ids().iter().any(|id| id == source_topic) {
         return Ok(());
     }
-    let manifest_dir = subscriber_manifest_dir(source_topic);
-    if !manifest_dir.join("manifest.toml").exists() {
+    let roots = subscriber_manifest_roots(cwd);
+    if let Some(connection) = manager.connection_store().get(source_topic) {
+        if let Some(template) = manager.connector_store().get(&connection.connector_slug) {
+            if connector_stream_supported(&template) {
+                return Ok(());
+            }
+            if let Some(manifest) = connection_subscriber_manifest(&roots, &connection, &template)?
+            {
+                if !manager
+                    .subscriber_ids()
+                    .iter()
+                    .any(|id| id == &manifest.spec.id)
+                {
+                    manager.start_subscriber(manifest)?;
+                }
+                return Ok(());
+            }
+        }
+    }
+    let Some(manifest) = direct_subscriber_manifest(&roots, source_topic)? else {
         // No manifest installed for this topic; the agent created a spec
         // for a subscriber that has not been wired up. We surface this
         // softly (no events will arrive until a matching manifest exists).
@@ -78,21 +108,20 @@ fn ensure_subscriber_started(
             "subscription: no subscriber manifest found for topic `{source_topic}`; spec created but no events will fire"
         );
         return Ok(());
-    }
-    let manifest = Manifest::load(&manifest_dir)?;
+    };
     manager.start_subscriber(manifest)?;
     Ok(())
 }
 
-fn subscriber_manifest_dir(source_topic: &str) -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        let user = PathBuf::from(home)
-            .join(".puffer")
-            .join("subscribers")
-            .join(source_topic);
-        if user.join("manifest.toml").exists() {
-            return user;
-        }
-    }
-    PathBuf::from("resources/subscribers").join(source_topic)
+fn connector_stream_supported(template: &ConnectorTemplate) -> bool {
+    template.can_subscribe && template.command_argv().is_some()
+}
+
+fn subscriber_manifest_roots(cwd: &Path) -> SubscriberManifestRoots {
+    let paths = ConfigPaths::discover(cwd);
+    SubscriberManifestRoots::new(
+        paths.workspace_config_dir,
+        paths.user_config_dir,
+        paths.builtin_resources_dir,
+    )
 }

@@ -1,0 +1,15 @@
+id: ConnectorDelete
+name: ConnectorDelete
+description: |-
+  Delete a user-defined connector template. Built-in connectors remain
+  available unless overridden by another user-defined template.
+handler: runtime:workflow:connector_delete
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    connector_slug:
+      type: string
+  required: [connector_slug]
+  additionalProperties: false

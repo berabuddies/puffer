@@ -1,6 +1,6 @@
 ---
 name: email
-description: Configure the Email subscriber through the internal CLI so subscriptions can receive email events.
+description: Configure the Email connector with /connect so workflows can receive email events.
 allowed-tools:
   - Bash
 argument-hint: "[email configuration task]"
@@ -9,13 +9,13 @@ user-invocable: true
 disable-model-invocation: false
 ---
 
-Use Bash to run the Email internal CLI when the user needs email subscriptions
-or asks to configure email. Email is not a model tool and must not be requested
-as a provider tool call. Run Email commands as `email ...` inside Bash.
+Use `/connect email <connection>` when the user needs email workflow setup or
+auth repair. That flow uses AskUserQuestion for hosts, username, app password,
+from address, and allowed sender choices.
 
 Target: $target
 
-Collect these values from the user before configuring:
+The `/connect` flow collects these values before configuring:
 
 1. IMAP host, for example `imap.gmail.com`, and optional IMAP port.
 2. SMTP host, for example `smtp.gmail.com`, and optional SMTP port.
@@ -26,26 +26,11 @@ Collect these values from the user before configuring:
 
 Configuration command:
 
-```bash
-email configure \
-  --imap-host imap.gmail.com \
-  --smtp-host smtp.gmail.com \
-  --username alice@example.com \
-  --password '<app password>' \
-  --from-address alice@example.com
+```text
+/connect email <connection>
 ```
 
-Optional flags:
-
-- `--imap-port 993`
-- `--smtp-port 587`
-- `--password-stdin` when the password is available on stdin
-- `--allowed-sender person@example.com`
-- `--allowed-sender @example.com`
-
-Treat passwords as secrets. Prefer `--password-stdin` when a secret source can
-be piped into the command; otherwise use `--password` for a single
-non-interactive Bash call. Do not echo the password in the final answer, and do
-not write it to project files. After configuration succeeds, install a
-subscription with `source_topic="email"` when the user wants ongoing
-monitoring.
+Treat passwords as secrets. Do not echo the password in the final answer, and
+do not write it to project files. After configuration succeeds, create a
+workflow with `connection_slug` set to that connection when the user wants
+ongoing monitoring.

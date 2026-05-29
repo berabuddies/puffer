@@ -64,6 +64,10 @@ fn manifest(server_id: &str, mcp_url: &str) -> Vec<McpServerSpec> {
         endpoint: String::new(),
         target: mcp_url.to_string(),
         description: "OAuth-gated MCP stub".into(),
+        env: Default::default(),
+        inherit_env: true,
+        timeout: None,
+        connect_timeout: None,
         headers: Default::default(),
         oauth: Some(McpOAuthSpec::Detailed(McpOAuthDetail {
             enabled: true,

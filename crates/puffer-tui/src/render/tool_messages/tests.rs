@@ -159,6 +159,20 @@ fn telegram_login_submit_password_redacts_value_in_header() {
 }
 
 #[test]
+fn consolidated_telegram_tool_redacts_login_secrets_in_header() {
+    let rendered = render_tool_message(
+        "Tool Telegram [ok]\ninput: {\"action\":\"login_submit_code\",\"code\":\"12345\"}\n{\"status\":\"complete\"}",
+        false,
+        false,
+    )
+    .expect("rendered");
+    let header = rendered[0].to_string();
+    assert!(header.contains("Telegram"), "got: {header}");
+    assert!(header.contains("code redacted"), "got: {header}");
+    assert!(!header.contains("12345"), "header leaked code: {header}");
+}
+
+#[test]
 fn email_configure_header_shows_username_only() {
     let rendered = render_tool_message(
         "Tool EmailConfigure [ok]\ninput: {\"imap_host\":\"imap.example.com\",\"smtp_host\":\"smtp.example.com\",\"username\":\"alice@example.com\",\"password\":\"sekret\",\"from_address\":\"alice@example.com\"}\n{\"status\":\"configured\"}",
