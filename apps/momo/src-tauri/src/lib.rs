@@ -16,6 +16,15 @@ pub fn run() {
     let backend = Arc::new(BackendState::new());
     websocket::start_backend_ws(backend.clone());
 
+    {
+        let backend = backend.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = backend.ensure_daemon() {
+                eprintln!("momo: failed to pre-start puffer daemon: {error:#}");
+            }
+        });
+    }
+
     Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {

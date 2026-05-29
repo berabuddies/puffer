@@ -50,6 +50,10 @@ pub(crate) struct BackendState {
     /// extension point. The frontend works against this RPC regardless
     /// (tests synthesise the event via `daemon.emit`).
     pending_questions: Mutex<HashMap<(String, String), std_mpsc::Sender<Value>>>,
+    /// Owns the local `puffer daemon` subprocess. Started lazily on the
+    /// first `daemon_handshake` call (or pre-warmed at app startup) and
+    /// torn down when the launcher drops.
+    launcher: crate::daemon_launcher::DaemonLauncher,
 }
 
 impl BackendState {
@@ -57,6 +61,7 @@ impl BackendState {
         Self {
             turns: Mutex::new(HashMap::new()),
             pending_questions: Mutex::new(HashMap::new()),
+            launcher: crate::daemon_launcher::DaemonLauncher::new(),
         }
     }
 
@@ -102,6 +107,7 @@ impl BackendState {
                 self.rename_session(&session_id, title)?;
                 serde_value(self.load_session_detail(&session_id)?)
             }
+            "daemon_handshake" => serde_value(self.daemon_handshake()?),
             "run_agent_turn" => self.run_agent_turn(events.clone(), params),
             "cancel_turn" => {
                 let turn_id = string_param(&params, &["turnId", "turn_id"])?;
@@ -124,6 +130,17 @@ impl BackendState {
             "resolve_user_question" => self.resolve_user_question(params),
             other => bail!("unknown method: {other}"),
         }
+    }
+
+    /// Ensures the local `puffer daemon` is running and returns its
+    /// WebSocket handshake so the frontend can dial the daemon directly.
+    fn daemon_handshake(&self) -> Result<crate::daemon_launcher::DaemonHandshake> {
+        self.launcher.ensure_started()
+    }
+
+    /// Best-effort pre-warm of the daemon at startup.
+    pub(crate) fn ensure_daemon(&self) -> Result<()> {
+        self.launcher.ensure_started().map(|_| ())
     }
 
     fn default_workspace(&self) -> Result<PathBuf> {
@@ -1887,4 +1904,27 @@ fn apply_codex_permission_args(args: &mut Vec<String>, permission_mode: Option<&
 enum ProcessLine {
     Stdout(String),
     Stderr(String),
+}
+
+#[cfg(test)]
+mod daemon_handshake_tests {
+    use super::*;
+    use crate::events::EventEmitter;
+
+    #[test]
+    fn daemon_handshake_method_is_dispatched() {
+        let state = BackendState::new();
+        let result = state.handle(
+            EventEmitter::websocket_only(),
+            "daemon_handshake",
+            serde_json::json!({}),
+        );
+        match result {
+            Ok(value) => assert!(value.get("url").is_some(), "handshake should carry url"),
+            Err(error) => assert!(
+                !error.to_string().contains("unknown method"),
+                "method must be dispatched, got: {error}"
+            ),
+        }
+    }
 }
