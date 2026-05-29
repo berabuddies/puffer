@@ -232,6 +232,9 @@ pub struct AppState {
     /// Last API-reported input token count (from `usage.input_tokens`).
     /// Updated after each Responses API call for accurate context-window display.
     pub last_input_tokens: Option<u32>,
+    /// When `Some`, tool calls with outbound URLs must stay on this origin
+    /// (`scheme://host:port`). Set by /pentest start/resume; cleared by stop.
+    pub pentest_in_scope_origin: Option<String>,
     /// Wall-clock timestamp of the most recent committed assistant message.
     /// Set by `push_message` when role == Assistant. Consumed by the
     /// microcompact time-based trigger to mirror Claude Code's "gap since
@@ -335,6 +338,7 @@ impl AppState {
             status_line_signature: None,
             pending_query_prompt: None,
             last_input_tokens: None,
+            pentest_in_scope_origin: None,
             last_assistant_at: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,

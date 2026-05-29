@@ -106,6 +106,9 @@ pub(super) fn execute_tool_call(
     {
         return Ok(denied);
     }
+    if let Some(denied) = enforce_pentest_scope(state, tool_id, &input) {
+        return Ok(denied);
+    }
     let skip_verified_approval =
         lambda_skill_skips_concrete_approval(state, registry, tool_id, &input);
     let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
@@ -913,4 +916,82 @@ pub(super) fn blocked_runtime_tool(
             metadata: Value::Null,
         },
     }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn in_scope_matches_origin() {
+        assert!(url_in_scope("http://target.local:32918/path?q=1", "http://target.local:32918"));
+        assert!(url_in_scope("https://target.local:443/", "https://target.local:443"));
+    }
+
+    #[test]
+    fn out_of_scope_origins_rejected() {
+        let scope = "http://target.local:32918";
+        assert!(!url_in_scope("http://127.0.0.1:32918/", scope));
+        assert!(!url_in_scope("http://169.254.169.254/latest/meta-data/", scope));
+        assert!(!url_in_scope("http://target.local:80/", scope), "wrong port");
+        assert!(!url_in_scope("https://target.local:32918/", scope), "wrong scheme");
+        assert!(!url_in_scope("http://attacker.example/", scope));
+    }
+
+    #[test]
+    fn dangerous_schemes_always_rejected() {
+        let scope = "http://target.local:32918";
+        assert!(!url_in_scope("file:///etc/passwd", scope));
+        assert!(!url_in_scope("javascript:alert(1)", scope));
+        assert!(!url_in_scope("data:text/html,<script>", scope));
+    }
+}
+
+/// Tools whose inputs carry outbound URLs that must respect pentest scope.
+const PENTEST_SCOPED_TOOLS: &[&str] = &["WebFetch", "Browser"];
+
+/// Denies a tool call when an in-scope origin is set and the call's URL points
+/// outside it (loopback, link-local, file://, foreign hosts). Bash + nested Agent
+/// dispatches are out of scope here — they go through their own filters.
+pub(super) fn enforce_pentest_scope(
+    state: &AppState,
+    tool_id: &str,
+    input: &Value,
+) -> Option<ToolExecutionResult> {
+    let scope = state.pentest_in_scope_origin.as_deref()?;
+    let canonical = canonical_tool_name(tool_id);
+    if !PENTEST_SCOPED_TOOLS.contains(&canonical.as_str()) {
+        return None;
+    }
+    let url = input.get("url").and_then(Value::as_str)?;
+    if url_in_scope(url, scope) {
+        return None;
+    }
+    Some(blocked_runtime_tool(
+        tool_id,
+        ToolPermissionBehavior::Deny,
+        Some(format!(
+            "pentest scope: `{url}` is outside `{scope}` — set $PUFFER_PENTEST_TASK_SPEC to widen scope"
+        )),
+    ))
+}
+
+/// Compares a URL's `scheme://host:port` against an expected origin literal.
+fn url_in_scope(url: &str, scope_origin: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let scheme = parsed.scheme();
+    if scheme == "file" || scheme == "javascript" || scheme == "data" {
+        return false;
+    }
+    let host = match parsed.host_str() {
+        Some(h) => h.to_ascii_lowercase(),
+        None => return false,
+    };
+    let port = parsed
+        .port_or_known_default()
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default();
+    format!("{scheme}://{host}{port}") == scope_origin
 }

@@ -312,7 +312,7 @@ pub(crate) fn handle_prompt_submit(
     let queued_before_loop_command = tui.queued_prompts.len();
     if try_handle_loop_command(state, session_store, tui, &submitted)? {
         if had_pentest_before_loop_command && tui.active_loop.is_some() {
-            pentest_command::clear_active(tui);
+            pentest_command::clear_active(state, tui);
             for _ in 0..queued_before_loop_command {
                 let _ = tui.queued_prompts.pop_front();
             }
@@ -360,7 +360,7 @@ pub(crate) fn handle_prompt_submit(
             && (tui.active_loop.is_some() || pentest_command::is_active(tui))
         {
             tui.active_loop = None;
-            pentest_command::clear_active(tui);
+            pentest_command::clear_active(state, tui);
             tui.queued_prompts.clear();
         }
         return Ok(());

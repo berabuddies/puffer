@@ -529,7 +529,7 @@ fn handle_key(
                 tui.status_hint = Some(("Loop stopped.".into(), std::time::Instant::now()));
             } else if pentest_command::is_active(tui) {
                 cancel_pending_submit(state, session_store, tui)?;
-                pentest_command::clear_active(tui);
+                pentest_command::clear_active(state, tui);
                 tui.queued_prompts.clear();
                 tui.status_hint = Some(("Pentest stopped.".into(), std::time::Instant::now()));
             } else if tui.has_pending_submit() {
@@ -1371,7 +1371,7 @@ fn handle_overlay_key(
                 emit_system_message(state, session_store, "Loop stopped.".to_string())?;
             } else if pentest_command::is_active(tui) {
                 cancel_pending_submit(state, session_store, tui)?;
-                pentest_command::clear_active(tui);
+                pentest_command::clear_active(state, tui);
                 tui.queued_prompts.clear();
                 emit_system_message(state, session_store, "Pentest stopped.".to_string())?;
             } else if tui.has_pending_submit() {
