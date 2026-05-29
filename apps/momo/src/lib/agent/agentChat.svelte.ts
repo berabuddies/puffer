@@ -22,7 +22,7 @@
  *   - Module-level `Record<sessionId, ChatState>` (`$state`). Momo's router
  *     re-mounts the Agent component on `{#key currentRoute.path}`, so the
  *     state machine must outlive the component — it lives here, keyed by
- *     sessionId, exactly like `lib/chat.svelte.ts`.
+ *     sessionId.
  *   - `handleSessionEvent(sessionId, ev)` is a pure reducer: it mutates only
  *     the per-session `ChatState`, never touches the daemon. This makes it
  *     unit-testable by feeding events directly (see
@@ -32,9 +32,9 @@
  *
  * Svelte 5 scope note: every mutation lives inside a function (event handler
  * or reducer), never in a `$derived` / module-init read scope, so the
- * `state_unsafe_mutation` guard is never tripped (same discipline as
- * `chat.svelte.ts`). Derived views (`combinedTimeline`, `pendingPermissions`,
- * …) are plain getter functions that recompute from `$state` on read.
+ * `state_unsafe_mutation` guard is never tripped. Derived views
+ * (`combinedTimeline`, `pendingPermissions`, …) are plain getter functions
+ * that recompute from `$state` on read.
  */
 
 import {
