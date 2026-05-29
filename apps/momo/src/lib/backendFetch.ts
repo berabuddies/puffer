@@ -3,35 +3,51 @@
  *
  * Ported from worldclaw-app/lib/backend.ts. Adapted for the desktop
  * environment:
- *   - Auth token is read from localStorage key `puffer.authToken`
- *     (the convention used by src/lib/auth.svelte.ts).
- *   - The RN-specific refresh-on-1007 flow from the donor is dropped:
- *     it depended on `useAuthStore` / `refreshBackendSession` which
- *     don't exist in the desktop app. On any of the auth-failure codes
- *     (1005, 1007, 1008, 1009) we surface a terminal BackendError and
- *     let the caller decide how to react (e.g. bounce to the login
- *     page). A future iteration can layer refresh on top once the
- *     desktop has a refresh-token endpoint wired up.
- *   - Base URL is read from `import.meta.env.VITE_BACKEND_BASE_URL`
- *     and falls back to `http://127.0.0.1:8080` — the same default the
- *     donor uses via `EXPO_PUBLIC_BACKEND_BASE_URL`.
+ *   - Auth: the ucard-backend wants its own `sessionToken`, not the Auth
+ *     Station JWT. `ucardSession.ts` mints + caches one (POST
+ *     /api/auth/exchange) off the JWT; we attach it as the Bearer here.
+ *     On any auth-failure code (1005/1007/1008/1009) we re-exchange once
+ *     from the JWT and retry — recovering an expired/rotated sessionToken —
+ *     before surfacing a terminal BackendError for the UI to act on.
+ *   - Base URL: in a production build we hit
+ *     `import.meta.env.VITE_BACKEND_BASE_URL` directly (falling back to
+ *     `http://127.0.0.1:8080`, the same default the donor uses via
+ *     `EXPO_PUBLIC_BACKEND_BASE_URL`). The packaged app runs at the
+ *     `tauri://localhost` origin, which the backend's CORS allowlist
+ *     accepts. In dev, though, the Tauri webview loads from
+ *     `http://localhost:1466` — an origin the backend does NOT allowlist —
+ *     so a direct cross-origin fetch is blocked by the WKWebView and surfaces
+ *     as "Network error: Load failed". To dodge that we issue *same-origin*
+ *     requests in dev (relative `/api/…`) and let the Vite dev server proxy
+ *     them to the real backend server-side, where CORS never applies. The
+ *     proxy target is configured from the same `VITE_BACKEND_BASE_URL` in
+ *     `vite.config.ts`.
  *
  * Response envelope shape (matches ucard-backend):
  *   { code: number, message: string, field: string, data: T }
  * Non-zero `code` → BackendError. Network / JSON failures → plain Error.
  */
 
-const BASE_URL =
-  (import.meta.env as Record<string, string | undefined>)
-    .VITE_BACKEND_BASE_URL ?? 'http://127.0.0.1:8080';
-const API_PREFIX = '/api';
-const TOKEN_KEY = 'puffer.authToken';
+import {
+  ensureUcardSessionToken,
+  refreshUcardSession,
+  clearUcardSession
+} from './ucardSession';
 
-// Backend codes that mean "this sessionToken is dead — go log in again".
-// 1005 unauthorized, 1007 token expired, 1008 token invalid/malformed,
-// 1009 session revoked. The donor split 1007 out as refreshable, but
-// without a refresh hook here we treat the whole family as terminal.
-const TERMINAL_AUTH_CODES = new Set([1005, 1007, 1008, 1009]);
+// Dev → '' (same-origin /api, proxied by Vite to dodge the backend's CORS
+// allowlist, which only admits the packaged tauri://localhost origin).
+// Prod → absolute backend URL, hit directly.
+const BASE_URL = import.meta.env.DEV
+  ? ''
+  : (import.meta.env as Record<string, string | undefined>)
+      .VITE_BACKEND_BASE_URL ?? 'http://127.0.0.1:8080';
+const API_PREFIX = '/api';
+
+// Auth-failure codes. 1005 unauthorized, 1007 token expired, 1008 token
+// invalid/malformed, 1009 session revoked. All four mean the attached ucard
+// sessionToken is no good — we re-exchange from the JWT once and retry; if
+// that still fails the error is terminal and the UI prompts re-login.
+const AUTH_FAILURE_CODES = new Set([1005, 1007, 1008, 1009]);
 
 export interface BackendEnvelope<T> {
   code: number;
@@ -102,15 +118,6 @@ export interface BackendFetchOptions extends Omit<RequestInit, 'body'> {
    * fire unauthenticated (e.g. health checks, future login bootstrap).
    */
   skipAuth?: boolean;
-}
-
-function readAuthToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    return window.localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
 }
 
 function buildUrl(path: string, query?: BackendFetchOptions['query']): string {
@@ -203,38 +210,48 @@ async function send<T>(
 }
 
 /**
- * Fetch from the ucard-backend at `${BASE_URL}/api${path}`. Injects the
- * cached auth token unless `skipAuth: true`. Decodes the envelope and
- * returns the `data` payload on success. Throws `BackendError` for any
- * non-zero envelope code; throws plain `Error` for network / JSON
- * failures.
+ * Fetch from the ucard-backend at `${BASE_URL}/api${path}`. Unless
+ * `skipAuth: true`, attaches a ucard `sessionToken` (minted from the Auth
+ * Station JWT via `ucardSession`). Decodes the envelope and returns `data`
+ * on success. Throws `BackendError` for any non-zero envelope code; throws
+ * plain `Error` for network / JSON failures.
  *
- * On a terminal auth-failure code (1005/1007/1008/1009) the stored
- * token is cleared so subsequent requests fail fast and the UI layer
- * can route the user back to login.
+ * On an auth-failure code (1005/1007/1008/1009) the cached sessionToken is
+ * stale or rejected, so we drop it, re-exchange once from the JWT, and retry
+ * the request. If the retry still fails the original error propagates and the
+ * UI layer can route the user back to login.
  */
 export async function backendFetch<T>(
   path: string,
   options: BackendFetchOptions = {},
 ): Promise<T> {
   const { body, query, headers, skipAuth, ...rest } = options;
-  const token = skipAuth ? null : readAuthToken();
+
+  if (skipAuth) {
+    return send<T>(path, { body, headers, query, rest, token: null });
+  }
+
+  // Mint/reuse the ucard sessionToken (proactively refreshed when expiring).
+  const token = await ensureUcardSessionToken();
 
   try {
     return await send<T>(path, { body, headers, query, rest, token });
   } catch (err) {
-    if (err instanceof BackendError && TERMINAL_AUTH_CODES.has(err.code)) {
-      console.warn(
-        `[backend] terminal auth code=${err.code} on ${path} → clearing token`,
-      );
-      try {
-        if (typeof window !== 'undefined') {
-          window.localStorage.removeItem(TOKEN_KEY);
-        }
-      } catch {
-        /* localStorage might be unavailable — already failing, nothing to do */
-      }
+    if (!(err instanceof BackendError) || !AUTH_FAILURE_CODES.has(err.code)) {
+      throw err;
     }
-    throw err;
+    // The sessionToken was rejected — re-exchange from the JWT and retry once.
+    console.warn(
+      `[backend] auth code=${err.code} on ${path} → re-exchange + retry`,
+    );
+    clearUcardSession();
+    let fresh: string;
+    try {
+      fresh = await refreshUcardSession();
+    } catch {
+      clearUcardSession();
+      throw err; // surface the original auth failure (e.g. JWT also dead)
+    }
+    return send<T>(path, { body, headers, query, rest, token: fresh });
   }
 }

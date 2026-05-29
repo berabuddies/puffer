@@ -130,14 +130,27 @@ export class RestWalletClient implements WalletClient {
   }
 
   async getKycStatus(): Promise<KycStatusResponse> {
-    const data = await backendFetch<{
+    let data: {
       status: BackendKycStatusCode;
       statusText?: string;
       message?: string;
       ekycUrl?: string;
       cardId?: number;
       maskedCardNumber?: string;
-    }>('/card/kyc/status');
+    };
+    try {
+      data = await backendFetch('/card/kyc/status');
+    } catch (err) {
+      // No CardHolder yet → the backend returns ResourceNotFound (1001).
+      // That's the "never started KYC" state, not a failure: surface it as
+      // `none` (matching mockWalletClient) so the UI shows the KYC intro
+      // instead of an error toast. Mirrors worldclaw-app/app/card.tsx's
+      // CODE_RESOURCE_NOT_FOUND handling.
+      if (err instanceof BackendError && err.code === 1001) {
+        return { status: 'none', message: null };
+      }
+      throw err;
+    }
 
     return {
       status: STATUS_MAP[data.status] ?? 'error',

@@ -11,6 +11,9 @@
 interface ImportMetaEnv {
   readonly VITE_AUTH_STATION_URL?: string;
   readonly VITE_WORLDROUTER_CONTROL_URL?: string;
+  /** U-card wallet REST base. Hit directly in prod; the Vite dev proxy
+   *  target in dev (see vite.config.ts / backendFetch.ts). */
+  readonly VITE_BACKEND_BASE_URL?: string;
   /** Vite-injected. True under `vite dev`, false under `vite build`. */
   readonly DEV?: boolean;
   /** Vite-injected. Inverse of DEV. */

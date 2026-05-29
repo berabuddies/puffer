@@ -11,10 +11,12 @@
                                                 transactions, Identity card
                                                 shows the green check.
 
-  The page calls into walletClient.* on mount:
+  On mount it calls walletStore.loadWallet(), which:
     • getKycStatus()                       — drives the three branches above.
     • getCardList() + getBalance(cardId)   — only when approved.
     • getTransactions(cardId, …)           — only when approved.
+  The snapshot lives in walletStore (module scope) so re-opening /wallet shows
+  the last result instantly and only the cold first load renders "Loading…".
 
   Top up CTA is disabled until status === 'approved'. Clicking it opens
   TopUpModal; closing the modal refreshes balance + transactions so the
@@ -30,7 +32,6 @@
   import ActivityRow from "../components/wallet/ActivityRow.svelte";
   import TopUpModal from "../components/wallet/TopUpModal.svelte";
   import {
-    walletClient,
     setMockKycStatus,
     setMockHasFunds
   } from "../lib/walletClient.svelte";
@@ -49,11 +50,8 @@
     if (typeof window === "undefined") return null;
     return (window as unknown as { __wallet?: WalletMock }).__wallet ?? null;
   }
-  import type {
-    KycStatus,
-    KycStatusResponse,
-    Transaction
-  } from "../lib/walletTypes";
+  import type { KycStatus, Transaction } from "../lib/walletTypes";
+  import { walletState, loadWallet } from "../lib/walletStore.svelte";
   import type { WalletActivity } from "../data/types";
   import { navigate } from "../router.svelte";
   import { pushToast } from "../lib/toast.svelte";
@@ -61,71 +59,33 @@
   const showDevToggles =
     (import.meta.env as Record<string, string | undefined>).VITE_USE_MOCK_WALLET === "true";
 
-  let kycStatus = $state<KycStatus>("none");
-  let kycLoaded = $state<boolean>(false);
-  let cardId = $state<number | null>(null);
-  let balance = $state<number>(0);
-  let txns = $state<Transaction[]>([]);
+  // The wallet snapshot (kyc / balance / txns) lives in walletStore so it
+  // survives navigation — that's what keeps the "Loading…" placeholder to the
+  // cold first load only (see walletStore's stale-while-revalidate note).
+  // Only the view-local toggles stay here.
   let balanceHidden = $state<boolean>(false);
   let topUpOpen = $state<boolean>(false);
 
   async function refresh(): Promise<void> {
-    let status: KycStatusResponse;
-    try {
-      status = await walletClient.getKycStatus();
-    } catch (err) {
-      pushToast(`Wallet load failed: ${err instanceof Error ? err.message : err}`, "error");
-      kycLoaded = true;
-      return;
-    }
-    kycStatus = status.status;
-    kycLoaded = true;
-
-    if (kycStatus === "none") {
-      // No cardholder record yet → user has never started KYC. Bounce to
-      // the empty-state page. We do this here rather than in App so the
-      // route only redirects once data lands.
-      navigate("/wallet/kyc");
-      return;
-    }
-
-    if (kycStatus === "approved") {
-      try {
-        const cards = await walletClient.getCardList();
-        const first = cards[0];
-        if (first) {
-          cardId = first.cardId;
-          const [b, t] = await Promise.all([
-            walletClient.getBalance(first.cardId),
-            walletClient.getTransactions(first.cardId, { limit: 10 })
-          ]);
-          balance = b.availableBalance;
-          txns = t.transactions;
-        } else {
-          // Approved but no card yet — treat the wallet as $0 + empty list.
-          balance = 0;
-          txns = [];
-        }
-      } catch (err) {
-        pushToast(
-          `Wallet load failed: ${err instanceof Error ? err.message : err}`,
-          "error"
-        );
-      }
-    } else {
-      // In Review / Declined / etc. — show the wallet shell with $0 and
-      // no transactions.
-      balance = 0;
-      txns = [];
-    }
+    const error = await loadWallet();
+    if (error) pushToast(`Wallet load failed: ${error}`, "error");
   }
 
   onMount(() => {
     void refresh();
   });
 
+  // No cardholder yet (status "none") → user has never started KYC; bounce to
+  // the KYC entry. An $effect rather than a branch in refresh(), so a
+  // returning none-user redirects immediately from the persisted snapshot
+  // instead of flashing the wallet shell while loadWallet re-checks. (Done
+  // here, not in App, so the redirect only fires once a status is known.)
+  $effect(() => {
+    if (walletState.kyc === "none") navigate("/wallet/kyc");
+  });
+
   function handleTopUp(): void {
-    if (kycStatus !== "approved") return;
+    if (walletState.kyc !== "approved") return;
     topUpOpen = true;
   }
 
@@ -180,7 +140,7 @@
 
   // Format helpers — the design uses comma-grouped two-decimal USD.
   let balanceDisplay = $derived(
-    balanceHidden ? "●●●●●●" : formatCurrency(balance)
+    balanceHidden ? "●●●●●●" : formatCurrency(walletState.balance)
   );
 
   function formatCurrency(n: number): string {
@@ -214,12 +174,14 @@
   // "$0.00" empty state and "$326.80" with the sample data.
   let monthlySpend = $derived(
     formatCurrency(
-      txns.filter((t) => t.type === "debit").reduce((s, t) => s + t.amount, 0)
+      walletState.txns
+        .filter((t) => t.type === "debit")
+        .reduce((s, t) => s + t.amount, 0)
     )
   );
 
-  let activitiesDisplay = $derived(txns.map(txnToActivity));
-  let isApproved = $derived(kycStatus === "approved");
+  let activitiesDisplay = $derived(walletState.txns.map(txnToActivity));
+  let isApproved = $derived(walletState.kyc === "approved");
   let identityLabel = $derived(isApproved ? "Verified" : "In Review");
 </script>
 
@@ -254,7 +216,10 @@
     {/if}
   </header>
 
-  {#if !kycLoaded}
+  {#if walletState.status === "loading" || walletState.kyc === "none"}
+    <!-- "none" is mid-redirect to /wallet/kyc (see the $effect): show the
+         placeholder, never the shell, so a returning none-user doesn't flash
+         the wallet page before bouncing. -->
     <p class="wallet-loading">Loading…</p>
   {:else}
     <section class="wallet-balance">
