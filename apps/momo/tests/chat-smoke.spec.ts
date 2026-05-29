@@ -1,8 +1,8 @@
 /**
  * Chat smoke test. Holds tiny, harness-wide regressions that aren't a
  * good fit for a per-feature spec in `chat/`, plus the one end-to-end
- * "send a message → see the assistant reply" path through the new
- * daemon-backed `ConversationView` surface (Task 5).
+ * "send a message → see the assistant reply" path through the
+ * daemon-backed `BubbleConversation` surface.
  *
  * The deeper flows — permission / question / cancel / replay e2e — live in
  * `chat/` and are owned by Task 8. This file only guards that the Agent page
@@ -59,16 +59,16 @@ test("home composer → run_agent_turn → ConversationView renders the assistan
   // fallback).
   emitTurnComplete(daemon, { sessionId, turnId });
 
-  // ConversationView renders an agent row (`.pf-msg[data-role="agent"]`) whose
-  // body text comes through MessageBody as a paragraph inside `.pf-msg-text`.
+  // BubbleConversation renders an assistant bubble (`.mb-row[data-role="assistant"]`)
+  // whose body text comes through MessageBody as a paragraph inside `.pf-msg-text`.
   const assistant = page
-    .locator('.pf-msg[data-role="agent"] .pf-msg-text')
+    .locator('.mb-row[data-role="assistant"] .pf-msg-text')
     .filter({ hasText: "You're in luck!" });
   await expect(assistant).toBeVisible();
 
-  // The user's prompt renders as a user row in the same thread.
+  // The user's prompt renders as a user bubble in the same thread.
   await expect(
-    page.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: prompt })
+    page.locator('.mb-row[data-role="user"] .pf-msg-text').filter({ hasText: prompt })
   ).toBeVisible();
 });
 
@@ -106,7 +106,7 @@ test("streaming: a rapid delta burst still renders the complete final markdown (
   emitTurnComplete(daemon, { sessionId, turnId });
 
   const bubble = page
-    .locator('.pf-msg[data-role="agent"] .pf-msg-text')
+    .locator('.mb-row[data-role="assistant"] .pf-msg-text')
     .filter({ hasText: "This is bold and code and the end." });
   await expect(bubble).toBeVisible();
   // The closed markdown won the race: `**bold**` rendered as <strong>, not as
@@ -150,13 +150,13 @@ test("direct goto /agent/<id> hydrates the timeline without a pageerror", async 
   await page.goto("/#/agent/seeded-1");
   await expect(page).toHaveURL(/#\/agent\/seeded-1$/);
 
-  // ConversationView must hydrate and render the persisted transcript.
+  // BubbleConversation must hydrate and render the persisted transcript.
   await expect(
-    page.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "ping from history" })
+    page.locator('.mb-row[data-role="user"] .pf-msg-text').filter({ hasText: "ping from history" })
   ).toBeVisible();
   await expect(
     page
-      .locator('.pf-msg[data-role="agent"] .pf-msg-text')
+      .locator('.mb-row[data-role="assistant"] .pf-msg-text')
       .filter({ hasText: "pong from history" })
   ).toBeVisible();
 

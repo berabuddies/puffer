@@ -21,7 +21,7 @@
 -->
 <script lang="ts">
   import Composer from "../components/shell/Composer.svelte";
-  import ConversationView from "../lib/agent/ConversationView.svelte";
+  import BubbleConversation from "../lib/agent/BubbleConversation.svelte";
   import { createController } from "../lib/agent/agentChat.svelte";
   import { navigate } from "../router.svelte";
   import type { TimelineItem, SessionListItem } from "../lib/agent/types";
@@ -66,22 +66,20 @@
   let pendingPermissions = $derived(controller ? controller.pendingPermissions() : []);
   let pendingQuestions = $derived(controller ? controller.pendingQuestions() : []);
   let turnRunning = $derived(controller ? controller.turnRunning() : false);
-  // Surface the live turn timing/status so ConversationView's typing indicator
-  // can show "Thinking (3.2s)" / the current status hint instead of a static
-  // "Running". Without these props its 100ms elapsed-timer `$effect` had no
-  // consumer (formatElapsed always returned "") and just span-idled.
+  // Surface the live turn timing/status so BubbleConversation's typing
+  // indicator can show the current status hint / "思考中…" instead of a static
+  // "处理中…".
   let turnStartedAtMs = $derived(controller ? controller.state().turnStartedAtMs : null);
   let turnThinking = $derived(controller ? controller.state().turnThinking : false);
   let turnStatusHint = $derived(controller ? controller.state().turnStatusHint : null);
   // Hydration loading state: the persisted detail hasn't landed yet and the
-  // live stream is empty. `ConversationView` shows its own "Loading…" row when
+  // live stream is empty. `BubbleConversation` shows its own "Loading…" row when
   // `loading && timeline.length === 0`. Treat the pre-seed frame as loading too.
   let loading = $derived(
     controller ? controller.state().sessionDetail === null && timeline.length === 0 : Boolean(taskId)
   );
-  // ConversationView's composer is gated on `session`; momo drives input from
-  // the shell <Composer> below instead, so the session lets the timeline +
-  // approval prompts scope correctly without surfacing a second input.
+  // `session` scopes the timeline + approval prompts; momo drives input from
+  // the shell <Composer> below, so BubbleConversation has no internal composer.
   let session = $derived(controller ? (controller.state().sessionDetail?.session ?? null) : null);
 
   function goHome(event: MouseEvent): void {
@@ -124,19 +122,16 @@
     </header>
 
     <!--
-      Thread surface. `ConversationView` is the desktop-style timeline renderer
-      (text / tools / thinking / approvals / questions / diffs) — it consumes
-      the controller's `TimelineItem[]` directly. Its own internal composer is
-      hidden via the `:global(.pf-composer-wrap)` rule below; momo drives input
-      through the shell <Composer> row underneath so the page keeps a single
-      visible input. `onSubmitMessage` is therefore intentionally inert here
-      (the hidden composer never fires it) — sending goes through the shell
-      Composer, NOT this prop, so there's no double-send. The Approval /
-      QuestionPrompt callbacks still route through ConversationView so pending
-      requests resolve inline with their turn.
+      Thread surface. `BubbleConversation` is the momo bubble timeline renderer
+      (messages / tools / approvals / questions / diffs) — it consumes the
+      controller's `TimelineItem[]` directly and has no internal composer; momo
+      drives input through the shell <Composer> row underneath so the page keeps
+      a single visible input. The Approval / QuestionPrompt callbacks route
+      through BubbleConversation so pending requests resolve inline with their
+      turn.
     -->
     <section class="agent__thread" aria-label="Conversation">
-      <ConversationView
+      <BubbleConversation
         {session}
         {timeline}
         {pendingPermissions}
@@ -146,7 +141,6 @@
         {turnThinking}
         {turnStatusHint}
         {loading}
-        onSubmitMessage={(message) => controller?.appendUserMessage(message)}
         onResolvePermission={(id, choice) => controller?.resolvePermission(id, choice)}
         onResolveUserQuestion={(id, answers, annotations) =>
           controller?.resolveUserQuestion(id, answers, annotations)}
@@ -199,8 +193,8 @@
     border-bottom: 1px solid var(--color-card-border);
   }
 
-  /* The thread row hosts <ConversationView>, which owns its own internal
-   * scroller (`.pf-chat-thread`) and centering. We just give it the flex
+  /* The thread row hosts <BubbleConversation>, which owns its own internal
+   * scroller (`.momo-chat__thread`) and centering. We just give it the flex
    * slot between the sticky header and the composer; the negative margin
    * lets the conversation surface span the full page width while the Shell
    * column keeps its horizontal padding for the header / composer. */
@@ -210,13 +204,6 @@
     display: flex;
     flex-direction: column;
     margin: 0 calc(-1 * var(--shell-page-padding));
-  }
-
-  /* ConversationView is a self-contained chat surface (thread + composer).
-   * momo drives input from the shell <Composer> below, so suppress
-   * ConversationView's own composer to avoid a duplicate input. */
-  .agent__thread :global(.pf-composer-wrap) {
-    display: none;
   }
 
   .agent__composer {

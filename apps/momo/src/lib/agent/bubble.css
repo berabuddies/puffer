@@ -1,0 +1,52 @@
+/* momo 气泡 chat —— desktop→momo token 桥接 + 气泡/pill/卡片皮。
+   桥接:ToolCard/DiffCard/MessageBody/Approval/QuestionPrompt 用的是 desktop
+   调色板别名(--muted/--foreground/--puffer-accent/…),momo 未定义。在 .momo-chat
+   根映射到 momo tokens.css,使复用组件无需改内部即可拿到 momo 配色。 */
+.momo-chat {
+  --background: var(--color-surface-app);
+  --foreground: var(--color-text-primary);
+  --muted: var(--color-surface-rail);
+  --muted-foreground: var(--color-text-muted);
+  --border: var(--color-input-border);
+  --accent: var(--color-action-cream);
+  --accent-foreground: var(--color-action-cream-text);
+  --puffer-accent: var(--color-action-cream-text);
+  --puffer-accent-fg: #ffffff;
+  --puffer-accent-soft: var(--color-action-cream);
+  --puffer-row-gap: var(--space-3);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.03);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface-app);
+}
+.momo-chat__thread {
+  flex: 1;
+  overflow-y: auto;
+  padding: 36px 0 24px;
+}
+.momo-chat__inner {
+  max-width: var(--shell-page-max);
+  margin: 0 auto;
+  width: 100%;
+  padding: 0 var(--shell-page-padding);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.momo-chat__loading,
+.momo-chat__typing {
+  color: var(--color-text-muted);
+  font-family: var(--font-system);
+  font-size: var(--font-size-body);
+  padding: var(--space-2) 0;
+}
+
+/* 临时内联气泡(Task 2 抽成 ChatBubble 后细化)。 */
+.mb-row { display: flex; }
+.mb-row[data-role="user"] { justify-content: flex-end; }
+.mb-bubble { max-width: 80%; padding: 11px 15px; background: var(--color-surface-rail); border-radius: 16px; font-family: var(--font-system); font-size: 14px; line-height: 20px; color: var(--color-text-primary); }

@@ -12,8 +12,8 @@ export default defineConfig({
     timeout: 10_000
   },
   webServer: {
-    command: `${nodeExecutable} ./node_modules/vite/bin/vite.js --host localhost --port 1466`,
-    url: "http://localhost:1466/?skipOnboarding",
+    command: `${nodeExecutable} ./node_modules/vite/bin/vite.js --host localhost --port 1477`,
+    url: "http://localhost:1477/?skipOnboarding",
     reuseExistingServer: shouldReuseExistingServer,
     timeout: 120_000,
     // wsClient.ts reads VITE_PUFFER_WS_URL at module load; this points the
@@ -26,7 +26,7 @@ export default defineConfig({
     env: { VITE_PUFFER_WS_URL: "ws://127.0.0.1:17777/ws", VITE_USE_MOCK_WALLET: "true" }
   },
   use: {
-    baseURL: "http://localhost:1466",
+    baseURL: "http://localhost:1477",
     headless: true
   }
 });
