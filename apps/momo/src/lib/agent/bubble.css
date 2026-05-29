@@ -66,6 +66,13 @@
   background: var(--color-surface-rail);
   border-radius: 4px 14px 14px 14px;
 }
+/* MessageBody 自带 .message-body{font-size:1rem}(16px),且 chat.css 的
+   .pf-msg-text 排版规则是 .pf-chat 作用域(在 .momo-chat 下不生效)。
+   气泡正文显式对齐设计图的 14/20;行内 code/pre 用紧凑码字号。 */
+.mb-bubble .pf-msg-text,
+.mb-bubble .pf-msg-text .message-body { font-size: 14px; line-height: 20px; }
+.mb-bubble .pf-msg-text .message-body code,
+.mb-bubble .pf-msg-text .message-body pre { font-size: var(--pf-chat-code-size); }
 .mb-system {
   color: var(--color-text-muted);
   font-family: var(--font-system);
