@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+
   type InlineSegment = {
     kind: "text" | "code";
     text: string;
@@ -338,11 +340,89 @@
     return blocks;
   }
 
-  $: blocks = parseBlocks(body);
+  /**
+   * Streaming jitter fix: while assistant text streams in, `body` grows by one
+   * delta per token and this component re-parses the *entire* accumulated text
+   * every change (`parseBlocks` is O(n) over the whole string, and the markdown
+   * "half-finished" heuristics flip block kinds frame-to-frame). Re-parsing +
+   * rebuilding the DOM on every token is the visible jitter.
+   *
+   * So we coalesce reparses to at most one per animation frame: `renderedBody`
+   * is what we actually parse; it catches up to the latest `body` on the next
+   * frame. The first paint (and every update when rAF is unavailable — SSR or
+   * the Playwright reducer harness) is applied synchronously, so initial render
+   * and tests see the truth immediately; only rapid mid-stream bursts coalesce.
+   * When the stream stops, the already-armed frame flushes the final text — so
+   * no tail is dropped (the turn-complete body lands on the very next frame).
+   */
+  const hasRaf = typeof requestAnimationFrame === "function";
+  // Legacy (non-runes) component: a plain top-level `let` is already reactive,
+  // so reassigning it re-renders. (Do NOT use `$state` here — it would flip the
+  // component into runes mode and break the `export let body` prop.)
+  let renderedBody = body;
+  // Plain (non-reactive) handle to the in-flight frame; never read in markup so
+  // it can't feed the reactive graph and trigger a reparse loop.
+  let pendingFrame: number | null = null;
+  let primed = false;
+
+  // Depend ONLY on `body`. We mutate `renderedBody` here, but never read it as a
+  // tracked dependency in this block, so there is no reactive feedback loop.
+  $: scheduleRender(body);
+
+  function scheduleRender(next: string): void {
+    if (!hasRaf || !primed) {
+      // First paint or no rAF: render synchronously so the DOM is correct now.
+      primed = true;
+      if (pendingFrame !== null) {
+        cancelAnimationFrame(pendingFrame);
+        pendingFrame = null;
+      }
+      renderedBody = next;
+      return;
+    }
+    if (next === renderedBody) {
+      // Latest body already matches what's rendered; drop any stale armed frame
+      // so it can't flush an intermediate value on top of the current one.
+      if (pendingFrame !== null) {
+        cancelAnimationFrame(pendingFrame);
+        pendingFrame = null;
+      }
+      return;
+    }
+    // Re-arm a single frame; when it fires it flushes the latest `body`.
+    if (pendingFrame !== null) cancelAnimationFrame(pendingFrame);
+    pendingFrame = requestAnimationFrame(() => {
+      pendingFrame = null;
+      renderedBody = next;
+    });
+  }
+
+  onDestroy(() => {
+    if (pendingFrame !== null && hasRaf) cancelAnimationFrame(pendingFrame);
+  });
+
+  $: blocks = parseBlocks(renderedBody);
+
+  // Memoize inline parsing so the {#each} snippet (called once per block per
+  // render) doesn't re-tokenize identical text on every reactive pass. Keyed
+  // by the raw text; capacity-bounded so a long stream can't leak.
+  const inlineCache = new Map<string, InlineSegment[]>();
+  const INLINE_CACHE_CAP = 512;
+  function parseInlineCached(text: string): InlineSegment[] {
+    const hit = inlineCache.get(text);
+    if (hit) return hit;
+    const parsed = parseInline(text);
+    if (inlineCache.size >= INLINE_CACHE_CAP) {
+      const oldest = inlineCache.keys().next().value;
+      if (oldest !== undefined) inlineCache.delete(oldest);
+    }
+    inlineCache.set(text, parsed);
+    return parsed;
+  }
 </script>
 
 {#snippet inline(text: string)}
-  {#each parseInline(text) as segment}
+  {#each parseInlineCached(text) as segment, segmentIndex (`${segmentIndex}:${segment.kind}:${segment.strong ? "b" : ""}${segment.emphasis ? "i" : ""}${segment.strike ? "s" : ""}${segment.href ? "l" : ""}`)}
     {#if segment.kind === "code"}
       <code>{segment.text}</code>
     {:else if segment.href && urlPattern.test(segment.href)}
@@ -372,7 +452,7 @@
 {/snippet}
 
 <div class="message-body">
-  {#each blocks as block}
+  {#each blocks as block, blockIndex (`${blockIndex}:${block.kind}`)}
     {#if block.kind === "paragraph"}
       <p>{@render inline(block.text)}</p>
     {:else if block.kind === "heading"}
@@ -381,7 +461,7 @@
       </svelte:element>
     {:else if block.kind === "list"}
       <svelte:element this={block.ordered ? "ol" : "ul"} class="list">
-        {#each block.items as item}
+        {#each block.items as item, itemIndex (itemIndex)}
           <li class:task={item.checked !== null}>
             {#if item.checked !== null}
               <input type="checkbox" checked={item.checked} disabled aria-label="task state" />
@@ -397,15 +477,15 @@
         <table>
           <thead>
             <tr>
-              {#each block.headers as header}
+              {#each block.headers as header, headerIndex (headerIndex)}
                 <th>{@render inline(header)}</th>
               {/each}
             </tr>
           </thead>
           <tbody>
-            {#each block.rows as row}
+            {#each block.rows as row, rowIndex (rowIndex)}
               <tr>
-                {#each block.headers as _, cellIndex}
+                {#each block.headers as _, cellIndex (cellIndex)}
                   <td>{@render inline(row[cellIndex] ?? "")}</td>
                 {/each}
               </tr>

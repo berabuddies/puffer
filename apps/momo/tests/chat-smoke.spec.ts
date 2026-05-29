@@ -72,6 +72,52 @@ test("home composer → run_agent_turn → ConversationView renders the assistan
   ).toBeVisible();
 });
 
+// Streaming jitter fix (MessageBody rAF throttle): the assistant MessageBody
+// now coalesces its markdown re-parse to one-per-frame instead of per-token.
+// The visible *jitter* can't be asserted in a unit test, but the throttle's
+// hard correctness guarantee can: a rapid burst of deltas (whose markdown
+// markers flip between "half-finished" and "closed" frame-to-frame) must still
+// land the COMPLETE final text — no dropped tail, and the closed markdown wins.
+test("streaming: a rapid delta burst still renders the complete final markdown (no dropped tail)", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await bootOnboarded(page, daemon);
+
+  const prompt = "stream me a burst";
+  await page.getByLabel("Message").fill(prompt);
+  await page.getByLabel("Message").press("Enter");
+
+  await daemon.waitForRequest("create_session");
+  const sessionId = "session-created-1";
+  await daemon.waitForRequest("run_agent_turn");
+  await expect(page).toHaveURL(new RegExp(`#/agent/${sessionId}$`));
+
+  const turnId = `turn-${sessionId}`;
+  // Tokenize a markdown sentence into many tiny deltas. Mid-stream, the unclosed
+  // `**bold**` / `` `code` `` markers make the parser flip block/inline kinds on
+  // almost every frame — exactly the case the throttle is meant to absorb.
+  const full = "This is **bold** and `code` and the *end*.";
+  for (const ch of full) {
+    emitTextDelta(daemon, { sessionId, turnId, delta: ch });
+  }
+  // Omit assistantText so the final text MUST come from the accumulated deltas
+  // (guards that the throttle flushed the tail, not the completion fallback).
+  emitTurnComplete(daemon, { sessionId, turnId });
+
+  const bubble = page
+    .locator('.pf-msg[data-role="agent"] .pf-msg-text')
+    .filter({ hasText: "This is bold and code and the end." });
+  await expect(bubble).toBeVisible();
+  // The closed markdown won the race: `**bold**` rendered as <strong>, not as
+  // literal asterisks, and `` `code` `` rendered as an inline <code> element.
+  await expect(bubble.locator(".strong").filter({ hasText: "bold" })).toBeVisible();
+  await expect(bubble.locator("code").filter({ hasText: "code" })).toBeVisible();
+  // No leftover literal markdown markers from a mid-stream parse leaking through.
+  await expect(bubble).not.toContainText("**");
+  await expect(bubble).not.toContainText("`");
+});
+
 // Regression for the `state_unsafe_mutation` crash on DIRECT navigation to an
 // existing session (sidebar click / Home task card / page reload). Unlike the
 // create-flow above — which pre-seeds the controller state via

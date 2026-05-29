@@ -65,6 +65,13 @@
   let pendingPermissions = $derived(controller ? controller.pendingPermissions() : []);
   let pendingQuestions = $derived(controller ? controller.pendingQuestions() : []);
   let turnRunning = $derived(controller ? controller.turnRunning() : false);
+  // Surface the live turn timing/status so ConversationView's typing indicator
+  // can show "Thinking (3.2s)" / the current status hint instead of a static
+  // "Running". Without these props its 100ms elapsed-timer `$effect` had no
+  // consumer (formatElapsed always returned "") and just span-idled.
+  let turnStartedAtMs = $derived(controller ? controller.state().turnStartedAtMs : null);
+  let turnThinking = $derived(controller ? controller.state().turnThinking : false);
+  let turnStatusHint = $derived(controller ? controller.state().turnStatusHint : null);
   // Hydration loading state: the persisted detail hasn't landed yet and the
   // live stream is empty. `ConversationView` shows its own "Loading…" row when
   // `loading && timeline.length === 0`. Treat the pre-seed frame as loading too.
@@ -125,6 +132,9 @@
         {pendingPermissions}
         {pendingQuestions}
         {turnRunning}
+        {turnStartedAtMs}
+        {turnThinking}
+        {turnStatusHint}
         {loading}
         onSubmitMessage={(message) => controller?.appendUserMessage(message)}
         onResolvePermission={(id, choice) => controller?.resolvePermission(id, choice)}
