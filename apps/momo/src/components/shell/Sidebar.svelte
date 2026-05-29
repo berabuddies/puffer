@@ -37,7 +37,6 @@
     Home,
     Wallet,
     LayoutGrid,
-    ListChecks,
     Search,
     PanelLeftClose,
     PanelLeftOpen,
@@ -64,6 +63,7 @@
     createNewSession,
     renameSession
   } from "../../lib/sessionStore.svelte";
+  import { sessionTitle, NEW_SESSION_TITLE } from "../../lib/sessionTitle";
   import type { SessionListItem } from "../../lib/agentClient";
 
   // See IconBlock.svelte — lucide-svelte v1 ships legacy class typings; use
@@ -88,7 +88,6 @@
 
   const navEntries: NavEntry[] = [
     { label: "Home", icon: Home, href: "/home", activePrefixes: ["/home"] },
-    { label: "Tasks", icon: ListChecks, href: "/tasks", activePrefixes: ["/tasks"] },
     { label: "Wallet", icon: Wallet, href: "/wallet", activePrefixes: ["/wallet"] },
     { label: "Connected Apps", icon: LayoutGrid, href: "/apps", activePrefixes: ["/apps"] }
   ];
@@ -107,7 +106,10 @@
   function beginRename(session: SessionListItem, event: MouseEvent): void {
     event.stopPropagation();
     editingId = session.sessionId;
-    editingValue = session.title || session.displayName || "";
+    // Prefill with the meaningful title (display name / generated title); never
+    // the slug fallback, and leave it empty for an untitled session so the user
+    // types from scratch rather than editing a "session-…" string.
+    editingValue = sessionTitle(session) ?? "";
     void tick().then(() => {
       editingInputEl?.focus();
       editingInputEl?.select();
@@ -119,7 +121,7 @@
     // input is being torn down and the onblur callback should no-op.
     if (editingId !== session.sessionId) return;
     const next = editingValue.trim();
-    const before = (session.title || session.displayName || "").trim();
+    const before = (sessionTitle(session) ?? "").trim();
     if (!next || next === before) {
       cancelRename();
       return;
@@ -146,7 +148,7 @@
   }
 
   function sessionLabel(session: SessionListItem): string {
-    return session.title || session.displayName || "New chat";
+    return sessionTitle(session) ?? NEW_SESSION_TITLE;
   }
 
   /* ───── Search dropdown ─────

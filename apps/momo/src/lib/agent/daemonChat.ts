@@ -111,6 +111,26 @@ export async function listGroupedSessions(): Promise<unknown[]> {
   return c.request("list_grouped_sessions", {});
 }
 
+/**
+ * Subscribe to the daemon's workspace-level session-change broadcast
+ * (`workspace:sessions:changed`). The daemon fires this when it mutates a
+ * session out-of-band — most visibly when it generates a session title after
+ * the first turn completes (reason `"generated_title"`), but also on routing
+ * changes, renames, etc. The handler receives no payload; callers refetch the
+ * list. Returns a disposer; a no-op disposer is returned when the daemon isn't
+ * reachable so callers don't need to branch.
+ */
+export async function subscribeSessionsChanged(
+  handler: () => void
+): Promise<() => void> {
+  try {
+    const c = await ensureDaemonClient();
+    return c.on("workspace:sessions:changed", () => handler());
+  } catch {
+    return () => {};
+  }
+}
+
 // Test bridge: lets Playwright drive the daemon chat RPCs without a wired-up
 // chat UI. DEV-only so it never ships in a production bundle. Temporary — a
 // later task removes this once the chat controller consumes these directly.

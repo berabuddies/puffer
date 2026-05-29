@@ -24,7 +24,8 @@
   import ConversationView from "../lib/agent/ConversationView.svelte";
   import { createController } from "../lib/agent/agentChat.svelte";
   import { navigate } from "../router.svelte";
-  import type { TimelineItem } from "../lib/agent/types";
+  import type { TimelineItem, SessionListItem } from "../lib/agent/types";
+  import { sessionTitle, NEW_SESSION_TITLE } from "../lib/sessionTitle";
 
   interface Props {
     taskId?: string;
@@ -88,13 +89,22 @@
     navigate("/home");
   }
 
-  /** Title for the page header: use the first user turn so it reads like
-   *  the user's intent rather than a generic placeholder. Falls back to
-   *  "New chat" before the first turn lands. */
-  function dynamicTitle(items: TimelineItem[]): string {
+  /** Title for the page header.
+   *
+   *  Prefer the daemon's authoritative title — the same display name /
+   *  generated title the sidebar rail renders (via the shared `sessionTitle`
+   *  helper) — so the header and the rail never disagree (the daemon generates
+   *  a concise title after the first turn; before that `generatedTitle` is
+   *  null). Only when no daemon title exists yet (a fresh session
+   *  mid-first-turn) do we fall back to the first user message so the header
+   *  reads like the user's intent rather than a bare placeholder, and finally
+   *  the friendly placeholder before any turn lands. */
+  function dynamicTitle(session: SessionListItem | null, items: TimelineItem[]): string {
+    const authoritative = sessionTitle(session);
+    if (authoritative) return authoritative;
     const first = items.find((item) => item.kind === "user");
     const txt = (first?.body ?? "").trim();
-    if (!txt) return "New chat";
+    if (!txt) return NEW_SESSION_TITLE;
     return txt.length > 60 ? `${txt.slice(0, 57)}…` : txt;
   }
 </script>
@@ -110,7 +120,7 @@
     </section>
   {:else}
     <header class="agent__header">
-      <h1 class="text-section">{dynamicTitle(timeline)}</h1>
+      <h1 class="text-section">{dynamicTitle(session, timeline)}</h1>
     </header>
 
     <!--

@@ -40,7 +40,7 @@
   import type { Snippet } from "svelte";
 
   import Sidebar from "./Sidebar.svelte";
-  import { loadSessions } from "../../lib/sessionStore.svelte";
+  import { loadSessions, subscribeSessionChanges } from "../../lib/sessionStore.svelte";
   import { loadProjects } from "../../lib/projectStore.svelte";
 
   interface Props {
@@ -62,6 +62,10 @@
   onMount(() => {
     void loadProjects();
     void loadSessions();
+    // Keep the rail live: refetch when the daemon broadcasts a session change
+    // (e.g. the title it generates after the first turn) so the label updates
+    // without an app restart.
+    void subscribeSessionChanges();
   });
 </script>
 

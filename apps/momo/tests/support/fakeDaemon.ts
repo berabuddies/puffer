@@ -195,13 +195,18 @@ function sessionMeta(input: FakeDaemonSessionInput): JsonRecord {
   const title = metadataInput.title ?? metadataInput.displayName ?? session.title;
   const cwd = metadataInput.cwd ?? session.cwd;
   const folderPath = metadataInput.folderPath ?? cwd;
+  const hasDisplayName = Object.prototype.hasOwnProperty.call(metadataInput, "displayName");
   const hasProviderId = Object.prototype.hasOwnProperty.call(metadataInput, "providerId");
   const hasModelId = Object.prototype.hasOwnProperty.call(metadataInput, "modelId");
   return {
     ...session,
     ...metadataInput,
     sessionId: metadataInput.sessionId,
-    displayName: metadataInput.displayName ?? title,
+    // Respect an explicit `displayName: null` (a fresh / unnamed session, as
+    // the real daemon returns) instead of forcing the derived title — so specs
+    // can exercise the generatedTitle / "New chat" fallback paths. Only fall
+    // back to the derived title when the caller omitted displayName entirely.
+    displayName: hasDisplayName ? metadataInput.displayName ?? null : title,
     title,
     cwd,
     folderPath,
@@ -1443,6 +1448,14 @@ export class FakeDaemon {
         return { watchId: String(request.params.watchId ?? "watch-fixture") };
       case "fs_unwatch":
         return {};
+      case "subscribe_event":
+      case "unsubscribe_event":
+        // daemonClient.on() / its disposer fire these to (un)register a
+        // server-side event subscription. The real daemon acks with an empty
+        // object; mirror that so the client's subscribe path resolves cleanly
+        // (and tests can `waitForRequest("subscribe_event", …)` to know a
+        // listener is wired before emitting the event).
+        return {};
       default:
         throw new Error(`Unhandled fake daemon method: ${request.method}`);
     }
@@ -1473,13 +1486,18 @@ export class FakeDaemon {
   private ignoreMonitorTask(params: JsonRecord): JsonRecord {
     const taskId = String(params.task_id ?? "");
     if (!taskId) throw new Error("missing task_id");
-    // Drop the task from the snapshot so a subsequent workflow_list (the store
-    // refetches after ignore) shows it gone — matching the real daemon, where
-    // an ignored task leaves the actionable list.
+    // Mirror the real daemon (crates/.../monitor_task_ignore.rs): ignoring a
+    // task sets `ignored: true` + `status: "completed"` and KEEPS the task in
+    // the store — workflow_list still returns it. The actionable list is
+    // produced by the *frontend* filtering ignored tasks out, NOT by the
+    // daemon dropping them. (Earlier this fixture physically removed the task,
+    // which masked a missing client-side `ignored` filter.)
     this.workflowSnapshot = {
       ...this.workflowSnapshot,
-      monitor_tasks: (this.workflowSnapshot.monitor_tasks ?? []).filter(
-        (task) => String(task.task_id) !== taskId
+      monitor_tasks: (this.workflowSnapshot.monitor_tasks ?? []).map((task) =>
+        String(task.task_id) === taskId
+          ? { ...task, ignored: true, status: "completed" }
+          : task
       )
     };
     return this.workflowListResponse();

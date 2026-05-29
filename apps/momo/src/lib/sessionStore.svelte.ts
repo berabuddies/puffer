@@ -27,7 +27,9 @@ import {
   createSession as daemonCreateSession,
   listGroupedSessions,
   renameSession as daemonRenameSession,
+  subscribeSessionsChanged,
 } from "./agent/daemonChat";
+import { NEW_SESSION_TITLE } from "./sessionTitle";
 import {
   getProjectCwd,
   loadProjects,
@@ -143,6 +145,31 @@ export async function loadSessions(): Promise<void> {
   replaceList(flat);
 }
 
+/** Live disposer + in-flight guard for the workspace session-change
+ *  subscription, so `subscribeSessionChanges()` only ever wires one listener
+ *  even across Shell remounts / concurrent calls. */
+let sessionsChangedUnsub: (() => void) | null = null;
+let sessionsChangedSubscribing = false;
+
+/**
+ * Wire a one-time listener for the daemon's `workspace:sessions:changed`
+ * broadcast and refetch the rail whenever it fires. Without this the rail only
+ * loaded once on Shell mount, so a title the daemon generates after the first
+ * turn (or any out-of-band rename) wouldn't appear until the app restarted —
+ * the user saw the sidebar title "change on restart". Idempotent.
+ */
+export async function subscribeSessionChanges(): Promise<void> {
+  if (sessionsChangedUnsub || sessionsChangedSubscribing) return;
+  sessionsChangedSubscribing = true;
+  try {
+    sessionsChangedUnsub = await subscribeSessionsChanged(() => {
+      void loadSessions();
+    });
+  } finally {
+    sessionsChangedSubscribing = false;
+  }
+}
+
 /**
  * Mint a fresh empty session via the puffer **daemon** under the default
  * project's fixed cwd. Returns the new sessionId so the caller can navigate
@@ -183,7 +210,7 @@ export async function createNewSession(): Promise<string> {
     sessionId: id,
     displayName: result.displayName,
     generatedTitle: result.generatedTitle,
-    title: result.displayName ?? result.generatedTitle ?? "New chat",
+    title: result.displayName ?? result.generatedTitle ?? NEW_SESSION_TITLE,
     cwd: result.cwd,
     folderPath: result.cwd,
     updatedAtMs: result.updatedAtMs ?? result.createdAtMs,

@@ -29,10 +29,11 @@ test('Tasks "+" creates a session that appears in the rail list', async ({ page 
   const sessionId = "session-created-1";
   await page.waitForURL(new RegExp(`#/agent/${sessionId}$`));
 
-  // The optimistic stub built inside sessionStore.createNewSession uses title
-  // "New chat" before any reload. Shell does NOT remount on hash-only route
-  // changes, so the stub's title is what the sidebar shows here.
-  await expect(taskList(page).getByText("New chat", { exact: true })).toBeVisible();
+  // A freshly created session has no display name / generated title yet, so the
+  // rail shows the friendly placeholder (NEW_SESSION_TITLE) rather than the raw
+  // slug. Shell does NOT remount on hash-only route changes, so the optimistic
+  // stub's label is what's shown here.
+  await expect(taskList(page).getByText("New task", { exact: true })).toBeVisible();
 });
 
 // Regression: the sidebar "+ New chat" path must NOT pin a providerId on
@@ -61,7 +62,7 @@ test('Tasks "+" New chat does not send an unknown "puffer" provider to the daemo
   // The session is actually created (no "unknown provider" rejection): the
   // route advances and the optimistic row renders.
   await page.waitForURL(/#\/agent\/session-created-1$/);
-  await expect(taskList(page).getByText("New chat", { exact: true })).toBeVisible();
+  await expect(taskList(page).getByText("New task", { exact: true })).toBeVisible();
 
   // No error toast surfaced — the create succeeded rather than rejecting.
   await expect(page.locator(".toast.toast--error")).toHaveCount(0);
