@@ -168,6 +168,13 @@ pub fn minicpm5_install(app: AppHandle) -> Result<(), String> {
 
 /// The running behavior watcher child, if any. Replaced on start, killed on stop.
 static BEHAVIOR: Mutex<Option<Child>> = Mutex::new(None);
+/// The mlx server only needs starting once per app run, not on every session
+/// switch (serve.sh doesn't single-instance and .status() can block).
+static SERVE_ENSURED: AtomicBool = AtomicBool::new(false);
+/// Monotonic watcher generation. Bumped on every start/stop so a superseded
+/// watcher's reader thread stops emitting (no stale analysis under a new
+/// session) and a start that lost the race aborts instead of clobbering.
+static BEHAVIOR_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn puffer_home() -> PathBuf {
     std::env::var_os("PUFFER_HOME")
@@ -189,31 +196,61 @@ fn stop_behavior_locked(slot: &mut Option<Child>) {
 /// and streams `minicpm5://behavior` events. Replaces any existing watcher.
 #[tauri::command]
 pub fn minicpm5_behavior_start(app: AppHandle, session_id: String) -> Result<(), String> {
+    use std::sync::atomic::Ordering::SeqCst;
+    // Session ids are daemon-issued UUIDs; reject anything with path separators
+    // so an unexpected value can't escape the sessions dir.
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return Err("invalid session id".to_string());
+    }
+    // Claim a generation; if a newer start arrives before we install, we abort.
+    let gen = BEHAVIOR_GEN.fetch_add(1, SeqCst) + 1;
     let behavior = script_path("minicpm5-behavior.py").ok_or("behavior script not found")?;
-    let session_file = puffer_home()
-        .join("sessions")
-        .join(format!("{session_id}.session.jsonl"));
-    if !session_file.is_file() {
-        return Err(format!("session transcript not found: {}", session_file.display()));
-    }
 
-    // Ensure the local server is running — fire-and-forget; serve.sh healthchecks
-    // and the watcher tolerates a not-yet-ready server.
-    if let Some(serve) = script_path("minicpm5-serve.sh") {
-        std::thread::spawn(move || {
-            let _ = Command::new("/bin/bash").arg(&serve).arg("--bg").status();
-        });
+    // Hold the lock across the whole start so concurrent starts fully serialize.
+    let mut slot = BEHAVIOR.lock().unwrap_or_else(|e| e.into_inner());
+    // A newer start was issued while we waited for the lock — yield to it.
+    if BEHAVIOR_GEN.load(SeqCst) != gen {
+        return Ok(());
     }
-
-    let mut slot = BEHAVIOR.lock().map_err(|_| "behavior lock poisoned")?;
+    // Stop the previous watcher BEFORE validating the new session, so switching
+    // to a session with no local transcript still tears down the stale watcher.
     stop_behavior_locked(&mut slot);
+
+    // Resolve + canonicalize, and require the target stay under the sessions
+    // dir (defends against symlink/`..` escape even past the id check).
+    let sessions_root = puffer_home().join("sessions");
+    let session_file = sessions_root.join(format!("{session_id}.session.jsonl"));
+    let canonical = session_file
+        .canonicalize()
+        .map_err(|_| format!("session transcript not found: {}", session_file.display()))?;
+    let root_canonical = sessions_root
+        .canonicalize()
+        .map_err(|_| "sessions directory missing".to_string())?;
+    if !canonical.starts_with(&root_canonical) || !canonical.is_file() {
+        return Err("session transcript outside sessions directory".to_string());
+    }
+
+    // Ensure the local server is running — once per app run (serve.sh does not
+    // single-instance and .status() can block). Fire-and-forget; the watcher
+    // tolerates a not-yet-ready server.
+    if !SERVE_ENSURED.swap(true, SeqCst) {
+        if let Some(serve) = script_path("minicpm5-serve.sh") {
+            std::thread::spawn(move || {
+                let _ = Command::new("/bin/bash").arg(&serve).arg("--bg").status();
+            });
+        }
+    }
 
     // `-u` = unbuffered, so each analysis line reaches us immediately.
     let mut child = Command::new("python3")
         .arg("-u")
         .arg(&behavior)
         .arg("--watch")
-        .arg(&session_file)
+        .arg(&canonical)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -221,14 +258,24 @@ pub fn minicpm5_behavior_start(app: AppHandle, session_id: String) -> Result<(),
 
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
+        let sid = session_id.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
+                // Superseded by a newer start/stop — stop emitting stale reads.
+                if BEHAVIOR_GEN.load(SeqCst) != gen {
+                    break;
+                }
                 let line = line.trim();
                 if line.is_empty() || !line.starts_with('{') {
                     continue; // skip the "[watch] …" banner
                 }
                 if let Ok(value) = serde_json::from_str::<Value>(line) {
-                    let _ = app.emit("minicpm5://behavior", value);
+                    // Tag with the session so the UI ignores events from a
+                    // watcher that was for a different (now inactive) session.
+                    let _ = app.emit(
+                        "minicpm5://behavior",
+                        json!({ "sessionId": sid, "behavior": value }),
+                    );
                 }
             }
         });
@@ -240,7 +287,10 @@ pub fn minicpm5_behavior_start(app: AppHandle, session_id: String) -> Result<(),
 /// Stop the behavior watcher.
 #[tauri::command]
 pub fn minicpm5_behavior_stop() -> Result<(), String> {
-    let mut slot = BEHAVIOR.lock().map_err(|_| "behavior lock poisoned")?;
+    // Bump the generation so the current reader thread stops emitting any
+    // still-buffered lines before its pipe closes.
+    BEHAVIOR_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut slot = BEHAVIOR.lock().unwrap_or_else(|e| e.into_inner());
     stop_behavior_locked(&mut slot);
     Ok(())
 }

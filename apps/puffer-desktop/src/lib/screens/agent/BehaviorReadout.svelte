@@ -21,9 +21,15 @@
     if (!isDesktopMac()) return;
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    void listen<Minicpm5Behavior>("minicpm5://behavior", (e) => {
-      if (e.payload && !e.payload.error) latest = e.payload;
-    }).then((u) => {
+    void listen<{ sessionId: string; behavior: Minicpm5Behavior }>(
+      "minicpm5://behavior",
+      (e) => {
+        // Ignore events from a watcher for a different (now inactive) session.
+        if (!e.payload || e.payload.sessionId !== sessionId) return;
+        const b = e.payload.behavior;
+        if (b && !b.error) latest = b;
+      }
+    ).then((u) => {
       if (disposed) u();
       else unlisten = u;
     });

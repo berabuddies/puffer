@@ -150,7 +150,10 @@ def main():
     watch = "--watch" in args
     args = [a for a in args if a != "--watch"]
     path = args[0]
-    outdir = pathlib.Path(os.path.expanduser("~/.puffer/behavior"))
+    # Honor PUFFER_HOME so the rolling log lands beside the sessions the desktop
+    # subsystem is reading (it resolves both from PUFFER_HOME).
+    home = os.environ.get("PUFFER_HOME") or os.path.expanduser("~/.puffer")
+    outdir = pathlib.Path(home) / "behavior"
     if not watch:
         run_once(path, outdir); return
     print(f"[watch] {path} — analyzing on new activity", flush=True)
@@ -168,7 +171,9 @@ def main():
                 # A transient failure (server still starting, bad line) must not
                 # kill a long-running watcher driving the desktop subsystem.
                 print(json.dumps({"error": str(ex)[:160]}), flush=True)
-            last = os.path.getsize(path)
+            # Reuse the size we already probed safely — re-calling getsize here
+            # would raise (and kill the loop) if the file was just deleted.
+            last = sz
         time.sleep(2)
 
 if __name__ == "__main__":
