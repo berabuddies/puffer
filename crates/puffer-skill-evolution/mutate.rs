@@ -18,7 +18,19 @@ impl MutatePromptBuilder for DefaultMutatePrompt {
         format!(
             "You will refine a SKILL.md draft to improve its weakest dimension: {weakest}.\n\
              Preserve the strengths of the draft. Do not regress on other dimensions. Output\n\
-             ONLY the revised SKILL.md (frontmatter and body), no commentary. Stay under 15000 bytes.\n\n\
+             ONLY the revised SKILL.md (frontmatter and body), no commentary. Stay under 15000 bytes.\n\
+             The revised skill must be conditional and verifier-first: preserve task/domain\n\
+             triggers, required artifacts, schemas, tests, permissions, and success signals.\n\
+             Keep the skill narrow: remove unrelated task families from broad catch-all drafts\n\
+             and preserve the single clearest reusable workflow.\n\
+             If the draft only restates a lightweight artifact contract, either add the\n\
+             non-obvious recovery/verification method from the trace or narrow the skill until\n\
+             it no longer competes with ordinary task instructions.\n\
+             Add or keep non-interference guidance so future task prompts and verifiers override\n\
+             the skill when they differ. Remove generic advice that would cause extra exploration.\n\
+             If the trace shows a \"looks done but verifier failed\" lesson, preserve the exact\n\
+             missing acceptance guard, such as running service state, report schema/CWE labels,\n\
+             fallback artifact creation after denied shell commands, or both polyglot entrypoints.\n\n\
              ORIGINAL TRACE (yaml):\n{trace_yaml}\n\n\
              CURRENT DRAFT:\n---\nname: {name}\ndescription: {description}\n---\n{body}\n",
             weakest = weakest,
@@ -177,5 +189,23 @@ mod tests {
         .await
         .unwrap();
         assert!(mutants.is_empty());
+    }
+
+    #[test]
+    fn default_mutation_prompt_preserves_non_interference() {
+        let survivor = make_scored(RubricScores {
+            novelty: 0.5,
+            reproducibility: 0.5,
+            structure: 0.5,
+            conciseness: 0.5,
+        });
+        let prompt = DefaultMutatePrompt.build(&sample_trace(), &survivor, "reproducibility");
+
+        assert!(prompt.contains("conditional and verifier-first"));
+        assert!(prompt.contains("Keep the skill narrow"));
+        assert!(prompt.contains("lightweight artifact contract"));
+        assert!(prompt.contains("future task prompts and verifiers override"));
+        assert!(prompt.contains("Remove generic advice"));
+        assert!(prompt.contains("looks done but verifier failed"));
     }
 }

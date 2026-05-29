@@ -28,6 +28,27 @@ impl GeneratePromptBuilder for DefaultGeneratePrompt {
              Output ONLY a SKILL.md document with YAML frontmatter (name, description) followed\n\
              by sections: Overview, When to Use, Topic Sections, Common Pitfalls, Verification\n\
              Checklist. Stay under 15000 bytes. Style hint: {style}\n\n\
+             Quality requirements:\n\
+             - Make the skill conditional: include concrete task/domain triggers and when not to use it.\n\
+             - Prefer a narrow domain skill over a catch-all benchmark skill. If the trace mixes\n\
+               unrelated task families, choose the single highest-signal reusable workflow and\n\
+               exclude the others in When to Use / non-goals.\n\
+             - If the trace only teaches a lightweight artifact contract that future task prompts\n\
+               already state exactly, generate a skill only when there is a non-obvious recovery\n\
+               or verification method; otherwise this knowledge should remain memory-only.\n\
+             - Make the skill verifier-first: preserve required output files, schemas, tests,\n\
+               permissions, success signals, and minimal verification steps from the trace.\n\
+             - Generalize temporary paths, run ids, model names, and incidental benchmark noise,\n\
+               but keep durable commands or contracts needed to reproduce the outcome.\n\
+             - Do not write broad productivity advice. A future agent must inspect the current\n\
+               task prompt and verifier before applying this skill.\n\
+             - If the skill could conflict with a future task's filenames, schema, or tests,\n\
+               explicitly say the current task contract overrides the skill.\n\n\
+             - Preserve \"looks done but verifier failed\" lessons when present: service tasks\n\
+               may require a running service rather than a setup script; report tasks may\n\
+               require exact JSON keys and CWE labels; denied shell commands may require\n\
+               switching to Write/Edit plus smaller executable commands; and polyglot tasks\n\
+               may require both language entrypoints to work.\n\n\
              EXECUTION TRACE (yaml):\n{trace_yaml}\n",
             style = style,
             trace_yaml = trace_yaml,
@@ -135,5 +156,17 @@ mod tests {
         let result =
             generate_candidates(&runtime, &DefaultGeneratePrompt, &sample_trace(), 3, 15_000).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_prompt_requires_conditional_verifier_first_skill() {
+        let prompt = DefaultGeneratePrompt.build(&sample_trace(), 0);
+
+        assert!(prompt.contains("Make the skill conditional"));
+        assert!(prompt.contains("narrow domain skill"));
+        assert!(prompt.contains("memory-only"));
+        assert!(prompt.contains("Make the skill verifier-first"));
+        assert!(prompt.contains("current task contract overrides the skill"));
+        assert!(prompt.contains("looks done but verifier failed"));
     }
 }

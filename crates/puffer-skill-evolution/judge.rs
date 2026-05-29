@@ -19,9 +19,24 @@ impl JudgePromptBuilder for DefaultJudgePrompt {
             "You are an LLM judge scoring a generated SKILL.md against four dimensions.\n\
              For each dimension, return a float in [0.0, 1.0]:\n\
              - novelty: captures non-obvious knowledge\n\
-             - reproducibility: a fresh agent could reproduce the approach\n\
+             - reproducibility: a fresh agent could reproduce the approach without ignoring the current task contract\n\
              - structure: proper sections (overview, when-to-use, pitfalls, checklist)\n\
              - conciseness: stays within budget without fluff\n\n\
+             Scoring guidance:\n\
+             - Penalize broad workflow advice without task/domain triggers.\n\
+             - Penalize catch-all benchmark skills that merge unrelated task families into one\n\
+               workflow instead of choosing a narrow reusable domain.\n\
+             - Penalize skills that only restate lightweight artifact contracts already present\n\
+               in future task prompts without adding a non-obvious recovery or verification method.\n\
+             - Penalize missing verifier-facing details such as output files, schemas, tests,\n\
+               permissions, or success signals.\n\
+             - Penalize skills that would increase repeated exploration before inspecting the\n\
+               current task prompt, files, and verifier.\n\
+             - Reward explicit non-interference: the skill says when not to apply itself and\n\
+               that current task instructions override the skill when they conflict.\n\n\
+             - Penalize skills that miss \"looks done but verifier failed\" constraints:\n\
+               running services vs setup scripts, exact report schemas/CWE labels, artifact\n\
+               creation after denied shell commands, and both entrypoints for polyglot tasks.\n\n\
              Reply ONLY with a JSON object:\n\
              {{\"novelty\":0.x,\"reproducibility\":0.x,\"structure\":0.x,\"conciseness\":0.x}}\n\n\
              SKILL FRONTMATTER:\nname: {name}\ndescription: {description}\n\n\
@@ -163,5 +178,17 @@ mod tests {
             .unwrap();
         assert_eq!(scores.novelty, 1.0);
         assert_eq!(scores.reproducibility, 0.0);
+    }
+
+    #[test]
+    fn default_judge_penalizes_overbroad_non_verifier_skills() {
+        let prompt = DefaultJudgePrompt.build(&dummy_candidate());
+
+        assert!(prompt.contains("Penalize broad workflow advice"));
+        assert!(prompt.contains("catch-all benchmark skills"));
+        assert!(prompt.contains("lightweight artifact contracts"));
+        assert!(prompt.contains("missing verifier-facing details"));
+        assert!(prompt.contains("current task instructions override the skill"));
+        assert!(prompt.contains("looks done but verifier failed"));
     }
 }
