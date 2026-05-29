@@ -289,6 +289,8 @@ fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> V
     let action_path = workflow_action_path(&binding.action);
     let action_format = workflow_action_format(&binding.action);
     let filter_pattern = workflow_filter_pattern(binding.filter.as_ref());
+    let ignore_filters =
+        serde_json::to_value(&binding.ignore_filters).unwrap_or_else(|_| Value::Array(Vec::new()));
     let monitor = binding.slug.starts_with("monitor-")
         || (matches!(binding.action, ActionSpec::TriageAgent { .. })
             && binding.description.to_ascii_lowercase().contains("monitor"));
@@ -312,6 +314,7 @@ fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> V
         "action_path": action_path,
         "action_format": action_format,
         "filter_pattern": filter_pattern,
+        "ignore_filters": ignore_filters,
         "monitor": monitor,
         "monitor_memory_path": monitor_memory_path,
         "created_at_ms": binding.created_at_ms,

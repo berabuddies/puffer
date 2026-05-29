@@ -230,6 +230,7 @@ type BackendResourceCounts = SettingsSnapshot["resources"];
 type BackendSettingsSessionSummary = SettingsSnapshot["sessions"];
 type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
+type BackendBrowserProfile = SettingsSnapshot["browserProfiles"][number];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -242,6 +243,7 @@ type BackendSettingsSnapshot = {
   sessions: BackendSettingsSessionSummary;
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
+  browserProfiles: BackendBrowserProfile[];
 };
 
 type BackendRemoteOperation = RemoteOperation;
@@ -1942,6 +1944,7 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
+  browserChromeProfile?: string | null;
 };
 
 export async function listMcpServers(): Promise<McpServerInfo[]> {

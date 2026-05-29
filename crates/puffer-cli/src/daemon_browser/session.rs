@@ -43,6 +43,7 @@ use super::{
     parse_evaluation_response, send_cdp, BrowserCopySelection, BrowserCursor, BrowserEvaluation,
     BrowserHistoryDirection, BrowserInputEvent, BrowserState, CDP_READ_TIMEOUT, DEFAULT_URL,
 };
+use crate::browser_profiles::{prepare_managed_profile, ChromeProfileLaunch};
 
 type UploadReply = Sender<std::result::Result<(), String>>;
 
@@ -70,34 +71,21 @@ pub(super) struct BrowserSession {
 
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
-    pub(super) fn spawn(profile_dir: PathBuf, width: u32, height: u32) -> Result<Self> {
+    pub(super) fn spawn(
+        profile_dir: PathBuf,
+        selected_profile: Option<String>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
         let chrome = resolve_chrome_executable()
             .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
-        std::fs::create_dir_all(&profile_dir).context("create browser profile directory")?;
         super::chrome::terminate_profile_processes(&profile_dir);
-        match std::fs::remove_file(profile_dir.join("DevToolsActivePort")) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("remove stale Chrome DevToolsActivePort"),
-        }
+        let launch = prepare_managed_profile(&profile_dir, selected_profile.as_deref())?;
+        remove_stale_devtools_port(&profile_dir)?;
 
-        let mut child = Command::new(&chrome)
-            .arg("--headless=new")
-            .arg("--remote-debugging-port=0")
-            .arg(format!("--user-data-dir={}", profile_dir.display()))
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--disable-background-networking")
-            .arg("--disable-features=Translate")
-            .arg("--disable-gpu")
-            .arg("--allow-file-access")
-            .arg("--allow-file-access-from-files")
-            .arg("--force-color-profile=srgb")
-            .arg(format!("--window-size={width},{height}"))
-            .arg(DEFAULT_URL)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+        let mut command = Command::new(&chrome);
+        configure_chrome_command(&mut command, &profile_dir, &launch, width, height);
+        let mut child = command
             .spawn()
             .with_context(|| format!("launch Chrome at {}", chrome.display()))?;
 
@@ -944,6 +932,43 @@ fn emit_state_error<E: std::fmt::Display>(
             "popOut": false
         }),
     });
+}
+
+fn remove_stale_devtools_port(profile_dir: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(profile_dir.join("DevToolsActivePort")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove stale Chrome DevToolsActivePort"),
+    }
+}
+
+fn configure_chrome_command(
+    command: &mut Command,
+    profile_dir: &std::path::Path,
+    launch: &ChromeProfileLaunch,
+    width: u32,
+    height: u32,
+) {
+    command
+        .arg("--headless=new")
+        .arg("--remote-debugging-port=0")
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-background-networking")
+        .arg("--disable-features=Translate")
+        .arg("--disable-gpu")
+        .arg("--allow-file-access")
+        .arg("--allow-file-access-from-files")
+        .arg("--force-color-profile=srgb")
+        .arg(format!("--window-size={width},{height}"))
+        .arg(DEFAULT_URL)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(profile_directory) = &launch.profile_directory {
+        command.arg(format!("--profile-directory={profile_directory}"));
+    }
 }
 
 fn ensure_root_alive(inner: &mut BrowserRootState) -> Result<()> {

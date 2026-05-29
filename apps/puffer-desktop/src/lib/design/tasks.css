@@ -219,145 +219,6 @@
   font-size: 12px;
 }
 
-.pf-monitor-memory {
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in oklab, var(--muted) 22%, var(--background));
-}
-
-.pf-monitor-memory-head {
-  min-height: 34px;
-  padding: 7px 14px 0;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-
-.pf-monitor-memory-head strong {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.pf-monitor-memory-head span {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.pf-monitor-memory-list {
-  padding: 6px 14px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.pf-monitor-memory-item {
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--background);
-}
-
-.pf-monitor-memory-item summary {
-  min-height: 32px;
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  cursor: pointer;
-}
-
-.pf-monitor-memory-item summary strong {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.pf-monitor-memory-item summary span,
-.pf-monitor-memory-item summary code {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.pf-monitor-memory-item summary code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-}
-
-.pf-monitor-memory-toolbar {
-  min-height: 38px;
-  padding: 6px 10px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.pf-monitor-memory-toolbar span {
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.pf-monitor-memory-item pre {
-  max-height: 220px;
-  margin: 0;
-  padding: 10px;
-  border-top: 1px solid var(--border);
-  overflow: auto;
-  white-space: pre-wrap;
-  color: var(--foreground);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.pf-monitor-memory-toolbar + pre {
-  border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
-}
-
-.pf-monitor-memory-item p {
-  margin: 0;
-  padding: 10px;
-  border-top: 1px solid var(--border);
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.pf-monitor-memory-editor {
-  padding: 10px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.pf-monitor-memory-editor textarea {
-  width: 100%;
-  min-height: 220px;
-  resize: vertical;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--foreground);
-  padding: 10px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.pf-monitor-memory-editor textarea:focus {
-  outline: none;
-  border-color: color-mix(in oklab, var(--puffer-accent) 60%, var(--border));
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--puffer-accent) 16%, transparent);
-}
-
-.pf-monitor-memory-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .pf-tasks-list {
   flex: 1;
   min-height: 0;
@@ -685,6 +546,40 @@
   font-size: 11px;
 }
 
+.pf-task-filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+
+.pf-task-filter-rule {
+  min-width: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.pf-task-filter-rule span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pf-task-filter-rule code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
 .pf-task-config-actions {
   display: flex;
   justify-content: flex-end;
@@ -743,24 +638,6 @@
     margin-left: 0;
   }
 
-  .pf-monitor-memory-head,
-  .pf-monitor-memory-list {
-    padding-left: 10px;
-    padding-right: 10px;
-  }
-
-  .pf-monitor-memory-item summary {
-    grid-template-columns: minmax(0, 1fr);
-    align-items: start;
-    padding: 7px 10px;
-  }
-
-  .pf-monitor-memory-toolbar,
-  .pf-monitor-memory-actions {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
   .pf-task-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
@@ -787,5 +664,10 @@
   .pf-task-config-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .pf-task-filter-rule {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
   }
 }

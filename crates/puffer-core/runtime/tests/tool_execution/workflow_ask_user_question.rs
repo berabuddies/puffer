@@ -170,6 +170,49 @@ fn ask_user_question_rejects_searchable_multi_select_question() {
 }
 
 #[test]
+fn ask_user_question_accepts_large_multi_select_question() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::with_user_question_prompt_handler(
+        |_request| crate::runtime::UserQuestionPromptResponse {
+            answers: serde_json::Map::from_iter([(
+                "Which Gmail accounts should this connection monitor?".to_string(),
+                json!(["a@example.com", "e@example.com"]),
+            )]),
+            annotations: serde_json::Map::new(),
+        },
+        || {
+            crate::runtime::claude_tools::workflow::ask_user_question::execute_ask_user_question(
+                &mut state,
+                &cwd,
+                json!({
+                    "questions": [
+                        {
+                            "question": "Which Gmail accounts should this connection monitor?",
+                            "header": "Gmail Accounts",
+                            "multiSelect": true,
+                            "options": [
+                                {"label": "a@example.com", "description": "A"},
+                                {"label": "b@example.com", "description": "B"},
+                                {"label": "c@example.com", "description": "C"},
+                                {"label": "d@example.com", "description": "D"},
+                                {"label": "e@example.com", "description": "E"}
+                            ]
+                        }
+                    ]
+                }),
+            )
+        },
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        parsed["answers"]["Which Gmail accounts should this connection monitor?"],
+        json!(["a@example.com", "e@example.com"])
+    );
+}
+
+#[test]
 fn ask_user_question_rejects_searchable_input_question() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();

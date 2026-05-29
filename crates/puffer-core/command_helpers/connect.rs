@@ -5,6 +5,7 @@ use puffer_resources::LoadedResources;
 use serde_json::{json, Value};
 
 mod catalog;
+mod gmail_browser;
 mod serve_config;
 
 /// Runs the deterministic `/connect` connector-auth flow without a provider turn.
@@ -20,6 +21,9 @@ pub fn execute_connect_flow(
         "slack-login" => connect_slack_login(state, resources, &target.connection_name)?,
         "lark-app" => connect_lark_app(state, resources, &target.connection_name)?,
         "lark-login" => connect_lark_login(state, resources, &target.connection_name)?,
+        "gmail-browser" => {
+            gmail_browser::connect_gmail_browser(state, resources, &target.connection_name)?
+        }
         "email" => connect_email(state, resources, &target.connection_name)?,
         "telegram-bot" => {
             serve_config::connect_telegram_bot(state, resources, &target.connection_name)?

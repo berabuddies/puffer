@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use grammers_client::{
     types::media::{Contact, Document, Sticker},
-    types::{Chat, Media, Message},
+    types::{Chat, Dialog, Media, Message},
     Client,
 };
 use puffer_subscriber_runtime::TelegramPeerKind;
 use serde_json::json;
 
 use crate::events::emit_control;
-use crate::notifications::dialog_notifications_muted;
+use crate::notifications::{dialog_notifications_suppressed, fetch_chat_notification_suppressed};
 use crate::polls::{poll_payload, poll_text};
 use crate::reply::{reply_header_payload, reply_to_label};
 use crate::state::SkillEnv;
@@ -57,9 +57,10 @@ pub(crate) async fn handle_list_peers(
                 continue;
             }
         }
+        let notification_suppressed = resolve_peer_notification_suppressed(client, &dialog).await;
         peers.push(peer_payload_with_notifications(
             chat,
-            dialog_notifications_muted(&dialog),
+            notification_suppressed,
         ));
         if peers.len() >= limit {
             break;
@@ -79,6 +80,21 @@ pub(crate) async fn handle_list_peers(
         }),
     )?;
     Ok(())
+}
+
+async fn resolve_peer_notification_suppressed(client: &Client, dialog: &Dialog) -> bool {
+    let fallback = dialog_notifications_suppressed(dialog);
+    match fetch_chat_notification_suppressed(client, dialog.chat()).await {
+        Ok(suppressed) => suppressed,
+        Err(error) => {
+            tracing::warn!(
+                chat = %dialog.chat().id(),
+                %error,
+                "failed to refresh Telegram peer notification settings; using dialog state"
+            );
+            fallback
+        }
+    }
 }
 
 /// Searches message text inside one Telegram peer and returns nearby context.

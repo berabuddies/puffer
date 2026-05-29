@@ -276,6 +276,7 @@ export type SettingsConfig = {
   mascotEnabled: boolean;
   uiNoAltScreen: boolean;
   uiTmuxGoldenMode: boolean;
+  browserChromeProfile: string | null;
 };
 
 export type ResourceCounts = {
@@ -317,6 +318,22 @@ export type ProviderSummary = {
   sourcePath: string | null;
 };
 
+export type BrowserProfile = {
+  id: string;
+  name: string;
+  email: string | null;
+  googleAccounts: BrowserGoogleAccount[];
+  path: string;
+  isLastUsed: boolean;
+  isSelected: boolean;
+};
+
+export type BrowserGoogleAccount = {
+  email: string;
+  name: string | null;
+  gaiaId: string | null;
+};
+
 export type SettingsSnapshot = {
   workspaceRoot: string;
   workspaceConfigFile: string;
@@ -328,6 +345,7 @@ export type SettingsSnapshot = {
   sessions: SettingsSessionSummary;
   auth: AuthProviderStatus[];
   providers: ProviderSummary[];
+  browserProfiles: BrowserProfile[];
 };
 
 export type WorkflowTrigger =
@@ -471,6 +489,8 @@ export type WorkflowTask = {
   possible_ignore_reasons?: string[];
 };
 
+export type WorkflowFilterRule = Record<string, unknown>;
+
 export type WorkflowBinding = {
   slug: string;
   description: string;
@@ -482,6 +502,7 @@ export type WorkflowBinding = {
   action_path?: string | null;
   action_format?: string | null;
   filter_pattern?: string | null;
+  ignore_filters?: WorkflowFilterRule[];
   monitor?: boolean;
   monitor_memory_path?: string | null;
   created_at_ms?: number | null;
@@ -511,6 +532,7 @@ export type WorkflowSnapshot = {
   monitor_task_error?: string | null;
   monitor_memories?: WorkflowMonitorMemory[];
   monitor_memory_error?: string | null;
+  monitor_ignore_filter_error?: string | null;
 };
 
 export type WorkflowMonitorMemory = {

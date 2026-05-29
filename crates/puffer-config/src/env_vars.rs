@@ -537,6 +537,13 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         source_files: &["puffer-cli/src/daemon_browser/chrome.rs:122"],
     },
     EnvVar {
+        name: "PUFFER_CHROME_USER_DATA_DIR",
+        description: "Override the Chrome user-data directory used for profile discovery and \
+             managed browser profile seeding.",
+        default: None,
+        source_files: &["puffer-cli/src/browser_profiles.rs"],
+    },
+    EnvVar {
         name: "PUFFER_DISCOVERY_CACHE_PATH",
         description: "Override path for the model-discovery cache JSON. Defaults to \
              `~/.puffer/model_discovery_cache.json`.",

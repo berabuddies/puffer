@@ -693,7 +693,13 @@ mod tests {
         store
             .set_tags(
                 session.id,
-                vec!["b".into(), "a".into(), "  ".into(), "b".into(), " c ".into()],
+                vec![
+                    "b".into(),
+                    "a".into(),
+                    "  ".into(),
+                    "b".into(),
+                    " c ".into(),
+                ],
             )
             .unwrap();
         let reloaded = store.load_session(session.id).unwrap();

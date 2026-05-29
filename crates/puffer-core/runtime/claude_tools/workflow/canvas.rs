@@ -52,7 +52,9 @@ fn resolve_bridge(session_id: &str) -> Option<Value> {
 }
 
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Best-effort open of a file in the OS default app. Never fails the tool.
@@ -151,23 +153,35 @@ mod tests {
             "body": [{ "type": "finding", "severity": "high", "title": "Issue" }]
         });
         let html = render_canvas(&spec, None);
-        assert!(html.contains("Demo &lt;Review&gt;"), "title escaped into <title>");
+        assert!(
+            html.contains("Demo &lt;Review&gt;"),
+            "title escaped into <title>"
+        );
         assert!(html.contains("\"finding\""), "spec JSON embedded");
         assert!(html.contains("application/json"), "spec script tag present");
         // the design-system renderer (component registry) is present
         assert!(html.contains("const COMP="), "component registry embedded");
         // no daemon bridge -> actions degrade
-        assert!(html.contains("=null") || html.contains("= null") || html.contains(":null"),
-                "bridge is null without a daemon");
+        assert!(
+            html.contains("=null") || html.contains("= null") || html.contains(":null"),
+            "bridge is null without a daemon"
+        );
     }
 
     #[test]
     fn render_embeds_bridge_for_actions() {
         let spec = json!({ "title": "T", "body": [] });
-        let bridge = json!({ "url": "ws://127.0.0.1:5555/ws", "token": "tk", "sessionId": "sess-1" });
+        let bridge =
+            json!({ "url": "ws://127.0.0.1:5555/ws", "token": "tk", "sessionId": "sess-1" });
         let html = render_canvas(&spec, Some(&bridge));
-        assert!(html.contains("ws://127.0.0.1:5555/ws"), "daemon url embedded for callback");
-        assert!(html.contains("sess-1"), "session id embedded so actions continue the turn");
+        assert!(
+            html.contains("ws://127.0.0.1:5555/ws"),
+            "daemon url embedded for callback"
+        );
+        assert!(
+            html.contains("sess-1"),
+            "session id embedded so actions continue the turn"
+        );
     }
 
     #[test]

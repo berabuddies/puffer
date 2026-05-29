@@ -204,6 +204,8 @@
   let modelPickerModel = $state<string>("");
   let modelSaving = $state(false);
   let modelError = $state<string | null>(null);
+  let browserProfileSaving = $state(false);
+  let browserProfileError = $state<string | null>(null);
   let connectors = $derived(connectorSnapshot?.connectors ?? []);
   let connections = $derived(connectorSnapshot?.connections ?? []);
   let selectedConnector = $derived(
@@ -976,6 +978,20 @@
     }
   }
 
+  async function saveBrowserProfile(value: string) {
+    if (!daemonReachable || browserProfileSaving) return;
+    browserProfileSaving = true;
+    browserProfileError = null;
+    try {
+      await updateConfig({ browserChromeProfile: value || null });
+      props.onRefresh();
+    } catch (e) {
+      browserProfileError = (e as Error).message ?? String(e);
+    } finally {
+      browserProfileSaving = false;
+    }
+  }
+
   let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
   let defaultRouteProviders = $derived.by(() => {
     const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
@@ -1117,6 +1133,17 @@
       ?.displayName ?? modelPickerProvider
   );
   let modelPickerDisabled = $derived(!daemonReachable || modelSaving || credentialBusy);
+  let browserProfileOptions = $derived(props.snapshot?.browserProfiles ?? []);
+  let selectedBrowserProfile = $derived(
+    browserProfileOptions.find((profile) => profile.isSelected) ?? null
+  );
+  let configuredBrowserProfile = $derived(props.snapshot?.config.browserChromeProfile ?? "");
+  let browserProfileValue = $derived(
+    configuredBrowserProfile &&
+      browserProfileOptions.some((profile) => profile.id === configuredBrowserProfile)
+      ? configuredBrowserProfile
+      : ""
+  );
   let canSaveDefaultModel = $derived(
     Boolean(
       daemonReachable &&
@@ -1219,6 +1246,39 @@
           {:else}
             <span style="color: var(--muted-foreground);">not connected</span>
           {/if}
+        </div>
+      </div>
+
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">Browser profile</div>
+          <div class="desc">Chrome profile used to seed Puffer browser sessions.</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px; justify-self: end; min-width: 320px;">
+          <select
+            class="sc-input"
+            value={browserProfileValue}
+            disabled={!daemonReachable || browserProfileSaving || browserProfileOptions.length === 0}
+            onchange={(e) => void saveBrowserProfile((e.currentTarget as HTMLSelectElement).value)}
+          >
+            <option value="">Most recently used Chrome profile</option>
+            {#each browserProfileOptions as profile (profile.id)}
+              <option value={profile.id}>
+                {profile.name}{profile.email ? ` · ${profile.email}` : ""}{profile.isLastUsed ? " · recent" : ""}
+              </option>
+            {/each}
+          </select>
+          <div style="color: var(--muted-foreground); font-size: 11.5px; text-align: right;">
+            {#if browserProfileError}
+              <span style="color: var(--destructive, #c03232);">{browserProfileError}</span>
+            {:else if browserProfileSaving}
+              Saving profile...
+            {:else if selectedBrowserProfile}
+              Using {selectedBrowserProfile.name}{selectedBrowserProfile.email ? ` · ${selectedBrowserProfile.email}` : ""}.
+            {:else}
+              No local Chrome profiles found.
+            {/if}
+          </div>
         </div>
       </div>
 

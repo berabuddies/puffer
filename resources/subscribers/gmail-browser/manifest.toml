@@ -1,0 +1,15 @@
+manifest_version = 1
+id = "gmail-browser"
+kind = "subscriber"
+topic = "gmail-browser"
+display_name = "Gmail Browser"
+
+# Hidden subcommand baked into the puffer binary. The driver opens Gmail
+# through the daemon browser and emits newly observed inbox rows as ndjson.
+[run]
+cmd = ["puffer", "__subscriber", "gmail-browser"]
+
+# Per-connection state is supplied by the connector template when this
+# manifest is instantiated.
+[state]
+dir = "state"

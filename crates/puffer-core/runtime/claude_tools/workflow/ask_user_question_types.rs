@@ -76,8 +76,16 @@ fn validate_question_options(item: &AskUserQuestionItem) -> Result<()> {
 }
 
 fn validate_choice_question(item: &AskUserQuestionItem) -> Result<()> {
-    let max_options = if item.searchable { 50 } else { 4 };
-    let min_options = if item.searchable { 1 } else { 2 };
+    let max_options = if item.searchable || item.multi_select {
+        50
+    } else {
+        4
+    };
+    let min_options = if item.searchable || item.multi_select {
+        1
+    } else {
+        2
+    };
     if item.options.len() < min_options || item.options.len() > max_options {
         bail!(
             "AskUserQuestion choice question `{}` must provide between {min_options} and {max_options} options",

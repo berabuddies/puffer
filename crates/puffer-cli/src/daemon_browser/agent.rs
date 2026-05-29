@@ -35,6 +35,11 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
     let root_session_id = required_string(params, "sessionId")?;
     let width = optional_u32(params, "width").unwrap_or(INITIAL_WIDTH);
     let height = optional_u32(params, "height").unwrap_or(INITIAL_HEIGHT);
+    if let Some(chrome_profile) = chrome_profile_override(params)? {
+        state
+            .browsers
+            .set_root_chrome_profile(&root_session_id, chrome_profile);
+    }
     match action.as_str() {
         "list" => Ok(serde_json::to_value(
             state.browsers.list_tabs(&root_session_id),
@@ -697,6 +702,21 @@ fn optional_string(params: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn chrome_profile_override(params: &Value) -> Result<Option<Option<String>>> {
+    let Some(value) = params
+        .get("chromeProfile")
+        .or_else(|| params.get("chrome_profile"))
+    else {
+        return Ok(None);
+    };
+    match value {
+        Value::Null => Ok(Some(None)),
+        Value::String(value) if value.trim().is_empty() => Ok(Some(None)),
+        Value::String(value) => Ok(Some(Some(value.trim().to_string()))),
+        _ => bail!("chromeProfile must be string or null"),
+    }
+}
+
 fn navigation_timeout(params: &Value) -> Duration {
     Duration::from_millis(u64::from(
         optional_u32(params, "timeoutMs")
@@ -761,7 +781,7 @@ mod tests {
     #[test]
     fn open_target_resolution_reserves_first_new_tab() {
         let profile = tempfile::tempdir().unwrap();
-        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false);
+        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false, None);
         let params = json!({});
 
         let tab_id = resolve_open_target_tab_id(&browsers, "root", &params, true);
@@ -783,7 +803,7 @@ mod tests {
     #[test]
     fn open_target_resolution_reuses_active_tab() {
         let profile = tempfile::tempdir().unwrap();
-        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false);
+        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false, None);
         browsers.tabs.lock().unwrap().open_tab(
             "root",
             Some("existing".to_string()),

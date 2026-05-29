@@ -436,7 +436,9 @@ async fn run_update_loop(
             update = client.next_update() => {
                 match update {
                     Ok(Update::NewMessage(msg)) => {
-                        if let Err(err) = emit_message_if_new(env, delivery_cursor, notification_mutes, &msg) {
+                        if let Err(err) =
+                            emit_message_if_new(env, client, delivery_cursor, notification_mutes, &msg).await
+                        {
                             error!(error = %err, "failed to emit message event");
                         }
                     }

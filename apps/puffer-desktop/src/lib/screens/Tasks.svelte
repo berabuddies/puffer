@@ -5,7 +5,9 @@
   import { createMonitor, ignoreMonitorTask, loadWorkflowSnapshot, saveMonitorMemory } from "../api/desktop";
   import Icon from "../design/Icon.svelte";
   import type {
+    WorkflowBinding,
     WorkflowConnection,
+    WorkflowFilterRule,
     WorkflowMonitorMemory,
     WorkflowMonitorTask,
     WorkflowMonitorTaskAction,
@@ -30,7 +32,8 @@
     monitor_memories: [],
     task_error: null,
     monitor_task_error: null,
-    monitor_memory_error: null
+    monitor_memory_error: null,
+    monitor_ignore_filter_error: null
   });
   let loading = $state(false);
   let error = $state<string | null>(null);
@@ -44,6 +47,7 @@
   let selectedMonitorConnection = $state("");
   let creatingMonitor = $state(false);
   let configMemoryPath = $state("");
+  let selectedFilterBindingSlug = $state("");
   let memoryDraft = $state("");
   let savingMemoryPath = $state<string | null>(null);
   let refreshGeneration = 0;
@@ -67,8 +71,16 @@
   let ignoredCount = $derived(tasks.filter(taskIgnored).length);
   let activeCount = $derived(tasks.filter((task) => !taskIgnored(task) && !taskTerminal(task)).length);
   let monitorMemories = $derived(snapshot.monitor_memories ?? []);
+  let monitorFilterBindings = $derived(
+    (snapshot.workflow_bindings ?? []).filter((binding) => binding.monitor)
+  );
   let selectedConfigMemory = $derived(
     monitorMemories.find((memory) => memory.path === configMemoryPath) ?? monitorMemories[0] ?? null
+  );
+  let selectedFilterBinding = $derived(
+    monitorFilterBindings.find((binding) => binding.slug === selectedFilterBindingSlug)
+      ?? monitorFilterBindings[0]
+      ?? null
   );
   let monitorConnections = $derived((snapshot.connections ?? []).filter(canCreateMonitor));
   let monitorConnectionWarnings = $derived(warningMonitorConnections());
@@ -98,6 +110,12 @@
     }
     if (monitorMemories.some((memory) => memory.path === configMemoryPath)) return;
     chooseConfigMemory(monitorMemories[0].path);
+  });
+
+  $effect(() => {
+    if (!showTaskConfig) return;
+    if (monitorFilterBindings.some((binding) => binding.slug === selectedFilterBindingSlug)) return;
+    selectedFilterBindingSlug = monitorFilterBindings[0]?.slug ?? "";
   });
 
   $effect(() => {
@@ -135,7 +153,8 @@
       connections: next.connections ?? [],
       task_error: next.task_error ?? null,
       monitor_task_error: next.monitor_task_error ?? null,
-      monitor_memory_error: next.monitor_memory_error ?? null
+      monitor_memory_error: next.monitor_memory_error ?? null,
+      monitor_ignore_filter_error: next.monitor_ignore_filter_error ?? null
     };
     ignoreMenuTaskId = null;
   }
@@ -318,11 +337,46 @@
     return ignored === 1 ? "1 ignored example" : `${ignored} ignored examples`;
   }
 
-  function openTaskConfig(memory?: WorkflowMonitorMemory) {
+  function bindingFilterSummary(binding: WorkflowBinding): string {
+    const ignoreCount = binding.ignore_filters?.length ?? 0;
+    const triggerCount = binding.filter_pattern ? 1 : 0;
+    const count = ignoreCount + triggerCount;
+    return count === 1 ? "1 rule" : `${count} rules`;
+  }
+
+  function bindingFilterLabel(binding: WorkflowBinding): string {
+    const status = binding.enabled ? "active" : "paused";
+    return `${binding.connection_slug} - ${bindingFilterSummary(binding)} (${status})`;
+  }
+
+  function scalarRuleEntries(rule: WorkflowFilterRule): string[] {
+    return Object.entries(rule)
+      .filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value))
+      .map(([key, value]) => `${key}=${JSON.stringify(value)}`);
+  }
+
+  function filterRuleTitle(rule: WorkflowFilterRule): string {
+    if (rule.type === "regex") return "Regex ignore";
+    if (rule.type === "jq") return "Expression ignore";
+    const entries = scalarRuleEntries(rule);
+    return entries.length > 0 ? "Payload ignore" : "Ignore rule";
+  }
+
+  function filterRuleSummary(rule: WorkflowFilterRule): string {
+    if (rule.type === "regex" && typeof rule.pattern === "string") {
+      const casing = rule.case_insensitive === false ? "case-sensitive" : "case-insensitive";
+      return `${rule.pattern} (${casing})`;
+    }
+    if (rule.type === "jq" && typeof rule.expression === "string") {
+      return rule.expression;
+    }
+    const entries = scalarRuleEntries(rule);
+    return entries.length > 0 ? entries.join("  ") : JSON.stringify(rule);
+  }
+
+  function openTaskConfig() {
     showTaskConfig = true;
-    if (memory) {
-      chooseConfigMemory(memory.path);
-    } else if (!configMemoryPath && monitorMemories.length > 0) {
+    if (!configMemoryPath && monitorMemories.length > 0) {
       chooseConfigMemory(monitorMemories[0].path);
     }
   }
@@ -523,62 +577,10 @@
     </div>
   {/if}
 
-  {#if error || snapshot.connector_error || snapshot.workflow_binding_error || snapshot.task_error || snapshot.monitor_task_error || snapshot.monitor_memory_error}
+  {#if error || snapshot.connector_error || snapshot.workflow_binding_error || snapshot.task_error || snapshot.monitor_task_error || snapshot.monitor_memory_error || snapshot.monitor_ignore_filter_error}
     <div class="pf-tasks-error">
-      {error ?? snapshot.connector_error ?? snapshot.workflow_binding_error ?? snapshot.task_error ?? snapshot.monitor_task_error ?? snapshot.monitor_memory_error}
+      {error ?? snapshot.connector_error ?? snapshot.workflow_binding_error ?? snapshot.task_error ?? snapshot.monitor_task_error ?? snapshot.monitor_memory_error ?? snapshot.monitor_ignore_filter_error}
     </div>
-  {/if}
-
-  {#if monitorMemories.length > 0}
-    <section class="pf-monitor-memory" aria-label="Monitor memory">
-      <div class="pf-monitor-memory-head">
-        <strong>Monitor memory</strong>
-        <span>Used before new monitor tasks are created</span>
-      </div>
-      <div class="pf-monitor-memory-list">
-        {#each monitorMemories as memory (memory.path)}
-          <details class="pf-monitor-memory-item">
-            <summary>
-              <strong>{memory.connection_slug}</strong>
-              <span>{memorySummary(memory)}</span>
-              <code>{memory.path}</code>
-            </summary>
-            {#if memory.content.trim()}
-              <div class="pf-monitor-memory-toolbar">
-                <button
-                  type="button"
-                  class="sc-btn"
-                  data-variant="outline"
-                  data-size="sm"
-                  disabled={memory.truncated || savingMemoryPath !== null}
-                  onclick={() => openTaskConfig(memory)}
-                >
-                  <Icon name="edit" size={12} />Edit
-                </button>
-                {#if memory.truncated}
-                  <span>Snapshot truncated. Open the file directly to edit safely.</span>
-                {/if}
-              </div>
-              <pre>{memory.content}{memory.truncated ? "\n\n[truncated]" : ""}</pre>
-            {:else}
-              <div class="pf-monitor-memory-toolbar">
-                <button
-                  type="button"
-                  class="sc-btn"
-                  data-variant="outline"
-                  data-size="sm"
-                  disabled={savingMemoryPath !== null}
-                  onclick={() => openTaskConfig(memory)}
-                >
-                  <Icon name="edit" size={12} />Edit
-                </button>
-              </div>
-              <p>No monitor memory yet.</p>
-            {/if}
-          </details>
-        {/each}
-      </div>
-    </section>
   {/if}
 
   <div class="pf-tasks-list" aria-label="Task list">
@@ -681,7 +683,7 @@
         <header class="pf-task-config-head">
           <div>
             <h2 id="pf-task-config-title">Task configuration</h2>
-            <span>Monitors and monitor memory</span>
+            <span>Monitors, filter rules, and memory</span>
           </div>
           <button
             type="button"
@@ -730,6 +732,45 @@
             <p>No trigger-ready connections.</p>
           {/if}
         </form>
+
+        <section class="pf-task-config-section">
+          <div class="pf-task-config-section-head">
+            <strong>Filter rules</strong>
+            <span>Check installed trigger and ignore rules.</span>
+          </div>
+          {#if monitorFilterBindings.length > 0 && selectedFilterBinding}
+            <label class="pf-task-config-memory-select">
+              <span>Monitor</span>
+              <select
+                bind:value={selectedFilterBindingSlug}
+                aria-label="Monitor filter rules"
+              >
+                {#each monitorFilterBindings as binding (binding.slug)}
+                  <option value={binding.slug}>{bindingFilterLabel(binding)}</option>
+                {/each}
+              </select>
+            </label>
+            <div class="pf-task-filter-list">
+              {#if selectedFilterBinding.filter_pattern}
+                <div class="pf-task-filter-rule">
+                  <span>Trigger</span>
+                  <code>{selectedFilterBinding.filter_pattern}</code>
+                </div>
+              {/if}
+              {#each selectedFilterBinding.ignore_filters ?? [] as rule, index (`${selectedFilterBinding.slug}:${index}`)}
+                <div class="pf-task-filter-rule">
+                  <span>Ignore {index + 1} - {filterRuleTitle(rule)}</span>
+                  <code>{filterRuleSummary(rule)}</code>
+                </div>
+              {/each}
+              {#if !selectedFilterBinding.filter_pattern && (selectedFilterBinding.ignore_filters?.length ?? 0) === 0}
+                <p>No filter rules installed for {selectedFilterBinding.connection_slug}.</p>
+              {/if}
+            </div>
+          {:else}
+            <p>No monitor filter rules yet.</p>
+          {/if}
+        </section>
 
         <form class="pf-task-config-section" onsubmit={(event) => void saveConfiguredMemory(event)}>
           <div class="pf-task-config-section-head">

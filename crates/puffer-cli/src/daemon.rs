@@ -328,6 +328,7 @@ impl DaemonState {
         yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
+        let browser_chrome_profile = config.browser.chrome_profile.clone();
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
         let ptys = Arc::new(PtyRegistry::new());
@@ -342,7 +343,11 @@ impl DaemonState {
             next_request_id: Arc::new(AtomicU64::new(0)),
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
-            browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
+            browsers: Arc::new(BrowserRegistry::new(
+                browser_profile_root,
+                !no_browser,
+                browser_chrome_profile,
+            )),
             disable_auto_title,
             yolo,
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
@@ -1869,12 +1874,23 @@ fn handle_update_config(state: &DaemonState, params: &Value) -> Result<Value> {
                     _ => anyhow::bail!("openaiBaseUrl must be string or null"),
                 };
             }
+            "browserChromeProfile" | "browser_chrome_profile" => {
+                guard.browser.chrome_profile = match value {
+                    Value::Null => None,
+                    Value::String(s) if s.trim().is_empty() => None,
+                    Value::String(s) => Some(s.clone()),
+                    _ => anyhow::bail!("browserChromeProfile must be string or null"),
+                };
+            }
             other => anyhow::bail!("update_config: unknown key `{other}`"),
         }
     }
     let snapshot_cfg = guard.clone();
     drop(guard);
     save_user_config(&state.paths, &snapshot_cfg).context("save user config")?;
+    state
+        .browsers
+        .set_chrome_profile(snapshot_cfg.browser.chrome_profile.clone());
     // Return the refreshed settings snapshot so the UI re-renders without
     // a second round-trip.
     let inputs = state.build_runtime_inputs()?;

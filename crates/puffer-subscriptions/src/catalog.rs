@@ -110,6 +110,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         slack_login_template(),
         slack_bot_template(),
         email_template(),
+        gmail_browser_template(),
     ]
 }
 
@@ -125,6 +126,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
     match connector_slug {
         "telegram-login" => "telegram-user".to_string(),
         "email" => "email".to_string(),
+        "gmail-browser" => "gmail-browser".to_string(),
         "lark-app" => "lark-app".to_string(),
         "lark-login" => "lark-login".to_string(),
         "discord-bot" => "discord-bot".to_string(),
@@ -299,6 +301,26 @@ fn email_template() -> ConnectorTemplate {
         subscriber: None,
         output_schema: message_output_schema(),
         actions: send_message_actions(),
+    }
+}
+
+fn gmail_browser_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "gmail-browser".to_string(),
+        description: "Gmail web connector using a selected Chrome profile".to_string(),
+        skill: "gmail-browser".to_string(),
+        binary: "puffer __subscriber gmail-browser".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        subscriber: Some(ConnectorSubscriberTemplate {
+            manifest_slug: "gmail-browser".to_string(),
+            state_root: Some("gmail-browser-accounts".to_string()),
+            display_name: Some("Gmail Browser".to_string()),
+        }),
+        output_schema: message_output_schema(),
+        actions: BTreeMap::new(),
     }
 }
 

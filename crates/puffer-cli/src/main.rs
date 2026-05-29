@@ -7,6 +7,7 @@ mod benchmark_run;
 mod browser;
 mod browser_args;
 mod browser_output;
+mod browser_profiles;
 mod cli_args;
 mod command_surface;
 mod connect;
@@ -25,6 +26,7 @@ mod daemon_workflows;
 mod desktop_activity;
 mod desktop_api;
 mod desktop_api_types;
+mod gmail_browser;
 mod heartbeat;
 mod internal_tools;
 mod non_interactive;
@@ -1224,6 +1226,7 @@ fn run_subscriber(id: &str) -> Result<()> {
         match id {
             "telegram-user" => puffer_subscriber_telegram_user::run().await,
             "email" => puffer_subscriber_email::run().await,
+            "gmail-browser" => crate::gmail_browser::run_subscriber().await,
             other => Err(anyhow::anyhow!(
                 "unknown subscriber id `{other}`; this puffer build does not bundle a driver for it"
             )),

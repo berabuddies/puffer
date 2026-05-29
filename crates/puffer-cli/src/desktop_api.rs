@@ -17,11 +17,11 @@ use uuid::Uuid;
 use crate::cli_args::DesktopApiCommand;
 use crate::desktop_activity::session_activity_status;
 use crate::desktop_api_types::{
-    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto, DiffSummaryDto,
-    DivergenceReportDto, ExternalCredentialDto, FolderGroupDto, ProviderSummaryDto,
-    RepoActionResultDto, RepoPullRequestDto, RepoStatusDto, ResourceCountsDto, SessionDetailDto,
-    SessionListItemDto, SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
-    TimelineItemDto,
+    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto,
+    BrowserGoogleAccountDto, BrowserProfileDto, DiffSummaryDto, DivergenceReportDto,
+    ExternalCredentialDto, FolderGroupDto, ProviderSummaryDto, RepoActionResultDto,
+    RepoPullRequestDto, RepoStatusDto, ResourceCountsDto, SessionDetailDto, SessionListItemDto,
+    SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
 };
 
 /// Runs one hidden desktop JSON command for SSH-backed desktop integrations.
@@ -44,7 +44,10 @@ pub(crate) fn run_desktop_api(
                 .collect::<BTreeMap<String, Vec<String>>>();
             println!(
                 "{}",
-                serde_json::to_string_pretty(&list_grouped_sessions(&session_store, &project_tags)?)?
+                serde_json::to_string_pretty(&list_grouped_sessions(
+                    &session_store,
+                    &project_tags
+                )?)?
             );
         }
         DesktopApiCommand::SessionDetail { session_id } => {
@@ -371,6 +374,7 @@ pub(crate) fn load_settings_snapshot(
             mascot_enabled: config.mascot.enabled,
             ui_no_alt_screen: config.ui.no_alt_screen,
             ui_tmux_golden_mode: config.ui.tmux_golden_mode,
+            browser_chrome_profile: config.browser.chrome_profile.clone(),
         },
         resources: ResourceCountsDto {
             providers: resources.providers.len(),
@@ -391,7 +395,31 @@ pub(crate) fn load_settings_snapshot(
         },
         auth: auth_statuses(auth_store),
         providers: providers.provider_entries().map(provider_summary).collect(),
+        browser_profiles: browser_profile_dtos(config.browser.chrome_profile.as_deref()),
     })
+}
+
+fn browser_profile_dtos(selected_profile: Option<&str>) -> Vec<BrowserProfileDto> {
+    crate::browser_profiles::discover_chrome_profiles(selected_profile)
+        .into_iter()
+        .map(|profile| BrowserProfileDto {
+            id: profile.id,
+            name: profile.name,
+            email: profile.email,
+            google_accounts: profile
+                .google_accounts
+                .into_iter()
+                .map(|account| BrowserGoogleAccountDto {
+                    email: account.email,
+                    name: account.name,
+                    gaia_id: account.gaia_id,
+                })
+                .collect(),
+            path: profile.path.display().to_string(),
+            is_last_used: profile.is_last_used,
+            is_selected: profile.is_selected,
+        })
+        .collect()
 }
 
 fn auth_statuses(auth_store: &AuthStore) -> Vec<AuthProviderStatusDto> {

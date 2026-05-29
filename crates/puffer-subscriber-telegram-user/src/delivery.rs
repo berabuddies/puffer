@@ -138,7 +138,7 @@ pub(crate) async fn catch_up_recent_messages(
         }
         pending.sort_by_key(Message::id);
         for message in pending {
-            if emit_message_if_new(env, cursor, notification_mutes, &message)? {
+            if emit_message_if_new(env, client, cursor, notification_mutes, &message).await? {
                 emitted += 1;
             }
         }
@@ -158,24 +158,39 @@ pub(crate) async fn catch_up_recent_messages(
     Ok(())
 }
 
-pub(crate) fn emit_message_if_new(
+pub(crate) async fn emit_message_if_new(
     env: &SkillEnv,
+    client: &Client,
     cursor: &mut DeliveryCursor,
-    notification_mutes: &NotificationMuteCache,
+    notification_mutes: &mut NotificationMuteCache,
     message: &Message,
 ) -> anyhow::Result<bool> {
     if !cursor.is_new(message) {
         return Ok(false);
     }
-    let event = build_message_event(
-        &env.topic,
-        message,
-        notification_mutes.message_chat_muted(message),
-    );
+    let notification_muted = notification_mutes.message_chat_muted(client, message).await;
+    let notification_silent = message.silent();
+    if message_notifications_suppressed(notification_muted, notification_silent) {
+        cursor.record_seen(message);
+        cursor.save(env)?;
+        info!(
+            chat = %message.chat().id(),
+            message_id = message.id(),
+            notification_muted,
+            notification_silent,
+            "skipped suppressed Telegram message"
+        );
+        return Ok(false);
+    }
+    let event = build_message_event(&env.topic, message, notification_muted);
     emit(&event)?;
     cursor.record_seen(message);
     cursor.save(env)?;
     Ok(true)
+}
+
+fn message_notifications_suppressed(notification_muted: bool, notification_silent: bool) -> bool {
+    notification_muted || notification_silent
 }
 
 fn message_chat_key(message: &Message) -> String {
@@ -191,5 +206,13 @@ mod tests {
         let cursor = DeliveryCursor::default();
         assert!(!cursor.is_initialized());
         assert!(cursor.chats.is_empty());
+    }
+
+    #[test]
+    fn suppressed_notifications_are_not_emitted() {
+        assert!(message_notifications_suppressed(true, false));
+        assert!(message_notifications_suppressed(false, true));
+        assert!(message_notifications_suppressed(true, true));
+        assert!(!message_notifications_suppressed(false, false));
     }
 }

@@ -35,26 +35,22 @@ impl ProjectMetadataStore {
         if !self.path.exists() {
             return Ok(BTreeMap::new());
         }
-        let bytes = fs::read(&self.path)
-            .with_context(|| format!("reading {}", self.path.display()))?;
+        let bytes =
+            fs::read(&self.path).with_context(|| format!("reading {}", self.path.display()))?;
         if bytes.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let map: BTreeMap<String, ProjectMetadata> =
-            serde_json::from_slice(&bytes).with_context(|| {
-                format!("parsing project metadata at {}", self.path.display())
-            })?;
+        let map: BTreeMap<String, ProjectMetadata> = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing project metadata at {}", self.path.display()))?;
         Ok(map)
     }
 
     fn save_map(&self, map: &BTreeMap<String, ProjectMetadata>) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let bytes = serde_json::to_vec_pretty(map)?;
-        fs::write(&self.path, bytes)
-            .with_context(|| format!("writing {}", self.path.display()))?;
+        fs::write(&self.path, bytes).with_context(|| format!("writing {}", self.path.display()))?;
         Ok(())
     }
 
@@ -105,7 +101,10 @@ mod tests {
         let store = ProjectMetadataStore::from_paths(&paths);
         let folder = temp.path().join("proj");
         let meta = store
-            .set_tags(&folder, vec!["b".into(), "a".into(), "b".into(), "  ".into()])
+            .set_tags(
+                &folder,
+                vec!["b".into(), "a".into(), "b".into(), "  ".into()],
+            )
             .unwrap();
         assert_eq!(meta.tags, vec!["a".to_string(), "b".to_string()]);
         let all = store.all().unwrap();

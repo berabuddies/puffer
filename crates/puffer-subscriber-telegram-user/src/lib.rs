@@ -3,7 +3,7 @@
 //! This crate is compiled into the Puffer binary and reached via the hidden
 //! `puffer __subscriber telegram-user` subcommand. It connects to Telegram via
 //! MTProto using the user's personal account (grammers-client 0.7), streams
-//! incoming messages from every chat on stdout as ndjson events, and reads
+//! incoming messages from non-muted chats on stdout as ndjson events, and reads
 //! control commands on stdin to drive the three-step login flow
 //! (phone -> code -> optional 2FA password).
 //!
