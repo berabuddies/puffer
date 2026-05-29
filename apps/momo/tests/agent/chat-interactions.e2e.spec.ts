@@ -239,3 +239,14 @@ test("tool-calls-requested renders a running ToolCard that flips to success", as
   await expect(tool.locator('.pf-tool-status[data-state="running"]')).toHaveCount(0);
   await expect(tool.locator('.pf-tool-status[data-state="done"]')).toBeVisible();
 });
+
+test("user + assistant text render as left/right bubbles", async ({ page }) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await bootOnboarded(page, daemon);
+  const { sessionId, turnId } = await startTurnFromHome(page, daemon, "Say hi");
+  emitTurnStart(daemon, { sessionId, turnId });
+  daemon.emit(`session:${sessionId}:event`, { type: "text-delta", turnId, delta: "Hello there" });
+
+  await expect(page.locator('.mb-row[data-role="user"] .mb-bubble')).toContainText("Say hi");
+  await expect(page.locator('.mb-row[data-role="assistant"] .mb-bubble')).toContainText("Hello there");
+});

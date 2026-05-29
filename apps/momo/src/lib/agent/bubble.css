@@ -46,7 +46,39 @@
   padding: var(--space-2) 0;
 }
 
-/* 临时内联气泡(Task 2 抽成 ChatBubble 后细化)。 */
+/* 消息气泡 / system / command(ChatBubble.svelte 的皮)。 */
 .mb-row { display: flex; }
 .mb-row[data-role="user"] { justify-content: flex-end; }
-.mb-bubble { max-width: 80%; padding: 11px 15px; background: var(--color-surface-rail); border-radius: 16px; font-family: var(--font-system); font-size: 14px; line-height: 20px; color: var(--color-text-primary); }
+.mb-row[data-role="assistant"] { justify-content: flex-start; }
+.mb-bubble {
+  max-width: 80%;
+  padding: 11px 15px;
+  font-family: var(--font-system);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--color-text-primary);
+}
+.mb-row[data-role="user"] .mb-bubble {
+  background: var(--color-surface-rail);          /* #f4f4f4 */
+  border-radius: 16px 4px 16px 16px;
+}
+.mb-row[data-role="assistant"] .mb-bubble {
+  background: var(--color-surface-rail);
+  border-radius: 4px 14px 14px 14px;
+}
+.mb-system {
+  color: var(--color-text-muted);
+  font-family: var(--font-system);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+}
+.mb-row[data-error="true"] .mb-system { color: #b3261e; }
+.mb-cmd {
+  display: inline-flex;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-rail);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}

@@ -2,7 +2,7 @@
   import "./chat.css";   // 复用 .pf-* 类 + --pf-chat-*-size(ToolCard/DiffCard/MessageBody 依赖)
   import "./bubble.css"; // momo 桥接 + 气泡皮
   import { tick } from "svelte";
-  import MessageBody from "./components/MessageBody.svelte";
+  import ChatBubble from "./components/ChatBubble.svelte";
   import ToolCard from "./components/ToolCard.svelte";
   import DiffCard from "./components/DiffCard.svelte";
   import Approval from "./components/Approval.svelte";
@@ -103,12 +103,8 @@
               onResolve={onResolveUserQuestion}
             />
           {:else}
-            <!-- user/assistant/system/command 消息;markdown 走 MessageBody。Task 2 抽成 ChatBubble。 -->
-            <div class="mb-row" data-role={(item as MessageTimelineItem).kind}>
-              <div class="mb-bubble">
-                <div class="pf-msg-text"><MessageBody body={(item as MessageTimelineItem).body} /></div>
-              </div>
-            </div>
+            <!-- user/assistant/system/command 消息;每角色样式 + markdown 由 ChatBubble 处理。 -->
+            <ChatBubble item={item as MessageTimelineItem} />
           {/if}
         {/if}
       {/each}
