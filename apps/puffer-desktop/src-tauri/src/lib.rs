@@ -51,6 +51,8 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "cancel_turn",
     "minicpm5_recommend",
     "minicpm5_install",
+    "minicpm5_behavior_start",
+    "minicpm5_behavior_stop",
 ];
 
 fn backend_call(
@@ -418,6 +420,8 @@ pub fn run() {
             cancel_turn,
             minicpm5::minicpm5_recommend,
             minicpm5::minicpm5_install,
+            minicpm5::minicpm5_behavior_start,
+            minicpm5::minicpm5_behavior_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Corbina desktop");

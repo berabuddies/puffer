@@ -7,8 +7,9 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -156,5 +157,90 @@ pub fn minicpm5_install(app: AppHandle) -> Result<(), String> {
         INSTALLING.store(false, Ordering::SeqCst);
         let _ = app.emit("minicpm5://install-done", json!({ "success": success }));
     });
+    Ok(())
+}
+
+// ---- behavior analysis: the "does something" half of the feature ----------
+// The installed local model runs continuous, on-device user-behavior analysis.
+// We tail the active session transcript through scripts/minicpm5-behavior.py
+// (which calls the local mlx server) and stream each rolling read as a
+// `minicpm5://behavior` event. One watcher at a time.
+
+/// The running behavior watcher child, if any. Replaced on start, killed on stop.
+static BEHAVIOR: Mutex<Option<Child>> = Mutex::new(None);
+
+fn puffer_home() -> PathBuf {
+    std::env::var_os("PUFFER_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".puffer")))
+        .unwrap_or_else(|| PathBuf::from(".puffer"))
+}
+
+/// Kill any running watcher. Best-effort.
+fn stop_behavior_locked(slot: &mut Option<Child>) {
+    if let Some(mut child) = slot.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Start (or restart) behavior analysis for `session_id`. Ensures the mlx
+/// server is up (best-effort, non-blocking), then tails the session transcript
+/// and streams `minicpm5://behavior` events. Replaces any existing watcher.
+#[tauri::command]
+pub fn minicpm5_behavior_start(app: AppHandle, session_id: String) -> Result<(), String> {
+    let behavior = script_path("minicpm5-behavior.py").ok_or("behavior script not found")?;
+    let session_file = puffer_home()
+        .join("sessions")
+        .join(format!("{session_id}.session.jsonl"));
+    if !session_file.is_file() {
+        return Err(format!("session transcript not found: {}", session_file.display()));
+    }
+
+    // Ensure the local server is running — fire-and-forget; serve.sh healthchecks
+    // and the watcher tolerates a not-yet-ready server.
+    if let Some(serve) = script_path("minicpm5-serve.sh") {
+        std::thread::spawn(move || {
+            let _ = Command::new("/bin/bash").arg(&serve).arg("--bg").status();
+        });
+    }
+
+    let mut slot = BEHAVIOR.lock().map_err(|_| "behavior lock poisoned")?;
+    stop_behavior_locked(&mut slot);
+
+    // `-u` = unbuffered, so each analysis line reaches us immediately.
+    let mut child = Command::new("python3")
+        .arg("-u")
+        .arg(&behavior)
+        .arg("--watch")
+        .arg(&session_file)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("spawn behavior watcher: {err}"))?;
+
+    if let Some(out) = child.stdout.take() {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() || !line.starts_with('{') {
+                    continue; // skip the "[watch] …" banner
+                }
+                if let Ok(value) = serde_json::from_str::<Value>(line) {
+                    let _ = app.emit("minicpm5://behavior", value);
+                }
+            }
+        });
+    }
+    *slot = Some(child);
+    Ok(())
+}
+
+/// Stop the behavior watcher.
+#[tauri::command]
+pub fn minicpm5_behavior_stop() -> Result<(), String> {
+    let mut slot = BEHAVIOR.lock().map_err(|_| "behavior lock poisoned")?;
+    stop_behavior_locked(&mut slot);
     Ok(())
 }

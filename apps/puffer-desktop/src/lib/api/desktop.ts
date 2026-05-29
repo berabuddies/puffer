@@ -2041,3 +2041,23 @@ export async function minicpm5Recommend(): Promise<Minicpm5Recommendation> {
 export async function minicpm5Install(): Promise<void> {
   await invoke("minicpm5_install");
 }
+
+export type Minicpm5Behavior = {
+  intent?: string;
+  state?: string;
+  activity?: string;
+  signals?: string[];
+  suggestion?: string;
+  error?: string;
+};
+
+/** Start on-device behavior analysis for a session. Each rolling read streams
+ *  as a `minicpm5://behavior` event. Replaces any existing watcher. */
+export async function minicpm5BehaviorStart(sessionId: string): Promise<void> {
+  await invoke("minicpm5_behavior_start", { sessionId });
+}
+
+/** Stop the behavior watcher. */
+export async function minicpm5BehaviorStop(): Promise<void> {
+  await invoke("minicpm5_behavior_stop");
+}

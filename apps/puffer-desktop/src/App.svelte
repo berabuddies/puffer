@@ -18,6 +18,7 @@
   import NewSessionModal from "./lib/screens/workspace/NewSessionModal.svelte";
   import WorkspacePicker from "./lib/screens/WorkspacePicker.svelte";
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
+  import BehaviorReadout from "./lib/screens/agent/BehaviorReadout.svelte";
   import Workflows from "./lib/screens/Workflows.svelte";
   import Tasks from "./lib/screens/Tasks.svelte";
   import Settings from "./lib/screens/Settings.svelte";
@@ -3664,6 +3665,9 @@
         <div class="pf-stage">
           {#if tweaks.screen === "workspace"}
             {#if openAgentSessionId}
+              <div class="pf-beh-bar">
+                <BehaviorReadout sessionId={selectedSession?.id ?? null} />
+              </div>
               <AgentDetail
                 session={selectedSession}
                 sessionDetail={sessionDetail}

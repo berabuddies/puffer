@@ -139,7 +139,10 @@ def run_once(path, outdir):
     outdir.mkdir(parents=True, exist_ok=True)
     with open(outdir / f"{sid}.jsonl", "a") as f:
         f.write(json.dumps(a, ensure_ascii=False) + "\n")
-    print(json.dumps(a, ensure_ascii=False, indent=1))
+    # One JSON object per line, flushed immediately: a piped consumer (the
+    # desktop subsystem) streams one event per line in real time. Python block-
+    # buffers a piped stdout, so without flush nothing arrives until exit.
+    print(json.dumps(a, ensure_ascii=False), flush=True)
     return a
 
 def main():
@@ -159,7 +162,12 @@ def main():
             sz = -1
         if sz != last:
             time.sleep(0.8)  # debounce
-            run_once(path, outdir)
+            try:
+                run_once(path, outdir)
+            except Exception as ex:
+                # A transient failure (server still starting, bad line) must not
+                # kill a long-running watcher driving the desktop subsystem.
+                print(json.dumps({"error": str(ex)[:160]}), flush=True)
             last = os.path.getsize(path)
         time.sleep(2)
 
