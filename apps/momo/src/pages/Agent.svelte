@@ -21,25 +21,10 @@
 -->
 <script lang="ts">
   import Composer from "../components/shell/Composer.svelte";
-  import ChatBubble from "../components/agent/ChatBubble.svelte";
-  import ThinkingBlock from "../components/agent/ThinkingBlock.svelte";
-  import ToolCallPill from "../components/agent/ToolCallPill.svelte";
-  import AnswerForm from "../components/agent/AnswerForm.svelte";
-  import Mascot from "../components/common/Mascot.svelte";
-  import MessageBody from "../components/common/MessageBody.svelte";
-  import { formatTime } from "../lib/timeFormat";
+  import ConversationView from "../lib/agent/ConversationView.svelte";
+  import { createController } from "../lib/agent/agentChat.svelte";
   import { navigate } from "../router.svelte";
-  import {
-    chatSessions,
-    ensureSession,
-    getHydrationState,
-    retryHydration,
-    runningTurnBySessionId,
-    cancelRunningTurn,
-    answerQuestion,
-    activitySiblingMap,
-    type ChatMessage
-  } from "../lib/chat.svelte";
+  import type { TimelineItem } from "../lib/agent/types";
 
   interface Props {
     taskId?: string;
@@ -47,57 +32,37 @@
 
   let { taskId }: Props = $props();
 
-  // Materialise the session list lazily via $effect so the mutation lives
-  // outside derived/template scope (otherwise Svelte 5 raises
-  // `state_unsafe_mutation` — fatal in WebKit/Tauri). Once ensureSession
-  // writes the entry, `chatSessions[taskId]` becomes a reactive read and
-  // re-renders just like a $derived would.
+  // Bind a chat controller to this session id. `createController` is a thin
+  // façade over the module-level `chatStates` record, so it survives the
+  // route remount that fires on `{#key currentRoute.path}` — the underlying
+  // state outlives this component.
+  let controller = $derived(createController(taskId ?? ""));
+
+  // Subscribe this session's daemon events into the reducer and hydrate the
+  // persisted transcript once per session. Both are idempotent; the effect
+  // re-runs when `taskId` changes (new route → new session).
   $effect(() => {
-    if (taskId) ensureSession(taskId);
+    if (!taskId) return;
+    controller.ensureSubscription();
+    void controller.loadDetail();
   });
-  let chatMessages = $derived<ChatMessage[]>(
-    taskId ? (chatSessions[taskId] ?? []) : []
+
+  // Pull the rendered timeline through the controller getters. These recompute
+  // from `$state` on read, so they stay reactive inside the template/derived.
+  let timeline = $derived<TimelineItem[]>(taskId ? controller.combinedTimeline() : []);
+  let pendingPermissions = $derived(taskId ? controller.pendingPermissions() : []);
+  let pendingQuestions = $derived(taskId ? controller.pendingQuestions() : []);
+  let turnRunning = $derived(taskId ? controller.turnRunning() : false);
+  // Hydration loading state: the persisted detail hasn't landed yet and the
+  // live stream is empty. `ConversationView` shows its own "Loading…" row when
+  // `loading && timeline.length === 0`.
+  let loading = $derived(
+    taskId ? controller.state().sessionDetail === null && timeline.length === 0 : false
   );
-  // Track whether this session has a live turn so the Composer can swap
-  // its Send button for a red Stop. Cleared from chat.svelte.ts on
-  // turn-complete / turn-error.
-  let isRunning = $derived(taskId ? Boolean(runningTurnBySessionId[taskId]) : false);
-  // Single O(n) scan of the message list, returning a Map<turnId, true>
-  // for turns currently showing a "working" indicator (thinking, running
-  // tool, unanswered question). The template asks "does my turnId have an
-  // activity sibling?" via Map lookup, keeping the render O(n) total
-  // rather than O(n²) (each assistant message used to re-scan inline).
-  let activityMap = $derived(taskId ? activitySiblingMap(taskId) : new Map<string, true>());
-  let hydrationPhase = $derived(taskId ? getHydrationState(taskId) : "idle");
-  let showLoadingState = $derived(hydrationPhase === "loading" && chatMessages.length === 0);
-  let showErrorState = $derived(hydrationPhase === "error" && chatMessages.length === 0);
-
-  /** The scroll viewport for the conversation. Bound in the template. */
-  let threadEl = $state<HTMLElement | null>(null);
-
-  // Auto-scroll to the bottom whenever the visible message count changes
-  // (covers both new user turns and pending → resolved assistant flips).
-  $effect(() => {
-    // Read length so this effect tracks `chatMessages` reactively.
-    chatMessages.length;
-    // Also re-run when a pending bubble flips to resolved (text fills in)
-    // or when a tool pill flips status (running → success/failed).
-    chatMessages.forEach((m) => {
-      if (m.role === "user" || m.role === "assistant" || m.role === "thinking") {
-        void m.pending;
-        void m.text;
-      } else if (m.role === "tool") {
-        void m.status;
-      } else if (m.role === "question") {
-        void m.answered;
-      }
-    });
-    if (!threadEl) return;
-    // Defer one frame so freshly inserted nodes are measured first.
-    queueMicrotask(() => {
-      if (threadEl) threadEl.scrollTop = threadEl.scrollHeight;
-    });
-  });
+  // ConversationView's composer is gated on `session`; momo drives input from
+  // the shell <Composer> below instead, so the session lets the timeline +
+  // approval prompts scope correctly without surfacing a second input.
+  let session = $derived(taskId ? (controller.state().sessionDetail?.session ?? null) : null);
 
   function goHome(event: MouseEvent): void {
     event.preventDefault();
@@ -107,10 +72,10 @@
   /** Title for the page header: use the first user turn so it reads like
    *  the user's intent rather than a generic placeholder. Falls back to
    *  "New chat" before the first turn lands. */
-  function dynamicTitle(messages: ChatMessage[]): string {
-    const first = messages.find((m) => m.role === "user");
-    if (!first) return "New chat";
-    const txt = first.text.trim();
+  function dynamicTitle(items: TimelineItem[]): string {
+    const first = items.find((item) => item.kind === "user");
+    const txt = (first?.body ?? "").trim();
+    if (!txt) return "New chat";
     return txt.length > 60 ? `${txt.slice(0, 57)}…` : txt;
   }
 </script>
@@ -126,112 +91,45 @@
     </section>
   {:else}
     <header class="agent__header">
-      <h1 class="text-section">{dynamicTitle(chatMessages)}</h1>
+      <h1 class="text-section">{dynamicTitle(timeline)}</h1>
     </header>
 
-    <section class="agent__thread" bind:this={threadEl} aria-label="Conversation">
-      <div class="agent__thread-inner">
-        {#if showLoadingState}
-          <div class="hydration-status" data-testid="hydration-loading">
-            <span class="hydration-status__spinner" aria-hidden="true">
-              <span class="hydration-status__dot"></span>
-              <span class="hydration-status__dot"></span>
-              <span class="hydration-status__dot"></span>
-            </span>
-            <p class="hydration-status__text">Loading conversation…</p>
-          </div>
-        {:else if showErrorState}
-          <div class="hydration-status" data-testid="hydration-error">
-            <p class="hydration-status__text">Failed to load history</p>
-            <button
-              type="button"
-              class="hydration-status__retry"
-              onclick={() => taskId && retryHydration(taskId)}
-            >
-              Retry
-            </button>
-          </div>
-        {/if}
-        {#each chatMessages as message (message.id)}
-          {#if message.role === "user"}
-            <ChatBubble text={message.text} createdAt={message.createdAt} />
-          {:else if message.role === "thinking"}
-            <ThinkingBlock text={message.text} pending={message.pending} />
-          {:else if message.role === "tool"}
-            <ToolCallPill
-              toolId={message.toolId}
-              callId={message.callId}
-              status={message.status}
-              input={message.input}
-            />
-          {:else if message.role === "question"}
-            <AnswerForm
-              questions={message.questions}
-              answered={message.answered}
-              onSubmit={(answers) =>
-                taskId && answerQuestion(taskId, message.requestId, answers)}
-            />
-          {:else}
-            <!--
-              Suppress the empty pending assistant row whenever some other
-              "agent is working" signal for the same turn is on screen —
-              a thinking block, a running tool pill, OR an unanswered
-              question form. Each already conveys activity, so the typing-
-              dot stand-in is redundant.
-              Resolved tool pills (success/failed) DO NOT count: between
-              tool steps the agent may be silently composing, and the
-              typing dots are the only signal of life. Answered question
-              forms DO NOT count either — the agent is now actively
-              composing its follow-up.
-            -->
-            {@const hasActivitySibling = Boolean(message.turnId && activityMap.get(message.turnId))}
-            {@const hideEmptyPending =
-              message.pending && message.text.length === 0 && hasActivitySibling}
-            {#if !hideEmptyPending}
-            <div class="assistant-row" data-error={message.error ? "true" : undefined}>
-              <div class="assistant-avatar"><Mascot size="sm" /></div>
-              <div class="assistant-bubble">
-                {#if message.pending && !hasActivitySibling}
-                  <span class="typing" aria-label="Momo is typing">
-                    <span class="typing__dot"></span>
-                    <span class="typing__dot"></span>
-                    <span class="typing__dot"></span>
-                  </span>
-                {:else if message.pending}
-                  <!-- Activity sibling (thinking / running tool) covers the
-                       "working" indicator; render the in-flight text as it
-                       streams (may be empty briefly before the first
-                       text-delta lands). -->
-                  <div class="assistant-bubble__text">
-                    <MessageBody body={message.text} />
-                  </div>
-                {:else}
-                  <div class="assistant-bubble__text">
-                    <MessageBody body={message.text} />
-                  </div>
-                {/if}
-                {#if !message.pending && message.createdAt}
-                  <span class="assistant-bubble__time">{formatTime(message.createdAt)}</span>
-                {/if}
-              </div>
-            </div>
-            {/if}
-          {/if}
-        {/each}
-      </div>
+    <!--
+      Thread surface. `ConversationView` is the desktop-style timeline renderer
+      (text / tools / thinking / approvals / questions / diffs) — it consumes
+      the controller's `TimelineItem[]` directly. Its own internal composer is
+      hidden via the `:global(.pf-composer-wrap)` rule below; momo drives input
+      through the shell <Composer> row underneath so the page keeps a single
+      visible input. The Approval / QuestionPrompt callbacks still route through
+      ConversationView so pending requests resolve inline with their turn.
+    -->
+    <section class="agent__thread" aria-label="Conversation">
+      <ConversationView
+        {session}
+        {timeline}
+        {pendingPermissions}
+        {pendingQuestions}
+        {turnRunning}
+        {loading}
+        onSubmitMessage={(message) => controller.appendUserMessage(message)}
+        onResolvePermission={(id, choice) => controller.resolvePermission(id, choice)}
+        onResolveUserQuestion={(id, answers, annotations) =>
+          controller.resolveUserQuestion(id, answers, annotations)}
+        onCancelTurn={() => controller.cancelCurrentTurn()}
+      />
     </section>
 
     <div class="agent__composer">
       <div class="agent__composer-inner">
         <!-- No onsubmit: Composer's default branch sees /agent/<id> and
-             appends to the active session via the chat store. Pass
+             appends to the active session via the chat controller. Pass
              `running` so the Composer renders a red Stop button while a
-             turn is in flight; click routes through `cancelRunningTurn`
-             which fires `cancel_turn` via the WS client. -->
+             turn is in flight; click routes through `cancelCurrentTurn`
+             which fires `cancel_turn` via the daemon client. -->
         <Composer
           placeholder="Hi, Tomo. How's my luck today?"
-          running={isRunning}
-          onCancel={() => taskId && cancelRunningTurn(taskId)}
+          running={turnRunning}
+          onCancel={() => controller.cancelCurrentTurn()}
         />
       </div>
     </div>
@@ -266,24 +164,24 @@
     border-bottom: 1px solid var(--color-card-border);
   }
 
+  /* The thread row hosts <ConversationView>, which owns its own internal
+   * scroller (`.pf-chat-thread`) and centering. We just give it the flex
+   * slot between the sticky header and the composer; the negative margin
+   * lets the conversation surface span the full page width while the Shell
+   * column keeps its horizontal padding for the header / composer. */
   .agent__thread {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-    /* Counteract the Shell column's horizontal padding so the scroll
-     * region spans the full page width — content is re-centered inside. */
-    margin: 0 calc(-1 * var(--shell-page-padding));
-    padding: var(--space-5) var(--shell-page-padding);
-  }
-
-  .agent__thread-inner {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
-    max-width: var(--shell-page-max);
-    margin: 0 auto;
-    width: 100%;
+    margin: 0 calc(-1 * var(--shell-page-padding));
+  }
+
+  /* ConversationView is a self-contained chat surface (thread + composer).
+   * momo drives input from the shell <Composer> below, so suppress
+   * ConversationView's own composer to avoid a duplicate input. */
+  .agent__thread :global(.pf-composer-wrap) {
+    display: none;
   }
 
   .agent__composer {
@@ -338,156 +236,5 @@
   }
   .empty__link:hover {
     text-decoration: underline;
-  }
-
-  /* ── Assistant bubble ────────────────────────────────────────────── */
-
-  .assistant-row {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-2);
-    width: 100%;
-  }
-
-  .assistant-avatar {
-    flex-shrink: 0;
-    margin-top: 2px;
-  }
-
-  .assistant-bubble {
-    background: transparent;
-    padding: 4px 0;
-    min-height: 24px;
-    max-width: 600px;
-  }
-
-  .assistant-bubble__text {
-    margin: 0;
-    font-family: var(--font-system);
-    font-size: 14px;
-    line-height: 20px;
-    font-weight: var(--font-weight-regular);
-    color: var(--color-text-primary);
-    white-space: pre-wrap;
-    word-wrap: break-word;
-  }
-
-  .assistant-bubble__time {
-    display: block;
-    margin-top: 4px;
-    font-family: var(--font-system);
-    font-size: 11px;
-    line-height: 14px;
-    color: var(--color-text-secondary);
-    text-align: right;
-  }
-
-  /* Error variant — `data-error="true"` is set by Agent.svelte when the
-   * assistant bubble represents a turn-error or session-fetch failure
-   * (see chat.svelte.ts:handleSessionEvent turn-error). Cascades into the
-   * Markdown subtree via :global(*) so paragraph text inside MessageBody
-   * picks up the danger color too. */
-  .assistant-row[data-error="true"] .assistant-bubble :global(*) {
-    color: var(--color-danger-text, #c0392b);
-  }
-  .assistant-row[data-error="true"] .assistant-bubble::before {
-    content: "⚠ ";
-    color: var(--color-danger-text, #c0392b);
-  }
-
-  /* ── Hydration loading / error overlays ──────────────────────────
-   * Sit at the top of the thread (not the page) so the header and
-   * composer stay anchored. The spinner reuses the `.typing` keyframe
-   * to stay on brand without pulling in a new asset. */
-  .hydration-status {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-2);
-    padding: var(--space-5) var(--space-3);
-    color: var(--color-text-muted);
-  }
-
-  .hydration-status__text {
-    margin: 0;
-    font-family: var(--font-system);
-    font-size: var(--font-size-body);
-    line-height: var(--line-height-body);
-  }
-
-  .hydration-status__spinner {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .hydration-status__dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-text-muted);
-    opacity: 0.4;
-    animation: typing-bounce 1.2s infinite ease-in-out;
-  }
-  .hydration-status__dot:nth-child(2) {
-    animation-delay: 0.15s;
-  }
-  .hydration-status__dot:nth-child(3) {
-    animation-delay: 0.3s;
-  }
-
-  .hydration-status__retry {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 28px;
-    padding: 0 var(--space-3);
-    border-radius: var(--radius-control);
-    background: var(--color-action-cream);
-    color: var(--color-action-cream-text);
-    border: 1px solid var(--color-action-cream-border);
-    font-family: var(--font-system);
-    font-size: var(--font-size-button);
-    line-height: var(--line-height-button);
-    font-weight: var(--font-weight-medium);
-    cursor: pointer;
-  }
-  .hydration-status__retry:hover {
-    background: var(--color-selected-fill);
-  }
-
-  .typing {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 2px;
-  }
-
-  .typing__dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-text-muted);
-    opacity: 0.4;
-    animation: typing-bounce 1.2s infinite ease-in-out;
-  }
-
-  .typing__dot:nth-child(2) {
-    animation-delay: 0.15s;
-  }
-  .typing__dot:nth-child(3) {
-    animation-delay: 0.3s;
-  }
-
-  @keyframes typing-bounce {
-    0%, 60%, 100% {
-      transform: translateY(0);
-      opacity: 0.4;
-    }
-    30% {
-      transform: translateY(-3px);
-      opacity: 0.9;
-    }
   }
 </style>

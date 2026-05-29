@@ -22,7 +22,7 @@
   import { Plus, ArrowUp, Square } from "lucide-svelte";
 
   import { pushToast } from "../../lib/toast.svelte";
-  import { appendUserMessage, createSessionFromText } from "../../lib/chat.svelte";
+  import { createController, createSessionFromText } from "../../lib/agent/agentChat.svelte";
   import { currentRoute, navigate } from "../../router.svelte";
 
   interface Props {
@@ -65,11 +65,11 @@
 
   /**
    * Optimistically clear the input the moment the user submits; the chat
-   * store handles its own error surfacing via toast so we don't need to
-   * keep the text around for a retry. `createSessionFromText` /
-   * `appendUserMessage` are now async (they hit the puffer WS), so we
-   * fire-and-forget here — `Promise` rejections already bubble to the
-   * toast stack inside the store.
+   * controller handles its own error surfacing so we don't need to keep the
+   * text around for a retry. `createSessionFromText` (module-level) and the
+   * per-session controller's `appendUserMessage` both hit the puffer daemon
+   * over WS, so we fire-and-forget here — rejections are handled inside the
+   * controller (it appends an agent-error timeline item).
    */
   function handleSubmit(event?: SubmitEvent): void {
     event?.preventDefault();
@@ -82,7 +82,7 @@
     }
     const active = activeAgentSessionId();
     if (active) {
-      void appendUserMessage(active, text);
+      void createController(active).appendUserMessage(text);
     } else {
       void createSessionFromText(text).then((sessionId) => {
         navigate(`/agent/${sessionId}`);

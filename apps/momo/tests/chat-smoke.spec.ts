@@ -1,13 +1,76 @@
 /**
  * Chat smoke test. Holds tiny, harness-wide regressions that aren't a
- * good fit for a per-feature spec in `chat/`. Feature flows live there.
+ * good fit for a per-feature spec in `chat/`, plus the one end-to-end
+ * "send a message → see the assistant reply" path through the new
+ * daemon-backed `ConversationView` surface (Task 5).
  *
- * Today: the Sidebar "+ new chat" Promise-stringification regression.
+ * The deeper flows — permission / question / cancel / replay e2e — live in
+ * `chat/` and are owned by Task 8. This file only guards that the Agent page
+ * renders a streamed assistant message at all after the chat-controller wiring.
  */
 import { expect, test } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
 import { bootOnboarded } from "./support/bootHelpers";
 import { deferRpc } from "./support/chatTiming";
+import { emitTextDelta, emitTurnComplete } from "./support/chatEmit";
+
+// End-to-end happy path through the migrated daemon chat surface:
+//   shell Composer → create_session → run_agent_turn{turnId}
+//     → emit text-delta + turn-complete
+//     → ConversationView renders the assistant text.
+//
+// Boots via `bootOnboarded` (which installs the FakeDaemon ws route and lands
+// on /home). The frontend's daemonClient parses both the legacy and "real"
+// daemon envelopes, so the default protocol round-trips fine here; the
+// fakeDaemon dispatcher already answers create_session / run_agent_turn and
+// re-broadcasts `session:<id>:event` frames to every open socket.
+test("home composer → run_agent_turn → ConversationView renders the assistant reply", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await bootOnboarded(page, daemon);
+
+  const prompt = "What's my luck today?";
+  await page.getByLabel("Message").fill(prompt);
+  await page.getByLabel("Message").press("Enter");
+
+  // FakeDaemon.createSession mints `session-created-${size+1}`; with no seeded
+  // sessions the first new chat is `session-created-1`.
+  await daemon.waitForRequest("create_session");
+  const sessionId = "session-created-1";
+
+  // The turn carries the typed prompt and targets the freshly-created session.
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (req) => req.params.sessionId === sessionId && req.params.message === prompt
+  );
+
+  // Navigation lands on the new session's agent route.
+  await expect(page).toHaveURL(new RegExp(`#/agent/${sessionId}$`));
+
+  // FakeDaemon.runAgentTurn synthesizes turnId as `turn-${sessionId}`; the
+  // controller binds the live stream to that exact id, so reuse it for the
+  // event channel below.
+  const turnId = `turn-${sessionId}`;
+  emitTextDelta(daemon, { sessionId, turnId, delta: "You're " });
+  emitTextDelta(daemon, { sessionId, turnId, delta: "in luck!" });
+  // Omit `assistantText` so the resolved message has to come from the
+  // accumulated deltas (guards the delta accumulator, not the completion
+  // fallback).
+  emitTurnComplete(daemon, { sessionId, turnId });
+
+  // ConversationView renders an agent row (`.pf-msg[data-role="agent"]`) whose
+  // body text comes through MessageBody as a paragraph inside `.pf-msg-text`.
+  const assistant = page
+    .locator('.pf-msg[data-role="agent"] .pf-msg-text')
+    .filter({ hasText: "You're in luck!" });
+  await expect(assistant).toBeVisible();
+
+  // The user's prompt renders as a user row in the same thread.
+  await expect(
+    page.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: prompt })
+  ).toBeVisible();
+});
 
 // Regression for the Sidebar "+ new chat" Promise-stringification bug:
 // startNewChat used to template-literal the Promise into the URL, producing
@@ -42,7 +105,7 @@ test("harness: deferRpc pins create_session until resolve() is called", async ({
 
   // Pin the next create_session response. The webview will fire the RPC but
   // not get a result back until we call pending.resolve().
-  const pending = daemon.deferRpc("create_session");
+  const pending = deferRpc(daemon, "create_session");
 
   await page.getByLabel("New chat").click();
   // The request reaches the daemon synchronously, but we did NOT resolve yet.
