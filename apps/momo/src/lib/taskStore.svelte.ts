@@ -39,7 +39,14 @@ export async function loadTasks(): Promise<void> {
   taskState.error = null;
   try {
     const snapshot = await loadWorkflowSnapshot();
-    const next = snapshot.monitor_tasks ?? [];
+    // The daemon keeps ignored/handled tasks in the snapshot — `task_monitor_ignore`
+    // sets `ignored: true` (+ status=completed) rather than dropping the task, so
+    // `workflow_list` still returns it. The actionable list shown to the user is
+    // the non-ignored subset; mirror puffer-desktop's Tasks screen, which filters
+    // `task.ignored === true` out of the default view. Without this, clicking
+    // Ignore appears to do nothing — the refetched snapshot still contains the
+    // task, so the row never disappears.
+    const next = (snapshot.monitor_tasks ?? []).filter((task) => task.ignored !== true);
     monitorTasks.splice(0, monitorTasks.length, ...next);
     taskState.ready = true;
   } catch (error) {
