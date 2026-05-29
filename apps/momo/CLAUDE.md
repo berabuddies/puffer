@@ -6,33 +6,40 @@
 
 ## momo 与 puffer 的关系(最重要)
 
-**一句话:momo 是 GUI 壳,puffer 是 agent。momo 自己不实现 LLM agent runtime,而是把 `puffer` CLI 当 agent 跑。** momo 是 **puffer-only**(host 需要 `puffer` 在 `PATH`,或用 `MOMO_PUFFER_BIN` 指定路径)。
+**一句话:momo 是 GUI 壳,puffer 是 agent。momo 自己不实现 LLM agent runtime,而是连一个常驻 `puffer daemon` 跑 agent。** momo 是 **puffer-only**(host 需要 `puffer` 在 `PATH`,或用 `MOMO_PUFFER_BIN`/`PUFFER_BINARY` 指定路径——daemon_launcher 会 spawn 它)。
 
 ### 两段通信链路(别混淆)
 
 ```
-[momo 前端 svelte]  --WebSocket(ws://127.0.0.1:1431/ws)-->  [momo Tauri backend]  --spawn 子进程-->  [puffer CLI = agent]
-        wsClient.ts                                          src-tauri/websocket.rs + backend.rs            puffer-core runtime
+                         ┌─ wsClient.ts ──ws 1431──▶ momo backend: daemon_handshake / connectors / auth
+[momo 前端 svelte] ──────┤                            (src-tauri/websocket.rs + backend.rs)
+                         └─ daemonClient.ts ──直连 ws──▶ 常驻 puffer daemon: chat / session / task RPC
+                                                          (daemon_launcher.rs spawn,workspace=$HOME → ~/.puffer)
 ```
 
-1. **前端 ↔ momo backend**:WebSocket,端口 1431(`src-tauri/src/websocket.rs` 起 server,前端 `src/lib/wsClient.ts` 连)。JSON-RPC 协议 mirror 自 puffer-desktop 的 `websocket.rs`。**这层 ws 是 momo 内部的,不是连 puffer。**
-2. **momo backend ↔ puffer(agent)** — ⚠️ **当前实现违反下方设计原则,是待改造的技术债**:`backend.rs::run_agent_turn_inner` 直接 **spawn puffer CLI 子进程**(`Command::new("puffer")`,backend.rs:801-833 / 1031-1044),`provider=puffer` 跑 `puffer non-interactive --user-message <msg> --json-events`(一次性 stdio,ndjson:`text-delta` / `tool-invocation` / `turn-complete`)。默认 `DEFAULT_PROVIDER="codex"`,codex/claude/puffer 三个分支都在(codex 另走 `codex_app_server.rs`);README 产品定位是 puffer-only。**没有连 `puffer daemon`、没有朝向 puffer 的 ws client**(`tungstenite` 仅用于第 1 条那个对前端的 server)。
+1. **前端 ↔ momo backend**:WebSocket,端口 1431(`src-tauri/src/websocket.rs` 起 server,前端 `src/lib/wsClient.ts` 连)。**只剩 connectors / auth / `daemon_handshake`(返回 daemon 的 url+token)。chat 不再经此跑 turn。**
+2. **前端 ↔ puffer daemon(直连)**:前端 `src/lib/daemonClient.ts` 经 backend 的 `daemon_handshake` 拿 `{url,token}` 后**直连常驻 daemon**(`crates/puffer-cli/src/daemon.rs`,WebSocket/NDJSON server),chat / session / workflow / task 全走 daemon RPC。daemon 由 `src-tauri/src/daemon_launcher.rs` spawn(`puffer daemon --print-handshake`,workspace cwd=$HOME → session/凭据落 `~/.puffer`),随 app 退出而 kill。
 
-### 跟 puffer-desktop 的关键差异
+> **这是 2026-05-29 完成的架构迁移**:momo 从"backend spawn `puffer non-interactive` 一次性子进程 + 自管 `~/.momo` session"迁到"前端直连常驻 daemon"(照搬 puffer-desktop),分两阶段做(chat task #7)。详见 `docs/superpowers/specs|plans/2026-05-29-momo-chat-daemon-migration*`。
 
-puffer-desktop(同源 fork)走的是**另一条路**:它的 `src-tauri/daemon_launcher.rs` 会 spawn 一个常驻 **`puffer daemon`**(本身是 WebSocket/NDJSON server,`crates/puffer-cli/src/daemon.rs`),连 `ws://127.0.0.1:<port>/ws`,所有功能走 **daemon RPC**(`workflow_list` / `delete_session` / `set_session_tags` / `delete_project` / `set_project_tags` / `monitor_*` / `run_agent_turn` …)。
+### chat 架构(已迁 daemon,照搬 puffer-desktop)
 
-**momo 当前没有 `daemon_launcher`、不连 `puffer daemon`**,而是上面的一次性 `puffer non-interactive`。所以 puffer 团队说的"参考 desktop 实现"= 参考 desktop 连 daemon + 调那批 RPC 的模式。
+- **前端 `src/lib/agent/`**:`daemonChat.ts`(瘦 RPC 封装,直连 daemon)、`agentChat.svelte.ts`(chat 状态机 controller,**keyed by sessionId** 模块级 store,因路由 `{#key}` 会重挂 Agent 组件)、`sessionEvents.ts`(订阅 `session:<id>:event` + `SessionStreamEvent` 类型)、`normalize.ts`(timeline DTO 归一)、`ConversationView.svelte` + `components/`(从 desktop 照搬的渲染组件,**阶段1 暂用 desktop IDE 风格;阶段2 才改 momo 气泡 UI,渲染同一份 `TimelineItem[]`**)。
+- **一次 chat 的流转**:`login_with_api_key`(灌 key,见下)→ `create_session({cwd: $MOMO_HOME/projects/default})` 拿 sessionId → 订阅 `session:<id>:event` → `run_agent_turn({sessionId, message, permissionMode:"workspace-write"})` 拿 turnId(fire-and-return)→ 事件流(`text-delta`/`tool-calls-requested`/`tool-invocations`/`thinking-delta`/`permission-request`/`user-question-request`/`turn-complete`/`turn-error`)→ `resolve_permission`/`resolve_user_question` → 收尾。历史 `load_session_detail`,列表 `list_grouped_sessions`(按 default cwd 过滤,否则 monitor session 会混入)。
+- **session 由 daemon 管**(`~/.puffer`),前端只持 sessionId;momo 自管的 `~/.momo/sessions.json` 已废弃。create/rename 也走 daemon(`create_session`/`rename_session`),别再用 1431 的旧路径(否则新建/重命名的会话不在 daemon 列表里)。
+- **⚠️ provider / key(最易踩)**:**daemon 没有 "puffer" 这个 provider**(内置只有 openai/anthropic/openrouter/xai/...)。worldrouter 推理 API 是 **OpenAI 兼容 chat/completions**,所以 key 走**内置 openai provider + `openai_base_url` override 指向 `https://inference-api.worldrouter.ai/v1`** + `default_model=gpt-5.4`:`login_with_api_key("openai", sk-worldrouter-key)` + `update_config({openaiBaseUrl, defaultProvider:"openai", defaultModel})`(`src/lib/agent/daemonAuth.ts`)。**绝不传 `providerId:"puffer"` 给 daemon**(create_session/run_agent_turn 都会被 `unknown provider` 拒)。worldrouter 的 mint-key control-api(`control-api.worldrouter.ai`)与推理 API 是两回事。缺 key 表现为异步 `turn-error`,不是 RPC 同步异常。
+- **backend 旧 chat 路径已退役**:`backend.rs::run_agent_turn` 已 stub 成报错;`run_agent_turn_inner`/`codex_app_server.rs` 留作死代码(阶段2 删)。
 
-### 🎯 设计原则与改造方向(sean 已明确,优先级高)
+### ⚠️ 两个已修 chat bug(2026-05-29;puffer-desktop 同源也有,改时别回归)
 
-**原则:momo 不直接依赖 puffer CLI,而是通过 WebSocket 与 puffer(daemon)通信。**
+- **多轮 tool 调用错位**:`agentChat.svelte.ts::refreshSessionAfterTurn` 的 `currentTurnId` 守卫**不能在新 turn 已开始时整体放弃 refresh**——否则已完成 turn 的 live tool 不被对账清除、跨轮在 `liveStreamItems` 累积、`combinedTimeline` 拼末尾、`ConversationView.buildRows`(按 user 边界分组)把它们全归到最后一个 agent row。已改"窄路径"(更新 persisted + `reconcileCompletedTurnLiveItems` 只清已完成 turn 的 live,不碰运行中 turn)。复现测试 `tests/agent/multiturn-tool-grouping.spec.ts`。**daemon 的 `timeline_items` persisted 顺序本身是对的(pending_assistant 机制把 assistant 移到 tool 后),别去改 daemon。**
+- **streaming 文本抖动**:`components/MessageBody.svelte` 别每个 text-delta 都全量重解析 markdown——半成品 markdown 逐帧在 纯文本/加粗/代码块 间翻转会导致 layout 跳动。已 **rAF 节流**(每帧最多解析一次,`onDestroy` cancel,不丢尾)+ blocks/inline `{#each}` 加 key + parseInline LRU memo。**节流放 MessageBody,不放 reducer**(reducer 须保持同步契约,否则破坏 reducer 测试)。配套:`Agent.svelte` 必须把 `turnStartedAtMs`/`turnThinking`/`turnStatusHint` 传给 ConversationView(否则计时器空转 + typing 恒显 "Running")。
 
-- **现状(已核实 2026-05,违反原则)**:momo 直接 spawn `puffer non-interactive`(见上),用不到 daemon 的 `run_agent_turn` / `workflow_list` / session/project/task 那批 RPC。
-- **目标**:momo backend 改为连 `puffer daemon` 的 ws,agent turn 及所有功能走 daemon RPC,与 puffer-desktop 一致。
-- **可复制样板**:`apps/puffer-desktop/src-tauri/src/daemon_launcher.rs`(momo 同源 fork)。已实现 spawn `puffer daemon` 子进程 → 解析 handshake(ws URL + token)→ 连 `ws://127.0.0.1:<port>/ws`。momo `Cargo.toml` 已有 `tungstenite`,可直接用其 `connect`。
-- **改造落点**:`backend.rs::run_agent_turn_inner`(:749)的 spawn+stdio 逻辑(:801-932)在 puffer 分支替换为 ws RPC 收发;新增连 daemon 模块;再决定 session/workflow/task 是否从自管的 `puffer-session-store` 迁到 daemon RPC。
-- 一旦改成连 daemon,本文件后续"puffer 提供的能力边界"那批 RPC 即可直接调用。
+### telegram subscriber 互踢事故(已随 chat 迁 daemon 根治)
+
+> 历史背景(迁移前的真实事故,记录在此供回归排查):旧 `puffer non-interactive` chat 进程**跑完不退出**(装了 subscription manager + 起 telegram subscriber 长连接),每次聊天 spawn 一个新的 → 多个 `__subscriber telegram-user` 并存、同连一个 telegram 账号 → MTProto 会话互踢 → monitor 收不到新消息、别人 @ 你也不触发 task(connection 仍显示 `active`、Tasks 页只剩旧 task,极具迷惑性)。这是 spec 风险④从"已接受"变"必须做"的实证。
+> - **现已根治**:chat 迁 daemon 后全程只有**一个常驻 daemon** 连 tg,争抢消失。
+> - **回归排查**(万一又出现):`ps -Ao pid,command | grep -i 'puffer __subscriber'` 正常应只有 **1 个**(momo daemon 起的);若见多个 → `pkill -f 'puffer non-interactive'; pkill -f '\.cargo/bin/puffer __subscriber'` 后**重启 momo app**(daemon liveness 是 no-op,杀 daemon 不自愈,要重启整个 app)。
 
 ## puffer 提供的能力边界(开发新功能前先看这)
 
@@ -43,7 +50,8 @@ puffer daemon(= puffer-core runtime)暴露的 RPC 分组(定义见 `crates/puffe
 - **workflow**:`workflow_list`(返回快照,含 `workflows` / `runs` / `tasks` / `monitor_tasks` / `connectors` / `connections`) / `workflow_save` / `workflow_binding_create|delete` / `workflow_connection_delete` / `workflow_toggle` / `workflow_runs_list` / `workflow_run_show`
 - **task / monitor**(别名:`monitor_*` == `task_monitor_*`):`task_monitor_create` / `task_monitor_ignore` / `task_monitor_memory_save`。**task 列表没有独立 RPC,从 `workflow_list` 的 `tasks[]` / `monitor_tasks[]` 取。**
 - **agent turn**:`run_agent_turn` / `dispatch_slash_command` / `cancel_turn` / `resolve_permission` / `resolve_user_question`
-- **文件 / 其它**:`read_file` / `write_file` / `list_dir` / pty / browser / lsp / mcp / 凭据 等
+- **凭据 / 配置**:`login_with_api_key` / `login_with_oauth` / `logout_provider` / `update_config`(`openai_base_url`/`default_provider`/`default_model` 等) / `load_settings_snapshot`
+- **文件 / 其它**:`read_file` / `write_file` / `list_dir` / pty / browser / lsp / mcp 等
 
 ### 两个跨概念的坑(已踩过)
 
@@ -52,23 +60,27 @@ puffer daemon(= puffer-core runtime)暴露的 RPC 分组(定义见 `crates/puffe
 
 ## 存储与端口
 
-- App home:`~/.momo`(覆盖用 `MOMO_HOME`)。`sessions.json`(会话元数据+transcript) / `config.json` / `credentials.json` / `permissions.json` / `pins.json`。**momo 自管 session(`puffer-session-store`),不是 puffer 的 `~/.puffer`。**
+- **chat session / 凭据 → daemon 的 `~/.puffer`**(daemon workspace=$HOME):session transcript、`auth.json`(provider key)、monitor/connection、runtime。**这是 chat 的真值源,前端只持 sessionId。**
+- **momo 自己的 `~/.momo`**(覆盖用 `MOMO_HOME`):`config.json` / `credentials.json`(WorldRouter key 缓存) / `permissions.json` / `pins.json` / `projects/default`(default project cwd)。**`sessions.json` 自管 transcript 已废弃**(chat session 迁 daemon)。
 - 端口:Vite 1466 / Tauri WS backend 1431 / OAuth loopback 1457(与 V1 Corbina 共用,同时只能一个 app 监听)。
-- Auth:momo 有自己的 auth(WorldRouter Auth Station,`VITE_AUTH_STATION_URL`),OAuth 走 OS browser → `http://localhost:1457/callback`。
-
-## 待验证 (TODO)
-
-- [x] **worldrouter API key mint 端到端 —— 已实测通过(2026-05-29)。** 在隔离 clone + 全新 `MOMO_HOME` + 清空 webview localStorage 下走完整登录(点登录 → 系统浏览器 OAuth → control-api 两跳 mint),`credentials.json` 写入了**与日常不同的全新 key**(证明是本次 mint 产出、非缓存继承),并用该 key 驱动 `puffer non-interactive` 正常聊天出回复;`auth.svelte.ts:388-393` 担心的 CORS/未测试风险在当前 `auth.worldrouter.ai` + control-api 环境下**不成立**。原始背景如下:登录拿到 Auth Station JWT 后,前端 fire-and-forget 两跳换 `sk-worldrouter-…` key,再经 `login_with_api_key` RPC 写入 `~/.momo/credentials.json`,聊天时注入 `PUFFER_API_KEY`(链路:`src/lib/auth.svelte.ts:395-520`、`backend.rs:817-827`)。但 `auth.svelte.ts:388-393` 注释自标 **"截至 2026-05-26 未测试 + CORS 风险"**(control-api 是 backend-to-backend,浏览器 fetch 可能被 preflight 拦)。**失败时登录仍假成功并进首页,但聊天因缺 key 失败、UI 无任何提示(仅 console.warn)** —— 这是登录→聊天链路上唯一未验证的环节,也是 QA 最难自诊断的坑。需实测一次完整链路:登录 → mint 成功 → `credentials.json` 含 puffer key → 发消息能收到回复。
+- Auth:momo 有自己的 auth(WorldRouter Auth Station,`VITE_AUTH_STATION_URL`),OAuth 走 OS browser → `http://localhost:1457/callback`;登录后 mint 的 `sk-worldrouter-…` key 经 daemon `login_with_api_key("openai")` 落 `~/.puffer/auth.json`(详见上 chat 架构 provider/key)。
 
 ## 关键文件
 
-- `src-tauri/src/backend.rs` — RPC handler + `run_agent_turn`(spawn provider 进程)
-- `src-tauri/src/codex_app_server.rs` — codex provider 桥接
+**chat(直连 daemon)**
+- `src/lib/daemonClient.ts` — 前端直连 daemon 的通用 RPC client(`ensureDaemonClient()` 单例 + `request`/`on`)
+- `src/lib/agent/` — `daemonChat.ts`(chat RPC)、`agentChat.svelte.ts`(状态机 controller)、`sessionEvents.ts`、`normalize.ts`、`daemonAuth.ts`(worldrouter→openai login)、`ConversationView.svelte` + `components/*`(渲染)
+- `src/pages/Agent.svelte` — chat 页(挂 ConversationView + controller);`src/components/shell/Composer.svelte` — 输入(接 controller)
+- `src-tauri/src/daemon_launcher.rs` — spawn 常驻 daemon + handshake
+- `src-tauri/src/backend.rs` — 1431 RPC handler(`daemon_handshake` / connectors / auth;`run_agent_turn` 已 stub)
 - `src-tauri/src/websocket.rs` — 前端↔backend 的 ws server
+
+**其它**
 - `src-tauri/src/connectors.rs` — Connected Apps / connector
-- `src/lib/wsClient.ts` — 前端 ws JSON-RPC 客户端
-- `src/lib/chat.svelte.ts` — chat 状态机(turn / tool pills / askUserQuestion)
-- `src/lib/sessionStore.svelte.ts` / `projectStore.svelte.ts` — session / 单一固定 default project(Work/Life 已移除)
+- `src/lib/wsClient.ts` — 前端↔1431 backend ws 客户端
+- `src/lib/sessionStore.svelte.ts` / `projectStore.svelte.ts` — sidebar 会话列表(读 daemon `list_grouped_sessions` 按 default cwd 过滤)/ 单一固定 default project
+
+**死代码(阶段2 删)**:`src/lib/chat.svelte.ts`(旧 chat 状态机)、`src/components/agent/*`(旧气泡组件)已移除;`backend.rs::run_agent_turn_inner` / `codex_app_server.rs` 仍在但不再被 dispatch。
 
 ## 验证
 
