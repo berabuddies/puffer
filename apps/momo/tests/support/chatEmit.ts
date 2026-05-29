@@ -9,8 +9,8 @@ import type { FakeDaemon } from "./fakeDaemon";
  * Use primitives in race / lifecycle / cross-session tests where the *gaps*
  * between events matter. Use `emitTurnLifecycle` only for happy-path sugar.
  *
- * Channel naming is verified against `apps/momo/src/lib/agentClient.ts`
- * (line 176: `session:${sessionId}:event`).
+ * Channel naming is verified against
+ * `apps/momo/src/lib/agent/sessionEvents.ts` (`session:${sessionId}:event`).
  */
 
 function channel(sessionId: string): string {

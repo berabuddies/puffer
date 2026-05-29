@@ -17,7 +17,14 @@ import { FakeDaemon } from "../support/fakeDaemon";
 import { bootOnboarded } from "../support/bootHelpers";
 
 type DaemonChatBridge = {
-  createSession: (cwd: string) => Promise<string>;
+  createSession: (
+    cwd: string,
+    providerId?: string
+  ) => Promise<{ sessionId: string; cwd: string; [key: string]: unknown }>;
+  renameSession: (
+    sessionId: string,
+    title: string
+  ) => Promise<{ sessionId: string; displayName: string | null; title: string; updatedAtMs: number }>;
   runAgentTurn: (
     sessionId: string,
     message: string,
@@ -95,23 +102,50 @@ test("runAgentTurn forwards an explicit permissionMode and mode", async ({ page 
   });
 });
 
-test("createSession sends create_session with the cwd and resolves the sessionId", async ({ page }) => {
+test("createSession sends create_session with the cwd and resolves the full result", async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await bootOnboarded(page, daemon);
   await importBridge(page);
 
   const createPromise = daemon.waitForRequest("create_session");
 
-  const sessionId = await page.evaluate(async () => {
+  const result = await page.evaluate(async () => {
     return await (window as unknown as { __daemonChat: DaemonChatBridge }).__daemonChat.createSession(
-      "/tmp/momo-work"
+      "/tmp/momo-work",
+      "puffer"
     );
   });
 
   const create = await createPromise;
-  expect(create.params).toMatchObject({ cwd: "/tmp/momo-work" });
-  // FakeDaemon mints `session-created-N`; the helper returns the raw id.
-  expect(sessionId).toMatch(/^session-created-/);
+  // The provider routing is forwarded so daemon-side session routing matches.
+  expect(create.params).toMatchObject({ cwd: "/tmp/momo-work", providerId: "puffer" });
+  // FakeDaemon mints `session-created-N`; the helper now returns the full
+  // create_session payload (the sidebar needs cwd / timestamps for its stub).
+  expect(result.sessionId).toMatch(/^session-created-/);
+  expect(result.cwd).toBe("/tmp/momo-work");
+});
+
+test("renameSession sends rename_session and resolves the patched fields", async ({ page }) => {
+  const daemon = new FakeDaemon({ sessions: [{ sessionId: "s-1", timeline: [] }] });
+  await bootOnboarded(page, daemon);
+  await importBridge(page);
+
+  const renamePromise = daemon.waitForRequest("rename_session");
+
+  const result = await page.evaluate(async () => {
+    return await (window as unknown as { __daemonChat: DaemonChatBridge }).__daemonChat.renameSession(
+      "s-1",
+      "Renamed chat"
+    );
+  });
+
+  const rename = await renamePromise;
+  expect(rename.params).toMatchObject({ sessionId: "s-1", title: "Renamed chat" });
+  // FakeDaemon echoes the latest session detail; displayName / title reflect
+  // the new name the sidebar patches in place.
+  expect(result.sessionId).toBe("s-1");
+  expect(result.title).toBe("Renamed chat");
+  expect(result.displayName).toBe("Renamed chat");
 });
 
 test("cancelTurn / resolvePermission / resolveUserQuestion send the right RPCs", async ({ page }) => {

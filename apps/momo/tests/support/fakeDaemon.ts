@@ -1620,8 +1620,13 @@ export class FakeDaemon {
     const cwd = typeof params.cwd === "string" ? params.cwd : session.cwd;
     const created = sessionMeta({
       sessionId,
-      displayName: "New Session",
-      title: "New Session",
+      // A freshly created session carries no title yet — the real daemon's
+      // `handle_create_session` returns `display_name: None` /
+      // `generated_title: None` (it only fills `display_name` when the caller
+      // passes one). Mirror that so the frontend's "New chat" fallback path is
+      // exercised rather than a fake-only placeholder title.
+      displayName: null,
+      generatedTitle: null,
       cwd,
       folderPath: cwd,
       createdAtMs: Date.now(),
@@ -1635,8 +1640,8 @@ export class FakeDaemon {
     this.timelines.set(sessionId, []);
     return {
       sessionId,
-      displayName: created.displayName,
-      generatedTitle: created.generatedTitle,
+      displayName: null,
+      generatedTitle: null,
       cwd,
       createdAtMs: created.createdAtMs,
       updatedAtMs: created.updatedAtMs,

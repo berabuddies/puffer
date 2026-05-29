@@ -8,12 +8,12 @@
  * are hidden from the rail.
  *
  * Surface:
- *   - `sessionList` ($state) — flat list of all sessions, sorted by
- *     `updatedAtMs` desc.
- *   - `projectSessions()` — the default project's sessions (rail list).
- *   - `loadSessions()` — refetch from the backend.
- *   - `createNewSession()` — mint a new session via puffer under the
- *     default project's fixed cwd.
+ *   - `sessionList` ($state) — flat list of the default project's sessions
+ *     (already cwd-filtered in `loadSessions()`), sorted by `updatedAtMs` desc.
+ *   - `projectSessions()` — the rail list (returns `sessionList` as-is).
+ *   - `loadSessions()` — refetch from the daemon.
+ *   - `createNewSession()` — mint a new session via the puffer daemon under
+ *     the default project's fixed cwd.
  *   - `renameSession(id, title)` — server rename + local mutation so
  *     the row updates without a refetch.
  *
@@ -22,13 +22,15 @@
  *     do something (today it's disabled with a tooltip).
  */
 
-import * as agent from "./agentClient";
 import type { SessionListItem } from "./agentClient";
-import { listGroupedSessions } from "./agent/daemonChat";
+import {
+  createSession as daemonCreateSession,
+  listGroupedSessions,
+  renameSession as daemonRenameSession,
+} from "./agent/daemonChat";
 import {
   getProjectCwd,
   loadProjects,
-  projectIdForCwd,
   DEFAULT_PROJECT_ID,
 } from "./projectStore.svelte";
 import { pushToast } from "./toast.svelte";
@@ -69,11 +71,13 @@ export const sessionList = $state<SessionListItem[]>([]);
  * (template each-blocks, $derived, etc.) and get the normal Svelte 5
  * tracking they would get from `$derived`.
  *
- * The rail shows every session under the default project. Legacy work/life
- * sessions fall out because their cwd no longer matches any known project.
+ * The rail shows every session in `sessionList`. Membership is already
+ * narrowed to the default project's cwd in `loadSessions()` (it keeps only
+ * the matching daemon group), and `createNewSession()` only ever stubs rows
+ * under that same cwd, so no second cwd filter is needed here.
  */
 export function projectSessions(): SessionListItem[] {
-  return sessionList.filter((s) => projectIdForCwd(s.cwd) === DEFAULT_PROJECT_ID);
+  return sessionList;
 }
 
 function sortByUpdatedDesc(list: SessionListItem[]): SessionListItem[] {
@@ -140,11 +144,16 @@ export async function loadSessions(): Promise<void> {
 }
 
 /**
- * Mint a fresh empty session via puffer under the default project's fixed
- * cwd. Returns the new sessionId so the caller can navigate to
- * `/agent/<id>`. The new row is pushed onto the local list immediately
- * so the sidebar updates without waiting for a reload — the next
- * `loadSessions()` reconciles any drift.
+ * Mint a fresh empty session via the puffer **daemon** under the default
+ * project's fixed cwd. Returns the new sessionId so the caller can navigate
+ * to `/agent/<id>`. Goes through the same daemon RPC (`create_session`) that
+ * `loadSessions()` reads back via `list_grouped_sessions`, so a new chat
+ * shows up in the rail on the next refetch — no data-source split between
+ * the daemon (~/.puffer) and the legacy 1431 store.
+ *
+ * The new row is pushed onto the local list immediately so the sidebar
+ * updates without waiting for a reload — the next `loadSessions()`
+ * reconciles any drift.
  */
 export async function createNewSession(): Promise<string> {
   const cwd = getProjectCwd(DEFAULT_PROJECT_ID);
@@ -152,9 +161,9 @@ export async function createNewSession(): Promise<string> {
     pushToast("Project not ready yet — try again in a moment.", "error");
     throw new Error("default project cwd not loaded");
   }
-  let result: agent.CreateSessionResult;
+  let result: Awaited<ReturnType<typeof daemonCreateSession>>;
   try {
-    result = await agent.createSession({ cwd, providerId: "puffer" });
+    result = await daemonCreateSession(cwd, "puffer");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     pushToast(`Could not start session: ${msg}`, "error");
@@ -167,16 +176,16 @@ export async function createNewSession(): Promise<string> {
   // overwrite them with authoritative values on next refetch.
   const stub: SessionListItem = {
     sessionId: id,
-    displayName: null,
-    generatedTitle: null,
-    title: "New chat",
+    displayName: result.displayName,
+    generatedTitle: result.generatedTitle,
+    title: result.displayName ?? result.generatedTitle ?? "New chat",
     cwd: result.cwd,
     folderPath: result.cwd,
-    updatedAtMs: result.createdAtMs,
+    updatedAtMs: result.updatedAtMs ?? result.createdAtMs,
     createdAtMs: result.createdAtMs,
     eventCount: 0,
     activityStatus: "idle",
-    slug: null,
+    slug: result.slug,
     tags: [],
     note: null,
     parentSessionId: null,
@@ -194,7 +203,9 @@ export async function renameSession(id: string, title: string): Promise<void> {
   const trimmed = title.trim();
   if (!trimmed) return;
   try {
-    const detail = await agent.renameSession(id, trimmed);
+    // Goes through the daemon's `rename_session` (writes ~/.puffer), the same
+    // store `loadSessions()` reads, so a rename in the rail survives a refetch.
+    const detail = await daemonRenameSession(id, trimmed);
     const target = sessionList.find((s) => s.sessionId === id);
     if (target) {
       target.displayName = detail.displayName;

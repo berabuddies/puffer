@@ -1419,7 +1419,6 @@
                                   {#if selected.child.kind === "tool"}
                                     <ToolCard
                                       item={selected.child as ToolTimelineItem}
-                                      sessionId={session?.id ?? null}
                                       defaultCollapsed={false}
                                     />
                                   {:else if selected.child.kind === "diff"}
@@ -1452,7 +1451,6 @@
                           {#if child.kind === "tool"}
                             <ToolCard
                               item={child as ToolTimelineItem}
-                              sessionId={session?.id ?? null}
                             />
                           {:else if child.kind === "diff"}
                             <DiffCard item={child as DiffTimelineItem} />

@@ -1345,7 +1345,7 @@ export async function createSessionFromText(text: string): Promise<string> {
   if (!cwd) {
     throw new Error("Default project cwd is unavailable; cannot start a session.");
   }
-  const sessionId = await createSession(cwd);
+  const { sessionId } = await createSession(cwd);
   ensureState(sessionId);
   ensureSubscription(sessionId);
   if (trimmed) {

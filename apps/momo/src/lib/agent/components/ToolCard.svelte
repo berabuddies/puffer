@@ -5,12 +5,10 @@
 
   type Props = {
     item: ToolTimelineItem;
-    sessionId?: string | null;
     defaultCollapsed?: boolean;
   };
   let {
     item,
-    sessionId = null,
     defaultCollapsed = true
   }: Props = $props();
   type RenderRow = { kind: "ctx" | "add" | "del" | "omit"; line: number | null; text: string };

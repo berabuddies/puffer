@@ -15,8 +15,8 @@ This folder is shared by `apps/momo/tests/chat/**.spec.ts` and the
 | Drive a thinking / tool / question event flow | `emitThinkingDelta`, `emitToolRequest`, `emitToolInvocation`, `emitQuestion` |
 | Hold an RPC open until you say go | `const p = deferRpc(daemon, "run_agent_turn"); /* assert… */ p.resolve();` (chatTiming.ts; backed by `FakeDaemon.deferRpc`) |
 | Make an RPC take a fixed ms | `delayRpc(daemon, "load_session_detail", 800)` (chatTiming.ts) |
-| Target a chat surface in the DOM | `locate*` from chatLocators.ts (returns `Locator`, you await) |
-| Type + Enter + IME / state | `composer*` from composerHelpers.ts |
+| Target a chat surface in the DOM | locate the new `ConversationView` markup directly (`.pf-msg[data-role]`, `.pf-msg-text`); the legacy `chatLocators.ts` helpers were removed with the old chat UI |
+| Type + Enter + IME / state | drive the shell `Composer` directly (`page.getByLabel("Message")`); the legacy `composerHelpers.ts` were removed with the old chat UI |
 | Build a fixture session in 1 line | `makeSession({ id, timeline })` (sessionFixtures.ts) |
 
 ## When NOT to use a helper — use raw `daemon.emit(channel, payload)`
@@ -66,8 +66,7 @@ fakeDaemon.ts        — websocket fake. Already supports cancel_turn and
 bootHelpers.ts       — bootOnboarded(), openSession() (stub)
 chatEmit.ts          — emit* primitives + emitTurnLifecycle convenience
 chatTiming.ts        — deferRpc(), delayRpc()
-chatLocators.ts      — locate{User,Assistant}Bubble, locateThinkingBlock,
-                       locateToolPill, locateQuestionForm
-composerHelpers.ts   — composer{Type,Submit,IME,ExpectState,ExpectDraft}
 sessionFixtures.ts   — makeSession(), hydrateMidFlow()
+(chatLocators.ts / composerHelpers.ts were removed with the legacy chat UI;
+ target the new ConversationView markup / shell Composer directly.)
 ```

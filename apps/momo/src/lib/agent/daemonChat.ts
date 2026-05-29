@@ -12,10 +12,53 @@ import { ensureDaemonClient } from "../daemonClient";
 import type { AgentTurnOptions, SessionDetail } from "./types";
 import { normalizeSessionDetail } from "./normalize";
 
-export async function createSession(cwd: string): Promise<string> {
+/**
+ * Daemon `create_session` response (camelCase, see
+ * `crates/puffer-cli/src/daemon.rs::handle_create_session`). The sidebar
+ * needs the cwd / timestamps / routing to synthesise an optimistic row, so
+ * we surface the whole shape rather than just the id.
+ */
+export interface CreateSessionResult {
+  sessionId: string;
+  displayName: string | null;
+  generatedTitle: string | null;
+  cwd: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  slug: string | null;
+  providerId: string | null;
+  modelId: string | null;
+}
+
+/**
+ * Daemon `rename_session` echoes the full `SessionDetailDto`; the sidebar
+ * only patches `displayName` / `title` / `updatedAtMs` in place, so we type
+ * just those (the rest pass through as opaque).
+ */
+export interface RenameSessionResult {
+  sessionId: string;
+  displayName: string | null;
+  title: string;
+  updatedAtMs: number;
+  [key: string]: unknown;
+}
+
+export async function createSession(
+  cwd: string,
+  providerId?: string
+): Promise<CreateSessionResult> {
   const c = await ensureDaemonClient();
-  const r = await c.request<{ sessionId: string }>("create_session", { cwd });
-  return r.sessionId;
+  const params: Record<string, unknown> = { cwd };
+  if (providerId) params.providerId = providerId;
+  return c.request<CreateSessionResult>("create_session", params);
+}
+
+export async function renameSession(
+  sessionId: string,
+  title: string
+): Promise<RenameSessionResult> {
+  const c = await ensureDaemonClient();
+  return c.request<RenameSessionResult>("rename_session", { sessionId, title });
 }
 
 export async function runAgentTurn(
@@ -76,6 +119,7 @@ if (import.meta.env.DEV) {
     window as unknown as {
       __daemonChat?: {
         createSession: typeof createSession;
+        renameSession: typeof renameSession;
         runAgentTurn: typeof runAgentTurn;
         cancelTurn: typeof cancelTurn;
         resolvePermission: typeof resolvePermission;
@@ -86,6 +130,7 @@ if (import.meta.env.DEV) {
     }
   ).__daemonChat = {
     createSession,
+    renameSession,
     runAgentTurn,
     cancelTurn,
     resolvePermission,

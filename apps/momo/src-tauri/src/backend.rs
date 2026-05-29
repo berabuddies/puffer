@@ -108,7 +108,16 @@ impl BackendState {
                 serde_value(self.load_session_detail(&session_id)?)
             }
             "daemon_handshake" => serde_value(self.daemon_handshake()?),
-            "run_agent_turn" => self.run_agent_turn(events.clone(), params),
+            // The chat turn loop has been migrated to the puffer daemon — the
+            // frontend dials the daemon directly (see `lib/agent/daemonChat`).
+            // The legacy 1431 path (`run_agent_turn` -> spawn `puffer
+            // non-interactive`) is intentionally stubbed so no stale caller
+            // can resurrect it. `run_agent_turn_inner` / `codex_app_server`
+            // stay as dead code until phase 2 removes them.
+            "run_agent_turn" => {
+                let _ = (&events, &params);
+                bail!("run_agent_turn migrated to daemon; use the daemon RPC directly")
+            }
             "cancel_turn" => {
                 let turn_id = string_param(&params, &["turnId", "turn_id"])?;
                 if let Some(flag) = self.turns.lock().unwrap().get(&turn_id) {
@@ -1926,5 +1935,25 @@ mod daemon_handshake_tests {
                 "method must be dispatched, got: {error}"
             ),
         }
+    }
+
+    /// The chat turn loop moved to the puffer daemon (frontend dials the
+    /// daemon directly). The legacy 1431 `run_agent_turn` dispatch must no
+    /// longer spawn a `puffer non-interactive` subprocess; it returns an
+    /// error so any stale caller fails loudly instead of running a turn
+    /// through the dead path.
+    #[test]
+    fn run_agent_turn_is_stubbed_to_daemon_migration_error() {
+        let state = BackendState::new();
+        let result = state.handle(
+            EventEmitter::websocket_only(),
+            "run_agent_turn",
+            serde_json::json!({ "sessionId": "s-1", "message": "hi" }),
+        );
+        let error = result.expect_err("run_agent_turn must return an error after daemon migration");
+        assert!(
+            error.to_string().contains("migrated to daemon"),
+            "error should mention the daemon migration, got: {error}"
+        );
     }
 }
