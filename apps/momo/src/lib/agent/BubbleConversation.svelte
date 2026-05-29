@@ -1,6 +1,7 @@
 <script lang="ts">
   import "./chat.css";   // 复用 .pf-* 类 + --pf-chat-*-size(ToolCard/DiffCard/MessageBody 依赖)
   import "./bubble.css"; // momo 桥接 + 气泡皮
+  import { tick } from "svelte";
   import MessageBody from "./components/MessageBody.svelte";
   import ToolCard from "./components/ToolCard.svelte";
   import DiffCard from "./components/DiffCard.svelte";
@@ -30,10 +31,41 @@
     onCancelTurn?: () => void;
   };
   let {
-    timeline, pendingPermissions, pendingQuestions, loading,
+    session, timeline, pendingPermissions, pendingQuestions, loading,
     turnRunning = false, turnThinking = false,
     turnStatusHint = null, onResolvePermission, onResolveUserQuestion
   }: Props = $props();
+  // Reserved props consumed by later tasks (kept so Agent.svelte's binding is
+  // stable): `turnStartedAtMs` → Task 7 typing-elapsed timer; `onCancelTurn` →
+  // cancel wiring. momo currently drives Stop from the shell <Composer>.
+
+  let threadEl: HTMLDivElement | undefined;
+  let lastSessionId: string | null = null;
+
+  // Reset to the top when switching sessions so a new thread doesn't inherit
+  // the previous one's scroll position. Guarded on an actual id change so it
+  // doesn't fight the auto-scroll effect below on every timeline tick (ported
+  // from ConversationView's lastSessionId pattern).
+  $effect(() => {
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId === lastSessionId) return;
+    lastSessionId = nextSessionId;
+    void tick().then(() => {
+      if (threadEl) threadEl.scrollTop = 0;
+    });
+  });
+
+  // Auto-scroll to the newest content when the timeline grows or a turn starts/
+  // stops (ported from ConversationView). `tick()` lets the new rows mount
+  // before we measure scrollHeight.
+  $effect(() => {
+    // Touch the reactive deps so the effect re-runs on new content.
+    void timeline.length;
+    void turnRunning;
+    void tick().then(() => {
+      if (threadEl) threadEl.scrollTop = threadEl.scrollHeight;
+    });
+  });
 
   let pendingPermIds = $derived(new Set(pendingPermissions.map((p) => p.id)));
   let pendingQIds = $derived(new Set(pendingQuestions.map((q) => q.id)));
@@ -50,7 +82,7 @@
 </script>
 
 <div class="momo-chat">
-  <div class="momo-chat__thread">
+  <div class="momo-chat__thread" bind:this={threadEl}>
     <div class="momo-chat__inner">
       {#if loading && timeline.length === 0}
         <div class="momo-chat__loading">Loading…</div>

@@ -17,14 +17,14 @@ import { emitTextDelta, emitTurnComplete } from "./support/chatEmit";
 // End-to-end happy path through the migrated daemon chat surface:
 //   shell Composer → create_session → run_agent_turn{turnId}
 //     → emit text-delta + turn-complete
-//     → ConversationView renders the assistant text.
+//     → BubbleConversation renders the assistant text.
 //
 // Boots via `bootOnboarded` (which installs the FakeDaemon ws route and lands
 // on /home). The frontend's daemonClient parses both the legacy and "real"
 // daemon envelopes, so the default protocol round-trips fine here; the
 // fakeDaemon dispatcher already answers create_session / run_agent_turn and
 // re-broadcasts `session:<id>:event` frames to every open socket.
-test("home composer → run_agent_turn → ConversationView renders the assistant reply", async ({
+test("home composer → run_agent_turn → BubbleConversation renders the assistant reply", async ({
   page
 }) => {
   const daemon = new FakeDaemon({ sessions: [] });
