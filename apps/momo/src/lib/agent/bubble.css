@@ -198,3 +198,38 @@
   background: var(--color-surface-app); color: #b3261e;
   border-color: var(--color-card-border);
 }
+
+/* 提问卡(QuestionPrompt.svelte 的 .pf-question)。气泡形卡 + 选项卡 + cream 提交。
+   QuestionPrompt 的提交按钮真实 markup 是 <button type="button" class="sc-btn"
+   data-variant="default">Send answer</button>(非 submit),故同时覆盖 .sc-btn /
+   [data-variant="default"] / button[type=submit] 三个选择器保险。已答历史走同一
+   .pf-question 壳,answered 分支收起回显由组件内部 collapsed 控制,这里只给皮。
+   scoped 的 box/skin(border/background/radius/padding + option border/选中底色 +
+   按钮)已从 QuestionPrompt.svelte <style> 移除,避免同特异性靠 source order 争抢。 */
+.momo-chat .pf-question {
+  background: var(--color-surface-app);
+  border: 1px solid var(--color-input-border);
+  border-radius: 4px 16px 16px 16px;
+  max-width: 540px;
+  padding: 13px 15px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.momo-chat .pf-question-option {
+  min-height: 34px; padding: 8px 11px; border-radius: 10px;
+  border: 1px solid var(--color-card-border); background: var(--color-surface-app);
+  font-family: var(--font-system); font-size: 13px; color: var(--color-text-primary);
+}
+.momo-chat .pf-question-option[data-selected="true"] {
+  background: #fff7e8; border-color: #f2dca7;
+}
+.momo-chat .pf-question .sc-btn,
+.momo-chat .pf-question [data-variant="default"],
+.momo-chat .pf-question button[type="submit"] {
+  height: 32px; border-radius: var(--radius-pill); padding: 0 16px;
+  background: var(--color-action-cream); color: var(--color-action-cream-text);
+  border: 1px solid var(--color-action-cream-border);
+  font-family: var(--font-sans); font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.momo-chat .pf-question .sc-btn:disabled,
+.momo-chat .pf-question [data-variant="default"]:disabled,
+.momo-chat .pf-question button[type="submit"]:disabled { opacity: 0.5; cursor: not-allowed; }

@@ -169,6 +169,80 @@ test("user-question-request renders a QuestionPrompt; answering sends resolve_us
   await expect(question).toHaveCount(0);
 });
 
+// Task 6 — answered-question history echo.
+//
+// A LIVE resolved question is dropped from the inline thread (the assertion
+// above), but a question that was answered in a PRIOR turn persists in the
+// session timeline and must hydrate as a *collapsed answered card*. The daemon
+// stores it as an `AskUserQuestion` tool_call whose output JSON carries both the
+// questions and the chosen answers; normalize.ts maps that to a question item
+// with `status:"answered"`, and BubbleConversation.showItem renders answered
+// questions (unlike live-dismissed pending ones). QuestionPrompt's `answered`
+// branch collapses the card to a one-line summary echoing the chosen answer and
+// exposes NO enabled submit / clickable inputs (disabled via `disabled=true`).
+//
+// No vitest/@testing-library/svelte exists in this repo (the "reducer" spec is
+// itself Playwright), so this is the spec-sanctioned e2e fallback: seed the
+// persisted timeline through FakeDaemon's load_session_detail and direct-goto.
+test("a persisted answered question hydrates as a collapsed card echoing the chosen answer", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "answered-1",
+        timeline: [
+          { kind: "user_message", id: "u-1", text: "Deploy it", createdAtMs: 1 },
+          {
+            kind: "tool_call",
+            id: "q-1",
+            toolId: "AskUserQuestion",
+            status: "completed",
+            summary: null,
+            createdAtMs: 2,
+            // normalize.ts reads questions/answers out of the parsed outputText.
+            outputText: JSON.stringify({
+              questions: [
+                {
+                  question: "Pick an environment",
+                  header: "Deploy",
+                  type: "choice",
+                  options: [
+                    { label: "Staging", description: "Safe preview" },
+                    { label: "Production", description: "Live traffic" }
+                  ]
+                }
+              ],
+              answers: { "Pick an environment": "Staging" }
+            })
+          }
+        ]
+      }
+    ]
+  });
+  await bootOnboarded(page, daemon);
+
+  // Direct navigation hydrates the persisted timeline (same path as the
+  // chat-smoke hydration regression).
+  await page.goto("/#/agent/answered-1");
+  await expect(page).toHaveURL(/#\/agent\/answered-1$/);
+
+  // The answered question renders as a `.pf-question` card (the answered branch
+  // shares the same shell/class as the live form).
+  const answered = page.locator(".pf-question");
+  await expect(answered).toBeVisible();
+
+  // Collapsed answered state: the head reads "Answered" and the summary echoes
+  // the chosen answer.
+  await expect(answered).toContainText("Answered");
+  await expect(answered).toContainText("Staging");
+
+  // No actionable controls: the "Send answer" submit button is absent in the
+  // answered branch, and the radios/options are disabled (no enabled control).
+  await expect(answered.getByRole("button", { name: "Send answer" })).toHaveCount(0);
+  await expect(answered.locator("input:not([disabled])")).toHaveCount(0);
+});
+
 test("Stop button during a running turn sends cancel_turn", async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await bootOnboarded(page, daemon);

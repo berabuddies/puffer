@@ -388,14 +388,13 @@
 </form>
 
 <style>
+  /* 卡片皮(border/background/radius/padding/gap)与选项卡选中底色、提交按钮配色
+     由 bubble.css 的 .momo-chat .pf-question* 接管;这里只保留 bubble.css 不提供
+     的内部布局(flex 方向、字号、行内输入/搜索/其它项的结构),scoped box/skin 规则
+     已移除以免与 momo 皮同特异性靠 source order 争抢(见 Task 5 经验)。 */
   .pf-question {
-    border: 1px solid color-mix(in oklab, var(--puffer-accent) 42%, var(--border));
-    background: color-mix(in oklab, var(--puffer-accent) 5%, var(--background));
-    border-radius: 10px;
-    padding: 12px 14px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
     font-size: 13px;
   }
 
@@ -524,21 +523,11 @@
   }
 
   .pf-question-option {
-    border: 1px solid var(--border);
-    background: var(--background);
-    color: var(--foreground);
-    border-radius: 8px;
-    padding: 9px 10px;
     text-align: left;
     display: flex;
     align-items: flex-start;
     gap: 8px;
     cursor: pointer;
-  }
-
-  .pf-question-option[data-selected="true"] {
-    border-color: var(--puffer-accent);
-    background: color-mix(in oklab, var(--puffer-accent) 10%, var(--background));
   }
 
   .pf-question-option[data-readonly="true"] {
