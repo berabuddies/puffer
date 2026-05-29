@@ -686,15 +686,51 @@ pub(crate) fn ensure_telegram_connection_subscriber(
     }
     let paths = ConfigPaths::discover(cwd);
     let manifest = telegram_connection_manifest(&paths, connection_slug)?;
-    manager.start_subscriber(manifest)?;
+    let subscriber_id = manifest.spec.id.clone();
+    let state_dir = manifest
+        .spec
+        .state
+        .as_ref()
+        .map(|state| state.dir.as_str())
+        .unwrap_or("<manifest default>");
+    eprintln!(
+        "[telegram-connect] starting subscriber connection={} subscriber={} cwd={} resources={} state={}",
+        connection_slug,
+        subscriber_id,
+        cwd.display(),
+        paths.builtin_resources_dir.display(),
+        state_dir
+    );
+    manager
+        .start_subscriber(manifest)
+        .with_context(|| format!("start Telegram subscriber `{subscriber_id}`"))?;
+    eprintln!(
+        "[telegram-connect] subscriber ready connection={} subscriber={}",
+        connection_slug, subscriber_id
+    );
     Ok(())
 }
 
 fn telegram_connection_manifest(paths: &ConfigPaths, connection_slug: &str) -> Result<Manifest> {
-    let dir = find_subscriber_manifest(paths, TELEGRAM_USER_TOPIC).ok_or_else(|| {
-        anyhow!("telegram-user subscriber manifest not found; install it before logging in")
+    let candidates = subscriber_manifest_candidates(paths, TELEGRAM_USER_TOPIC);
+    let dir = find_subscriber_manifest(&candidates).ok_or_else(|| {
+        let searched = manifest_search_summary(&candidates);
+        eprintln!(
+            "[telegram-connect] missing subscriber manifest connection={} searched={}",
+            connection_slug, searched
+        );
+        anyhow!(
+            "telegram-user subscriber manifest not found; searched: {searched}; \
+             install resources/subscribers/telegram-user or set PUFFER_BUILTIN_RESOURCES_DIR \
+             before logging in"
+        )
     })?;
-    let mut manifest = Manifest::load(&dir)?;
+    let mut manifest = Manifest::load(&dir).with_context(|| {
+        format!(
+            "load Telegram subscriber manifest {}",
+            dir.join("manifest.toml").display()
+        )
+    })?;
     if connection_slug != TELEGRAM_USER_TOPIC {
         manifest.spec.id = connection_slug.to_string();
         manifest.spec.topic = Some(connection_slug.to_string());
@@ -711,20 +747,27 @@ fn telegram_connection_manifest(paths: &ConfigPaths, connection_slug: &str) -> R
     Ok(manifest)
 }
 
-fn find_subscriber_manifest(paths: &ConfigPaths, topic: &str) -> Option<PathBuf> {
-    let workspace = paths.workspace_config_dir.join("subscribers").join(topic);
-    if workspace.join("manifest.toml").exists() {
-        return Some(workspace);
-    }
-    let user = paths.user_config_dir.join("subscribers").join(topic);
-    if user.join("manifest.toml").exists() {
-        return Some(user);
-    }
-    let bundled = paths.builtin_resources_dir.join("subscribers").join(topic);
-    if bundled.join("manifest.toml").exists() {
-        return Some(bundled);
-    }
-    None
+fn subscriber_manifest_candidates(paths: &ConfigPaths, topic: &str) -> Vec<PathBuf> {
+    vec![
+        paths.workspace_config_dir.join("subscribers").join(topic),
+        paths.user_config_dir.join("subscribers").join(topic),
+        paths.builtin_resources_dir.join("subscribers").join(topic),
+    ]
+}
+
+fn find_subscriber_manifest(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|dir| dir.join("manifest.toml").exists())
+        .cloned()
+}
+
+fn manifest_search_summary(candidates: &[PathBuf]) -> String {
+    candidates
+        .iter()
+        .map(|dir| dir.join("manifest.toml").display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn ensure_telegram_connection_record(
@@ -776,8 +819,9 @@ fn telegram_connection_description(payload: &Value) -> String {
 mod tests {
     use super::{
         connection_slug_from_input, format_succinct_message_list, format_succinct_message_search,
-        telegram_connection_description,
+        telegram_connection_description, telegram_connection_manifest,
     };
+    use puffer_config::ConfigPaths;
     use serde_json::json;
 
     #[test]
@@ -812,6 +856,37 @@ mod tests {
             telegram_connection_description(&payload),
             "Telegram Tony (12345)"
         );
+    }
+
+    #[test]
+    fn missing_manifest_error_lists_telegram_search_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            workspace_root: root.path().join("workspace"),
+            workspace_config_dir: root.path().join("workspace").join(".puffer"),
+            user_config_dir: root.path().join("home").join(".puffer"),
+            builtin_resources_dir: root.path().join("bundle").join("resources"),
+        };
+
+        let error = telegram_connection_manifest(&paths, "telegram-user")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("telegram-user subscriber manifest not found"));
+        assert!(error.contains(
+            &paths
+                .workspace_config_dir
+                .join("subscribers/telegram-user/manifest.toml")
+                .display()
+                .to_string()
+        ));
+        assert!(error.contains(
+            &paths
+                .builtin_resources_dir
+                .join("subscribers/telegram-user/manifest.toml")
+                .display()
+                .to_string()
+        ));
     }
 
     #[test]

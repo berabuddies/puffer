@@ -179,6 +179,7 @@
   let connectorCreating = $state(false);
   let connectorCreateSessionId = $state<string | null>(null);
   let connectorTurnId = $state<string | null>(null);
+  let connectorSetupSlug = $state<string | null>(null);
   let connectorQuestionRequest = $state<ConnectorQuestionRequest | null>(null);
   let connectorQuestionAnswers = $state<Record<string, string | string[]>>({});
   let connectorUnlisten: (() => void) | null = null;
@@ -475,6 +476,63 @@
     });
   }
 
+  function activeConnectorSetupSlug(): string {
+    return connectorSetupSlug ?? selectedConnector?.connector_slug ?? connectorSlug;
+  }
+
+  function connectorQuestionStatusMessage(questions: ConnectorQuestion[]): string {
+    if (activeConnectorSetupSlug() !== "telegram-login") {
+      return "Answer the connector setup questions to continue.";
+    }
+    const prompt = questions
+      .map((question) => `${question.header} ${question.question}`)
+      .join(" ")
+      .toLowerCase();
+    if (prompt.includes("authenticate")) {
+      return "Telegram setup is waiting for you to choose Desktop import, QR login, or phone login.";
+    }
+    if (prompt.includes("qr")) {
+      return "Telegram setup is waiting for QR approval in an already logged-in Telegram app.";
+    }
+    if (prompt.includes("phone")) {
+      return "Telegram setup is waiting for the account phone number.";
+    }
+    if (prompt.includes("code")) {
+      return "Telegram setup is waiting for the one-time login code from Telegram.";
+    }
+    if (prompt.includes("password")) {
+      return "Telegram setup is waiting for the account's Telegram 2FA cloud password.";
+    }
+    return "Telegram setup is waiting for the next login answer.";
+  }
+
+  function connectorSetupErrorMessage(error: string): string {
+    if (activeConnectorSetupSlug() !== "telegram-login") return error;
+    const lower = error.toLowerCase();
+    if (lower.includes("telegram-user subscriber manifest not found")) {
+      return [
+        "Telegram setup could not start because the local telegram-user subscriber manifest is unavailable.",
+        error,
+        "The daemon log now includes a [telegram-connect] line with the searched paths."
+      ].join(" ");
+    }
+    if (lower.includes("telegram subscriber manifest")) {
+      return [
+        "Telegram setup found a subscriber manifest but could not read it.",
+        error,
+        "Check the manifest path and daemon stderr for [telegram-connect] details."
+      ].join(" ");
+    }
+    if (lower.includes("start telegram subscriber")) {
+      return [
+        "Telegram setup found its manifest but could not start the local subscriber process.",
+        error,
+        "Check the daemon stderr for [telegram-connect] details."
+      ].join(" ");
+    }
+    return error;
+  }
+
   function handleConnectorSessionEvent(event: SessionStreamEvent) {
     if (connectorTurnId && "turnId" in event && event.turnId !== connectorTurnId) return;
     if (event.type === "user-question-request") {
@@ -487,7 +545,7 @@
       connectorQuestionAnswers = defaultConnectorAnswers(questions);
       connectorCreating = false;
       connectorCreateOpen = false;
-      connectorSaved = "Answer the connector setup questions to continue.";
+      connectorSaved = connectorQuestionStatusMessage(questions);
       return;
     }
     if (event.type === "turn-complete") {
@@ -496,6 +554,7 @@
       connectorQuestionRequest = null;
       connectorQuestionAnswers = {};
       connectorSaved = `Connector setup finished for ${connectorConnectionSlug.trim()}.`;
+      connectorSetupSlug = null;
       connectorTab = "connections";
       void loadConnectorSnapshot();
       return;
@@ -508,7 +567,9 @@
         connectorCancelledTurnIds.delete(event.turnId);
         return;
       }
-      connectorError = event.error;
+      connectorError = connectorSetupErrorMessage(event.error);
+      connectorSaved = null;
+      connectorSetupSlug = null;
     }
   }
 
@@ -517,6 +578,7 @@
     connectorCreating = true;
     connectorError = null;
     connectorSaved = `Starting ${connectorCommandPreview}...`;
+    connectorSetupSlug = selectedConnector?.connector_slug ?? connectorSlug;
     connectorQuestionRequest = null;
     connectorQuestionAnswers = {};
     connectorCreateOpen = false;
@@ -533,7 +595,9 @@
       connectorTurnId = await dispatchSlashCommand(created.sessionId, connectorCommandPreview);
     } catch (e) {
       connectorCreating = false;
-      connectorError = (e as Error).message ?? String(e);
+      connectorError = connectorSetupErrorMessage((e as Error).message ?? String(e));
+      connectorSaved = null;
+      connectorSetupSlug = null;
     }
   }
 
@@ -552,7 +616,8 @@
       connectorQuestionAnswers = {};
     } catch (e) {
       connectorCreating = false;
-      connectorError = (e as Error).message ?? String(e);
+      connectorError = connectorSetupErrorMessage((e as Error).message ?? String(e));
+      connectorSaved = null;
     }
   }
 
@@ -562,6 +627,7 @@
     connectorQuestionAnswers = {};
     connectorCreating = false;
     connectorSaved = "Connector setup cancelled.";
+    connectorSetupSlug = null;
     if (turnId) {
       connectorCancelledTurnIds.add(turnId);
       try {
@@ -1090,6 +1156,7 @@
     connectorCreating = false;
     connectorCreateSessionId = null;
     connectorTurnId = null;
+    connectorSetupSlug = null;
     connectorQuestionRequest = null;
     connectorQuestionAnswers = {};
     lastConnectorSlug = "";
