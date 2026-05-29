@@ -162,3 +162,39 @@
   color: var(--color-text-muted);
   background: var(--color-surface-rail);
 }
+
+/* 审批卡(Approval.svelte 的 .pf-approval)。气泡形卡片 + pill 动作按钮。
+   .sc-btn 是 desktop 遗留 class(momo 无全局规则),两条选择器都覆盖以确保
+   variant→配色映射生效:default=cream allow / outline=灰 session / ghost=红 deny。
+   header 行的 inline 样式用 desktop token(--puffer-accent/--muted-foreground),
+   已由 .momo-chat 桥接映射到 cream-ish icon + dark title。 */
+.momo-chat .pf-approval {
+  background: var(--color-surface-app);
+  border: 1px solid var(--color-input-border);
+  border-radius: 4px 16px 16px 16px;
+  max-width: 540px;
+  padding: 13px 15px;
+}
+.momo-chat .pf-approval-row .what {
+  color: var(--color-text-secondary);
+  font-family: var(--font-system);
+}
+.momo-chat .pf-approval-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.momo-chat .pf-approval .sc-btn,
+.momo-chat .pf-approval button {
+  height: 32px; border-radius: var(--radius-pill); padding: 0 16px;
+  font-family: var(--font-sans); font-size: 12px; font-weight: 500;
+  border: 1px solid transparent; cursor: pointer;
+}
+.momo-chat .pf-approval [data-variant="default"] {
+  background: var(--color-action-cream);
+  color: var(--color-action-cream-text);
+  border-color: var(--color-action-cream-border);
+}
+.momo-chat .pf-approval [data-variant="outline"] {
+  background: var(--color-surface-rail); color: var(--color-text-primary);
+}
+.momo-chat .pf-approval [data-variant="ghost"] {
+  background: var(--color-surface-app); color: #b3261e;
+  border-color: var(--color-card-border);
+}

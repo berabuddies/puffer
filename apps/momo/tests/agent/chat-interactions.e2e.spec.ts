@@ -80,7 +80,7 @@ test("permission-request renders an Approval card; clicking Approve sends resolv
   // reason text rendered inline.
   const approval = page.locator(".pf-approval");
   await expect(approval).toBeVisible();
-  await expect(approval).toContainText("Approval needed");
+  await expect(approval).toContainText("需要授权");
   await expect(approval).toContainText("bash");
   await expect(approval).toContainText("List the working directory");
 

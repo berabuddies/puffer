@@ -21,7 +21,7 @@
 <div class="pf-approval">
   <div style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500;">
     <Icon name="bolt" size={14} color="var(--puffer-accent)" />
-    Approval needed
+    需要授权
     {#if item.toolName}
       <span style="color: var(--muted-foreground); font-weight: 400; font-family: var(--font-mono); font-size: 12px;">
         · {item.toolName}
@@ -48,11 +48,10 @@
 </div>
 
 <style>
+  /* 仅保留 box/边框无关的内部布局;卡片皮(border/background/radius/padding)
+     与按钮、.what 配色由 bubble.css 的 .momo-chat .pf-approval* 接管,
+     desktop scoped box 规则已移除以免与 momo 皮同特异性争抢 source order。 */
   .pf-approval {
-    border: 1px solid color-mix(in oklab, var(--puffer-accent) 40%, var(--border));
-    background: color-mix(in oklab, var(--puffer-accent) 6%, var(--background));
-    border-radius: 10px;
-    padding: 12px 14px;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -62,9 +61,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    font-family: var(--font-mono);
     font-size: 12px;
   }
-  .pf-approval-row .what { flex: 1; color: var(--foreground); }
+  .pf-approval-row .what { flex: 1; }
   .pf-approval-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 </style>
