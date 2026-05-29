@@ -170,6 +170,30 @@ function withoutLiveItemsForTurn(items: TimelineItem[], turnId: string): Timelin
   return items.filter((item) => !liveItemBelongsToTurn(item, turnId));
 }
 
+/**
+ * Reconcile *only* the completed turn's live items against the freshly-loaded
+ * persisted timeline, leaving every other turn's live items untouched and in
+ * place. Used by `refreshSessionAfterTurn` when a newer turn is already in
+ * flight: the completed turn's rows are now persisted (the source of truth),
+ * so we drop its live residue, but we must not disturb the running turn's
+ * in-flight live items. Order is preserved for the items we keep.
+ */
+function reconcileCompletedTurnLiveItems(
+  state: ChatState,
+  persistedTimeline: TimelineItem[],
+  completedTurnId: string
+): void {
+  const completedLive = state.liveStreamItems.filter((item) =>
+    liveItemBelongsToTurn(item, completedTurnId)
+  );
+  if (completedLive.length === 0) return;
+  const stillMissing = stillMissingFromPersisted(state, persistedTimeline, completedLive);
+  const stillMissingIds = new Set(stillMissing.map((item) => item.id));
+  state.liveStreamItems = state.liveStreamItems.filter(
+    (item) => !liveItemBelongsToTurn(item, completedTurnId) || stillMissingIds.has(item.id)
+  );
+}
+
 /* ── Turn settle bookkeeping (verbatim from desktop) ──────────────── */
 
 function turnKey(sessionId: string, turnId: string): string {
@@ -688,11 +712,25 @@ async function refreshSessionAfterTurn(
   try {
     const detail = await loadSessionDetail(state.sessionId);
     if (loadGeneration !== sessionLoadGenerations.get(state.sessionId)) return;
-    if (state.currentTurnId !== null && state.currentTurnId !== completedTurnId) return;
     const persistedTimeline = reuseTransientMessageIds(state, detail.timeline, [
       ...submittedAtCompletion,
       ...liveItemsAtCompletion
     ]);
+    // A *newer* turn started while this load was in flight. We must NOT clobber
+    // the live turn's in-flight state (liveStreamItems / submittedMessages /
+    // currentTurnId), but the freshly-loaded persisted transcript IS still the
+    // source of truth for the turn that just completed — and it already
+    // contains that turn's tool/assistant rows. So we adopt the persisted
+    // timeline and reconcile *only the completed turn's* residual live items
+    // out of it. Without this, the completed turn's live tool rows linger in
+    // `liveStreamItems` and `combinedTimeline()` appends them after the new
+    // turn's user message, re-homing every prior turn's tools onto the newest
+    // agent row (Bug 2).
+    if (state.currentTurnId !== null && state.currentTurnId !== completedTurnId) {
+      state.sessionDetail = { ...detail, timeline: persistedTimeline };
+      reconcileCompletedTurnLiveItems(state, persistedTimeline, completedTurnId);
+      return;
+    }
     state.sessionDetail = { ...detail, timeline: persistedTimeline };
     if (turnEndedWithError) {
       state.liveStreamItems = stillMissingFromPersisted(state, persistedTimeline, preservedErrorItems);
