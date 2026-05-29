@@ -64,7 +64,7 @@ Done.svelte (onMount) --commitProfile()
 
 ### ② `Where.svelte` / `Role.svelte` — 采集选择
 - 在现有 `pick` / `pickPreset` 回调里**追加** `setCountry` / `setRole`，其余行为（toast、300ms 自动前进、自定义输入 debounce）不动。
-- Role 取最终生效的 `selected`（含自定义输入的字符串）：`onCustomInput`（debounce 自动前进路径）**和** `onCustomSubmit`（Enter 提交路径）**都要** `setRole`，否则 Enter 提交会漏采。
+- Role 的最终值产生于三处：`pickPreset`（设 `selected=role`）、`onCustomInput`（设 `selected=value`）、`onCustomSubmit`（Enter 提交，**不改** `selected`，依赖 `onCustomInput` 已设好）。在 `pickPreset` + `onCustomInput` 调 `setRole` 即覆盖所有最终值；`onCustomSubmit` 也调 `setRole(customRole.trim())` 作冗余防御（无害）。取值用 `selected` 或 `customRole.trim()` 在自定义路径等价。
 
 ### ③ `Done.svelte` — 触发提交
 - `onMount` 调 `commitProfile()`。完成路径的 `markOnboarded()` 已存在，不动。
@@ -86,7 +86,7 @@ Done.svelte (onMount) --commitProfile()
 - 在 `handle` 的 `match method` 加分支。
 - 解析 `country` / `role`（用 `pub(crate) optional_trimmed_string_param`，自动 trim 空值）。
 - 解析 `$HOME/.puffer`（env `HOME`，与 daemon / system_prompt 解析一致）→ `create_dir_all`（onboarding 阶段该目录不保证存在，见 §6）。
-- 构造托管块（见 §5）；对 `AGENTS.md`、`CLAUDE.md` 各 read-or-empty → `upsert_managed_block` → 写回。
+- sanitize country/role（剥离换行 + `<!--`/`-->`，trim 单行，见 §5）→ 构造托管块 → 对 `AGENTS.md`、`CLAUDE.md` 各 read-or-empty → `upsert_managed_block` → 写回。
 - 返回 `{}`（或写入路径，便于测试断言）。
 
 ## 5. 托管块格式
@@ -101,6 +101,7 @@ Done.svelte (onMount) --commitProfile()
 
 - 某项为空 → 省略该 bullet；两项都空 → 不写文件。
 - BEGIN/END 标记字符串固定，用于幂等定位替换。
+- **sanitize 用户输入**：`role` 是自由文本（Role 页自定义输入），`country` 虽来自 preset 仍统一处理——写进模板前剥离换行、剥离 `<!--` / `-->`、trim 到单行纯文本，防止用户输入含 marker 串（如直接输入或粘贴 `<!-- END momo-user-profile -->`）破坏托管块定位 / 污染 `upsert_managed_block` 的幂等。sanitize 在 backend 构造块时做。
 
 ## 6. 边界与错误处理
 
@@ -109,7 +110,9 @@ Done.svelte (onMount) --commitProfile()
 - 文件已有内容但无标记 → **追加**块，原内容不动。
 - 仅半个标记（残缺）→ 视为无有效块，追加新块。
 - 重跑 onboarding → 替换块，幂等（写两次结果 == 写一次）。
+- **用户输入含 marker 串 / 换行** → sanitize 后再入块（见 §5），不破坏 BEGIN/END 定位。
 - Skip（没到 Done）→ 不写。
+- **1431 backend 未就绪** → `commitProfile` 走 `wsClient.request`（懒连接 + 握手）；1431 是 momo 自己的 Tauri backend，app 启动即起，比 daemon 可靠。万一断线 in-flight request reject → 前端 toast，**非阻断**（fire-and-forget，§4①）。
 - 并发：onboarding 单次触发，不涉及并发。
 
 ## 7. 测试
@@ -119,10 +122,13 @@ Done.svelte (onMount) --commitProfile()
   - 有内容无标记 → 追加且原文保留；
   - 有标记 → 替换且周围内容不动；
   - 幂等（写两次 == 写一次）；
-  - 残缺标记 → 追加新块。
-- **前端**（扩展/新增 Playwright）：选国家 + 职业 → 到 Done → 断言 `write_user_profile` 以 `{ country, role }` 被调用。harness 要点：
-  - **测 onboarding flow 必须用 `daemon.open(page, { forceOnboarding: true })`**，不能用 `bootHelpers.bootOnboarded`（后者默认 seed `onboarded=true`，会直接跳过 onboarding）。
-  - **给 `FakeDaemon.dispatch` 加 `case "write_user_profile"`**（返回 `{}` + 记录到如 `lastUserProfile`）。FakeDaemon 一套 dispatcher 同时演 1431 `/ws` 与 daemon `/daemon`，未加 case 会走 `default` throw `Unhandled fake daemon method`，给每个 onboarding 测试带噪声。`record()` 在 `dispatch` 之前跑，`waitForRequest("write_user_profile", …)` 即便 dispatch 抛错也能断言被调用 + 参数，但仍应加 case 消噪。
+  - 残缺标记 → 追加新块；
+  - sanitize：role 含 `<!-- END momo-user-profile -->` / 换行 → 被剥离/压成单行，托管块仍只有一对 marker、`upsert` 仍幂等。
+- **前端**（扩展/新增 Playwright）：进入 onboarding → 选国家 + 职业 → 到 Done → 断言 `write_user_profile` 以 `{ country, role }` 被调用。harness 要点（已对照现有测试核实）：
+  - **触发 onboarding 的正确手法 = seed 已登录 JWT 但不 seed `onboarded` flag**：照 `bootHelpers.bootOnboarded` 的 `addInitScript` 写法 seed 有效 `puffer.authToken`（JWT），但**省略** `localStorage.setItem("puffer.onboarded", …)`，再 `daemon.install(page)` + `page.goto("/")` → `getRootRedirect()` 返回 `/onboarding/where`。可抽一个 `bootForOnboarding(page, daemon)` helper（= bootOnboarded 去掉 onboarded seed、goto `/` 而非 `/#/home`）。
+  - **不要用 `daemon.open({ forceOnboarding })`**：该 query 参数是 inert——`src/` 无任何代码消费 `forceOnboarding`/`skipOnboarding`，且 `open()` 不 seed JWT（未授权会被 auth gate 踢到 `/login`）。gate 纯由 `getRootRedirect()` 读 `isOnboarded()`(localStorage) + signed-in 驱动。
+  - **wsClient 接线用 `daemon.install(page)`**（不是 `open`）：装好 ws 路由后，`commitProfile` 的 `wsClient.request("write_user_profile")` 才会到 FakeDaemon。
+  - **给 `FakeDaemon.dispatch` 加 `case "write_user_profile"`**（返回 `{}` + 记录到如 `lastUserProfile`）：FakeDaemon 一套 dispatcher 同时演 1431 `/ws` 与 daemon `/daemon`，未加 case 会走 `default` throw `Unhandled fake daemon method`，带噪声。`record()` 在 `dispatch` 之前跑，`waitForRequest("write_user_profile", …)` 即便 dispatch 抛错也能断言被调用 + 参数，但仍应加 case 消噪。
 - **手动验收**：跑 onboarding → 查 `~/.puffer/AGENTS.md` + `CLAUDE.md` 含托管块 → 起 chat 确认 agent 知道用户国家/职业。
 - **onboarding gate 回归**（扩展 `tests/onboarding-persistence.spec.ts`）：从 Where Skip → `puffer.onboarded === "true"` 且 root 解析为 `/home`（不回 onboarding）；从 Role Skip 同样。这是固化"Skip→onboarded"现有行为的回归测试（防 §11 的 `App.svelte` `$effect` 或 onSkip 将来被改坏）。
 
@@ -155,7 +161,7 @@ flag `puffer.onboarded` 存 localStorage，是**机器级**判断（`src/lib/aut
 - gate 在 `getRootRedirect()`（`routes.ts:100`）：`signedIn && !isOnboarded()` → `/onboarding/where`，否则 `/home`。仅在根路径 `/` 解析时生效。
 - **账号切换已天然满足**：`signOut()`（auth.svelte.ts:786）只删 `TOKEN_KEY`/`REFRESH_TOKEN_KEY`/`API_KEY_KEY`/`API_KEY_OWNER_KEY`，**不删** `ONBOARDED_KEY`。已 onboarded 的机器，signOut→换账号登录后 `isOnboarded()` 仍为 true，不重弹。现有 `tests/onboarding-persistence.spec.ts` 已 pin。
 
-**所有退出路径当前都已落 flag**（关键：`App.svelte:100-104` 有个 `$effect`，路由进 `/home` 或 `/home/*` 即 `markOnboarded()`——注释明写"Whenever the user lands on /home … persist the onboarded flag so next launch skips the flow"）：
+**所有退出路径当前都已落 flag**（关键：`App.svelte:100-104` 有个 `$effect`，路由进 `/home` 或 `/home/*` 即调 `markOnboarded()`（调用在 :102）——注释明写"Whenever the user lands on /home … persist the onboarded flag so next launch skips the flow"）：
 
 | 退出方式 | 路径 | 当前是否落 flag |
 |---|---|---|
