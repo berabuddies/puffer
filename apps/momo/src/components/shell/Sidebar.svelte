@@ -52,6 +52,12 @@
   import { currentUser } from "../../data/user";
   import { apps } from "../../data/apps";
   import { authState } from "../../lib/auth.svelte";
+  import {
+    creditState,
+    startCreditPolling,
+    stopCreditPolling
+  } from "../../lib/creditStore.svelte";
+  import { formatCredits } from "../../lib/format";
   import UserMenu from "./UserMenu.svelte";
   import {
     projectSessions,
@@ -285,6 +291,41 @@
         // Toast already surfaced inside the store.
       });
   }
+
+  /* ───── Credits ─────
+   * The pill shows the user's WorldRouter balance, loaded + polled by
+   * creditStore while signed in. While loading / on error it renders "—".
+   * Clicking opens the external top-up page in the system browser (Tauri)
+   * or a new tab (web / playwright). */
+  const WR_DASHBOARD_URL =
+    (import.meta.env.VITE_WR_DASHBOARD_URL as string | undefined) ??
+    "https://www.worldrouter.ai";
+
+  let creditsLabel = $derived(
+    creditState.status === "ready" && creditState.creditsUsd !== null
+      ? formatCredits(creditState.creditsUsd)
+      : "—"
+  );
+
+  function openTopUp(): void {
+    const url = `${WR_DASHBOARD_URL.replace(/\/$/, "")}/dashboard/credits`;
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+        openUrl(url)
+      );
+    } else if (typeof window !== "undefined") {
+      window.open(url, "_blank");
+    }
+  }
+
+  // Poll credits while signed in; tear down on sign-out / unmount. The
+  // Sidebar only mounts when signedIn, so this also covers the first load.
+  $effect(() => {
+    if (authState.status === "signedIn") {
+      startCreditPolling();
+      return () => stopCreditPolling();
+    }
+  });
 </script>
 
 <aside
@@ -484,18 +525,25 @@
   <!-- 4. Rail upgrade: credits -->
   <div class="rail-upgrade">
     {#if collapsed}
-      <span
+      <button
         class="credits-badge"
-        aria-label={`${currentUser.credits.toLocaleString()} credits`}
-        title={`${currentUser.credits.toLocaleString()} credits`}
+        type="button"
+        aria-label={`${creditsLabel} — open top-up`}
+        title={creditsLabel}
+        onclick={openTopUp}
       >
         <Sparkles size={14} strokeWidth={1.75} aria-hidden="true" />
-      </span>
+      </button>
     {:else}
-      <div class="credits-pill" aria-label="Available credits">
+      <button
+        class="credits-pill"
+        type="button"
+        aria-label="Available credits — open top-up"
+        onclick={openTopUp}
+      >
         <span class="credits-pill__label">Credits</span>
-        <span class="credits-pill__value">{currentUser.credits.toLocaleString()}</span>
-      </div>
+        <span class="credits-pill__value">{creditsLabel}</span>
+      </button>
     {/if}
   </div>
 
@@ -968,9 +1016,16 @@
     border-radius: var(--radius-pill);
     background: var(--color-surface-app);
     border: 1px solid var(--color-input-border);
+    color: var(--color-text-primary);
     font-family: var(--font-system);
     font-size: var(--font-size-button);
     line-height: var(--line-height-button);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 120ms ease;
+  }
+  .credits-pill:hover {
+    background: var(--color-selected-fill);
   }
   .credits-pill__label {
     color: var(--color-text-muted);
@@ -992,6 +1047,7 @@
     background: var(--color-action-cream);
     color: var(--color-action-cream-text);
     border: 1px solid var(--color-action-cream-border);
+    cursor: pointer;
   }
 
   /* ───── 5. Rail user ───── */

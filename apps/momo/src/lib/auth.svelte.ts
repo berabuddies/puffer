@@ -353,6 +353,103 @@ interface MintKeyResponse {
   token_id?: string;
 }
 
+/** A resolved worldrouter session: the opaque session token + the team it
+ *  is scoped to. Both come from a single `/auth/exchange` round-trip. */
+export interface WrSession {
+  sessionToken: string;
+  teamId: string;
+}
+
+/**
+ * In-memory cache of the most recent worldrouter session, tagged with the
+ * JWT `sub` it was minted for. Deliberately NOT persisted to localStorage:
+ * the session token can mint inference keys and read billing, so it's more
+ * sensitive than the sk- key. A re-exchange after an app restart is cheap
+ * (we poll credits anyway), so memory-only is the safer trade.
+ */
+let wrSessionCache: (WrSession & { ownerSub: string }) | null = null;
+
+/**
+ * Hop 1 of the worldrouter handshake: exchange an Auth Station JWT for an
+ * Infer-session token + default team id. Shared by `mintWorldRouterApiKey`
+ * (which then mints a key) and `ensureWrSession` (which caches it for
+ * billing reads). Throws `ApiKeyMintError(step:"exchange")` on any failure.
+ */
+async function exchangeJwtForSession(
+  authStationToken: string
+): Promise<WrSession> {
+  const exchangeRes = await fetch(`${CONTROL_API_URL}/auth/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_token: authStationToken })
+  });
+  if (!exchangeRes.ok) {
+    const body = await safeJson(exchangeRes);
+    throw new ApiKeyMintError(
+      `auth/exchange failed: HTTP ${exchangeRes.status}`,
+      "exchange",
+      exchangeRes.status,
+      body
+    );
+  }
+  const exchange = (await exchangeRes.json()) as ExchangeResponse;
+  if (!exchange.session_token || !exchange.default_team_id) {
+    throw new ApiKeyMintError(
+      "auth/exchange returned incomplete payload",
+      "exchange",
+      exchangeRes.status,
+      exchange
+    );
+  }
+  return {
+    sessionToken: exchange.session_token,
+    teamId: exchange.default_team_id
+  };
+}
+
+/**
+ * Resolve a worldrouter session (session token + team id) for the
+ * currently signed-in user, reusing the in-memory cache when its owner
+ * matches. Pass `forceRefresh` to bypass the cache (e.g. after a 401 that
+ * suggests the cached session token expired).
+ *
+ * Returns null when there's no usable JWT or the exchange fails — callers
+ * treat that as "credits unavailable" rather than throwing.
+ */
+export async function ensureWrSession(opts?: {
+  forceRefresh?: boolean;
+}): Promise<WrSession | null> {
+  const jwt = getAuthToken();
+  if (!jwt) return null;
+  const sub = authState.user?.sub ?? decodeJwtPayload(jwt)?.sub ?? null;
+
+  if (
+    !opts?.forceRefresh &&
+    wrSessionCache &&
+    sub &&
+    wrSessionCache.ownerSub === sub
+  ) {
+    return {
+      sessionToken: wrSessionCache.sessionToken,
+      teamId: wrSessionCache.teamId
+    };
+  }
+
+  let session: WrSession;
+  try {
+    session = await exchangeJwtForSession(jwt);
+  } catch {
+    return null;
+  }
+  if (sub) wrSessionCache = { ...session, ownerSub: sub };
+  return session;
+}
+
+/** Drop the cached worldrouter session (called on sign-out). */
+export function clearWrSession(): void {
+  wrSessionCache = null;
+}
+
 function buildKeyAlias(): string {
   const uuid =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -401,40 +498,21 @@ export async function mintWorldRouterApiKey(
   const ownerSub = decodeJwtPayload(authStationToken)?.sub ?? null;
 
   // Hop 1: exchange Auth Station JWT for an Infer-session token + team_id.
-  const exchangeRes = await fetch(`${CONTROL_API_URL}/auth/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ access_token: authStationToken })
-  });
-  if (!exchangeRes.ok) {
-    const body = await safeJson(exchangeRes);
-    throw new ApiKeyMintError(
-      `auth/exchange failed: HTTP ${exchangeRes.status}`,
-      "exchange",
-      exchangeRes.status,
-      body
-    );
-  }
-  const exchange = (await exchangeRes.json()) as ExchangeResponse;
-  if (!exchange.session_token || !exchange.default_team_id) {
-    throw new ApiKeyMintError(
-      "auth/exchange returned incomplete payload",
-      "exchange",
-      exchangeRes.status,
-      exchange
-    );
-  }
+  // Shared with ensureWrSession; populate the cache here too so a credit
+  // read right after login reuses this session instead of re-exchanging.
+  const session = await exchangeJwtForSession(authStationToken);
+  if (ownerSub) wrSessionCache = { ...session, ownerSub };
 
   // Hop 2: mint the inference key.
   const mintRes = await fetch(
     `${CONTROL_API_URL}/platform/v1/teams/${encodeURIComponent(
-      exchange.default_team_id
+      session.teamId
     )}/keys`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${exchange.session_token}`
+        Authorization: `Bearer ${session.sessionToken}`
       },
       body: JSON.stringify({ key_alias: buildKeyAlias() })
     }
@@ -715,6 +793,8 @@ export function signOut(): void {
     store.removeItem(API_KEY_KEY);
     store.removeItem(API_KEY_OWNER_KEY);
   }
+  // Drop the cached worldrouter session so it can't outlive the login.
+  clearWrSession();
   // Best-effort: tell the puffer host to forget the key too, so a stale
   // PUFFER_API_KEY doesn't leak across signed-out sessions.
   void (async () => {

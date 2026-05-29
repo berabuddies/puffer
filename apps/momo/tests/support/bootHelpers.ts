@@ -40,6 +40,13 @@ export async function bootOnboarded(page: Page, daemon: FakeDaemon): Promise<voi
          care will fail loudly. */
     }
   });
+  // Sidebar mounts on /home and immediately polls credits against
+  // control-api. Specs that boot here don't assert on credits, so abort
+  // those requests to keep the suite off the live internet — the pill just
+  // renders "—". Credit specs use their own boot + route stubs instead.
+  await page.route("https://control-api.worldrouter.ai/**", (route) =>
+    route.abort()
+  );
   await daemon.install(page);
   await page.goto("/#/home");
   await expect(page).toHaveURL(/#\/home$/);
