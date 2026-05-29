@@ -100,7 +100,6 @@
   .pf-tool-head {
     width: 100%;
     text-align: left;
-    background: color-mix(in oklab, var(--muted) 50%, var(--background));
     border: 0;
     font: inherit;
     cursor: pointer;
