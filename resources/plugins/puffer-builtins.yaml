@@ -14,7 +14,7 @@ skills:
   - browser
   - email
   - telegram
-  - book-anything
+  - lifeclaw-partner
 mcp_servers:
   - id: filesystem
     display_name: Filesystem

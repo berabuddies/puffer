@@ -192,6 +192,12 @@ Bundled resources live under `resources/` and currently include:
 
 Resource provenance matters. Preserve source metadata when loading resources.
 
+See [`docs/architecture/skills.md`](docs/architecture/skills.md) for the skill
+loading model (builtin/user/workspace layers + precedence), how to
+add/register/update/remove a skill, and the rebuild-required gotcha when
+removing a built-in (the embedded copy is a union with the on-disk dir, so a
+disk deletion alone does not drop it).
+
 ## Session Model
 
 Session state is append-only and should stay migration-friendly.

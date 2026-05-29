@@ -53,6 +53,10 @@ puffer daemon(= puffer-core runtime)暴露的 RPC 分组(定义见 `crates/puffe
 - **凭据 / 配置**:`login_with_api_key` / `login_with_oauth` / `logout_provider` / `update_config`(`openai_base_url`/`default_provider`/`default_model` 等) / `load_settings_snapshot`
 - **文件 / 其它**:`read_file` / `write_file` / `list_dir` / pty / browser / lsp / mcp 等
 
+### skill 系统(装 / 更新 / 移除)
+
+puffer 原生 skill(`<name>/SKILL.md` + builtin/user/workspace 三层加载 + `resources/plugins/puffer-builtins.yaml` 注册)。**注意触发是「软提示」**:skill 加载且进 system prompt ≠ 模型一定调用——worldrouter 的 native `web_search` 会压过「找/查」类意图,需用 web_search 做不到的意图措辞(如「打电话/预订」)才触发。完整的安装 / 更新 / 移除流程与坑(尤其**删除内置 skill 必须重编译**,嵌入副本删目录删不掉)见 [`docs/architecture/skills.md`](../../docs/architecture/skills.md)。momo 已内置 `lifeclaw-partner`(AI 电话预订,需 env `LIFECLAW_PARTNER_API_TOKEN`)。
+
 ### 两个跨概念的坑(已踩过)
 
 - **momo 只有一个固定 default project,puffer task 也不按它分组**。momo 把所有会话收在单一 default project 下(`backend.rs::list_projects`,cwd = `$MOMO_HOME/projects/default`;Work/Life 分类已于 2026-05 移除)。puffer task 的 `task_scope` 是 `workspace` / `session:<id>` / `team:<id>` / `monitor`,与 momo 的 project 无关。要做"首页 task 列表",momo 拿到 `tasks[]` 后按 `session:<id> → session.cwd → 是否命中 default project` 自己 roll up。task 由 puffer-core agent 用 `TaskCreate` 工具产生。
