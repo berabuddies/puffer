@@ -73,6 +73,27 @@
       {@render children()}
     </div>
   </main>
+
+  <!--
+    macOS window drag handle for the page region.
+
+    titleBarStyle:Overlay (tauri.conf.json) gives us NO native draggable
+    title bar — so, exactly like the Sidebar's rail-top strip, we reserve
+    the top traffic-spacer band over the page column as a
+    data-tauri-drag-region. Every page already reserves that same band as
+    empty top padding (see .page__column padding-top and .agent__header
+    padding-top), so this strip only ever overlays empty space and never
+    sits on interactive content.
+
+    Offset from the left by the current sidebar width so the Sidebar keeps
+    its own drag strip + toggle; together the two strips make the entire
+    window top edge draggable.
+  -->
+  <div
+    class="shell__drag"
+    class:shell__drag--collapsed={collapsed}
+    data-tauri-drag-region
+  ></div>
 </div>
 
 <style>
@@ -82,6 +103,26 @@
     height: 100%;
     background: var(--color-surface-app);
     overflow: hidden;
+    /* Anchor for the absolutely-positioned .shell__drag handle. */
+    position: relative;
+  }
+
+  /* Transparent macOS drag strip over the page region's reserved top band.
+   * Spans from the right edge of the sidebar to the window edge so it never
+   * covers the Sidebar's own drag strip / toggle. Sits above page content,
+   * but only over the empty traffic-spacer padding, so nothing interactive
+   * is ever blocked. `left` tracks the sidebar's collapse animation. */
+  .shell__drag {
+    position: absolute;
+    top: 0;
+    left: var(--shell-rail-width);
+    right: 0;
+    height: var(--shell-traffic-spacer);
+    z-index: 5;
+    transition: left 180ms ease;
+  }
+  .shell__drag--collapsed {
+    left: var(--shell-rail-collapsed);
   }
 
   .page {
