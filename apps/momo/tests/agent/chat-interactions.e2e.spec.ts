@@ -6,11 +6,11 @@
  * coverage: a daemon event must render the right inline card, a click must
  * fire the right resolve RPC back to the daemon. Cancel-mid-turn is covered
  * too (it replaces the deleted legacy stop-button spec, rewritten against the
- * new ConversationView + shell Composer surface).
+ * new BubbleConversation + shell Composer surface).
  *
  * These drive the full stack: shell Composer → create_session/run_agent_turn
  * → `daemon.emit("session:<id>:event", …)` → the chat controller's reducer
- * (agentChat.svelte.ts) → ConversationView/Approval/QuestionPrompt DOM →
+ * (agentChat.svelte.ts) → BubbleConversation/Approval/QuestionPrompt DOM →
  * click → resolve_permission / resolve_user_question / cancel_turn assertion.
  *
  * Selectors are read off the real components, not guessed:
@@ -64,7 +64,7 @@ test("permission-request renders an Approval card; clicking Approve sends resolv
 
   // Stream a turn that pauses on a tool permission gate. The reducer routes
   // permission-request into pendingPermissions, which Agent.svelte feeds to
-  // ConversationView, which renders an <Approval> card under the agent row.
+  // BubbleConversation, which renders an <Approval> card inline in the thread.
   emitTurnStart(daemon, { sessionId, turnId });
   const requestId = "perm-req-1";
   daemon.emit(`session:${sessionId}:event`, {
@@ -289,10 +289,10 @@ test("tool-calls-requested renders a running ToolCard that flips to success", as
 
   emitTurnStart(daemon, { sessionId, turnId });
 
-  // A requested tool call renders a running pill. With a single child and no
-  // final assistant text yet, ConversationView renders the ToolCard directly
-  // (not the collapsed activity group). ToolCard surfaces the tool name and a
-  // status; the running state shows the "running" data-state on the head.
+  // A requested tool call renders a running pill. BubbleConversation renders
+  // the ToolCard inline (pure timeline order — no roll-up activity grouping).
+  // ToolCard surfaces the tool name and a status; the running state shows the
+  // "running" data-state on the head.
   const callId = "call-1";
   daemon.emit(`session:${sessionId}:event`, {
     type: "tool-calls-requested",

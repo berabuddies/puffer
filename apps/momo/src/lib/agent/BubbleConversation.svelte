@@ -62,8 +62,7 @@
 
   // Reset to the top when switching sessions so a new thread doesn't inherit
   // the previous one's scroll position. Guarded on an actual id change so it
-  // doesn't fight the auto-scroll effect below on every timeline tick (ported
-  // from ConversationView's lastSessionId pattern).
+  // doesn't fight the auto-scroll effect below on every timeline tick.
   $effect(() => {
     const nextSessionId = session?.id ?? null;
     if (nextSessionId === lastSessionId) return;
@@ -74,8 +73,7 @@
   });
 
   // Auto-scroll to the newest content when the timeline grows or a turn starts/
-  // stops (ported from ConversationView). `tick()` lets the new rows mount
-  // before we measure scrollHeight.
+  // stops. `tick()` lets the new rows mount before we measure scrollHeight.
   $effect(() => {
     // Touch the reactive deps so the effect re-runs on new content.
     void timeline.length;
