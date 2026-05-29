@@ -25,6 +25,8 @@
   } from "../lib/kycValidation";
   import type { CreateCardHolderParams } from "../lib/walletTypes";
   import Button from "../components/common/Button.svelte";
+  import KycHelpModal from "../components/wallet/KycHelpModal.svelte";
+  import { Info } from "lucide-svelte";
 
   type KycErrors = Partial<Record<KycFieldKey, string>>;
   type TouchedMap = Partial<Record<KycFieldKey, boolean>>;
@@ -71,6 +73,10 @@
   // `markTouched` pattern.
   let touched = $state<TouchedMap>({});
   let submitting = $state<boolean>(false);
+
+  // "How to fill this in" help dialog. Local to the page — the modal is
+  // purely presentational (see KycHelpModal).
+  let helpOpen = $state<boolean>(false);
 
   // Dev-only mock affordance. Mirrors the Wallet page pattern: only render
   // dev controls when the wallet client is in mock mode. Typed locally so
@@ -253,16 +259,27 @@
   <header class="kyc-form__head">
     <div class="kyc-form__title-row">
       <h1 class="text-section">Identity verification</h1>
-      {#if isMockMode}
+      <div class="kyc-form__actions">
         <button
           type="button"
-          class="dev-link"
-          onclick={prefillMock}
-          aria-label="Prefill form with mock data (dev only)"
+          class="help-link"
+          onclick={() => (helpOpen = true)}
+          aria-haspopup="dialog"
         >
-          Prefill (mock)
+          <Info size={14} strokeWidth={1.75} aria-hidden="true" />
+          How to fill this in
         </button>
-      {/if}
+        {#if isMockMode}
+          <button
+            type="button"
+            class="dev-link"
+            onclick={prefillMock}
+            aria-label="Prefill form with mock data (dev only)"
+          >
+            Prefill (mock)
+          </button>
+        {/if}
+      </div>
     </div>
     <p class="kyc-form__intro">
       We need a few details to verify your identity before activating your card.
@@ -450,6 +467,8 @@
       />
     </footer>
   </form>
+
+  <KycHelpModal open={helpOpen} onClose={() => (helpOpen = false)} />
 </section>
 
 <style>
@@ -471,6 +490,40 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
+  }
+
+  .kyc-form__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  /* Always-visible help trigger. Quiet by default (muted text + icon),
+     turns into the cream accent on hover so it reads as actionable. */
+  .help-link {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 2px 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--color-text-secondary);
+    font-family: var(--font-system);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: var(--font-weight-medium);
+    cursor: pointer;
+    border-radius: var(--radius-control);
+    transition: background-color 120ms ease, color 120ms ease;
+  }
+  .help-link:hover {
+    background: var(--color-surface-rail);
+    color: var(--color-text-primary);
+  }
+  .help-link:focus-visible {
+    outline: 2px solid var(--color-action-cream-border);
+    outline-offset: 1px;
   }
 
   /* Mirrors the dev-link style on the Wallet page so the affordance feels

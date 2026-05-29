@@ -3,6 +3,10 @@
  * enforces server-side (verified 2026-04-29 against api2.stradacarte.cloud)
  * so users get inline feedback instead of a generic backend rejection.
  *
+ * Email rules follow the TC37 one-pager (KYC Didit): max 36 characters and
+ * no "+" in the address. These are surfaced to the user verbatim by the
+ * KycHelpModal, so keep the two in sync if either changes.
+ *
  * The wire format requires `firstName`, `lastName`, `dob`, `email`,
  * `callingCode`, `countryCallingCode`, `phoneNum`, `cellNum`, `address`,
  * `city`, `country`, `zipCode` for every country, plus `state` when
@@ -14,6 +18,10 @@
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Per the TC37 one-pager, the cardholder email must not contain a "+"
+// (Strada rejects it). Kept as its own regex so we can give a specific
+// message instead of a generic "invalid format".
+const EMAIL_PLUS_RE = /\+/;
 const ISO_ALPHA2_RE = /^[A-Z]{2}$/;
 const CALLING_CODE_RE = /^\d{1,4}$/;
 const DIGITS_ONLY_RE = /^\d+$/;
@@ -87,7 +95,9 @@ export function validateField(
 
     case 'email':
       if (!v) return 'Required.';
-      if (v.length > 50) return 'Maximum 50 characters.';
+      // TC37 one-pager: max 36 chars, no "+" in the address.
+      if (v.length > 36) return 'Maximum 36 characters.';
+      if (EMAIL_PLUS_RE.test(v)) return 'Email cannot contain a "+".';
       if (!EMAIL_RE.test(v)) return 'Invalid email format.';
       return null;
 

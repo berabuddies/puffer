@@ -413,6 +413,56 @@ test.describe("C. KYC form validation", () => {
     await page.getByRole("button", { name: "Submit" }).click();
     await expect(page).toHaveURL(/#\/wallet\/kyc\/verify$/, { timeout: 5000 });
   });
+
+  test("C9: email over 36 characters → length-specific error", async ({
+    page
+  }) => {
+    // TC37 one-pager caps the email at 36 chars (was 50). 40-char address.
+    const email = page.getByLabel("Email");
+    await email.fill("aaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com");
+    await email.blur();
+    const emailField = page.locator("label.field", { hasText: "Email" });
+    await expect(emailField.locator(".field__err")).toContainText(
+      /Maximum 36 characters/i
+    );
+  });
+
+  test('C10: email containing "+" → plus-specific error', async ({ page }) => {
+    // Strada rejects "+" in the email; we surface a specific message rather
+    // than the generic "Invalid email format".
+    const email = page.getByLabel("Email");
+    await email.fill("ada+test@example.com");
+    await email.blur();
+    const emailField = page.locator("label.field", { hasText: "Email" });
+    await expect(emailField.locator(".field__err")).toContainText(
+      /cannot contain a "\+"/i
+    );
+  });
+
+  test("C11: help trigger opens the field-guidance modal; ESC + close dismiss it", async ({
+    page
+  }) => {
+    const dialog = page.getByRole("dialog", {
+      name: "How to fill in your details"
+    });
+    await expect(dialog).toBeHidden();
+
+    // Open via the always-visible header link.
+    await page.getByRole("button", { name: "How to fill this in" }).click();
+    await expect(dialog).toBeVisible();
+    // A representative PDF-sourced rule is present.
+    await expect(dialog).toContainText(/Max 36 characters/i);
+
+    // ESC dismisses (Modal wires window keydown).
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    // Re-open and dismiss via the close button.
+    await page.getByRole("button", { name: "How to fill this in" }).click();
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(dialog).toBeHidden();
+  });
 });
 
 /* ─────────────────────────────────────────────────────────────────────
