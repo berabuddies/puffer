@@ -14,7 +14,15 @@
  */
 import { ensureDaemonClient } from "../daemonClient";
 
-export const WORLDROUTER_BASE_URL = "https://inference-api.worldrouter.ai/v1";
+// Inference endpoint the minted worldrouter key is sent to. MUST track the
+// same environment as the control-api that mints the key
+// (VITE_WORLDROUTER_CONTROL_URL): a test-minted key hitting the prod inference
+// proxy fails with 401 "tokennotfoundindb" (the prod LiteLLM has no record of
+// it). Env-driven so switching .env to test moves the endpoint too; defaults
+// to prod when unset.
+export const WORLDROUTER_BASE_URL =
+  (import.meta.env.VITE_WORLDROUTER_INFERENCE_URL as string | undefined) ??
+  "https://inference-api.worldrouter.ai/v1";
 export const WORLDROUTER_DEFAULT_MODEL = "gpt-5.4";
 
 /** Register a minted worldrouter key with the daemon as the OpenAI-compatible

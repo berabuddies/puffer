@@ -11,6 +11,10 @@
 interface ImportMetaEnv {
   readonly VITE_AUTH_STATION_URL?: string;
   readonly VITE_WORLDROUTER_CONTROL_URL?: string;
+  /** Inference endpoint the minted worldrouter key is sent to. Must match the
+   *  environment of VITE_WORLDROUTER_CONTROL_URL. Defaults to prod when unset
+   *  (see daemonAuth.ts). */
+  readonly VITE_WORLDROUTER_INFERENCE_URL?: string;
   /** U-card wallet REST base. Hit directly in prod; the Vite dev proxy
    *  target in dev (see vite.config.ts / backendFetch.ts). */
   readonly VITE_BACKEND_BASE_URL?: string;
