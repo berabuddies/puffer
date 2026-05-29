@@ -36,10 +36,15 @@
   } from "../../providerIds";
 
   const ENGINEER_NAME = "Engineer";
+  const RECAP_DISPLAY_PREFIX = "\u203B recap: ";
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
   type ComposerRoutingPreference = {
     providerId: string | null;
     modelId: string | null;
+  };
+  type RecapContent = {
+    summary: string;
+    details: string[];
   };
 
   type Props = {
@@ -121,6 +126,7 @@
   let lastSessionId: string | null = null;
   let nowMs = $state(Date.now());
   let expandedActivityIds = $state<string[]>([]);
+  let expandedRecapIds = $state<string[]>([]);
   let selectedActivityChildren = $state<Record<string, string>>({});
   let fastMode = $state(false);
   let permissionMode = $state<AgentPermissionMode>("workspace-write");
@@ -492,6 +498,35 @@
     );
   }
 
+  function isRecapCommandItem(item: TimelineItem): boolean {
+    return item.kind === "command" && (item.title === "/recap" || item.body.trim() === "recap");
+  }
+
+  function recapContent(item: MessageTimelineItem): RecapContent | null {
+    const body = item.body.trim();
+    if (!body.startsWith(RECAP_DISPLAY_PREFIX)) return null;
+    const raw = body.slice(RECAP_DISPLAY_PREFIX.length).trim();
+    const paragraphs = raw
+      .split(/\n\s*\n/)
+      .map((paragraph) => paragraph.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    if (paragraphs.length === 0) return null;
+    return {
+      summary: paragraphs[0],
+      details: paragraphs.slice(1, 4)
+    };
+  }
+
+  function recapExpanded(id: string): boolean {
+    return expandedRecapIds.includes(id);
+  }
+
+  function toggleRecap(id: string) {
+    expandedRecapIds = recapExpanded(id)
+      ? expandedRecapIds.filter((value) => value !== id)
+      : [...expandedRecapIds, id];
+  }
+
   function normalizedGateKey(value: string | null | undefined): string {
     return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
   }
@@ -727,6 +762,7 @@
       timeline.filter(
         (i) =>
           i.kind !== "permission" &&
+          !isRecapCommandItem(i) &&
           !(i.kind === "question" && i.status === "pending")
       )
     )
@@ -1732,17 +1768,54 @@
             </div>
           {:else if row.kind === "system"}
             {@const isError = row.item.status === "error" || row.item.meta.includes("error")}
-            <div class="pf-msg" data-role="system" data-error={isError}>
-              <div class="pf-msg-avatar">{isError ? "err" : "sys"}</div>
+            {@const recap = recapContent(row.item)}
+            <div class="pf-msg" data-role="system" data-error={isError} data-recap={Boolean(recap)}>
+              {#if !recap}
+                <div class="pf-msg-avatar">{isError ? "err" : "sys"}</div>
+              {/if}
               <div class="pf-msg-body">
-                {#if isError}
+                {#if recap}
+                  <div class="recap-card" data-expanded={recapExpanded(row.key)}>
+                    {#if recap.details.length > 0}
+                      <button
+                        type="button"
+                        class="recap-summary"
+                        onclick={() => toggleRecap(row.key)}
+                        aria-expanded={recapExpanded(row.key)}
+                        aria-label={recapExpanded(row.key) ? "Collapse recap details" : "Expand recap details"}
+                      >
+                        <span class="recap-icon" aria-hidden="true"><Icon name="sparkles" size={13} /></span>
+                        <span class="recap-sentence">{recap.summary}</span>
+                        <span class="recap-chevron" aria-hidden="true">
+                          <Icon name={recapExpanded(row.key) ? "chevD" : "chevR"} size={11} />
+                        </span>
+                      </button>
+                    {:else}
+                      <div class="recap-summary">
+                        <span class="recap-icon" aria-hidden="true"><Icon name="sparkles" size={13} /></span>
+                        <span class="recap-sentence">{recap.summary}</span>
+                      </div>
+                    {/if}
+                    {#if recap.details.length > 0 && recapExpanded(row.key)}
+                      <div class="recap-details">
+                        {#each recap.details as paragraph, paragraphIdx (`${row.key}-recap-${paragraphIdx}`)}
+                          <p>{paragraph}</p>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {:else if isError}
                   <div class="pf-msg-meta">
                     <span class="name">{row.item.title || "Error"}</span>
                   </div>
+                  <div class="pf-msg-text">
+                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
+                  </div>
+                {:else}
+                  <div class="pf-msg-text">
+                    <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
+                  </div>
                 {/if}
-                <div class="pf-msg-text">
-                  <MessageBody body={row.item.body} onOpenFile={onOpenFileLink} />
-                </div>
               </div>
             </div>
           {:else}
@@ -2104,6 +2177,80 @@
     font-weight: 600;
     background: color-mix(in oklab, var(--muted) 28%, var(--background));
   }
+  .pf-msg[data-role="system"][data-recap="true"] {
+    grid-template-columns: minmax(0, 1fr);
+    opacity: 1;
+  }
+  .pf-msg[data-role="system"][data-recap="true"] .pf-msg-body {
+    padding-top: 0;
+  }
+  .recap-card {
+    width: 100%;
+    max-width: 100%;
+    border: 1px solid color-mix(in oklab, var(--accent-foreground) 20%, var(--border));
+    border-radius: 8px;
+    overflow: hidden;
+    background: color-mix(in oklab, var(--accent) 28%, var(--background));
+    box-shadow: var(--shadow-sm);
+  }
+  .recap-summary {
+    width: 100%;
+    max-width: 100%;
+    min-height: 42px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--foreground);
+    font: inherit;
+    text-align: left;
+  }
+  button.recap-summary {
+    cursor: pointer;
+  }
+  button.recap-summary:hover {
+    background: color-mix(in oklab, var(--accent) 36%, var(--background));
+  }
+  .recap-icon {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in oklab, var(--accent-foreground) 24%, var(--border));
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--accent-foreground);
+  }
+  .recap-sentence {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: var(--pf-chat-text-size);
+    font-weight: 650;
+    line-height: 1.4;
+  }
+  .recap-chevron {
+    display: inline-flex;
+    color: var(--muted-foreground);
+  }
+  .recap-details {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 12px 46px;
+    border-top: 1px solid color-mix(in oklab, var(--accent-foreground) 16%, var(--border));
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-size: var(--pf-chat-detail-size);
+    line-height: 1.5;
+  }
+  .recap-details p {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
   .agent-tools {
     display: flex;
     flex-direction: column;
@@ -2396,6 +2543,9 @@
     }
     .activity-failed {
       display: none;
+    }
+    .recap-details {
+      padding-left: 12px;
     }
   }
 </style>

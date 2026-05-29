@@ -23,15 +23,19 @@ use puffer_resources::LoadedResources;
 
 use crate::state::{AppState, MessageRole};
 
-/// Prompt sent to the model. Lifted verbatim from claude-code's `tP5`
-/// constant so the linguistic shape matches what Anthropic ships and so
-/// the model's "Skip ... em-dash tangents" anti-pattern hint carries over.
-pub(crate) const RECAP_PROMPT: &str = "The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.";
+/// Prompt sent to the model. The first paragraph is the glanceable recap
+/// sentence; the optional following paragraphs are capped detail for UIs
+/// that expose an expanded recap card.
+pub(crate) const RECAP_PROMPT: &str = "The user stepped away and is coming back. Return plain text only in this exact shape: first paragraph is one short sentence under 22 words; then optionally up to 3 detail paragraphs. Each detail paragraph must be under 55 words. No markdown, bullets, headings, file inventories, exhaustive logs, or root-cause dumps. Focus on current goal, progress, blocker if any, and the next action.";
 
 /// Visible-but-quiet prefix the TUI / GUI use to render the recap line
 /// with a distinct symbol so users can tell auto-recap apart from a
 /// regular system note. Matches claude-code's `nwq` reference symbol.
 pub const RECAP_DISPLAY_PREFIX: &str = "\u{203B} recap: ";
+
+const MAX_RECAP_SHORT_WORDS: usize = 22;
+const MAX_RECAP_DETAIL_PARAGRAPHS: usize = 3;
+const MAX_RECAP_DETAIL_WORDS: usize = 55;
 
 /// Runs one synchronous recap side-turn against the currently selected
 /// provider and model. Tool-filter is empty, so no tools are reachable;
@@ -57,7 +61,7 @@ pub fn run_recap_side_turn(
         RECAP_PROMPT,
         filter.as_ref(),
     )?;
-    Ok(turn.assistant_text.trim().to_string())
+    Ok(normalize_recap_text(&turn.assistant_text))
 }
 
 /// Renders a successful recap into the live transcript without writing
@@ -65,10 +69,180 @@ pub fn run_recap_side_turn(
 /// renderers display it; the [`RECAP_DISPLAY_PREFIX`] sentinel lets TUI /
 /// GUI styling pick it out for italic+dim treatment.
 pub fn render_recap(state: &mut AppState, text: &str) {
-    let mut line = String::with_capacity(RECAP_DISPLAY_PREFIX.len() + text.len());
+    let recap = normalize_recap_text(text);
+    let mut line = String::with_capacity(RECAP_DISPLAY_PREFIX.len() + recap.len());
     line.push_str(RECAP_DISPLAY_PREFIX);
-    line.push_str(text);
+    line.push_str(&recap);
     state.push_message(MessageRole::System, line);
+}
+
+fn normalize_recap_text(text: &str) -> String {
+    let paragraphs = recap_paragraphs(text);
+    if paragraphs.is_empty() {
+        return String::new();
+    }
+
+    let first = strip_optional_label(
+        &paragraphs[0],
+        &["short:", "summary:", "sentence:", "recap:"],
+    );
+    let (short_source, first_detail) = split_first_sentence(&first);
+    let short = limit_words(&short_source, MAX_RECAP_SHORT_WORDS);
+    let mut details = Vec::new();
+    if let Some(detail) = first_detail {
+        push_detail_paragraph(&mut details, &detail);
+    }
+    for paragraph in paragraphs.iter().skip(1) {
+        push_detail_paragraph(&mut details, paragraph);
+    }
+
+    if details.is_empty() {
+        return short;
+    }
+
+    let mut output = short;
+    for detail in details {
+        output.push_str("\n\n");
+        output.push_str(&detail);
+    }
+    output
+}
+
+fn recap_paragraphs(text: &str) -> Vec<String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let without_prefix = normalized
+        .strip_prefix(RECAP_DISPLAY_PREFIX)
+        .unwrap_or(&normalized);
+    let mut paragraphs = Vec::new();
+    let mut current = Vec::new();
+
+    for line in without_prefix.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            flush_recap_paragraph(&mut paragraphs, &mut current);
+            continue;
+        }
+        if let Some(rest) = strip_known_label(trimmed, &["details:", "detail:"]) {
+            flush_recap_paragraph(&mut paragraphs, &mut current);
+            if !rest.is_empty() {
+                current.push(rest.to_string());
+            }
+            continue;
+        }
+        current.push(strip_list_marker(trimmed).to_string());
+    }
+    flush_recap_paragraph(&mut paragraphs, &mut current);
+    paragraphs
+}
+
+fn flush_recap_paragraph(paragraphs: &mut Vec<String>, current: &mut Vec<String>) {
+    if current.is_empty() {
+        return;
+    }
+    let paragraph = collapse_recap_whitespace(&current.join(" "));
+    if !paragraph.is_empty() {
+        paragraphs.push(paragraph);
+    }
+    current.clear();
+}
+
+fn push_detail_paragraph(details: &mut Vec<String>, paragraph: &str) {
+    if details.len() >= MAX_RECAP_DETAIL_PARAGRAPHS {
+        return;
+    }
+    let cleaned = strip_optional_label(paragraph, &["details:", "detail:"]);
+    let cleaned = collapse_recap_whitespace(strip_list_marker(&cleaned));
+    if cleaned.is_empty() {
+        return;
+    }
+    details.push(limit_words(&cleaned, MAX_RECAP_DETAIL_WORDS));
+}
+
+fn strip_known_label<'a>(text: &'a str, labels: &[&str]) -> Option<&'a str> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for label in labels {
+        if lower.starts_with(label) {
+            return Some(trimmed[label.len()..].trim());
+        }
+    }
+    None
+}
+
+fn strip_optional_label(text: &str, labels: &[&str]) -> String {
+    strip_known_label(text, labels)
+        .unwrap_or_else(|| text.trim())
+        .to_string()
+}
+
+fn strip_list_marker(text: &str) -> &str {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+    {
+        return rest.trim();
+    }
+    let mut chars = trimmed.char_indices().peekable();
+    while let Some((_, ch)) = chars.peek() {
+        if !ch.is_ascii_digit() {
+            break;
+        }
+        chars.next();
+    }
+    if let Some((marker_index, marker)) = chars.next() {
+        if (marker == '.' || marker == ')') && trimmed[marker_index + 1..].starts_with(' ') {
+            return trimmed[marker_index + 2..].trim();
+        }
+    }
+    trimmed
+}
+
+fn split_first_sentence(text: &str) -> (String, Option<String>) {
+    let trimmed = text.trim();
+    for (index, ch) in trimmed.char_indices() {
+        if !matches!(ch, '.' | '!' | '?') {
+            continue;
+        }
+        let end = index + ch.len_utf8();
+        let next_is_boundary = trimmed[end..]
+            .chars()
+            .next()
+            .map(|next| next.is_whitespace())
+            .unwrap_or(true);
+        if next_is_boundary {
+            let first = trimmed[..end].trim().to_string();
+            let rest = trimmed[end..].trim();
+            return (
+                first,
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.to_string())
+                },
+            );
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
+fn limit_words(text: &str, max_words: usize) -> String {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.len() <= max_words {
+        return collapse_recap_whitespace(text);
+    }
+    let mut limited = words[..max_words].join(" ");
+    limited = limited
+        .trim_end_matches(|ch: char| matches!(ch, ',' | ';' | ':'))
+        .to_string();
+    if !limited.ends_with('.') && !limited.ends_with('!') && !limited.ends_with('?') {
+        limited.push('.');
+    }
+    limited
+}
+
+fn collapse_recap_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Skip-check decisions for the auto-trigger path. Returns `Ok(true)` if
@@ -219,10 +393,47 @@ mod tests {
     #[test]
     fn render_recap_uses_prefix() {
         let mut state = fresh_state();
-        render_recap(&mut state, "Hello world.");
+        render_recap(
+            &mut state,
+            "Summary: Hello world.\n\nDetails:\n- First useful detail.\n\nSecond useful detail.",
+        );
         let last = state.transcript.last().expect("recap message pushed");
         assert!(matches!(last.role, MessageRole::System));
         assert!(last.text.starts_with(RECAP_DISPLAY_PREFIX));
-        assert!(last.text.ends_with("Hello world."));
+        assert!(last.text.contains("Hello world.\n\nFirst useful detail."));
+        assert!(last.text.ends_with("Second useful detail."));
+    }
+
+    #[test]
+    fn recap_prompt_requests_a_short_sentence_with_capped_details() {
+        assert!(RECAP_PROMPT.contains("one short sentence"));
+        assert!(RECAP_PROMPT.contains("up to 3 detail paragraphs"));
+        assert!(RECAP_PROMPT.contains("No markdown, bullets"));
+    }
+
+    #[test]
+    fn normalize_recap_caps_details_and_strips_dump_formatting() {
+        let text = "\
+Short: The auth refresh path is being tightened before the next test run. Extra sentence should become detail.
+
+Details:
+- Provider routing is wired, but the OAuth refresh branch still needs the failing status case handled before the CLI path is re-run.
+
+2. The desktop view should only surface the active blocker and next action rather than replaying each file inspected during the turn.
+
+Third paragraph stays.
+
+Fourth paragraph is dropped.";
+
+        let normalized = normalize_recap_text(text);
+        let parts = normalized.split("\n\n").collect::<Vec<_>>();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(
+            parts[0],
+            "The auth refresh path is being tightened before the next test run."
+        );
+        assert_eq!(parts[1], "Extra sentence should become detail.");
+        assert!(!parts[2].starts_with('-'));
+        assert!(!parts[3].contains("Fourth paragraph"));
     }
 }

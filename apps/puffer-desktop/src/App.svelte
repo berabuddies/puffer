@@ -747,7 +747,7 @@
   // Init
   // ─────────────────────────────────────────────────────────────
   // Auto-recap: when the window loses focus for `RECAP_IDLE_MS`, submit
-  // `/recap` so the session shows a 1-2 sentence summary by the time the
+  // `/recap` so the session shows a compact summary by the time the
   // user comes back. Matches the TUI's idle-timer auto-trigger; mirrors
   // claude-code's `tengu_sedge_lantern` blur path. The slash command
   // dispatcher inside puffer-core decides whether to actually run (gates

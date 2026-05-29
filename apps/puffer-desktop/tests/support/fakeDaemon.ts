@@ -1000,6 +1000,8 @@ export class FakeDaemon {
         return this.setDesktopPin(request.params);
       case "list_grouped_sessions":
         return this.groupedSessions();
+      case "list_grouped_sessions_page":
+        return this.groupedSessionsPage(request.params);
       case "load_session_detail":
         return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
       case "rename_session":
@@ -1710,6 +1712,37 @@ export class FakeDaemon {
       group.tags = this.projectTags.get(folderPath) ?? [];
     }
     return Array.from(groups.values());
+  }
+
+  private groupedSessionsPage(params: JsonRecord): JsonRecord {
+    const offset = Math.max(0, Number(params.offset ?? 0) || 0);
+    const limit = Math.max(1, Number(params.limit ?? 30) || 30);
+    const entries = this.groupedSessions().flatMap((group) =>
+      ((group.sessions as JsonRecord[] | undefined) ?? []).map((sessionItem) => ({
+        group,
+        session: sessionItem
+      }))
+    );
+    const pageGroups = new Map<string, JsonRecord>();
+    for (const { group, session: sessionItem } of entries.slice(offset, offset + limit)) {
+      const folderId = String(group.folderId ?? group.folderPath ?? "");
+      const pageGroup = pageGroups.get(folderId) ?? {
+        ...group,
+        sessionCount: 0,
+        sessions: []
+      };
+      (pageGroup.sessions as JsonRecord[]).push(sessionItem);
+      pageGroup.sessionCount = (pageGroup.sessions as JsonRecord[]).length;
+      pageGroups.set(folderId, pageGroup);
+    }
+    return {
+      groups: Array.from(pageGroups.values()),
+      offset,
+      limit,
+      returnedSessions: entries.slice(offset, offset + limit).length,
+      totalSessions: entries.length,
+      hasMore: offset + limit < entries.length
+    };
   }
 
   private sessionDetail(sessionId: string): JsonRecord {
