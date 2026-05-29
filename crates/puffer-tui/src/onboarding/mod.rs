@@ -261,6 +261,7 @@ pub(crate) fn back_overlay(
         | OverlayState::Session(..)
         | OverlayState::Status(..)
         | OverlayState::Text(..)
+        | OverlayState::AutoDreamSuggestion { .. }
         | OverlayState::OnboardingTheme { .. }
         | OverlayState::OnboardingProvider { .. }
         | OverlayState::OnboardingAuth { .. }

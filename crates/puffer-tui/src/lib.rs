@@ -26,8 +26,9 @@ mod user_question_overlay;
 use crate::flow::{
     advance_loop_after_turn, allow_prompt_before_onboarding, apply_selected_provider,
     builtin_openai_base_url, builtin_openai_headers, builtin_openai_query_params,
-    cancel_pending_submit, check_loop_interval, emit_system_message, handle_prompt_submit,
-    handle_submit, maybe_apply_requested_reload, persist_user_config, poll_pending_submit,
+    cancel_pending_submit, check_loop_interval, emit_system_message,
+    handle_autodream_suggestion_action, handle_prompt_submit, handle_submit,
+    maybe_apply_requested_reload, persist_user_config, poll_pending_submit,
     run_embedded_auth_login, set_overlay_state, should_defer_while_turn_is_running,
     submit_next_queued_prompt, submit_queued_prompt_if_ready, try_open_overlay,
 };
@@ -790,6 +791,41 @@ fn handle_overlay_key(
     ) && handle_user_question_key(key, tui)
     {
         return Ok(false);
+    }
+
+    if matches!(
+        tui.overlay.as_ref(),
+        Some(OverlayState::AutoDreamSuggestion { .. })
+    ) {
+        match key.code {
+            KeyCode::Esc => {
+                set_overlay_state(tui, None);
+                return Ok(false);
+            }
+            KeyCode::Enter => {
+                let action = tui
+                    .overlay
+                    .as_ref()
+                    .and_then(OverlayState::selected_autodream_suggestion_action);
+                if let Some(action) = action {
+                    handle_autodream_suggestion_action(tui, action);
+                    submit_queued_prompt_if_ready(
+                        state,
+                        resources,
+                        providers,
+                        auth_store,
+                        auth_path,
+                        session_store,
+                        tui,
+                        no_alt_screen,
+                    )?;
+                } else {
+                    set_overlay_state(tui, None);
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
     }
 
     let Some(active_overlay) = tui.overlay.as_ref() else {

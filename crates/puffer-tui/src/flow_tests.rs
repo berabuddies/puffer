@@ -1,5 +1,6 @@
 use super::flow_loop::*;
 use super::*;
+use crate::flow;
 use crate::state::{LoopKind, PendingSubmit, PendingSubmitEvent, PendingSubmitResult};
 use puffer_config::{
     ensure_workspace_dirs, save_user_config, ConfigPaths, MemoryConfig, PufferConfig,
@@ -46,6 +47,51 @@ fn user_question_answer(question: &str, answer: &str) -> UserQuestionPromptRespo
         answers: Map::from_iter([(question.to_string(), json!(answer))]),
         annotations: Map::new(),
     }
+}
+
+#[test]
+fn autodream_suggestion_action_queues_genskill_once() {
+    let mut tui = TuiState {
+        overlay: Some(flow::autodream_suggestion_overlay()),
+        ..TuiState::default()
+    };
+    let action = tui
+        .overlay
+        .as_ref()
+        .and_then(OverlayState::selected_autodream_suggestion_action)
+        .unwrap();
+
+    flow::handle_autodream_suggestion_action(&mut tui, action);
+    flow::handle_autodream_suggestion_action(
+        &mut tui,
+        crate::state::AutoDreamSuggestionAction::CreateSkillDraft,
+    );
+
+    assert!(tui.overlay.is_none());
+    assert_eq!(tui.dequeue_prompt().as_deref(), Some("/genskill"));
+    assert!(tui.dequeue_prompt().is_none());
+}
+
+#[test]
+fn autodream_suggestion_dismiss_closes_without_prompt() {
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::AutoDreamSuggestion {
+            skill_name: "AutoDream memory consolidation workflow".to_string(),
+            purpose: "Reuse the project-memory bootstrap and consolidation flow.".to_string(),
+            selection: 1,
+        }),
+        ..TuiState::default()
+    };
+    let action = tui
+        .overlay
+        .as_ref()
+        .and_then(OverlayState::selected_autodream_suggestion_action)
+        .unwrap();
+
+    flow::handle_autodream_suggestion_action(&mut tui, action);
+
+    assert!(tui.overlay.is_none());
+    assert!(tui.dequeue_prompt().is_none());
 }
 
 fn auth_required_provider_registry() -> ProviderRegistry {
@@ -935,6 +981,8 @@ fn poll_pending_submit_syncs_project_memory_review_turns_back_to_main_state() {
             session_permission_state: Default::default(),
             session_allow_all: false,
             project_memory_review_turns: 1,
+            autodream_review_turns: 0,
+            autodream_suggest_skill: false,
         }))
         .unwrap();
 
@@ -1360,6 +1408,8 @@ fn poll_pending_submit_skips_empty_assistant_message_after_tool_only_turn() {
             session_permission_state: Default::default(),
             session_allow_all: false,
             project_memory_review_turns: 0,
+            autodream_review_turns: 0,
+            autodream_suggest_skill: false,
         }))
         .unwrap();
 
@@ -1436,6 +1486,8 @@ fn poll_pending_submit_preserves_browser_category_session_grants() {
             session_permission_state: worker_permission_state,
             session_allow_all: false,
             project_memory_review_turns: 0,
+            autodream_review_turns: 0,
+            autodream_suggest_skill: false,
         }))
         .unwrap();
 

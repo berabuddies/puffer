@@ -8,10 +8,11 @@ use crate::command_helpers::{
     handle_monitor_command, handle_permissions_command, handle_plan_command, handle_plugin_command,
     handle_recap_command, handle_reflect_command, handle_remote_control_command,
     handle_remote_env_command, handle_resume_command, handle_sandbox_command,
-    handle_session_command, handle_tag_command, handle_tasks_command, handle_terminal_setup_command,
-    handle_workflows_command, list_skills, persist_user_settings, record_command_checkpoint,
-    reload_config_from_disk, remove_provider_credentials, render_login_guidance, rewind_transcript,
-    run_doctor, run_provider_login_flow, supports_auth_mode,
+    handle_session_command, handle_tag_command, handle_tasks_command,
+    handle_terminal_setup_command, handle_workflows_command, list_skills, persist_user_settings,
+    record_command_checkpoint, reload_config_from_disk, remove_provider_credentials,
+    render_login_guidance, rewind_transcript, run_doctor, run_provider_login_flow,
+    supports_auth_mode,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_status_summary, render_usage_summary,

@@ -61,6 +61,7 @@ pub(super) fn overlay_renders_inline_dropdown(overlay: &OverlayState) -> bool {
             | OverlayState::ThemePicker { .. }
             | OverlayState::CommandPicker { .. }
             | OverlayState::PermissionPrompt { .. }
+            | OverlayState::AutoDreamSuggestion { .. }
             | OverlayState::UserQuestionPrompt { .. }
             | OverlayState::OnboardingTheme { .. }
             | OverlayState::OnboardingProvider { .. }
@@ -319,6 +320,11 @@ fn command_dropdown_lines(
 fn overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
     match overlay {
         OverlayState::PermissionPrompt { overlay } => overlay.dropdown_lines(),
+        OverlayState::AutoDreamSuggestion {
+            skill_name,
+            purpose,
+            ..
+        } => autodream_suggestion_dropdown_lines(overlay, skill_name, purpose),
         OverlayState::ApiKeyPrompt { provider_id, .. } => {
             api_key_dropdown_lines("Enter API Key", provider_id)
         }
@@ -369,6 +375,50 @@ fn replace_user_question_footer(lines: &mut [Line<'static>], hint: &str) {
             Style::default().add_modifier(Modifier::DIM),
         ));
     }
+}
+
+fn autodream_suggestion_dropdown_lines(
+    overlay: &OverlayState,
+    skill_name: &str,
+    purpose: &str,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "AutoDream found a reusable workflow.",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "Review it before creating a reusable skill draft.",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            "Suggested skill:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("- Name: {skill_name}")),
+        Line::from(format!("- Purpose: {purpose}")),
+        Line::default(),
+        Line::from(Span::styled(
+            "Actions:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    let rows = visible_overlay_rows(
+        overlay_rows(overlay),
+        overlay_selection(overlay),
+        MAX_INLINE_DROPDOWN_ROWS,
+    );
+    lines.extend(
+        rows.into_iter()
+            .map(|row| selection_line(row.text, row.selected)),
+    );
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Use arrows · Enter to select · Esc to dismiss",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    lines
 }
 
 fn generic_overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {

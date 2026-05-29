@@ -26,8 +26,11 @@ mod workspace_paths;
 pub use agent_catalog::{load_agent_catalog, AgentCatalogEntry};
 pub use autodream::{
     autodream_status, autodream_status_with_store, autodream_suggestions_with_store,
-    autodream_turn_completed, autodream_turn_completed_with_store, run_autodream_review,
-    spawn_autodream_review, spawn_autodream_review_with_store, AutoDreamOutcome,
+    autodream_turn_completed, autodream_turn_completed_with_store,
+    ensure_manual_autodream_project_memory, render_manual_autodream_result, run_autodream_review,
+    should_show_manual_autodream_genskill_suggestion, spawn_autodream_review,
+    spawn_autodream_review_with_store, visible_autodream_assistant_text, AutoDreamOutcome,
+    ManualAutoDreamBootstrap,
 };
 pub use command::{
     command_surface, dispatch_command, find_command, supported_commands, CommandKind, CommandSpec,
@@ -47,7 +50,8 @@ pub use command_summary::render_cost_summary;
 pub(crate) use command_summary::{render_buddy_summary, render_usage_summary};
 pub use hooks::run_resource_hooks;
 pub use memory::{
-    flush_project_memory, project_memory_turn_completed, spawn_project_memory_review,
+    activate_project_memory, flush_project_memory, project_memory_turn_completed,
+    spawn_project_memory_review,
 };
 pub use model_preferences::{
     default_effort_level, effort_level_is_supported, normalized_effort_level,

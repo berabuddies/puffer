@@ -109,6 +109,10 @@ pub(crate) struct PendingSubmitResult {
     pub(crate) session_allow_all: bool,
     /// Project-memory review turns accumulated on the worker clone.
     pub(crate) project_memory_review_turns: usize,
+    /// AutoDream review turns accumulated on the worker clone.
+    pub(crate) autodream_review_turns: usize,
+    /// Whether this completed turn should ask the user about creating a skill.
+    pub(crate) autodream_suggest_skill: bool,
 }
 
 /// Carries one event emitted while a provider-backed turn is in flight.
@@ -174,6 +178,13 @@ pub(crate) struct PendingPermissionRequest {
 /// Stores the response channel for the currently visible user question prompt.
 pub(crate) struct PendingUserQuestionRequest {
     pub(crate) response_tx: Sender<UserQuestionPromptResponse>,
+}
+
+/// Describes the review action selected from an AutoDream suggestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoDreamSuggestionAction {
+    CreateSkillDraft,
+    Dismiss,
 }
 
 impl Default for TuiState {
@@ -735,6 +746,11 @@ pub(crate) enum OverlayState {
     UserQuestionPrompt {
         overlay: UserQuestionOverlay,
     },
+    AutoDreamSuggestion {
+        skill_name: String,
+        purpose: String,
+        selection: usize,
+    },
     OnboardingTheme {
         entries: Vec<ModelPickerEntry>,
         selection: usize,
@@ -781,7 +797,8 @@ impl OverlayState {
             | Self::OnboardingTheme { selection, .. }
             | Self::OnboardingProvider { selection, .. }
             | Self::OnboardingAuth { selection, .. }
-            | Self::OnboardingModel { selection, .. } => {
+            | Self::OnboardingModel { selection, .. }
+            | Self::AutoDreamSuggestion { selection, .. } => {
                 *selection = selection.saturating_sub(1);
             }
             Self::PermissionPrompt { overlay } => overlay.select_previous(),
@@ -837,6 +854,9 @@ impl OverlayState {
                 entries, selection, ..
             } => {
                 *selection = (*selection + 1).min(entries.len().saturating_sub(1));
+            }
+            Self::AutoDreamSuggestion { selection, .. } => {
+                *selection = (*selection + 1).min(1);
             }
             Self::PermissionPrompt { overlay } => overlay.select_next(),
             Self::Btw(overlay) => overlay.scroll_down(),
@@ -984,6 +1004,7 @@ impl OverlayState {
             | Self::Text(..)
             | Self::Usage(..)
             | Self::UserQuestionPrompt { .. }
+            | Self::AutoDreamSuggestion { .. }
             | Self::OnboardingTheme { .. }
             | Self::OnboardingProvider { .. }
             | Self::OnboardingAuth { .. }
@@ -1022,6 +1043,7 @@ impl OverlayState {
             | Self::Status(..)
             | Self::Text(..)
             | Self::UserQuestionPrompt { .. }
+            | Self::AutoDreamSuggestion { .. }
             | Self::Usage(..)
             | Self::OnboardingTheme { .. } => None,
         }
@@ -1111,6 +1133,7 @@ impl OverlayState {
             | Self::Text(..)
             | Self::Usage(..)
             | Self::UserQuestionPrompt { .. }
+            | Self::AutoDreamSuggestion { .. }
             | Self::ApiKeyPrompt { .. }
             | Self::OnboardingApiKey { .. } => true,
         }
@@ -1173,7 +1196,8 @@ impl OverlayState {
             | Self::Btw(..)
             | Self::Session(..)
             | Self::Status(..)
-            | Self::Text(..) => {}
+            | Self::Text(..)
+            | Self::AutoDreamSuggestion { .. } => {}
             Self::UserQuestionPrompt { .. } => {}
             Self::AuthPicker {
                 entries, selection, ..
@@ -1259,6 +1283,18 @@ impl OverlayState {
                 | Self::OnboardingAuth { .. }
                 | Self::OnboardingModel { .. }
         )
+    }
+
+    /// Returns the selected AutoDream suggestion action, when present.
+    pub(crate) fn selected_autodream_suggestion_action(&self) -> Option<AutoDreamSuggestionAction> {
+        match self {
+            Self::AutoDreamSuggestion { selection, .. } => match selection {
+                0 => Some(AutoDreamSuggestionAction::CreateSkillDraft),
+                1 => Some(AutoDreamSuggestionAction::Dismiss),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Returns the selected permission action when the overlay is a permission prompt.

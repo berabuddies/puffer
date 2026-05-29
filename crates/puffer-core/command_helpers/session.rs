@@ -555,6 +555,9 @@ fn emit_memory_path(
     scope: Option<MemoryScope>,
 ) -> Result<()> {
     if let Some(scope) = scope {
+        if scope == MemoryScope::Project {
+            let _ = crate::memory::activate_project_memory(state)?;
+        }
         return emit_system(
             state,
             session_store,
@@ -624,6 +627,9 @@ fn open_memory_file(
     scope: Option<MemoryScope>,
 ) -> Result<()> {
     let scope = scope.unwrap_or(MemoryScope::Project);
+    if scope == MemoryScope::Project {
+        let _ = crate::memory::activate_project_memory(state)?;
+    }
     let Some(path) = memory_file_path(state, scope) else {
         return emit_system(
             state,
@@ -638,7 +644,7 @@ fn open_memory_file(
         Ok(status) => emit_system(
             state,
             session_store,
-            format!("{status}\nTarget: {} memory", scope.label()),
+            format!("{status}\nTarget: {} memory\nPath: {}", scope.label(), path.display()),
         ),
         Err(error) => emit_system(
             state,
@@ -912,6 +918,10 @@ mod tests {
         assert!(path.starts_with(paths.projects_memory_dir()));
     }
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
 
 fn parse_memory_scope_for_command(raw: &str) -> std::result::Result<Option<MemoryScope>, String> {
     let normalized = raw.trim();

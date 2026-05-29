@@ -9,6 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
 
 mod artifacts;
+mod autodream;
 mod basics;
 mod commit;
 mod connectors;

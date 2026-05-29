@@ -26,6 +26,8 @@ use std::path::Path;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const MIN_GENSKILL_SUGGESTION_MESSAGES: usize = 4;
+
 const AUTODREAM_PROMPT: &str = r#"Run AutoDream for the active project. Treat the conversation above as short-term working memory and consolidate only durable project knowledge.
 
 Phase 1: Orient.
@@ -119,6 +121,15 @@ pub struct AutoDreamOutcome {
     pub genskill_suggested: bool,
 }
 
+/// Describes project-memory initialization performed for a manual AutoDream run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManualAutoDreamBootstrap {
+    /// User-visible initialization message to prepend to the AutoDream result.
+    pub message: String,
+    /// True when this invocation created project memory for the current cwd.
+    pub initialized_project_memory: bool,
+}
+
 /// Runs one AutoDream consolidation pass synchronously.
 pub fn run_autodream_review(
     state: &AppState,
@@ -127,6 +138,115 @@ pub fn run_autodream_review(
     auth_store: &mut AuthStore,
 ) -> Result<AutoDreamOutcome> {
     run_autodream_review_with_context(state, resources, providers, auth_store, None)
+}
+
+/// Initializes project memory for an explicit manual AutoDream run.
+pub fn ensure_manual_autodream_project_memory(
+    state: &mut AppState,
+) -> Result<ManualAutoDreamBootstrap> {
+    if !state.memory_enabled() || state.project_memory.is_some() {
+        return Ok(ManualAutoDreamBootstrap::default());
+    }
+    let Some(context) = crate::memory::activate_project_memory(state)? else {
+        return Ok(ManualAutoDreamBootstrap::default());
+    };
+    Ok(ManualAutoDreamBootstrap {
+        message: format!(
+            "Initialized project memory at {}.\n\n",
+            context.memory_file.display()
+        ),
+        initialized_project_memory: true,
+    })
+}
+
+/// Returns AutoDream assistant text without internal machine-readable markers.
+pub fn visible_autodream_assistant_text(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("AUTODREAM_GENSKILL:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Returns true when a manual AutoDream result should prompt the user to run GenSkill.
+pub fn should_show_manual_autodream_genskill_suggestion(
+    state: &AppState,
+    bootstrap: &ManualAutoDreamBootstrap,
+    genskill_detected: bool,
+) -> bool {
+    let enough_context = state
+        .transcript
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.role,
+                crate::MessageRole::User | crate::MessageRole::Assistant
+            )
+        })
+        .count()
+        >= MIN_GENSKILL_SUGGESTION_MESSAGES;
+    !bootstrap.initialized_project_memory
+        && enough_context
+        && state.autodream_genskill_suggestions_enabled()
+        && genskill_detected
+}
+
+/// Renders the user-visible result for a manual AutoDream run.
+pub fn render_manual_autodream_result(
+    bootstrap: &ManualAutoDreamBootstrap,
+    outcome: &AutoDreamOutcome,
+    should_suggest_genskill: bool,
+) -> String {
+    let mut sections = Vec::new();
+    let bootstrap_message = bootstrap.message.trim();
+    if !bootstrap_message.is_empty() {
+        sections.push(bootstrap_message.to_string());
+    }
+    if bootstrap.initialized_project_memory {
+        sections.push("Project memory ready.".to_string());
+    }
+    sections.push("AutoDream complete.".to_string());
+    sections.push(concise_autodream_summary(&outcome.assistant_text));
+    if should_suggest_genskill {
+        sections.push(
+            "Reusable workflow found. Review the suggestion menu to create a skill draft."
+                .to_string(),
+        );
+    }
+    sections.join("\n")
+}
+
+fn concise_autodream_summary(text: &str) -> String {
+    let visible = visible_autodream_assistant_text(text);
+    let normalized = visible.to_ascii_lowercase();
+    if visible.trim().is_empty() {
+        return "Memory checked.".to_string();
+    }
+    let reports_no_changes = normalized.contains("no stale")
+        || normalized.contains("no new durable")
+        || normalized.contains("no durable")
+        || normalized.contains("no changes")
+        || normalized.contains("no updates")
+        || normalized.contains("kept the existing")
+        || normalized.contains("memory verified");
+    if reports_no_changes {
+        return "Memory checked. No durable changes needed.".to_string();
+    }
+    let reports_update = normalized.contains("updated")
+        || normalized.contains("added")
+        || normalized.contains("replaced")
+        || normalized.contains("removed")
+        || normalized.contains("saved");
+    if reports_update {
+        return "Project memory updated.".to_string();
+    }
+    "Memory checked.".to_string()
 }
 
 fn run_autodream_review_with_context(

@@ -1,5 +1,5 @@
 use super::*;
-use puffer_config::{ConfigPaths, MemoryConfig, PufferConfig};
+use puffer_config::{set_puffer_home_override, ConfigPaths, MemoryConfig, PufferConfig};
 use puffer_session_store::SessionMetadata;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -79,6 +79,47 @@ fn autodream_counter_does_not_trigger_without_project_memory() {
 
     assert!(!autodream_turn_completed(&mut state));
     assert_eq!(state.autodream_review_turns, 0);
+}
+
+#[test]
+fn manual_autodream_bootstrap_registers_project_memory() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace/demo");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let _home = set_puffer_home_override(&home);
+    let mut state = AppState::new(
+        PufferConfig {
+            memory: MemoryConfig {
+                enabled: true,
+                autodream_enabled: true,
+                ..MemoryConfig::default()
+            },
+            ..PufferConfig::default()
+        },
+        cwd.clone(),
+        SessionMetadata {
+            id: Uuid::nil(),
+            display_name: None,
+            generated_title: None,
+            cwd,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        },
+    );
+
+    assert!(state.project_memory.is_none());
+    let bootstrap = ensure_manual_autodream_project_memory(&mut state).unwrap();
+
+    assert!(bootstrap.initialized_project_memory);
+    assert!(bootstrap.message.contains("Initialized project memory at"));
+    let project_memory = state.project_memory.expect("project memory");
+    assert_eq!(project_memory.project_name, "demo");
+    assert!(project_memory.memory_file.exists());
 }
 
 #[test]

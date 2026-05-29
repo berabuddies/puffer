@@ -76,6 +76,14 @@ const SUPPORTED_CONFIG_SETTINGS: &[ConfigSettingSpec] = &[
         options: &[],
     },
     ConfigSettingSpec {
+        canonical_key: "autodreamEnabled",
+        aliases: &["autodream_enabled"],
+        description: "Enable automatic AutoDream background memory consolidation.",
+        value_kind: ConfigSettingValueKind::Boolean,
+        scope: ConfigSettingScope::User,
+        options: &[],
+    },
+    ConfigSettingSpec {
         canonical_key: "effortLevel",
         aliases: &[],
         description: "Reasoning effort preference.",

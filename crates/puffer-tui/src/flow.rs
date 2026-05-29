@@ -27,8 +27,8 @@ mod flow_pickers;
 use crate::onboarding;
 use crate::session_overlay::SessionOverlay;
 use crate::state::{
-    PendingPermissionRequest, PendingSubmit, PendingSubmitEvent, PendingSubmitResult,
-    PendingUserQuestionRequest,
+    AutoDreamSuggestionAction, PendingPermissionRequest, PendingSubmit, PendingSubmitEvent,
+    PendingSubmitResult, PendingUserQuestionRequest,
 };
 use crate::task_overlay::open_task_overlay;
 use crate::user_question_overlay::UserQuestionOverlay;
@@ -56,6 +56,11 @@ mod flow_ultrareview;
 use flow_ultrareview::execute_ultrareview;
 
 const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
+
+fn is_autodream_command_input(submitted: &str) -> bool {
+    let (name, args) = parsed_slash_command(submitted);
+    name.eq_ignore_ascii_case("autodream") && args.trim().is_empty()
+}
 
 fn parsed_slash_command(submitted: &str) -> (&str, &str) {
     let trimmed = submitted.trim();
@@ -342,6 +347,19 @@ pub(crate) fn handle_prompt_submit(
         )?;
         return Ok(());
     }
+    if is_autodream_command_input(&submitted) {
+        ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
+        execute_autodream_command(
+            state,
+            resources,
+            providers,
+            auth_store,
+            session_store,
+            tui,
+            submitted,
+        )?;
+        return Ok(());
+    }
     if let Some(shell_command) = parse_shell_shortcut(&submitted) {
         ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
         execute_shell_shortcut(state, resources, session_store, tui, shell_command)?;
@@ -507,6 +525,7 @@ pub(crate) fn handle_prompt_submit(
             session_allow_all: worker_state.session_permission_state().allow_all_tools(),
             project_memory_review_turns: worker_state.project_memory_review_turns,
             autodream_review_turns: worker_state.autodream_review_turns,
+            autodream_suggest_skill: false,
         }));
     });
     tui.pending_submit = Some(PendingSubmit {
@@ -579,6 +598,8 @@ fn execute_connect_command(
             session_permission_state: worker_state.session_permission_state().clone(),
             session_allow_all: worker_state.session_permission_state().allow_all_tools(),
             project_memory_review_turns: worker_state.project_memory_review_turns,
+            autodream_review_turns: worker_state.autodream_review_turns,
+            autodream_suggest_skill: false,
         }));
     });
     tui.pending_submit = Some(PendingSubmit {
@@ -590,6 +611,97 @@ fn execute_connect_command(
         started_at: std::time::Instant::now(),
         thinking_active: false,
         status_hint: Some("Connecting...".to_string()),
+        cancel,
+    });
+    Ok(())
+}
+
+fn execute_autodream_command(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
+    session_store: &SessionStore,
+    tui: &mut TuiState,
+    submitted: String,
+) -> Result<()> {
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::CommandInvoked {
+            name: "autodream".to_string(),
+            args: String::new(),
+            actor: Some(state.user_actor()),
+        },
+    )?;
+    let mut worker_state = state.clone();
+    let worker_resources = resources.clone();
+    let worker_providers = providers.clone();
+    let mut worker_auth_store = auth_store.clone();
+    let (sender, receiver) = mpsc::channel();
+    let cancel = puffer_core::CancelToken::new();
+    thread::spawn(move || {
+        let mut should_suggest_genskill = false;
+        let outcome = (|| -> Result<puffer_core::TurnExecution> {
+            let _ = sender.send(PendingSubmitEvent::ReflectionCheckpoint(
+                "Initializing project memory...".to_string(),
+            ));
+            let bootstrap = puffer_core::ensure_manual_autodream_project_memory(&mut worker_state)?;
+            if bootstrap.initialized_project_memory {
+                let _ = sender.send(PendingSubmitEvent::ReflectionCheckpoint(
+                    "Project memory ready.".to_string(),
+                ));
+            }
+            let _ = sender.send(PendingSubmitEvent::ReflectionCheckpoint(
+                "Consolidating durable memory...".to_string(),
+            ));
+            let review = puffer_core::run_autodream_review(
+                &worker_state,
+                &worker_resources,
+                &worker_providers,
+                &mut worker_auth_store,
+            )?;
+            should_suggest_genskill = puffer_core::should_show_manual_autodream_genskill_suggestion(
+                &worker_state,
+                &bootstrap,
+                review.genskill_suggested,
+            );
+            Ok(puffer_core::TurnExecution {
+                assistant_text: puffer_core::render_manual_autodream_result(
+                    &bootstrap,
+                    &review,
+                    should_suggest_genskill,
+                ),
+                tool_invocations: Vec::new(),
+                reflection_traces: Vec::new(),
+            })
+        })()
+        .map_err(|error| error.to_string())
+        .or_else(|error| {
+            Ok::<puffer_core::TurnExecution, String>(puffer_core::TurnExecution {
+                assistant_text: format!("/autodream failed: {error}"),
+                tool_invocations: Vec::new(),
+                reflection_traces: Vec::new(),
+            })
+        });
+        let _ = sender.send(PendingSubmitEvent::Finished(PendingSubmitResult {
+            outcome,
+            auth_store: worker_auth_store,
+            session_permission_state: worker_state.session_permission_state().clone(),
+            session_allow_all: worker_state.session_permission_state().allow_all_tools(),
+            project_memory_review_turns: worker_state.project_memory_review_turns,
+            autodream_review_turns: worker_state.autodream_review_turns,
+            autodream_suggest_skill: should_suggest_genskill,
+        }));
+    });
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: submitted,
+        receiver,
+        transcript_persisted_len: state.transcript.len(),
+        pending_tool_calls: Vec::new(),
+        rendered_tool_invocations: 0,
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: Some("Initializing project memory...".to_string()),
         cancel,
     });
     Ok(())
@@ -777,6 +889,7 @@ pub(crate) fn poll_pending_submit(
                 session_allow_all: false,
                 project_memory_review_turns: state.project_memory_review_turns,
                 autodream_review_turns: state.autodream_review_turns,
+                autodream_suggest_skill: false,
             }),
         };
         match event {
@@ -925,6 +1038,9 @@ pub(crate) fn poll_pending_submit(
                         )?;
                     }
                 }
+                if result.autodream_suggest_skill && tui.overlay.is_none() {
+                    tui.overlay = Some(autodream_suggestion_overlay());
+                }
                 if *auth_store != previous_auth_store {
                     auth_store.save(auth_path)?;
                 }
@@ -937,6 +1053,35 @@ pub(crate) fn poll_pending_submit(
         tui.pending_submit = None;
     }
     Ok(completed)
+}
+
+/// Builds the post-AutoDream suggestion review overlay.
+pub(crate) fn autodream_suggestion_overlay() -> OverlayState {
+    OverlayState::AutoDreamSuggestion {
+        skill_name: "AutoDream memory consolidation workflow".to_string(),
+        purpose: "Reuse the project-memory bootstrap and consolidation flow.".to_string(),
+        selection: 0,
+    }
+}
+
+/// Handles a selected AutoDream suggestion action.
+pub(crate) fn handle_autodream_suggestion_action(
+    tui: &mut TuiState,
+    action: AutoDreamSuggestionAction,
+) {
+    match action {
+        AutoDreamSuggestionAction::CreateSkillDraft => {
+            if !tui
+                .queued_prompts
+                .iter()
+                .any(|prompt| prompt.trim().eq_ignore_ascii_case("/genskill"))
+            {
+                tui.enqueue_prompt("/genskill".to_string());
+            }
+        }
+        AutoDreamSuggestionAction::Dismiss => {}
+    }
+    tui.overlay = None;
 }
 
 /// Resolves the active permission prompt and unblocks the worker thread.
