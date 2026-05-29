@@ -1,0 +1,209 @@
+/* Chat primitives — pf-msg, pf-composer, pf-tool, pf-chip — shared by
+   Ask Puffer pane and future AgentDetail chat. Ported from puffer.css. */
+
+:root {
+  --pf-chat-text-size: 13px;
+  --pf-chat-detail-size: 12.5px;
+  --pf-chat-meta-size: 11px;
+  --pf-chat-code-size: 11.5px;
+}
+
+.pf-msg {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 14px;
+  align-items: flex-start;
+}
+.pf-msg-avatar {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  background: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 600; font-size: 13px;
+  flex-shrink: 0;
+}
+.pf-msg[data-role="agent"] .pf-msg-avatar {
+  background: color-mix(in oklab, var(--puffer-accent) 12%, var(--background));
+}
+.pf-msg[data-role="system"] {
+  opacity: 0.78;
+}
+.pf-msg[data-role="system"] .pf-msg-avatar {
+  background: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.pf-msg[data-role="system"][data-error="true"] {
+  opacity: 1;
+}
+.pf-msg[data-role="system"][data-error="true"] .pf-msg-avatar {
+  background: color-mix(in oklab, oklch(0.62 0.22 25) 18%, var(--background));
+  color: oklch(0.45 0.18 25);
+  border: 1px solid color-mix(in oklab, oklch(0.62 0.22 25) 28%, var(--border));
+}
+.pf-msg[data-role="system"][data-error="true"] .pf-msg-text {
+  color: oklch(0.45 0.18 25);
+}
+.pf-msg-body { min-width: 0; padding-top: 6px; }
+.pf-msg-meta {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-bottom: 6px;
+}
+.pf-msg-meta .name { font-size: var(--pf-chat-detail-size); font-weight: 600; }
+.pf-msg-meta .time {
+  font-size: var(--pf-chat-meta-size); color: var(--muted-foreground); font-family: var(--font-sans);
+}
+.pf-msg-text {
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-text-size);
+  line-height: 1.5;
+  color: var(--foreground);
+  text-wrap: pretty;
+}
+.pf-chat .pf-msg-text .message-body {
+  gap: 6px;
+  font-family: inherit;
+  font-size: inherit;
+}
+.pf-chat .pf-msg-text .message-body p,
+.pf-chat .pf-msg-text .message-body li,
+.pf-chat .pf-msg-text .message-body blockquote,
+.pf-chat .pf-msg-text .message-body td,
+.pf-chat .pf-msg-text .message-body th {
+  line-height: 1.5;
+}
+.pf-chat .pf-msg-text .message-body code {
+  font-size: var(--pf-chat-code-size);
+}
+.pf-chat .pf-msg-text .message-body pre {
+  font-size: var(--pf-chat-code-size);
+  line-height: 1.45;
+}
+.pf-chat .pf-msg-text .message-body h1.heading { font-size: 1.12em; }
+.pf-chat .pf-msg-text .message-body h2.heading { font-size: 1.06em; }
+.pf-chat .pf-msg-text .message-body h3.heading,
+.pf-chat .pf-msg-text .message-body h4.heading,
+.pf-chat .pf-msg-text .message-body h5.heading,
+.pf-chat .pf-msg-text .message-body h6.heading { font-size: 1em; }
+.pf-msg-text p { margin: 0 0 8px; }
+.pf-msg-text p:last-child { margin-bottom: 0; }
+.pf-msg-text code {
+  background: var(--muted);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: var(--pf-chat-code-size);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+}
+
+.pf-composer {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  padding: 10px 12px 8px;
+  transition: border-color 120ms, box-shadow 120ms;
+}
+.pf-composer:focus-within {
+  border-color: var(--puffer-accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--puffer-accent) 18%, transparent);
+}
+.pf-composer textarea {
+  width: 100%; border: 0; outline: 0; background: transparent;
+  resize: none; min-height: 26px; max-height: 200px;
+  font-size: var(--pf-chat-text-size); font-family: var(--font-sans); line-height: 1.5;
+  color: var(--foreground);
+  padding: 4px 4px 6px;
+}
+.pf-composer-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding-top: 4px;
+}
+.pf-composer-foot .spacer { flex: 1; }
+.pf-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px; font-weight: 500;
+  background: var(--muted);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font: inherit;
+}
+.pf-chip:hover { background: color-mix(in oklab, var(--accent) 80%, var(--muted)); }
+.pf-chip svg { width: 12px; height: 12px; }
+.pf-send-btn {
+  width: 32px; height: 32px; border-radius: 8px;
+  border: 0; cursor: pointer;
+  background: var(--puffer-accent);
+  color: var(--puffer-accent-fg);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.pf-send-btn svg { width: 16px; height: 16px; }
+.pf-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.pf-tool {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+  overflow: hidden;
+  box-shadow: var(--shadow-xs);
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-detail-size);
+}
+.pf-tool-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: color-mix(in oklab, var(--muted) 50%, var(--background));
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-detail-size);
+}
+.pf-tool-icon {
+  width: 22px; height: 22px;
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--puffer-accent) 14%, var(--background));
+  color: var(--puffer-accent);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.pf-tool-icon svg { width: 13px; height: 13px; }
+.pf-tool-name { font-weight: 600; color: var(--foreground); }
+.pf-tool-arg {
+  color: var(--muted-foreground);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1;
+}
+.pf-tool-status {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--pf-chat-meta-size);
+  color: var(--muted-foreground);
+  font-family: var(--font-sans);
+}
+.pf-tool-status .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: oklch(0.65 0.18 145);
+}
+.pf-tool-body {
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-detail-size);
+  background: var(--background);
+  max-height: 280px;
+  overflow: auto;
+}
+.pf-tool-body .terminal {
+  font-family: var(--font-mono);
+  background: oklch(0.16 0 0);
+  color: oklch(0.92 0 0);
+  padding: 12px 14px;
+  font-size: var(--pf-chat-code-size);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pf-tool-body .terminal .prompt { color: oklch(0.7 0.14 145); }
+.pf-tool-body .terminal .err    { color: oklch(0.7 0.18 25); }
+.pf-tool-body .terminal .dim    { color: oklch(0.55 0 0); }
