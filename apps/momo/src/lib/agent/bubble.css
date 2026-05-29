@@ -117,3 +117,48 @@
 .momo-chat .pf-tool-body {
   background: var(--color-surface-app);
 }
+
+/* diff 卡内部行(DiffCard 的 .pf-diff)。这些行布局样式只存在于其他组件的
+   scoped <style> 或针对 .pf-file-row,均不作用于 DiffCard——故全部在此全局补齐:
+   mono 字体、flex 行、定宽右对齐 gutter、add/del 着色、hunk 头部弱化。
+   diff 配色按 spec §4 硬编码(add #e9f5ea/#1e7a34, del #fdecec/#b3261e)。 */
+.momo-chat .pf-diff {
+  font-family: var(--font-mono);
+  font-size: var(--pf-chat-code-size, 11.5px);
+  line-height: 1.55;
+  padding: 6px 0;
+  overflow-x: auto;
+}
+.momo-chat .pf-diff .row {
+  display: flex;
+  gap: 10px;
+  padding: 0 12px;
+  white-space: pre;
+}
+.momo-chat .pf-diff .row.add {
+  background: #e9f5ea;
+  color: #1e7a34;
+}
+.momo-chat .pf-diff .row.del {
+  background: #fdecec;
+  color: #b3261e;
+}
+.momo-chat .pf-diff .row.ctx {
+  color: var(--color-text-secondary);
+}
+.momo-chat .pf-diff .gutter {
+  flex: 0 0 auto;
+  min-width: 28px;
+  text-align: right;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+.momo-chat .pf-diff .code {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.momo-chat .pf-diff .hunk-hdr {
+  padding: 2px 12px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-rail);
+}
