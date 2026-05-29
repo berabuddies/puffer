@@ -578,23 +578,21 @@ export async function mintWorldRouterApiKey(
 }
 
 /**
- * Register the minted `sk-worldrouter-…` key with the puffer Tauri host
- * over WebSocket. The host stores it as the `puffer` provider's API key
- * (the only worldrouter-compatible provider id the backend whitelists)
- * and will inject it as `PUFFER_API_KEY` when it spawns the puffer CLI
- * for a chat turn — which is what makes chat actually work.
+ * Register the minted `sk-worldrouter-…` key with the puffer *daemon* over
+ * WebSocket. The daemon has no "puffer" provider, so the key is registered
+ * against the built-in OpenAI-compatible `openai` provider and that
+ * provider's base_url is repointed at worldrouter's inference endpoint
+ * (see `loginWorldRouter`). Chat turns then route through worldrouter — which
+ * is what makes chat actually work.
  *
- * Kept here (next to mintWorldRouterApiKey) instead of in wsClient.ts so
+ * Kept here (next to mintWorldRouterApiKey) instead of in daemonAuth.ts so
  * the auth module owns the whole "JWT → API key → registered" pipeline.
  */
 export async function registerApiKeyWithPufferHost(apiKey: string): Promise<void> {
   // Lazy import keeps auth.svelte.ts importable in non-browser contexts
-  // (e.g. unit tests) where wsClient pulls in `WebSocket`.
-  const { request } = await import("./wsClient");
-  await request("login_with_api_key", {
-    providerId: "puffer",
-    apiKey
-  });
+  // (e.g. unit tests) where daemonClient pulls in `WebSocket`.
+  const { loginWorldRouter } = await import("./agent/daemonAuth");
+  await loginWorldRouter(apiKey);
 }
 
 async function safeJson(res: Response): Promise<unknown> {
@@ -795,14 +793,16 @@ export function signOut(): void {
   }
   // Drop the cached worldrouter session so it can't outlive the login.
   clearWrSession();
-  // Best-effort: tell the puffer host to forget the key too, so a stale
-  // PUFFER_API_KEY doesn't leak across signed-out sessions.
+  // Best-effort: tell the puffer daemon to forget the key too (registered
+  // under the built-in `openai` provider), so a stale worldrouter key
+  // doesn't leak across signed-out sessions.
   void (async () => {
     try {
-      const { request } = await import("./wsClient");
-      await request("logout_provider", { providerId: "puffer" });
+      const { ensureDaemonClient } = await import("./daemonClient");
+      const client = await ensureDaemonClient();
+      await client.request("logout_provider", { providerId: "openai" });
     } catch {
-      /* host may be unavailable — local logout still proceeds */
+      /* daemon may be unavailable — local logout still proceeds */
     }
   })();
   authState.status = "signedOut";
