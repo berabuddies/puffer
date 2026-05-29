@@ -52,7 +52,9 @@
     | "token"
     | "wrench"
     | "pin"
-    | "bot";
+    | "bot"
+    | "message-circle"
+    | "mail";
 </script>
 
 <script lang="ts">
@@ -89,6 +91,8 @@
   import LockIcon from "lucide-svelte/icons/lock";
   import LogsIcon from "lucide-svelte/icons/logs";
   import ListTodoIcon from "lucide-svelte/icons/list-todo";
+  import MailIcon from "lucide-svelte/icons/mail";
+  import MessageCircleIcon from "lucide-svelte/icons/message-circle";
   import MoreHorizontalIcon from "lucide-svelte/icons/more-horizontal";
   import PanelLeftCloseIcon from "lucide-svelte/icons/panel-left-close";
   import PanelLeftOpenIcon from "lucide-svelte/icons/panel-left-open";
@@ -171,7 +175,9 @@
     token: BadgeCentIcon,
     wrench: WrenchIcon,
     pin: PinIcon,
-    bot: BotIcon
+    bot: BotIcon,
+    "message-circle": MessageCircleIcon,
+    mail: MailIcon
   };
 
   let { name, size = 14, color, strokeWidth = 1.8 }: Props = $props();

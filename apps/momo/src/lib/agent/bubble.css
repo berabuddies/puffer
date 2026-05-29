@@ -82,3 +82,38 @@
   font-family: var(--font-mono);
   font-size: 12px;
 }
+
+/* 复用 ToolCard 的 .pf-tool;折叠=pill,展开=统一卡片。
+   bubble.css 是普通导入样式表(非 Svelte scoped),选择器不用 :global()。 */
+.momo-chat .pf-tool {
+  border: 1px solid var(--color-input-border);
+  border-radius: 12px;
+  background: var(--color-surface-app);
+  box-shadow: none;
+  width: fit-content;
+  max-width: 560px;
+}
+.momo-chat .pf-tool[data-collapsed="false"] {
+  width: auto;
+}
+.momo-chat .pf-tool-head {
+  background: transparent;
+  border-bottom: 0;
+  min-height: 36px;
+  padding: 8px 14px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-system);
+  font-size: 13px;
+}
+.momo-chat .pf-tool[data-collapsed="false"] .pf-tool-head {
+  border-bottom: 1px solid var(--color-card-border);
+}
+.momo-chat .pf-tool-icon {
+  background: transparent;
+  color: var(--color-text-secondary);
+  width: 16px;
+  height: 16px;
+}
+.momo-chat .pf-tool-body {
+  background: var(--color-surface-app);
+}

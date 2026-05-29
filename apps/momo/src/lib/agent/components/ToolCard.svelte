@@ -2,6 +2,8 @@
   import Icon, { type IconName } from "./Icon.svelte";
   import HighlightedLine from "./HighlightedLine.svelte";
   import type { ToolTimelineItem } from "../types";
+  import { lookupToolLabel } from "../toolLabels";
+  import { SHOW_RAW_AGENT_ACTIVITY } from "../debugFlags";
 
   type Props = {
     item: ToolTimelineItem;
@@ -818,6 +820,14 @@
   );
   let status = $derived(statusLabel(toolStatus));
 
+  // Friendly head label/icon (prod) vs raw toolId (dev). `inputJson` is the
+  // parsed tool input, used by the bash command sniff in lookupToolLabel.
+  let friendly = $derived(lookupToolLabel(toolName, inputJson));
+  let headName = $derived(
+    SHOW_RAW_AGENT_ACTIVITY ? toolDisplayName : (friendly?.label ?? "正在处理…")
+  );
+  let headIcon = $derived(friendly?.icon ?? null);
+
   function handleHeadClick() {
     if (toggleable) collapsed = !collapsed;
   }
@@ -836,8 +846,8 @@
     aria-label={toggleable ? (collapsed ? "Expand tool output" : "Collapse tool output") : undefined}
     disabled={!toggleable}
   >
-    <span class="pf-tool-icon"><Icon name={iconFor(toolName)} size={13} /></span>
-    <span class="pf-tool-name" title={toolName}>{toolDisplayName}</span>
+    <span class="pf-tool-icon"><Icon name={headIcon ?? iconFor(toolName)} size={13} /></span>
+    <span class="pf-tool-name" title={toolName}>{headName}</span>
     <span class="pf-tool-arg" title={arg}>{arg}</span>
     <span class="pf-tool-status" data-state={status}>
       <span class="dot"></span>{status}

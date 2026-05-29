@@ -218,6 +218,19 @@ test("tool-calls-requested renders a running ToolCard that flips to success", as
   // data-state on `.pf-tool-status`.
   await expect(tool.locator('.pf-tool-status[data-state="running"]')).toBeVisible();
 
+  // BubbleConversation renders ToolCard with the default `defaultCollapsed`
+  // (true), so a lone running tool starts as a collapsed pill. The head is a
+  // toggle (a pending tool is toggleable), so clicking it expands the card.
+  // The pill↔card bubble.css skin keys off this `data-collapsed` attribute.
+  await expect(tool).toHaveAttribute("data-collapsed", "true");
+  await tool.locator(".pf-tool-head").click();
+  await expect(tool).toHaveAttribute("data-collapsed", "false");
+  // Raw toolId still shows in dev (SHOW_RAW_AGENT_ACTIVITY === import.meta.env.DEV).
+  await expect(tool).toContainText("read_file");
+  // Collapse back so the success-flip assertions below run against the pill.
+  await tool.locator(".pf-tool-head").click();
+  await expect(tool).toHaveAttribute("data-collapsed", "true");
+
   // The matching invocation (same callId + turnId) upgrades the pill in place.
   daemon.emit(`session:${sessionId}:event`, {
     type: "tool-invocations",
