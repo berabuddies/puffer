@@ -40,6 +40,7 @@ fn builtins_define_host_enforced_action_permissions() {
     let update_group = telegram.actions.get("update_group_title").unwrap();
     let lark = builtin_connector_template("lark-login").unwrap();
     let slack = builtin_connector_template("slack-login").unwrap();
+    let email = builtin_connector_template("email").unwrap();
     let gmail = builtin_connector_template("gmail-browser").unwrap();
 
     assert_eq!(action.permission.category, "external_message_send");
@@ -93,7 +94,45 @@ fn builtins_define_host_enforced_action_permissions() {
         gmail.subscriber.as_ref().unwrap().manifest_slug,
         "gmail-browser"
     );
-    assert!(gmail.actions.is_empty());
+    assert_eq!(
+        email
+            .actions
+            .get("list_emails")
+            .unwrap()
+            .permission
+            .category,
+        "external_message_read"
+    );
+    assert!(
+        !email
+            .actions
+            .get("list_emails")
+            .unwrap()
+            .permission
+            .external_side_effect
+    );
+    assert_eq!(
+        email
+            .actions
+            .get("draft_reply")
+            .unwrap()
+            .permission
+            .category,
+        "external_message_draft"
+    );
+    assert!(email.actions.contains_key("send_message"));
+    assert!(email.actions.contains_key("send_email"));
+    assert_eq!(
+        gmail
+            .actions
+            .get("list_emails")
+            .unwrap()
+            .permission
+            .category,
+        "external_message_read"
+    );
+    assert!(gmail.actions.contains_key("send_email"));
+    assert!(gmail.actions.contains_key("delete"));
 }
 
 #[test]

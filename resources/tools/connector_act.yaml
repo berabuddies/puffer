@@ -2,7 +2,16 @@ id: ConnectorAct
 name: ConnectorAct
 description: |-
   Invoke a connector action, such as sending a message through Telegram,
-  Slack, or email.
+  Slack, email, or gmail-browser.
+
+  Use this tool for configured email and gmail-browser accounts instead of
+  opening a separate browser session. Email actions include list_emails,
+  list_inbox, list_category, search_emails, mark_read, draft_reply,
+  draft_forward, send_email, and delete. The gmail-browser connector also
+  supports requestuserbrowseraction when it needs the user to complete a
+  sign-in or approval step in the global Puffer browser profile. The email
+  connector executes through IMAP/SMTP; gmail-browser executes through the
+  daemon-managed global Chrome profile that owns browser-backed connections.
 
   Connector actions are external side effects. The connector's action metadata
   defines the permission category and input shape.

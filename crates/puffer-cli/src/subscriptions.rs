@@ -6,6 +6,8 @@
 //! task. Workflow tools and internal tools (`SubscriptionCreate`, `Telegram`, ...)
 //! reach into it through a `OnceLock` installed here.
 
+#[path = "email_connector_actions.rs"]
+mod email_connector_actions;
 #[path = "lark_connector_actions.rs"]
 mod lark_connector_actions;
 #[path = "slack_connector_actions.rs"]
@@ -31,6 +33,10 @@ use std::thread;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
+use self::email_connector_actions::{
+    email_action_via_subscriber, email_subscriber_for_action, email_subscriber_for_platform,
+    is_email_action, is_email_connector,
+};
 use self::lark_connector_actions::{
     is_lark_action, is_lark_connector, run_lark_action, LarkConnectionAuthChecker,
 };
@@ -468,6 +474,20 @@ impl ConnectorActionExecutor for ManagerConnectorActionExecutor {
                 summary, action_definition.permission.category
             ));
         }
+        if is_email_connector(connector_slug) && is_email_action(action) {
+            let summary = email_action_via_subscriber(
+                &manager,
+                &self.paths,
+                connector_slug,
+                &connection,
+                action,
+                &input,
+            )?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
+        }
         if is_telegram_connector(connector_slug) && is_telegram_action(action) {
             let summary = telegram_action_via_subscriber(
                 &manager,
@@ -705,13 +725,13 @@ fn parse_reply_to(input: &serde_json::Value) -> Result<Option<i32>> {
 }
 
 fn subscriber_for_platform(platform: &str) -> Option<&'static str> {
+    if let Some(subscriber) = email_subscriber_for_platform(platform) {
+        return Some(subscriber);
+    }
     if let Some(subscriber) = telegram_subscriber_for_platform(platform) {
         return Some(subscriber);
     }
-    match platform {
-        "email" => Some("email"),
-        _ => None,
-    }
+    None
 }
 
 fn subscriber_for_action(
@@ -722,6 +742,11 @@ fn subscriber_for_action(
 ) -> Result<Option<String>> {
     if let Some(subscriber_id) =
         telegram_subscriber_for_action(manager, paths, connector_slug, connection_slug)?
+    {
+        return Ok(Some(subscriber_id));
+    }
+    if let Some(subscriber_id) =
+        email_subscriber_for_action(manager, paths, connector_slug, connection_slug)?
     {
         return Ok(Some(subscriber_id));
     }

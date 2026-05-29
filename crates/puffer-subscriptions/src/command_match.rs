@@ -47,6 +47,14 @@ pub(crate) fn command_matches_terminal_event(
             .and_then(Value::as_str)
             .map(|action| payload_str_eq(&envelope.event.payload, "action", action))
             .unwrap_or(true),
+        SubscriberCommand::Custom { op, args }
+            if op == "email_act" || op == "gmail_browser_act" =>
+        {
+            args.get("action")
+                .and_then(Value::as_str)
+                .map(|action| payload_str_eq(&envelope.event.payload, "action", action))
+                .unwrap_or(true)
+        }
         _ => true,
     }
 }
@@ -231,6 +239,29 @@ mod tests {
             &envelope(
                 "message_list",
                 json!({"peer":"477843728","before_id":325,"sender_filter":"Tony"})
+            )
+        ));
+    }
+
+    #[test]
+    fn custom_email_actions_match_action_terminal_events() {
+        let command = SubscriberCommand::Custom {
+            op: "email_act".into(),
+            args: json!({"action":"list_emails"}),
+        };
+
+        assert!(command_matches_terminal_event(
+            &command,
+            &envelope(
+                "email_action_complete",
+                json!({"action":"list_emails","summary":"ok"})
+            )
+        ));
+        assert!(!command_matches_terminal_event(
+            &command,
+            &envelope(
+                "email_action_complete",
+                json!({"action":"delete","summary":"ok"})
             )
         ));
     }

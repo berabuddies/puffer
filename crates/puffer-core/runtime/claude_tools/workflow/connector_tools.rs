@@ -220,7 +220,7 @@ pub fn execute_connector_delete(
 }
 
 /// Executes `ConnectorAct`.
-pub fn execute_connector_act(_state: &mut AppState, _cwd: &Path, input: Value) -> Result<String> {
+pub fn execute_connector_act(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
     let parsed: ConnectorActInput =
         serde_json::from_value(input).context("invalid ConnectorAct input")?;
     let manager = subscription_manager()?;
@@ -254,6 +254,25 @@ pub fn execute_connector_act(_state: &mut AppState, _cwd: &Path, input: Value) -
         object
             .entry("connection_slug")
             .or_insert_with(|| Value::String(connection.clone()));
+        object
+            .entry("connector_slug")
+            .or_insert_with(|| Value::String(parsed.connector_slug.clone()));
+    }
+    if parsed.action == "requestuserbrowseraction" {
+        let output = super::request_user_browser_action::execute_request_user_browser_action(
+            state,
+            cwd,
+            action_input,
+        )?;
+        let output_value: Value =
+            serde_json::from_str(&output).context("parse requestuserbrowseraction output")?;
+        return Ok(serde_json::to_string_pretty(&json!({
+            "success": true,
+            "summary": "requested user browser action",
+            "output": output_value,
+            "retryable": false,
+            "permission": action_definition.permission,
+        }))?);
     }
     let request = ConnectorActionRequest {
         connection: connection.clone(),

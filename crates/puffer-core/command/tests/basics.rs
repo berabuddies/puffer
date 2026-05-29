@@ -352,7 +352,8 @@ fn workflows_connectors_filter_presets_use_stable_capability_terms() {
 
     let text = &state.transcript.last().unwrap().text;
     assert!(text.contains("filters: trigger-ready | no-trigger | draft | append | has-actions"));
-    assert!(text.contains("showing 7/11 connectors for query=\"has-actions\""));
+    assert!(text.contains("showing 8/11 connectors for query=\"has-actions\""));
+    assert!(text.contains("- gmail-browser [auth,events,no-trigger,actions]"));
     assert!(text.contains("- telegram-login [auth,events,no-trigger,actions]"));
     assert!(text.contains("actions=send_message,"));
     assert!(!text.contains("- slack-bot ["));

@@ -94,6 +94,87 @@ fn lark_common_properties() -> Value {
     })
 }
 
+/// Returns the Email and Gmail-browser action input schema.
+pub(super) fn email_action_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "connection_slug": {"type": "string"},
+            "account_slug": {"type": "string"},
+            "connection": {"type": "string"},
+            "account": {"type": "string"},
+            "mailbox": {
+                "description": "IMAP mailbox or Gmail category/label target; defaults to INBOX.",
+                "type": "string"
+            },
+            "category": {
+                "description": "Gmail category or mailbox shortcut such as inbox, primary, promotions, social, updates, forums, sent, drafts, spam, or trash.",
+                "type": "string"
+            },
+            "label": {"type": "string"},
+            "query": {"type": "string"},
+            "keywords": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}}
+                ]
+            },
+            "from": {"type": "string"},
+            "to": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}}
+                ]
+            },
+            "cc": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}}
+                ]
+            },
+            "bcc": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}}
+                ]
+            },
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+            "text": {"type": "string"},
+            "message": {"type": "string"},
+            "uid": {
+                "oneOf": [
+                    {"type": "integer"},
+                    {"type": "string"},
+                    {"type": "array"}
+                ]
+            },
+            "uids": {"type": "array"},
+            "message_id": {"type": "string"},
+            "thread_id": {"type": "string"},
+            "gmail_thread_id": {"type": "string"},
+            "id": {
+                "oneOf": [
+                    {"type": "integer"},
+                    {"type": "string"}
+                ]
+            },
+            "unread": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "scan_limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "expunge": {"type": "boolean"},
+            "in_reply_to": {"type": "string"},
+            "references": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}}
+                ]
+            }
+        },
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Telegram peer action input schema.
 pub(super) fn telegram_peer_action_schema() -> Value {
     serde_json::json!({

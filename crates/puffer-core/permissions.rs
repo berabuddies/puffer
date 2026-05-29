@@ -358,10 +358,12 @@ impl RuntimePermissionContext {
                     reason: None,
                 }
             }),
-            "AskUserQuestion" => Some(ToolPermissionDecision {
-                behavior: ToolPermissionBehavior::Allow,
-                reason: None,
-            }),
+            "AskUserQuestion" | "requestuserbrowseraction" | "RequestUserBrowserAction" => {
+                Some(ToolPermissionDecision {
+                    behavior: ToolPermissionBehavior::Allow,
+                    reason: None,
+                })
+            }
             "WebSearch" => Some(ToolPermissionDecision {
                 behavior: ToolPermissionBehavior::Ask,
                 reason: Some("web search requires permission".to_string()),

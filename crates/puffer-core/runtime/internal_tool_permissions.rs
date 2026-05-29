@@ -78,6 +78,7 @@ fn execute_internal_tool_request_result(
     }
     let workflow_tool = match canonical_tool_name(&request.tool_id).as_str() {
         "email" => "Email",
+        "requestuserbrowseraction" => "requestuserbrowseraction",
         "telegram" => "Telegram",
         other => anyhow::bail!("unknown internal executable tool `{other}`"),
     };
@@ -141,7 +142,7 @@ fn resolve_internal_tool_permission_result(
 ) -> anyhow::Result<InternalToolPermissionResponse> {
     match canonical_tool_name(&request.tool_id).as_str() {
         "browser" => resolve_browser_permission(state, resources, registry, cwd, request.input),
-        "email" | "telegram" => {
+        "email" | "requestuserbrowseraction" | "telegram" => {
             resolve_generic_internal_permission(state, resources, registry, cwd, request)
         }
         other => Ok(InternalToolPermissionResponse::deny(format!(

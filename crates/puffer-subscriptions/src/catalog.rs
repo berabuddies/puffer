@@ -300,14 +300,14 @@ fn email_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: message_output_schema(),
-        actions: send_message_actions(),
+        actions: email_actions(),
     }
 }
 
 fn gmail_browser_template() -> ConnectorTemplate {
     ConnectorTemplate {
         slug: "gmail-browser".to_string(),
-        description: "Gmail web connector using a selected Chrome profile".to_string(),
+        description: "Gmail web connector using the global Puffer browser profile".to_string(),
         skill: "gmail-browser".to_string(),
         binary: "puffer __subscriber gmail-browser".to_string(),
         command: Vec::new(),
@@ -320,7 +320,142 @@ fn gmail_browser_template() -> ConnectorTemplate {
             display_name: Some("Gmail Browser".to_string()),
         }),
         output_schema: message_output_schema(),
-        actions: BTreeMap::new(),
+        actions: gmail_browser_actions(),
+    }
+}
+
+fn email_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = send_message_actions();
+    for action in email_specific_actions("email") {
+        actions.insert(action.slug.clone(), action);
+    }
+    actions
+}
+
+fn gmail_browser_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = BTreeMap::new();
+    for action in email_specific_actions("Gmail") {
+        actions.insert(action.slug.clone(), action);
+    }
+    let browser_action = request_user_browser_action_definition();
+    actions.insert(browser_action.slug.clone(), browser_action);
+    actions
+}
+
+fn request_user_browser_action_definition() -> ConnectorActionDefinition {
+    ConnectorActionDefinition {
+        slug: "requestuserbrowseraction".to_string(),
+        description: "Ask the user to complete a browser action in the global Puffer profile"
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Specific browser action the user should complete."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Optional URL or page that the user should use."
+                }
+            },
+            "required": ["description"],
+            "additionalProperties": false
+        }),
+        output_schema: action_output_schema(),
+        permission: ConnectorPermissionDefinition {
+            category: "user_browser_action".to_string(),
+            summary: "Ask the user to complete a browser action".to_string(),
+            external_side_effect: true,
+        },
+    }
+}
+
+fn email_specific_actions(service: &str) -> Vec<ConnectorActionDefinition> {
+    vec![
+        email_action_definition(
+            "list_emails",
+            &format!("List {service} emails with optional mailbox, category, keyword, sender, and unread filters"),
+            "external_message_read",
+            "Read external email messages",
+            false,
+        ),
+        email_action_definition(
+            "list_inbox",
+            &format!("List recent {service} inbox emails"),
+            "external_message_read",
+            "Read external email messages",
+            false,
+        ),
+        email_action_definition(
+            "list_category",
+            &format!("List {service} emails from a mailbox, category, or label"),
+            "external_message_read",
+            "Read external email messages",
+            false,
+        ),
+        email_action_definition(
+            "search_emails",
+            &format!("Search {service} emails by keywords and headers"),
+            "external_message_read",
+            "Read external email messages",
+            false,
+        ),
+        email_action_definition(
+            "mark_read",
+            &format!("Mark one or more {service} emails as read"),
+            "external_message_interaction",
+            "Mark external email messages as read",
+            true,
+        ),
+        email_action_definition(
+            "draft_reply",
+            &format!("Create a draft reply in {service}"),
+            "external_message_draft",
+            "Draft an external email reply",
+            true,
+        ),
+        email_action_definition(
+            "draft_forward",
+            &format!("Create a draft forward in {service}"),
+            "external_message_draft",
+            "Draft an external email forward",
+            true,
+        ),
+        email_action_definition(
+            "send_email",
+            &format!("Send an email through {service}"),
+            "external_message_send",
+            "Send an external email",
+            true,
+        ),
+        email_action_definition(
+            "delete",
+            &format!("Delete one or more {service} emails"),
+            "external_message_delete",
+            "Delete external email messages",
+            true,
+        ),
+    ]
+}
+
+fn email_action_definition(
+    slug: &str,
+    description: &str,
+    category: &str,
+    summary: &str,
+    external_side_effect: bool,
+) -> ConnectorActionDefinition {
+    ConnectorActionDefinition {
+        slug: slug.to_string(),
+        description: description.to_string(),
+        input_schema: email_action_schema(),
+        output_schema: action_output_schema(),
+        permission: ConnectorPermissionDefinition {
+            category: category.to_string(),
+            summary: summary.to_string(),
+            external_side_effect,
+        },
     }
 }
 

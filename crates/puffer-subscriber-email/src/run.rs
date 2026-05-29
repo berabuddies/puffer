@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::commands::CommandStream;
 use crate::config::{self, EmailConfig};
+use crate::email_actions;
 use crate::events::emit_control;
 use crate::imap_poll;
 use crate::smtp_send;
@@ -153,13 +154,19 @@ pub async fn run() -> anyhow::Result<()> {
                     json!({"error": "email subscriber does not handle telegram login"}),
                 )?;
             }
-            SubscriberCommand::Custom { op, .. } => {
+            SubscriberCommand::Custom { op, args } if op == "email_act" => {
+                let action = args.get("action").and_then(serde_json::Value::as_str);
                 emit_control(
                     &env.topic,
-                    "command_ignored",
-                    json!({ "op": op, "error": "unknown custom op" }),
+                    "email_action_error",
+                    json!({
+                        "op": op,
+                        "action": action,
+                        "error": "email subscriber is not configured yet",
+                    }),
                 )?;
             }
+            SubscriberCommand::Custom { op, .. } => emit_unknown_custom(&env.topic, &op)?,
         }
     }
 
@@ -306,6 +313,30 @@ async fn handle_command(
                 }
             }
         }
+        SubscriberCommand::Custom { op, args } if op == "email_act" => {
+            let action = args
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let input = args.get("input").cloned().unwrap_or_else(|| json!({}));
+            match email_actions::handle_action(config, action, &input).await {
+                Ok(payload) => {
+                    emit_control(&env.topic, "email_action_complete", payload)?;
+                }
+                Err(err) => {
+                    error!(error = %err, action, "email action failed");
+                    emit_control(
+                        &env.topic,
+                        "email_action_error",
+                        json!({
+                            "op": op,
+                            "action": action,
+                            "error": format!("{err:#}"),
+                        }),
+                    )?;
+                }
+            }
+        }
         SubscriberCommand::TelegramLoginStart { .. }
         | SubscriberCommand::TelegramLoginSubmitCode { .. }
         | SubscriberCommand::TelegramLoginSubmitPassword { .. }
@@ -322,13 +353,15 @@ async fn handle_command(
                 json!({ "error": "email subscriber does not handle telegram login" }),
             )?;
         }
-        SubscriberCommand::Custom { op, .. } => {
-            emit_control(
-                &env.topic,
-                "command_ignored",
-                json!({ "op": op, "error": "unknown custom op" }),
-            )?;
-        }
+        SubscriberCommand::Custom { op, .. } => emit_unknown_custom(&env.topic, &op)?,
     }
     Ok(())
+}
+
+fn emit_unknown_custom(topic: &str, op: &str) -> anyhow::Result<()> {
+    emit_control(
+        topic,
+        "command_ignored",
+        json!({ "op": op, "error": "unknown custom op" }),
+    )
 }
