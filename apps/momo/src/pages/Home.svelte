@@ -1,7 +1,6 @@
 <!--
-  Home — the task feed. Two serif-titled sections ("Work", "Life") with a
-  neutral count chip beside the label, followed by the matching TaskCards.
-  Composer is pinned to the bottom of the page column.
+  Home — the task feed. A single flat list of TaskCards (Work/Life grouping
+  was removed), with the Composer pinned to the bottom of the page column.
 
   Page-level interaction wiring (TaskCard component is owned by another
   agent, so we wrap each card in a clickable layer and use event delegation
@@ -11,39 +10,23 @@
   import PageHeader from "../components/shell/PageHeader.svelte";
   import Composer from "../components/shell/Composer.svelte";
   import Mascot from "../components/common/Mascot.svelte";
-  import SectionHeading from "../components/home/SectionHeading.svelte";
   import TaskCard from "../components/home/TaskCard.svelte";
 
-  import type { Task, TaskGroup } from "../data/types";
+  import type { Task } from "../data/types";
   import { navigate } from "../router.svelte";
   import { pushToast } from "../lib/toast.svelte";
   import { resetOnboarding } from "../lib/auth.svelte";
 
-  // Mock task feed was removed alongside the scripted demos. Home now
-  // renders with empty Work/Life groups until the backend exposes a real
-  // task source — the structure is preserved so the page lays out the
-  // same way and existing tests/snapshots stay valid.
-  let groups = $state<TaskGroup[]>([
-    { label: "Work", count: 0, tasks: [] },
-    { label: "Life", count: 0, tasks: [] }
-  ]);
-
-  // Collapsed group labels (toggle via clicking the count chip header).
-  let collapsed = $state<Record<string, boolean>>({});
-
-  function toggleGroup(label: string): void {
-    collapsed[label] = !collapsed[label];
-  }
+  // Mock task feed was removed alongside the scripted demos, and Work/Life
+  // grouping is gone — Home now renders a single flat task list (matching
+  // the Paper "Home" board). It stays empty until the backend exposes a
+  // real task source; the structure is preserved so the page lays out the
+  // same way once tasks arrive.
+  let tasks = $state<Task[]>([]);
 
   function removeTask(id: string): void {
-    for (const g of groups) {
-      const idx = g.tasks.findIndex((t) => t.id === id);
-      if (idx >= 0) {
-        g.tasks.splice(idx, 1);
-        g.count = g.tasks.length;
-        return;
-      }
-    }
+    const idx = tasks.findIndex((t) => t.id === id);
+    if (idx >= 0) tasks.splice(idx, 1);
   }
 
   /**
@@ -131,36 +114,32 @@
 </PageHeader>
 
 <section class="feed">
-  {#each groups as group (group.label)}
-    <div class="feed__group">
-      <button
-        type="button"
-        class="feed__heading-btn"
-        aria-expanded={!collapsed[group.label]}
-        onclick={() => toggleGroup(group.label)}
-      >
-        <SectionHeading label={group.label} count={group.count} />
-      </button>
-      {#if !collapsed[group.label]}
-        <ul class="feed__list">
-          {#each group.tasks as task (task.id)}
-            <li>
-              <div
-                class="task-wrap"
-                role="button"
-                tabindex="0"
-                aria-label={`Open ${task.title}`}
-                onclick={(e) => onCardClick(e, task)}
-                onkeydown={(e) => onCardKey(e, task)}
-              >
-                <TaskCard {task} />
-              </div>
-            </li>
-          {/each}
-        </ul>
-      {/if}
+  {#if tasks.length === 0}
+    <div class="feed__empty">
+      <Mascot size="lg" />
+      <h2 class="feed__empty-title text-display">You're all caught up</h2>
+      <p class="feed__empty-body">
+        Momo will surface things here when they need your attention.
+      </p>
     </div>
-  {/each}
+  {:else}
+    <ul class="feed__list">
+      {#each tasks as task (task.id)}
+        <li>
+          <div
+            class="task-wrap"
+            role="button"
+            tabindex="0"
+            aria-label={`Open ${task.title}`}
+            onclick={(e) => onCardClick(e, task)}
+            onkeydown={(e) => onCardKey(e, task)}
+          >
+            <TaskCard {task} />
+          </div>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 </section>
 
 <Composer placeholder="Hi, Tomo. How's my luck today?" />
@@ -174,26 +153,28 @@
     padding-bottom: var(--space-5);
   }
 
-  .feed__group {
+  /* Empty state — calm "all caught up" placeholder, same hero vocabulary as
+     the other empty-state pages (ContactEmpty / HomeEmpty). Fills the feed
+     column and centers; the bottom Composer stays as the action entry. */
+  .feed__empty {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    text-align: center;
+    padding: var(--space-7) var(--space-4);
   }
-
-  .feed__heading-btn {
-    appearance: none;
-    background: transparent;
-    border: 0;
-    padding: 0;
+  .feed__empty-title {
     margin: 0;
-    text-align: left;
-    cursor: pointer;
-    align-self: flex-start;
-    border-radius: var(--radius-control);
   }
-  .feed__heading-btn:focus-visible {
-    outline: 2px solid var(--color-action-cream-border);
-    outline-offset: 2px;
+  .feed__empty-body {
+    max-width: 360px;
+    font-family: var(--font-system);
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--color-text-secondary);
   }
 
   .feed__list {

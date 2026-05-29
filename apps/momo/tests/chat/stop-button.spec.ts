@@ -305,7 +305,7 @@ test("cross-session: composer in session B shows Send while A is running", async
 
   // Navigate to a brand-new session B. Use the sidebar "+ New chat" to
   // mint sessionB so it follows the production code path.
-  await page.getByLabel("New chat in Work").click();
+  await page.getByLabel("New chat").click();
   const sessionB = "session-created-2";
   await expect(page).toHaveURL(new RegExp(`#/agent/${sessionB}$`));
 

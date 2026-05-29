@@ -1,19 +1,19 @@
 /**
  * Sidebar session store (Svelte 5 runes).
  *
- * Owns the flat list of puffer-backed sessions surfaced under the
- * Work / Life projects in the rail. Project membership is derived from
- * `session.cwd` matching one of the two fixed project cwds returned by
- * `list_projects` (see `projectStore.svelte.ts`). Sessions whose cwd
- * doesn't match either project are hidden from the rail.
+ * Owns the flat list of puffer-backed sessions surfaced in the rail.
+ * Membership is derived from `session.cwd` matching the single default
+ * project's cwd returned by `list_projects` (see `projectStore.svelte.ts`).
+ * Sessions whose cwd doesn't match (e.g. legacy `projects/work|life` chats)
+ * are hidden from the rail.
  *
  * Surface:
  *   - `sessionList` ($state) — flat list of all sessions, sorted by
  *     `updatedAtMs` desc.
- *   - `workSessions` / `lifeSessions` — filtered slices.
+ *   - `projectSessions()` — the default project's sessions (rail list).
  *   - `loadSessions()` — refetch from the backend.
- *   - `createSessionForProject(projectId)` — mint a new session via puffer
- *     with the project's fixed cwd.
+ *   - `createNewSession()` — mint a new session via puffer under the
+ *     default project's fixed cwd.
  *   - `renameSession(id, title)` — server rename + local mutation so
  *     the row updates without a refetch.
  *
@@ -27,7 +27,7 @@ import type { SessionListItem } from "./agentClient";
 import {
   getProjectCwd,
   projectIdForCwd,
-  type ProjectId,
+  DEFAULT_PROJECT_ID,
 } from "./projectStore.svelte";
 import { pushToast } from "./toast.svelte";
 
@@ -37,21 +37,16 @@ export const sessionList = $state<SessionListItem[]>([]);
 /**
  * Svelte 5 forbids `export const x = $derived(...)` from `.svelte.ts`
  * modules (svelte/derived_invalid_export) — derivations have to live in
- * component instances or be exposed as functions. We export thin filter
- * functions; consumers call `workSessions()` / `lifeSessions()` inside
- * a reactive context (template each-blocks, $derived, etc.) and get the
- * normal Svelte 5 tracking they would get from `$derived`.
+ * component instances or be exposed as functions. We export a thin filter
+ * function; consumers call `projectSessions()` inside a reactive context
+ * (template each-blocks, $derived, etc.) and get the normal Svelte 5
+ * tracking they would get from `$derived`.
+ *
+ * The rail shows every session under the default project. Legacy work/life
+ * sessions fall out because their cwd no longer matches any known project.
  */
-export function workSessions(): SessionListItem[] {
-  return sessionsForProject("work");
-}
-
-export function lifeSessions(): SessionListItem[] {
-  return sessionsForProject("life");
-}
-
-export function sessionsForProject(projectId: ProjectId): SessionListItem[] {
-  return sessionList.filter((s) => projectIdForCwd(s.cwd) === projectId);
+export function projectSessions(): SessionListItem[] {
+  return sessionList.filter((s) => projectIdForCwd(s.cwd) === DEFAULT_PROJECT_ID);
 }
 
 function sortByUpdatedDesc(list: SessionListItem[]): SessionListItem[] {
@@ -60,7 +55,7 @@ function sortByUpdatedDesc(list: SessionListItem[]): SessionListItem[] {
 
 function replaceList(next: SessionListItem[]): void {
   // Preserve local-only entries (e.g. an optimistic stub from
-  // createSessionForProject whose create_session response landed before this
+  // createNewSession whose create_session response landed before this
   // listGroupedSessions snapshot) so we don't drop them on reconcile.
   const nextIds = new Set(next.map((s) => s.sessionId));
   const localOnly = sessionList.filter((s) => !nextIds.has(s.sessionId));
@@ -90,17 +85,17 @@ export async function loadSessions(): Promise<void> {
 }
 
 /**
- * Mint a fresh empty session via puffer under the given project's fixed
+ * Mint a fresh empty session via puffer under the default project's fixed
  * cwd. Returns the new sessionId so the caller can navigate to
  * `/agent/<id>`. The new row is pushed onto the local list immediately
  * so the sidebar updates without waiting for a reload — the next
  * `loadSessions()` reconciles any drift.
  */
-export async function createSessionForProject(projectId: ProjectId): Promise<string> {
-  const cwd = getProjectCwd(projectId);
+export async function createNewSession(): Promise<string> {
+  const cwd = getProjectCwd(DEFAULT_PROJECT_ID);
   if (!cwd) {
     pushToast("Project not ready yet — try again in a moment.", "error");
-    throw new Error(`project ${projectId} cwd not loaded`);
+    throw new Error("default project cwd not loaded");
   }
   let result: agent.CreateSessionResult;
   try {

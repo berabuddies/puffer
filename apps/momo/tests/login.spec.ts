@@ -69,7 +69,7 @@ test.describe("worldrouter login gate", () => {
     // absorbOAuthCallbackInUrl rewrites the post-callback URL into the
     // hash-routed equivalent on landing.
     expect(parsed.searchParams.get("redirect_uri")).toBe(
-      "http://localhost:1456/auth/callback"
+      "http://localhost:1466/auth/callback"
     );
     expect(parsed.searchParams.get("client_state")).toMatch(/.{8,}/);
   });

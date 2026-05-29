@@ -1,11 +1,11 @@
 /**
  * Project store (Svelte 5 runes).
  *
- * Momo currently exposes two fixed projects in the rail: "Work" and "Life".
- * Each project corresponds to a fixed cwd resolved by the backend (under
- * `$MOMO_HOME/projects/<id>`). The backend creates the directories on first
- * `list_projects` call, so we can hand the absolute cwd straight to
- * `create_session`.
+ * Momo exposes a single fixed project in the rail, resolved by the backend
+ * to a fixed cwd under `$MOMO_HOME/projects/default`. The backend creates
+ * the directory on first `list_projects` call, so we can hand the absolute
+ * cwd straight to `create_session`. Work / Life are gone — every session
+ * lives under this one project.
  *
  * Surface:
  *   - `projects` ($state) — list of `{ id, label, cwd }`.
@@ -18,7 +18,10 @@
 import * as ws from "./wsClient";
 import { pushToast } from "./toast.svelte";
 
-export type ProjectId = "work" | "life";
+export type ProjectId = "default";
+
+/** The single project every Momo session lives under. */
+export const DEFAULT_PROJECT_ID: ProjectId = "default";
 
 export interface Project {
   id: ProjectId;
@@ -37,7 +40,7 @@ export const projects = $state<Project[]>([]);
 let loadPromise: Promise<void> | null = null;
 
 export function isProjectId(value: string): value is ProjectId {
-  return value === "work" || value === "life";
+  return value === "default";
 }
 
 export async function loadProjects(): Promise<void> {

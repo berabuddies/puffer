@@ -47,8 +47,8 @@ puffer daemon(= puffer-core runtime)暴露的 RPC 分组(定义见 `crates/puffe
 
 ### 两个跨概念的坑(已踩过)
 
-- **task 的分组维度 ≠ work/life**。puffer task 的 `task_scope` 是 `workspace` / `session:<id>` / `team:<id>` / `monitor`,**没有 work/life**。work/life 是 momo 自己的固定 project(`backend.rs::list_projects`,cwd = `$MOMO_HOME/projects/work|life`)。要做"首页 work/life task 列表",需 momo 拿到 `tasks[]` 后按 `session:<id> → session.cwd → 命中哪个 project` 自己 roll up。task 由 puffer-core agent 用 `TaskCreate` 工具产生。
-- **memory 是 project 级,没有"用户级全局 memory"**。puffer 有 project `MEMORY.md`(`~/.puffer/projects/<slug>/MEMORY.md`,需在 `~/.puffer/projects.toml` 注册;puffer-core 跑 agent 时**按 cwd 自动注入**上下文)。没有专门的"写 memory" RPC,但可用 `write_file` 把 md 落到 `MEMORY.md` 或 cwd 的 `AGENTS.md`(agent 启动读取)。onboarding 国家/职业这类用户画像若要"对该用户所有对话生效",因 momo 所有对话都在 work/life 两个 cwd 下,写进这两个 project 即可覆盖;真正跨 cwd 的全局画像 puffer 目前没有,需向 puffer 提需求。
+- **momo 只有一个固定 default project,puffer task 也不按它分组**。momo 把所有会话收在单一 default project 下(`backend.rs::list_projects`,cwd = `$MOMO_HOME/projects/default`;Work/Life 分类已于 2026-05 移除)。puffer task 的 `task_scope` 是 `workspace` / `session:<id>` / `team:<id>` / `monitor`,与 momo 的 project 无关。要做"首页 task 列表",momo 拿到 `tasks[]` 后按 `session:<id> → session.cwd → 是否命中 default project` 自己 roll up。task 由 puffer-core agent 用 `TaskCreate` 工具产生。
+- **memory 是 project 级,没有"用户级全局 memory"**。puffer 有 project `MEMORY.md`(`~/.puffer/projects/<slug>/MEMORY.md`,需在 `~/.puffer/projects.toml` 注册;puffer-core 跑 agent 时**按 cwd 自动注入**上下文)。没有专门的"写 memory" RPC,但可用 `write_file` 把 md 落到 `MEMORY.md` 或 cwd 的 `AGENTS.md`(agent 启动读取)。onboarding 国家/职业这类用户画像若要"对该用户所有对话生效",因 momo 所有对话都在单一 default cwd 下,写进该 project 即可覆盖;真正跨 cwd 的全局画像 puffer 目前没有,需向 puffer 提需求。
 
 ## 存储与端口
 
@@ -68,7 +68,7 @@ puffer daemon(= puffer-core runtime)暴露的 RPC 分组(定义见 `crates/puffe
 - `src-tauri/src/connectors.rs` — Connected Apps / connector
 - `src/lib/wsClient.ts` — 前端 ws JSON-RPC 客户端
 - `src/lib/chat.svelte.ts` — chat 状态机(turn / tool pills / askUserQuestion)
-- `src/lib/sessionStore.svelte.ts` / `projectStore.svelte.ts` — session / 固定 Work·Life project
+- `src/lib/sessionStore.svelte.ts` / `projectStore.svelte.ts` — session / 单一固定 default project(Work/Life 已移除)
 
 ## 验证
 

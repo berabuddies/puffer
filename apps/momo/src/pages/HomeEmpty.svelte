@@ -31,11 +31,11 @@
 
   // The three explanation cards each navigate to a sensible destination so
   // empty-state users can probe each surface of the app. Choice reasoning:
-  //   1) "Give me signal"        → /contact   (people = where signal comes from)
-  //   2) "Become your assistant" → /wallet    (wallet is the deepest agent surface)
-  //   3) "Still works as chat"   → /apps      (apps unlock chat capabilities)
+  //   1) "Give me signal"        → /apps     (connected apps are where signal comes from)
+  //   2) "Become your assistant" → /wallet   (wallet is the deepest agent surface)
+  //   3) "Still works as chat"   → /apps     (apps unlock chat capabilities)
   function openSignal(): void {
-    navigate("/contact");
+    navigate("/apps");
   }
   function openAssistant(): void {
     navigate("/wallet");

@@ -13,11 +13,11 @@ import { deferRpc } from "./support/chatTiming";
 // startNewChat used to template-literal the Promise into the URL, producing
 // `/agent/[object Promise]`. The async-then refactor must navigate to the
 // resolved sessionId.
-test('sidebar "+" New chat in Work navigates to a real session id, not [object Promise]', async ({ page }) => {
+test('sidebar "+" New chat navigates to a real session id, not [object Promise]', async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await bootOnboarded(page, daemon);
 
-  await page.getByLabel("New chat in Work").click();
+  await page.getByLabel("New chat").click();
   await daemon.waitForRequest("create_session");
 
   // Wait for the navigation to land. Hash routing means the URL contains
@@ -44,7 +44,7 @@ test("harness: deferRpc pins create_session until resolve() is called", async ({
   // not get a result back until we call pending.resolve().
   const pending = daemon.deferRpc("create_session");
 
-  await page.getByLabel("New chat in Work").click();
+  await page.getByLabel("New chat").click();
   // The request reaches the daemon synchronously, but we did NOT resolve yet.
   await daemon.waitForRequest("create_session");
   // URL stays on /home — navigation only fires after the sessionId resolves.

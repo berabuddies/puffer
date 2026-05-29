@@ -51,12 +51,6 @@ export interface Task {
   secondaryAction?: TaskAction;
 }
 
-export interface TaskGroup {
-  label: "Work" | "Life";
-  count: number;
-  tasks: Task[];
-}
-
 export interface Contact {
   id: string;
   name: string;

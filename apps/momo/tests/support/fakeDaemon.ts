@@ -1288,6 +1288,8 @@ export class FakeDaemon {
         return this.desktopPins;
       case "set_desktop_pin":
         return this.setDesktopPin(request.params);
+      case "list_projects":
+        return this.listProjects();
       case "list_grouped_sessions":
         return this.groupedSessions();
       case "load_session_detail":
@@ -1533,6 +1535,13 @@ export class FakeDaemon {
         isDefault: true
       }
     ];
+  }
+
+  private listProjects() {
+    // Momo collapsed Work/Life into a single default project. Point its cwd
+    // at the workspace root so seeded + created sessions (which default to
+    // that cwd) all land under it and surface in the flat rail list.
+    return [{ id: "default", label: "Tasks", cwd: this.workspaceRoot }];
   }
 
   private createSession(params: JsonRecord): JsonRecord {

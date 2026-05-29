@@ -4,7 +4,7 @@
   Sections top → bottom:
     1. Rail top      — drag/traffic-light spacer + sidebar toggle
     2. Rail search   — search input pill (icon-only in collapsed mode)
-    3. Rail scroll   — nav rows + Spaces (Work / Life with sub-items)
+    3. Rail scroll   — nav rows + Tasks (flat session list)
     4. Rail upgrade  — Credits pill (icon badge in collapsed mode)
     5. Rail user     — avatar + name + chevron (avatar-only in collapsed mode)
 
@@ -35,7 +35,6 @@
   import { tick } from "svelte";
   import {
     Home,
-    User,
     Wallet,
     LayoutGrid,
     Search,
@@ -50,17 +49,14 @@
 
   import { currentRoute, navigate } from "../../router.svelte";
   import { currentUser } from "../../data/user";
-  import { contacts } from "../../data/contacts";
   import { apps } from "../../data/apps";
   import { authState } from "../../lib/auth.svelte";
   import UserMenu from "./UserMenu.svelte";
   import {
-    workSessions,
-    lifeSessions,
-    createSessionForProject,
+    projectSessions,
+    createNewSession,
     renameSession
   } from "../../lib/sessionStore.svelte";
-  import type { ProjectId } from "../../lib/projectStore.svelte";
   import type { SessionListItem } from "../../lib/agentClient";
 
   // See IconBlock.svelte — lucide-svelte v1 ships legacy class typings; use
@@ -85,16 +81,13 @@
 
   const navEntries: NavEntry[] = [
     { label: "Home", icon: Home, href: "/home", activePrefixes: ["/home"] },
-    { label: "Contact", icon: User, href: "/contact", activePrefixes: ["/contact"] },
     { label: "Wallet", icon: Wallet, href: "/wallet", activePrefixes: ["/wallet"] },
     { label: "Connected Apps", icon: LayoutGrid, href: "/apps", activePrefixes: ["/apps"] }
   ];
 
-  // Session rows under the Work / Life projects are driven by sessionStore;
-  // a session's project is derived from its cwd matching one of the two
-  // fixed project paths returned by `list_projects`.
-  let workExpanded = $state(true);
-  let lifeExpanded = $state(true);
+  // Session rows in the rail are driven by sessionStore; a session shows
+  // here when its cwd matches the single default project path returned by
+  // `list_projects`.
 
   /** Id of the row currently being inline-renamed, or null. */
   let editingId = $state<string | null>(null);
@@ -149,15 +142,15 @@
   }
 
   /* ───── Search dropdown ─────
-   * Substring search across contacts / apps (the Tasks corpus is gone
-   * since the scripted demos were removed; sessions live in the rail
-   * directly so they don't need to be in this dropdown).
+   * Substring search across connected apps. Contacts are hidden, and
+   * sessions live in the rail directly, so neither appears in this
+   * dropdown.
    */
   const MAX_RESULTS = 5;
   const FOCUS_LOSS_DELAY_MS = 800;
 
-  type ResultKind = "Contact" | "App";
-  type ResultIcon = "user" | "layoutGrid";
+  type ResultKind = "App";
+  type ResultIcon = "layoutGrid";
 
   interface SearchResult {
     id: string;
@@ -178,18 +171,6 @@
     const q = query.trim().toLowerCase();
     if (!q) return [];
     const out: SearchResult[] = [];
-
-    for (const c of contacts) {
-      if (c.name.toLowerCase().includes(q) || (c.role ?? "").toLowerCase().includes(q)) {
-        out.push({
-          id: `contact-${c.id}`,
-          label: c.name,
-          kind: "Contact",
-          icon: "user",
-          href: `/contact/${c.id}`
-        });
-      }
-    }
 
     for (const a of apps) {
       if (a.name.toLowerCase().includes(q)) {
@@ -289,12 +270,12 @@
   }
 
   /**
-   * Mint a fresh empty puffer session in the given project's fixed cwd
+   * Mint a fresh empty puffer session in the default project's fixed cwd
    * and navigate into it. The session row appears in the sidebar
    * immediately via the local optimistic insert inside the store.
    */
-  function startNewChatInProject(projectId: ProjectId): void {
-    void createSessionForProject(projectId)
+  function startNewChat(): void {
+    void createNewSession()
       .then((sessionId) => {
         navigate(`/agent/${sessionId}`);
       })
@@ -384,11 +365,7 @@
               onclick={() => pickResult(r)}
             >
               <span class="search-dropdown__icon" aria-hidden="true">
-                {#if r.icon === "user"}
-                  <User size={14} strokeWidth={1.75} />
-                {:else}
-                  <LayoutGrid size={14} strokeWidth={1.75} />
-                {/if}
+                <LayoutGrid size={14} strokeWidth={1.75} />
               </span>
               <span class="search-dropdown__label">{r.label}</span>
               <span class="search-dropdown__badge">{r.kind}</span>
@@ -427,7 +404,21 @@
   <div class="rail-scroll">
     {#if !collapsed}
       <div class="spaces">
-        <p class="text-eyebrow spaces__eyebrow">Tasks</p>
+        <!-- Header row: "Tasks" eyebrow + a trailing "+" that mints a fresh
+             puffer session under the default project and navigates straight
+             to /agent/<sessionId>. -->
+        <div class="spaces__header">
+          <p class="text-eyebrow spaces__eyebrow">Tasks</p>
+          <button
+            class="spaces__add"
+            type="button"
+            aria-label="New chat"
+            title="New chat"
+            onclick={startNewChat}
+          >
+            <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+          </button>
+        </div>
 
         {#snippet sessionRow(session: SessionListItem)}
           {@const active = isAgentActive(session.sessionId)}
@@ -477,75 +468,12 @@
           </div>
         {/snippet}
 
-        <!-- Work group.
-             The header is two SIBLING buttons (not nested) — HTML forbids
-             button-in-button, and Svelte 5 + WebKit silently swallows the
-             inner click. The label button toggles expand; the trailing
-             "+" mints a fresh puffer session under the Work group and
-             navigates straight to /agent/<sessionId>. -->
-        <div class="space-group">
-          <div class="space-header-row">
-            <button
-              class="space-header"
-              type="button"
-              aria-expanded={workExpanded}
-              onclick={() => (workExpanded = !workExpanded)}
-            >
-              <span class="space-header__label">Work</span>
-            </button>
-            <button
-              class="space-header__add"
-              type="button"
-              aria-label="New chat in Work"
-              title="New chat in Work"
-              onclick={() => startNewChatInProject("work")}
-            >
-              <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
-            </button>
-          </div>
-
-          {#if workExpanded}
-            <div class="space-items">
-              {#each workSessions() as session (session.sessionId)}
-                {@render sessionRow(session)}
-              {:else}
-                <p class="space-items__add">No sessions yet</p>
-              {/each}
-            </div>
-          {/if}
-        </div>
-
-        <!-- Life group (mirror of Work — see Work header comment). -->
-        <div class="space-group">
-          <div class="space-header-row">
-            <button
-              class="space-header"
-              type="button"
-              aria-expanded={lifeExpanded}
-              onclick={() => (lifeExpanded = !lifeExpanded)}
-            >
-              <span class="space-header__label">Life</span>
-            </button>
-            <button
-              class="space-header__add"
-              type="button"
-              aria-label="New chat in Life"
-              title="New chat in Life"
-              onclick={() => startNewChatInProject("life")}
-            >
-              <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
-            </button>
-          </div>
-
-          {#if lifeExpanded}
-            <div class="space-items">
-              {#each lifeSessions() as session (session.sessionId)}
-                {@render sessionRow(session)}
-              {:else}
-                <p class="space-items__add">No sessions yet</p>
-              {/each}
-            </div>
-          {/if}
+        <div class="space-items">
+          {#each projectSessions() as session (session.sessionId)}
+            {@render sessionRow(session)}
+          {:else}
+            <p class="space-items__add">No sessions yet</p>
+          {/each}
         </div>
       </div>
     {/if}
@@ -865,63 +793,27 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .spaces__eyebrow {
-    padding: 0 10px;
+  .spaces__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 6px 0 10px;
     margin-bottom: 2px;
+  }
+  .spaces__eyebrow {
     text-transform: none; /* design shows "Tasks" mixed-case */
     letter-spacing: 0;
   }
 
-  .space-group {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  /* Header row holds the label-toggle button + the trailing "+" as two
-   * SIBLINGS (HTML disallows button-in-button; nested clicks were getting
-   * swallowed in WebKit/Tauri). The row paints the hover background so
-   * both buttons share one continuous hit target visually. */
-  .space-header-row {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    height: 34px;
-    padding: 0 10px;
-    border-radius: var(--radius-control);
-    transition: background-color 120ms ease;
-  }
-  .space-header-row:hover {
-    background: rgba(0, 0, 0, 0.03);
-  }
-  .space-header {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    height: 100%;
-    background: transparent;
-    border: 0;
-    padding: 0;
-    font-family: var(--font-system);
-    font-size: var(--font-size-body);
-    font-weight: var(--font-weight-medium);
-    color: var(--color-text-primary);
-    text-align: left;
-    cursor: pointer;
-  }
-  .space-header__label {
-    flex: 1;
-    text-align: left;
-  }
-  .space-header__add {
+  /* Trailing "+" in the Tasks header — mints a fresh session. Faint by
+   * default, solid on hover, so the affordance stays quiet until reached. */
+  .spaces__add {
     display: inline-flex;
     width: 22px;
     height: 22px;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    margin-left: 4px;
     background: transparent;
     border: 0;
     padding: 0;
@@ -929,12 +821,9 @@
     border-radius: 4px;
     opacity: 0.65;
     cursor: pointer;
-    transition: background-color 120ms ease, opacity 120ms ease, color 120ms ease;
+    transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
   }
-  .space-header-row:hover .space-header__add {
-    opacity: 1;
-  }
-  .space-header__add:hover {
+  .spaces__add:hover {
     background: rgba(0, 0, 0, 0.06);
     color: var(--color-text-primary);
     opacity: 1;
@@ -946,7 +835,7 @@
     gap: 2px;
   }
   .space-items__add {
-    padding: 7px 10px 7px 36px;
+    padding: 7px 10px;
     color: var(--color-text-muted);
     font-size: var(--font-size-body);
   }
@@ -961,7 +850,7 @@
     align-items: center;
     width: 100%;
     min-height: var(--height-nav-row);
-    padding: 0 6px 0 36px;
+    padding: 0 6px 0 10px;
     border-radius: var(--radius-control);
     background: transparent;
     color: var(--color-text-primary);

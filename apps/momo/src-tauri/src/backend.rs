@@ -130,24 +130,23 @@ impl BackendState {
         Ok(env::current_dir().context("failed to read current directory")?)
     }
 
-    /// Returns the two fixed projects (Work and Life) surfaced in the rail.
-    /// Each project's cwd lives under `$MOMO_HOME/projects/<id>` and is
-    /// created on demand so `create_session` can immediately use it.
+    /// Returns the single default project surfaced in the rail. Its cwd lives
+    /// under `$MOMO_HOME/projects/default` and is created on demand so
+    /// `create_session` can immediately use it.
+    ///
+    /// Momo no longer splits sessions into Work / Life — every chat lives
+    /// under this one project. The cwd stays namespaced under `projects/` so
+    /// any pre-existing `projects/work|life` sessions remain on disk; they're
+    /// simply hidden from the rail, which filters to this project's cwd.
     fn list_projects(&self) -> Result<Vec<ProjectDto>> {
-        let root = app_home()?.join("projects");
-        let entries = [("work", "Work"), ("life", "Life")];
-        let mut out = Vec::with_capacity(entries.len());
-        for (id, label) in entries {
-            let cwd = root.join(id);
-            fs::create_dir_all(&cwd)
-                .with_context(|| format!("failed to create project dir {}", cwd.display()))?;
-            out.push(ProjectDto {
-                id: id.to_string(),
-                label: label.to_string(),
-                cwd: cwd.to_string_lossy().to_string(),
-            });
-        }
-        Ok(out)
+        let cwd = app_home()?.join("projects").join("default");
+        fs::create_dir_all(&cwd)
+            .with_context(|| format!("failed to create project dir {}", cwd.display()))?;
+        Ok(vec![ProjectDto {
+            id: "default".to_string(),
+            label: "Tasks".to_string(),
+            cwd: cwd.to_string_lossy().to_string(),
+        }])
     }
 
     fn list_grouped_sessions(&self) -> Result<Vec<FolderGroupDto>> {
