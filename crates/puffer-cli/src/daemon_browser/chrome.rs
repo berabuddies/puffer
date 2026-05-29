@@ -22,13 +22,13 @@ pub(super) fn read_devtools_ws_url(child: &mut Child, profile_dir: &Path) -> Res
     let active_port_path = profile_dir.join("DevToolsActivePort");
     let start = Instant::now();
     while start.elapsed() < CHROME_START_TIMEOUT {
-        if let Some(status) = child.try_wait().context("check Chrome launch status")? {
-            bail!("Chrome exited before publishing a DevTools endpoint: {status}");
-        }
         if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
             if let Some(url) = devtools_url_from_active_port(&contents) {
                 return Ok(url);
             }
+        }
+        if let Some(status) = child.try_wait().context("check Chrome launch status")? {
+            bail!("Chrome exited before publishing a DevTools endpoint: {status}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -234,20 +234,6 @@ fn which_on_path(name: &&str) -> Option<PathBuf> {
     std::env::split_paths(&paths)
         .map(|dir| dir.join(name))
         .find(|path| path.is_file())
-}
-
-/// Converts a session id into a filesystem-safe browser profile directory name.
-pub(super) fn safe_profile_name(session_id: &str) -> String {
-    session_id
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn urlencoding(value: &str) -> String {

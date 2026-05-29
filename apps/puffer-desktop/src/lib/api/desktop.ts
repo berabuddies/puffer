@@ -240,7 +240,6 @@ type BackendResourceCounts = SettingsSnapshot["resources"];
 type BackendSettingsSessionSummary = SettingsSnapshot["sessions"];
 type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
-type BackendBrowserProfile = SettingsSnapshot["browserProfiles"][number];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -253,7 +252,6 @@ type BackendSettingsSnapshot = {
   sessions: BackendSettingsSessionSummary;
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
-  browserProfiles: BackendBrowserProfile[];
 };
 
 type BackendRemoteOperation = RemoteOperation;
@@ -1334,6 +1332,21 @@ export async function dispatchSlashCommand(
   return result.turnId;
 }
 
+/** Runs deterministic connector setup without creating a persisted session.
+ *  Events stream on `connector-setup:<setupId>:event` and use the same
+ *  question/complete/error payloads as a normal turn. */
+export async function startConnectorSetupCommand(
+  setupId: string,
+  message: string
+): Promise<string> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ turnId: string }>("start_connector_setup", {
+    setupId,
+    message
+  });
+  return result.turnId;
+}
+
 /** Resolves a pending permission prompt for an in-flight turn. */
 export async function resolvePermission(
   turnId: string,
@@ -2062,7 +2075,6 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
-  browserChromeProfile?: string | null;
 };
 
 export async function localModelStatus(modelId = "minicpm5"): Promise<LocalModelStatus> {

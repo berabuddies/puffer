@@ -189,10 +189,7 @@ impl Default for RecapConfig {
 
 /// Browser launch preferences persisted in the user config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct BrowserConfig {
-    #[serde(default, alias = "chromeProfile")]
-    pub chrome_profile: Option<String>,
-}
+pub struct BrowserConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ProjectRegistry {

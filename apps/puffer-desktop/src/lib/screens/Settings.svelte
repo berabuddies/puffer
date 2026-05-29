@@ -20,17 +20,16 @@
     isDaemonReachable,
     listLambdaSkillLibraries,
     listMcpServers,
-    dispatchSlashCommand,
     listPermissions,
     listProviderModels,
     loadWorkflowSnapshot,
     removeLambdaSkillLibrary,
     resolveUserQuestion,
-    createSession,
     saveLambdaSkillLibrary,
     savePermissions,
     setLambdaSkillApproval,
     setLambdaSkillEnabled,
+    startConnectorSetupCommand,
     updateConfig,
     type LambdaSkillLibraryInfo,
     type LambdaSkillLibrariesSnapshot,
@@ -40,7 +39,7 @@
     type PermissionsSnapshot
   } from "../api/desktop";
   import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
-  import { subscribeSessionEvents, type SessionStreamEvent } from "../api/sessionEvents";
+  import { subscribeConnectorSetupEvents, type SessionStreamEvent } from "../api/sessionEvents";
   import type {
     DesktopPreferences,
     ExternalCredential,
@@ -177,7 +176,6 @@
   let connectorSlug = $state("");
   let connectorConnectionSlug = $state("");
   let connectorCreating = $state(false);
-  let connectorCreateSessionId = $state<string | null>(null);
   let connectorTurnId = $state<string | null>(null);
   let connectorSetupSlug = $state<string | null>(null);
   let connectorQuestionRequest = $state<ConnectorQuestionRequest | null>(null);
@@ -206,8 +204,6 @@
   let modelPickerModel = $state<string>("");
   let modelSaving = $state(false);
   let modelError = $state<string | null>(null);
-  let browserProfileSaving = $state(false);
-  let browserProfileError = $state<string | null>(null);
   let connectors = $derived(connectorSnapshot?.connectors ?? []);
   let connections = $derived(connectorSnapshot?.connections ?? []);
   let selectedConnector = $derived(
@@ -573,6 +569,13 @@
     }
   }
 
+  function newConnectorSetupId(): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `connector-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
   async function startConnectorSetup() {
     if (!canStartConnectorSetup) return;
     connectorCreating = true;
@@ -585,16 +588,15 @@
     try {
       connectorUnlisten?.();
       connectorUnlisten = null;
-      const created = await createSession(
-        props.snapshot?.workspaceRoot ?? undefined,
-        props.snapshot?.config.defaultProvider ?? undefined,
-        props.snapshot?.config.defaultModel ?? undefined
-      );
-      connectorCreateSessionId = created.sessionId;
-      connectorUnlisten = await subscribeSessionEvents(created.sessionId, handleConnectorSessionEvent);
-      connectorTurnId = await dispatchSlashCommand(created.sessionId, connectorCommandPreview);
+      const setupId = newConnectorSetupId();
+      connectorTurnId = setupId;
+      connectorUnlisten = await subscribeConnectorSetupEvents(setupId, handleConnectorSessionEvent);
+      connectorTurnId = await startConnectorSetupCommand(setupId, connectorCommandPreview);
     } catch (e) {
       connectorCreating = false;
+      connectorUnlisten?.();
+      connectorUnlisten = null;
+      connectorTurnId = null;
       connectorError = connectorSetupErrorMessage((e as Error).message ?? String(e));
       connectorSaved = null;
       connectorSetupSlug = null;
@@ -1045,20 +1047,6 @@
     }
   }
 
-  async function saveBrowserProfile(value: string) {
-    if (!daemonReachable || browserProfileSaving) return;
-    browserProfileSaving = true;
-    browserProfileError = null;
-    try {
-      await updateConfig({ browserChromeProfile: value || null });
-      props.onRefresh();
-    } catch (e) {
-      browserProfileError = (e as Error).message ?? String(e);
-    } finally {
-      browserProfileSaving = false;
-    }
-  }
-
   let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
   let defaultRouteProviders = $derived.by(() => {
     const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
@@ -1154,7 +1142,6 @@
     connectorSlug = "";
     connectorConnectionSlug = "";
     connectorCreating = false;
-    connectorCreateSessionId = null;
     connectorTurnId = null;
     connectorSetupSlug = null;
     connectorQuestionRequest = null;
@@ -1201,17 +1188,6 @@
       ?.displayName ?? modelPickerProvider
   );
   let modelPickerDisabled = $derived(!daemonReachable || modelSaving || credentialBusy);
-  let browserProfileOptions = $derived(props.snapshot?.browserProfiles ?? []);
-  let selectedBrowserProfile = $derived(
-    browserProfileOptions.find((profile) => profile.isSelected) ?? null
-  );
-  let configuredBrowserProfile = $derived(props.snapshot?.config.browserChromeProfile ?? "");
-  let browserProfileValue = $derived(
-    configuredBrowserProfile &&
-      browserProfileOptions.some((profile) => profile.id === configuredBrowserProfile)
-      ? configuredBrowserProfile
-      : ""
-  );
   let canSaveDefaultModel = $derived(
     Boolean(
       daemonReachable &&
@@ -1314,39 +1290,6 @@
           {:else}
             <span style="color: var(--muted-foreground);">not connected</span>
           {/if}
-        </div>
-      </div>
-
-      <div class="pf-settings-row">
-        <div class="meta">
-          <div class="label">Browser profile</div>
-          <div class="desc">Chrome profile used to seed Puffer browser sessions.</div>
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 6px; justify-self: end; min-width: 320px;">
-          <select
-            class="sc-input"
-            value={browserProfileValue}
-            disabled={!daemonReachable || browserProfileSaving || browserProfileOptions.length === 0}
-            onchange={(e) => void saveBrowserProfile((e.currentTarget as HTMLSelectElement).value)}
-          >
-            <option value="">Most recently used Chrome profile</option>
-            {#each browserProfileOptions as profile (profile.id)}
-              <option value={profile.id}>
-                {profile.name}{profile.email ? ` · ${profile.email}` : ""}{profile.isLastUsed ? " · recent" : ""}
-              </option>
-            {/each}
-          </select>
-          <div style="color: var(--muted-foreground); font-size: 11.5px; text-align: right;">
-            {#if browserProfileError}
-              <span style="color: var(--destructive, #c03232);">{browserProfileError}</span>
-            {:else if browserProfileSaving}
-              Saving profile...
-            {:else if selectedBrowserProfile}
-              Using {selectedBrowserProfile.name}{selectedBrowserProfile.email ? ` · ${selectedBrowserProfile.email}` : ""}.
-            {:else}
-              No local Chrome profiles found.
-            {/if}
-          </div>
         </div>
       </div>
 

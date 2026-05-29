@@ -40,7 +40,6 @@ mod worker;
 pub(crate) use agent::handle_browser_agent;
 pub(super) use cdp::parse_evaluation_response;
 pub(super) use cdp::send_cdp;
-use chrome::safe_profile_name;
 pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};
 use console::BrowserConsoleRegistry;
 use recording::BrowserRecordingRegistry;
@@ -55,6 +54,7 @@ pub(crate) use types::{
 };
 
 const DEFAULT_URL: &str = "about:blank";
+const GLOBAL_BROWSER_ROOT_ID: &str = "puffer-global";
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 720;
 const CHROME_START_TIMEOUT: Duration = Duration::from_secs(12);
@@ -65,8 +65,6 @@ const AGENT_RECORDING_WINDOW: Duration = Duration::from_secs(5);
 /// Tracks live browser roots and page workers by session id.
 pub(crate) struct BrowserRegistry {
     profile_root: PathBuf,
-    chrome_profile: Arc<Mutex<Option<String>>>,
-    root_chrome_profiles: Arc<Mutex<HashMap<String, Option<String>>>>,
     roots: Arc<Mutex<HashMap<String, BrowserRootSession>>>,
     enabled: bool,
     sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
@@ -78,11 +76,7 @@ pub(crate) struct BrowserRegistry {
 
 impl BrowserRegistry {
     /// Creates an empty browser session registry.
-    pub(crate) fn new(
-        profile_root: PathBuf,
-        enabled: bool,
-        chrome_profile: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(profile_root: PathBuf, enabled: bool) -> Self {
         let roots = Arc::new(Mutex::new(HashMap::<String, BrowserRootSession>::new()));
         let sessions = Arc::new(Mutex::new(HashMap::<String, BrowserSession>::new()));
         let tabs = Arc::new(Mutex::new(BrowserTabRegistry::default()));
@@ -99,8 +93,6 @@ impl BrowserRegistry {
         }
         Self {
             profile_root,
-            chrome_profile: Arc::new(Mutex::new(chrome_profile)),
-            root_chrome_profiles: Arc::new(Mutex::new(HashMap::new())),
             roots,
             enabled,
             sessions,
@@ -109,55 +101,6 @@ impl BrowserRegistry {
             console_logs,
             recordings: Arc::new(Mutex::new(BrowserRecordingRegistry::default())),
         }
-    }
-
-    /// Updates the selected source Chrome profile and closes existing roots.
-    pub(crate) fn set_chrome_profile(&self, chrome_profile: Option<String>) {
-        let mut guard = self.chrome_profile.lock().unwrap();
-        if *guard == chrome_profile {
-            return;
-        }
-        *guard = chrome_profile;
-        drop(guard);
-        let root_ids = self
-            .roots
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for root_id in root_ids {
-            let _ = self.shutdown_root(&root_id, false);
-        }
-    }
-
-    /// Updates a root-session Chrome profile override and closes that root.
-    pub(crate) fn set_root_chrome_profile(
-        &self,
-        root_session_id: &str,
-        chrome_profile: Option<String>,
-    ) {
-        let normalized = chrome_profile.filter(|value| !value.trim().is_empty());
-        let mut guard = self.root_chrome_profiles.lock().unwrap();
-        let changed = match normalized.as_ref() {
-            Some(profile) => {
-                guard
-                    .get(root_session_id)
-                    .and_then(|value| value.as_deref())
-                    != Some(profile.as_str())
-            }
-            None => guard.contains_key(root_session_id),
-        };
-        if !changed {
-            return;
-        }
-        if let Some(profile) = normalized {
-            guard.insert(root_session_id.to_string(), Some(profile));
-        } else {
-            guard.remove(root_session_id);
-        }
-        drop(guard);
-        let _ = self.shutdown_root(root_session_id, true);
     }
 
     /// Opens or reuses the browser page worker for `session_id`.
@@ -402,7 +345,7 @@ impl BrowserRegistry {
 
     fn ensure_root_session(
         &self,
-        root_session_id: &str,
+        _root_session_id: &str,
         width: u32,
         height: u32,
     ) -> Result<BrowserRootSession> {
@@ -410,31 +353,23 @@ impl BrowserRegistry {
             .roots
             .lock()
             .unwrap()
-            .get(root_session_id)
+            .get(GLOBAL_BROWSER_ROOT_ID)
             .cloned()
             .filter(|root| root.is_alive())
         {
             root.touch();
             return Ok(root);
         }
-        let _ = self.shutdown_root(root_session_id, true);
-        let selected_profile = self
-            .root_chrome_profiles
-            .lock()
-            .unwrap()
-            .get(root_session_id)
-            .cloned()
-            .unwrap_or_else(|| self.chrome_profile.lock().unwrap().clone());
+        let _ = self.shutdown_global_root();
         let root = BrowserRootSession::spawn(
-            self.profile_root.join(safe_profile_name(root_session_id)),
-            selected_profile,
+            self.profile_root.join(GLOBAL_BROWSER_ROOT_ID),
             width,
             height,
         )?;
         self.roots
             .lock()
             .unwrap()
-            .insert(root_session_id.to_string(), root.clone());
+            .insert(GLOBAL_BROWSER_ROOT_ID.to_string(), root.clone());
         Ok(root)
     }
 
@@ -465,7 +400,6 @@ impl BrowserRegistry {
     }
 
     fn shutdown_root(&self, root_session_id: &str, preserve_tabs: bool) -> Result<()> {
-        let root = self.roots.lock().unwrap().remove(root_session_id);
         let sessions = drain_root_sessions(&self.sessions, root_session_id);
         let backend_ids = sessions
             .iter()
@@ -484,6 +418,14 @@ impl BrowserRegistry {
             .filter_map(|(_, session)| session.begin_close())
             .collect::<Vec<_>>();
         wait_for_shutdown_acks(shutdown_acks, Duration::from_secs(5));
+        if self.sessions.lock().unwrap().is_empty() {
+            self.shutdown_global_root()?;
+        }
+        Ok(())
+    }
+
+    fn shutdown_global_root(&self) -> Result<()> {
+        let root = self.roots.lock().unwrap().remove(GLOBAL_BROWSER_ROOT_ID);
         if let Some(root) = root {
             root.shutdown()?;
         }
@@ -544,19 +486,16 @@ fn spawn_idle_pruner(
                 .collect::<Vec<_>>()
         };
         for (root_session_id, root) in stale_roots {
-            let root_sessions = drain_root_sessions(&sessions, &root_session_id);
+            let root_sessions = if root_session_id == GLOBAL_BROWSER_ROOT_ID {
+                drain_all_sessions(&sessions)
+            } else {
+                drain_root_sessions(&sessions, &root_session_id)
+            };
             let backend_ids = root_sessions
                 .iter()
                 .map(|(session_id, _)| session_id.clone())
                 .collect::<Vec<_>>();
-            cleanup_root_metadata(
-                &tabs,
-                &agent_refs,
-                &console_logs,
-                &root_session_id,
-                &backend_ids,
-                true,
-            );
+            cleanup_sessions_metadata(&tabs, &agent_refs, &console_logs, &backend_ids, true);
             for (_, session) in root_sessions {
                 let _ = session.close();
             }
@@ -579,6 +518,12 @@ fn drain_root_sessions(
         .into_iter()
         .filter_map(|session_id| sessions.remove_entry(&session_id))
         .collect()
+}
+
+fn drain_all_sessions(
+    sessions: &Arc<Mutex<HashMap<String, BrowserSession>>>,
+) -> Vec<(String, BrowserSession)> {
+    sessions.lock().unwrap().drain().collect()
 }
 
 fn cleanup_root_metadata(
@@ -610,6 +555,34 @@ fn cleanup_root_metadata(
         }
     } else {
         tabs.remove_root(root_session_id);
+    }
+}
+
+fn cleanup_sessions_metadata(
+    tabs: &Arc<Mutex<BrowserTabRegistry>>,
+    agent_refs: &Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
+    console_logs: &Arc<Mutex<BrowserConsoleRegistry>>,
+    backend_ids: &[String],
+    preserve_tabs: bool,
+) {
+    let mut grouped = HashMap::<String, Vec<String>>::new();
+    for backend_id in backend_ids {
+        if let Some((root_session_id, _)) = parse_backend_session_id(backend_id) {
+            grouped
+                .entry(root_session_id.to_string())
+                .or_default()
+                .push(backend_id.clone());
+        }
+    }
+    for (root_session_id, ids) in grouped {
+        cleanup_root_metadata(
+            tabs,
+            agent_refs,
+            console_logs,
+            &root_session_id,
+            &ids,
+            preserve_tabs,
+        );
     }
 }
 

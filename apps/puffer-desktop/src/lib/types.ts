@@ -285,7 +285,6 @@ export type SettingsConfig = {
   mascotEnabled: boolean;
   uiNoAltScreen: boolean;
   uiTmuxGoldenMode: boolean;
-  browserChromeProfile: string | null;
 };
 
 export type ResourceCounts = {
@@ -327,22 +326,6 @@ export type ProviderSummary = {
   sourcePath: string | null;
 };
 
-export type BrowserProfile = {
-  id: string;
-  name: string;
-  email: string | null;
-  googleAccounts: BrowserGoogleAccount[];
-  path: string;
-  isLastUsed: boolean;
-  isSelected: boolean;
-};
-
-export type BrowserGoogleAccount = {
-  email: string;
-  name: string | null;
-  gaiaId: string | null;
-};
-
 export type SettingsSnapshot = {
   workspaceRoot: string;
   workspaceConfigFile: string;
@@ -354,7 +337,6 @@ export type SettingsSnapshot = {
   sessions: SettingsSessionSummary;
   auth: AuthProviderStatus[];
   providers: ProviderSummary[];
-  browserProfiles: BrowserProfile[];
 };
 
 export type WorkflowTrigger =

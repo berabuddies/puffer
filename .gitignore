@@ -16,6 +16,7 @@ benchmark/*.pyc
 # Claude Code + OMX tool metadata
 .claude/
 .omx/
+.playwright-mcp/
 
 # Local audit and bug-triage artifacts.
 audit_scope.txt

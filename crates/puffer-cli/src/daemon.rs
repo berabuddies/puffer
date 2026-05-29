@@ -35,7 +35,7 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    command_surface, default_effort_level, dispatch_command, enter_plan_mode,
+    command_surface, default_effort_level, dispatch_command, enter_plan_mode, execute_connect_flow,
     execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
     supported_effort_levels, with_user_question_prompt_handler, AppState,
     BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
@@ -51,7 +51,7 @@ use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
-use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
+use puffer_session_store::{MessageActor, SessionMetadata, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
     exchange_authorization_code as exchange_anthropic_authorization_code,
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
@@ -310,8 +310,8 @@ impl DaemonState {
 
 #[derive(Clone)]
 struct TurnHandle {
-    session_id: String,
-    session_uuid: Uuid,
+    session_id: Option<String>,
+    session_uuid: Option<Uuid>,
     channel: String,
     message: String,
     cancel: CancelToken,
@@ -341,7 +341,6 @@ impl DaemonState {
         yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
-        let browser_chrome_profile = config.browser.chrome_profile.clone();
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
         let ptys = Arc::new(PtyRegistry::new());
@@ -356,11 +355,7 @@ impl DaemonState {
             next_request_id: Arc::new(AtomicU64::new(0)),
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
-            browsers: Arc::new(BrowserRegistry::new(
-                browser_profile_root,
-                !no_browser,
-                browser_chrome_profile,
-            )),
+            browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
             local_models: crate::daemon_local_model::LocalModelInstaller::new(),
             disable_auto_title,
             yolo,
@@ -406,6 +401,7 @@ fn is_replay_channel(event: &str) -> bool {
         || event.starts_with("workspace:")
         || event.starts_with("clone:")
         || event.starts_with("workflow:")
+        || event.starts_with("connector-setup:")
 }
 
 impl DaemonState {
@@ -997,6 +993,31 @@ async fn dispatch_request(
                         result: None,
                         error: Some(RpcError {
                             code: "slash-dispatch-error".to_string(),
+                            message: format!("{e:#}"),
+                        }),
+                    },
+                };
+                let _ = send_envelope(&tx_clone, &env).await;
+            });
+        }
+
+        "start_connector_setup" => {
+            let tx_clone = tx.clone();
+            let state_clone = state.clone();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                let result = start_connector_setup_turn(state_clone, params).await;
+                let env = match result {
+                    Ok(v) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: Some(v),
+                        error: None,
+                    },
+                    Err(e) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "connector-setup-error".to_string(),
                             message: format!("{e:#}"),
                         }),
                     },
@@ -1926,23 +1947,12 @@ fn handle_update_config(state: &DaemonState, params: &Value) -> Result<Value> {
                     _ => anyhow::bail!("openaiBaseUrl must be string or null"),
                 };
             }
-            "browserChromeProfile" | "browser_chrome_profile" => {
-                guard.browser.chrome_profile = match value {
-                    Value::Null => None,
-                    Value::String(s) if s.trim().is_empty() => None,
-                    Value::String(s) => Some(s.clone()),
-                    _ => anyhow::bail!("browserChromeProfile must be string or null"),
-                };
-            }
             other => anyhow::bail!("update_config: unknown key `{other}`"),
         }
     }
     let snapshot_cfg = guard.clone();
     drop(guard);
     save_user_config(&state.paths, &snapshot_cfg).context("save user config")?;
-    state
-        .browsers
-        .set_chrome_profile(snapshot_cfg.browser.chrome_profile.clone());
     // Return the refreshed settings snapshot so the UI re-renders without
     // a second round-trip.
     let inputs = state.build_runtime_inputs()?;
@@ -2651,17 +2661,28 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 annotations: serde_json::Map::new(),
             });
         }
-        report_cancelled_turn(
-            state,
-            handle.session_uuid,
-            &handle.session_id,
-            &handle.channel,
-            turn_id,
-            &handle.message,
-            &handle.cancel_reported,
-            &handle.user_prompt_persisted,
-            &handle.progress,
-        )?;
+        if let (Some(session_uuid), Some(session_id)) =
+            (handle.session_uuid, handle.session_id.as_deref())
+        {
+            report_cancelled_turn(
+                state,
+                session_uuid,
+                session_id,
+                &handle.channel,
+                turn_id,
+                &handle.message,
+                &handle.cancel_reported,
+                &handle.user_prompt_persisted,
+                &handle.progress,
+            )?;
+        } else {
+            report_cancelled_sessionless_turn(
+                state,
+                &handle.channel,
+                turn_id,
+                &handle.cancel_reported,
+            );
+        }
         state.turns.lock().unwrap().remove(turn_id);
         Ok(json!({"ok": true}))
     } else {
@@ -2713,6 +2734,24 @@ fn report_cancelled_turn(
         Some("cancelled"),
     );
     Ok(true)
+}
+
+fn report_cancelled_sessionless_turn(
+    state: &DaemonState,
+    channel: &str,
+    turn_id: &str,
+    cancel_reported: &AtomicBool,
+) {
+    if cancel_reported.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    publish_sessionless_turn_error_event(
+        state,
+        channel,
+        turn_id,
+        CANCELLED_TURN_MESSAGE.to_string(),
+        Some("cancelled"),
+    );
 }
 
 fn persist_cancelled_turn_progress(
@@ -2847,15 +2886,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let mut turns = state.turns.lock().unwrap();
         if let Some((existing_turn_id, _)) = turns
             .iter()
-            .find(|(_, handle)| handle.session_uuid == session_uuid)
+            .find(|(_, handle)| handle.session_uuid == Some(session_uuid))
         {
             anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
         }
         turns.insert(
             turn_id.clone(),
             TurnHandle {
-                session_id: session_id.clone(),
-                session_uuid,
+                session_id: Some(session_id.clone()),
+                session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
                 cancel: cancel.clone(),
@@ -2891,7 +2930,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
-            payload: json!({"type": "turn-start", "turnId": turn_id_thread}),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
         });
 
         // Load provider registry + auth + resources + session record on
@@ -3368,7 +3407,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     payload: event_payload_with_actor(
                         json!({
                             "type": "turn-complete",
-                            "turnId": turn_id_thread,
+                            "turnId": turn_id_thread.clone(),
                             "assistantText": turn.assistant_text,
                         }),
                         &stream_actor,
@@ -3464,15 +3503,15 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
         let mut turns = state.turns.lock().unwrap();
         if let Some((existing_turn_id, _)) = turns
             .iter()
-            .find(|(_, handle)| handle.session_uuid == session_uuid)
+            .find(|(_, handle)| handle.session_uuid == Some(session_uuid))
         {
             anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
         }
         turns.insert(
             turn_id.clone(),
             TurnHandle {
-                session_id: session_id.clone(),
-                session_uuid,
+                session_id: Some(session_id.clone()),
+                session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
                 cancel: cancel.clone(),
@@ -3496,7 +3535,7 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
-            payload: json!({"type": "turn-start", "turnId": turn_id_thread}),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
         });
 
         let mut inputs = match setup_state.build_runtime_inputs_without_discovery() {
@@ -3643,6 +3682,202 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
     Ok(json!({"turnId": turn_id_resp}))
 }
 
+async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
+    let turn_id = connector_setup_id(&params)?;
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .context("missing message")?
+        .to_string();
+    let connect_args = connector_setup_connect_args(&message)?;
+    let channel = format!("connector-setup:{turn_id}:event");
+    let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: Arc<
+        Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let cancel = CancelToken::new();
+    let cancel_reported = Arc::new(AtomicBool::new(false));
+    let user_prompt_persisted = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(TurnProgress::default()));
+
+    {
+        let mut turns = state.turns.lock().unwrap();
+        if turns.contains_key(&turn_id) {
+            anyhow::bail!("connector setup `{turn_id}` is already in flight");
+        }
+        turns.insert(
+            turn_id.clone(),
+            TurnHandle {
+                session_id: None,
+                session_uuid: None,
+                channel: channel.clone(),
+                message: message.clone(),
+                cancel: cancel.clone(),
+                cancel_reported: cancel_reported.clone(),
+                user_prompt_persisted,
+                pending,
+                pending_questions: pending_questions.clone(),
+                progress,
+            },
+        );
+    }
+
+    let setup_state = state.clone();
+    let turn_id_thread = turn_id.clone();
+    let turn_id_resp = turn_id.clone();
+    let channel_thread = channel.clone();
+    let next_req_id = state.next_request_id.clone();
+    let cancel_thread = cancel.clone();
+    let cancel_reported_thread = cancel_reported.clone();
+    std::thread::spawn(move || {
+        setup_state.publish_event(ServerEnvelope::Event {
+            event: channel_thread.clone(),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
+        });
+
+        let inputs = match setup_state.build_runtime_inputs_without_discovery() {
+            Ok(v) => v,
+            Err(err) => {
+                publish_sessionless_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &turn_id_thread,
+                    format!("build_runtime_inputs: {err:#}"),
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        };
+        let cfg_for_turn = setup_state.config.lock().unwrap().clone();
+        let metadata = connector_setup_session_metadata(setup_state.cwd.clone(), Uuid::new_v4());
+        let mut app_state = AppState::new(cfg_for_turn, setup_state.cwd.clone(), metadata);
+        let stream_actor = app_state.system_actor();
+
+        let question_state = setup_state.clone();
+        let question_channel = channel_thread.clone();
+        let question_turn = turn_id_thread.clone();
+        let question_pending = pending_questions.clone();
+        let question_next_id = next_req_id.clone();
+        let question_actor = stream_actor.clone();
+        let on_user_question = move |req: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
+            let request_id = question_next_id.fetch_add(1, Ordering::SeqCst).to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            question_pending
+                .lock()
+                .unwrap()
+                .insert(request_id.clone(), tx);
+
+            question_state.publish_event(ServerEnvelope::Event {
+                event: question_channel.clone(),
+                payload: event_payload_with_actor(
+                    json!({
+                        "type": "user-question-request",
+                        "turnId": question_turn.clone(),
+                        "requestId": request_id,
+                        "questions": req.questions,
+                    }),
+                    &question_actor,
+                ),
+            });
+
+            rx.recv().unwrap_or(UserQuestionPromptResponse {
+                answers: serde_json::Map::new(),
+                annotations: serde_json::Map::new(),
+            })
+        };
+
+        let outcome = with_user_question_prompt_handler(on_user_question, || {
+            cancel_thread.check()?;
+            let turn = execute_connect_flow(&mut app_state, &inputs.resources, &connect_args)?;
+            cancel_thread.check()?;
+            Ok::<_, anyhow::Error>(turn)
+        });
+
+        match outcome {
+            Ok(turn) => {
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: channel_thread.clone(),
+                    payload: event_payload_with_actor(
+                        json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread.clone(),
+                            "assistantText": turn.assistant_text,
+                        }),
+                        &stream_actor,
+                    ),
+                });
+            }
+            Err(error) => {
+                if !(cancel_thread.is_cancelled() && cancel_reported_thread.load(Ordering::SeqCst))
+                {
+                    publish_sessionless_turn_error_event(
+                        &setup_state,
+                        &channel_thread,
+                        &turn_id_thread,
+                        format!("{error:#}"),
+                        None,
+                    );
+                }
+            }
+        }
+        setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+    });
+
+    Ok(json!({"turnId": turn_id_resp, "setupId": turn_id_resp}))
+}
+
+fn connector_setup_id(params: &Value) -> Result<String> {
+    let setup_id = params
+        .get("setupId")
+        .or_else(|| params.get("setup_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    if !setup_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        anyhow::bail!("connector setup id must be ASCII alphanumeric, '-' or '_'");
+    }
+    Ok(setup_id)
+}
+
+fn connector_setup_connect_args(message: &str) -> Result<String> {
+    let trimmed = message.trim();
+    let without_slash = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    let (name, args) = without_slash
+        .split_once(' ')
+        .map(|(name, args)| (name, args.trim()))
+        .unwrap_or((without_slash, ""));
+    if name != "connect" {
+        anyhow::bail!("start_connector_setup expects a /connect command");
+    }
+    Ok(args.to_string())
+}
+
+fn connector_setup_session_metadata(cwd: std::path::PathBuf, id: Uuid) -> SessionMetadata {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    SessionMetadata {
+        id,
+        display_name: Some("Connector Setup".to_string()),
+        generated_title: None,
+        cwd,
+        created_at_ms: now,
+        updated_at_ms: now,
+        parent_session_id: None,
+        slug: Some(format!("connector-setup-{}", id.simple())),
+        tags: Vec::new(),
+        note: None,
+    }
+}
+
 fn publish_turn_error_event(
     state: &DaemonState,
     channel: &str,
@@ -3673,6 +3908,27 @@ fn publish_turn_error_event(
             "reason": "turn_error",
             "sessionId": session_id,
         }),
+    });
+}
+
+fn publish_sessionless_turn_error_event(
+    state: &DaemonState,
+    channel: &str,
+    turn_id: &str,
+    error: String,
+    category: Option<&str>,
+) {
+    let mut payload = json!({
+        "type": "turn-error",
+        "turnId": turn_id,
+        "error": error,
+    });
+    if let Some(category) = category {
+        payload["category"] = json!(category);
+    }
+    state.publish_event(ServerEnvelope::Event {
+        event: channel.to_string(),
+        payload,
     });
 }
 
@@ -3972,14 +4228,15 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        browser_permission_payload_json, handle_create_session, handle_import_external_credential,
+        browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
+        handle_create_session, handle_import_external_credential,
         handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
         handle_local_model_status, handle_login_with_api_key, handle_logout_provider,
         handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
         handle_save_permissions, handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled,
         model_descriptor_dto, permission_review_payload_json, report_cancelled_turn,
         requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
-        DaemonState, TurnProgress, TurnRequestOptions,
+        start_connector_setup_turn, DaemonState, ServerEnvelope, TurnProgress, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -4175,6 +4432,93 @@ mod tests {
         assert!(status["checks"]
             .as_array()
             .is_some_and(|checks| !checks.is_empty()));
+    }
+
+    #[test]
+    fn connector_setup_connect_args_accepts_connect_slash_command() {
+        assert_eq!(
+            connector_setup_connect_args("  /connect gmail-browser gmail-browser  ")
+                .expect("connect args"),
+            "gmail-browser gmail-browser"
+        );
+    }
+
+    #[test]
+    fn connector_setup_connect_args_rejects_other_commands() {
+        let err = connector_setup_connect_args("/session list").expect_err("reject command");
+        assert!(format!("{err:#}").contains("expects a /connect command"));
+    }
+
+    #[test]
+    fn connector_setup_id_rejects_path_like_values() {
+        let err =
+            connector_setup_id(&json!({"setupId": "../sessions"})).expect_err("reject setup id");
+        assert!(format!("{err:#}").contains("ASCII alphanumeric"));
+    }
+
+    #[test]
+    fn connector_setup_turn_does_not_create_visible_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = Arc::new(
+            DaemonState::load(
+                workspace_root.clone(),
+                paths.clone(),
+                "token".into(),
+                true,
+                false,
+                false,
+            )
+            .expect("daemon state"),
+        );
+        let mut events = state.event_sender().subscribe();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let response = runtime
+            .block_on(start_connector_setup_turn(
+                state.clone(),
+                json!({
+                    "setupId": "setup-test",
+                    "message": "/connect not-a-real-connector demo"
+                }),
+            ))
+            .expect("start connector setup");
+
+        assert_eq!(response["turnId"], "setup-test");
+
+        let payload = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let env = events.recv().await.expect("connector setup event");
+                        let ServerEnvelope::Event { event, payload } = env else {
+                            continue;
+                        };
+                        if event == "connector-setup:setup-test:event"
+                            && payload["type"] == "turn-error"
+                        {
+                            break payload;
+                        }
+                    }
+                })
+                .await
+            })
+            .expect("connector setup error event");
+        assert_eq!(payload["turnId"], "setup-test");
+
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let page = store.list_sessions_page(0, 10).expect("sessions page");
+        assert_eq!(page.total_sessions, 0);
     }
 
     fn spawn_openai_discovery_server() -> (String, std::thread::JoinHandle<()>) {

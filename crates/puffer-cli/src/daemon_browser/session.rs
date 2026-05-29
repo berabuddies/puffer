@@ -71,25 +71,22 @@ pub(super) struct BrowserSession {
 
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
-    pub(super) fn spawn(
-        profile_dir: PathBuf,
-        selected_profile: Option<String>,
-        width: u32,
-        height: u32,
-    ) -> Result<Self> {
+    pub(super) fn spawn(profile_dir: PathBuf, width: u32, height: u32) -> Result<Self> {
         let chrome = resolve_chrome_executable()
             .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
-        super::chrome::terminate_profile_processes(&profile_dir);
-        let launch = prepare_managed_profile(&profile_dir, selected_profile.as_deref())?;
-        remove_stale_devtools_port(&profile_dir)?;
+        let launch = prepare_managed_profile(&profile_dir)?;
+        if launch.owns_user_data_dir {
+            super::chrome::terminate_profile_processes(&launch.user_data_dir);
+            remove_stale_devtools_port(&launch.user_data_dir)?;
+        }
 
         let mut command = Command::new(&chrome);
-        configure_chrome_command(&mut command, &profile_dir, &launch, width, height);
+        configure_chrome_command(&mut command, &launch, width, height);
         let mut child = command
             .spawn()
             .with_context(|| format!("launch Chrome at {}", chrome.display()))?;
 
-        let browser_ws = match read_devtools_ws_url(&mut child, &profile_dir) {
+        let browser_ws = match read_devtools_ws_url(&mut child, &launch.user_data_dir) {
             Ok(url) => url,
             Err(error) => {
                 let _ = child.kill();
@@ -105,7 +102,7 @@ impl BrowserRootSession {
         };
         Ok(Self {
             inner: Arc::new(Mutex::new(BrowserRootState {
-                profile_dir,
+                profile_dir: launch.user_data_dir,
                 browser_ws,
                 child,
                 reusable_target,
@@ -944,7 +941,6 @@ fn remove_stale_devtools_port(profile_dir: &std::path::Path) -> Result<()> {
 
 fn configure_chrome_command(
     command: &mut Command,
-    profile_dir: &std::path::Path,
     launch: &ChromeProfileLaunch,
     width: u32,
     height: u32,
@@ -952,7 +948,10 @@ fn configure_chrome_command(
     command
         .arg("--headless=new")
         .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg(format!(
+            "--user-data-dir={}",
+            launch.user_data_dir.display()
+        ))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-background-networking")
