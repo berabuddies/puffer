@@ -2,6 +2,18 @@ import type { Page, WebSocketRoute } from "@playwright/test";
 
 export const FAKE_DAEMON_URL = "ws://127.0.0.1:17777/ws";
 
+/**
+ * Second ws the FakeDaemon also serves. In momo's runtime the frontend's
+ * `wsClient` talks to the momo Tauri backend (the `/ws` path above), which
+ * answers `daemon_handshake` with the URL+token of the *puffer daemon*; the
+ * `daemonClient` then dials that daemon ws directly for workflow/task RPCs.
+ * Under test both roles are played by this one FakeDaemon: the backend path
+ * (`/ws`) returns this URL from `daemon_handshake`, and this path (`/daemon`)
+ * serves the daemon-protocol RPCs (`workflow_list`, `task_monitor_*`, …).
+ */
+export const FAKE_DAEMON_RPC_URL = "ws://127.0.0.1:17777/daemon";
+const FAKE_DAEMON_TOKEN = "test-daemon-token";
+
 type JsonRecord = Record<string, unknown>;
 
 type DaemonRequest = {
@@ -996,9 +1008,17 @@ export class FakeDaemon {
 
   async install(page: Page): Promise<void> {
     const expectedUrl = new URL(this.url);
+    const daemonUrl = new URL(FAKE_DAEMON_RPC_URL);
     await page.routeWebSocket((url) => {
+      // Two routed paths share one dispatcher: the backend `/ws` path (where
+      // the frontend's wsClient connects and `daemon_handshake` is answered)
+      // and the daemon `/daemon` path (where daemonClient dials for the
+      // workflow/task RPCs). daemonClient appends `?token=…`, so we match on
+      // origin + pathname only and ignore the query string.
       const matches =
-        !this.rejectConnections && url.origin === expectedUrl.origin && url.pathname === expectedUrl.pathname;
+        !this.rejectConnections &&
+        url.origin === expectedUrl.origin &&
+        (url.pathname === expectedUrl.pathname || url.pathname === daemonUrl.pathname);
       if (matches) this.socketUrls.push(url.toString());
       return matches;
     }, (socket) => {
@@ -1270,6 +1290,13 @@ export class FakeDaemon {
   private dispatch(request: DaemonRequest): unknown {
     this.throwQueuedFailure(request.method);
     switch (request.method) {
+      case "daemon_handshake":
+        return {
+          url: FAKE_DAEMON_RPC_URL,
+          token: FAKE_DAEMON_TOKEN,
+          protocolVersion: "1",
+          workspaceRoot: this.workspaceRoot
+        };
       case "default_workspace":
         return { cwd: this.workspaceRoot, workspaceRoot: this.workspaceRoot };
       case "load_settings_snapshot":
@@ -1360,6 +1387,10 @@ export class FakeDaemon {
         return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
       case "workflow_list":
         return this.workflowListResponse();
+      case "task_monitor_create":
+        return this.createMonitorTask(request.params);
+      case "task_monitor_ignore":
+        return this.ignoreMonitorTask(request.params);
       case "workflow_save":
         return this.saveWorkflow(request.params);
       case "workflow_binding_create":
@@ -1401,6 +1432,29 @@ export class FakeDaemon {
       monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
       monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
     };
+  }
+
+  private createMonitorTask(params: JsonRecord): JsonRecord {
+    // Mirror puffer: a monitor-create returns the refreshed workflow snapshot.
+    // The fixture doesn't synthesize a task (the agent does that out of band),
+    // it just echoes the current snapshot so the caller can re-render.
+    void params;
+    return this.workflowListResponse();
+  }
+
+  private ignoreMonitorTask(params: JsonRecord): JsonRecord {
+    const taskId = String(params.task_id ?? "");
+    if (!taskId) throw new Error("missing task_id");
+    // Drop the task from the snapshot so a subsequent workflow_list (the store
+    // refetches after ignore) shows it gone — matching the real daemon, where
+    // an ignored task leaves the actionable list.
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      monitor_tasks: (this.workflowSnapshot.monitor_tasks ?? []).filter(
+        (task) => String(task.task_id) !== taskId
+      )
+    };
+    return this.workflowListResponse();
   }
 
   private saveWorkflow(params: JsonRecord): JsonRecord {

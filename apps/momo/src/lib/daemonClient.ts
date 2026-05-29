@@ -267,3 +267,17 @@ export async function ensureDaemonClient(): Promise<DaemonClient> {
 export function currentDaemonClient(): DaemonClient | null {
   return sharedClient;
 }
+
+/**
+ * Drop the memoized client (closing its socket) so the next
+ * `ensureDaemonClient()` re-fetches the handshake and dials a fresh socket.
+ *
+ * `ensureDaemonClient` never re-dials a dead daemon on its own — once
+ * `sharedClient` is set it's returned forever. Callers that observe a failed
+ * request (the daemon may have restarted, invalidating the old ws URL/token)
+ * call this so the connection can self-heal on the next attempt.
+ */
+export function resetDaemonClient(): void {
+  sharedClient?.close();
+  sharedClient = null;
+}

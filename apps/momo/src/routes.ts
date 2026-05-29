@@ -14,6 +14,7 @@ import type { Component } from "svelte";
 
 import Home from "./pages/Home.svelte";
 import HomeEmpty from "./pages/HomeEmpty.svelte";
+import Tasks from "./pages/Tasks.svelte";
 import Contact from "./pages/Contact.svelte";
 import ContactDetail from "./pages/ContactDetail.svelte";
 import Wallet from "./pages/Wallet.svelte";
@@ -56,6 +57,8 @@ export const routes: readonly RouteDef[] = [
 
   { pattern: "/home/empty", component: HomeEmpty as Component<Record<string, unknown>>, hasShell: true, displayName: "Home (empty)" },
   { pattern: "/home", component: Home as Component<Record<string, unknown>>, hasShell: true, displayName: "Home" },
+
+  { pattern: "/tasks", component: Tasks as Component<Record<string, unknown>>, hasShell: true, displayName: "Tasks" },
 
   { pattern: "/contact/:id", component: ContactDetail as Component<Record<string, unknown>>, hasShell: true, displayName: "Contact detail" },
   { pattern: "/contact", component: Contact as Component<Record<string, unknown>>, hasShell: true, displayName: "Contact" },

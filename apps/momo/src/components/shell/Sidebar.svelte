@@ -37,6 +37,7 @@
     Home,
     Wallet,
     LayoutGrid,
+    ListChecks,
     Search,
     PanelLeftClose,
     PanelLeftOpen,
@@ -81,6 +82,7 @@
 
   const navEntries: NavEntry[] = [
     { label: "Home", icon: Home, href: "/home", activePrefixes: ["/home"] },
+    { label: "Tasks", icon: ListChecks, href: "/tasks", activePrefixes: ["/tasks"] },
     { label: "Wallet", icon: Wallet, href: "/wallet", activePrefixes: ["/wallet"] },
     { label: "Connected Apps", icon: LayoutGrid, href: "/apps", activePrefixes: ["/apps"] }
   ];
