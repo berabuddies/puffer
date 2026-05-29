@@ -33,6 +33,11 @@ SYS = (
     'Output: {"intent":"Add a dark mode toggle to the settings screen",'
     '"state":"implementing","activity":"Read settings, edited settings.tsx and theme.css",'
     '"signals":["new feature work across UI + styles"],"suggestion":"Add a test for the toggle state"}\n\n'
+    "The example is ONLY a format guide. Derive every field — especially signals "
+    "and suggestion — solely from the Recent actions below; never reuse the "
+    "example's wording (e.g. do not output \"new feature work across UI + styles\" "
+    "unless the actions below are actually about that). If there is no notable "
+    "signal, return an empty array; if no useful suggestion, return \"\".\n"
     "Now analyze the actual session below the same way."
 )
 
@@ -88,10 +93,29 @@ def analyze(behavior):
     s, e = txt.find("{"), txt.rfind("}")
     if s >= 0 and e > s:
         try:
-            return json.loads(txt[s:e+1])
+            return normalize(json.loads(txt[s:e+1]))
         except Exception:
             pass
-    return {"raw": txt.strip()[:200]}
+    return normalize({"raw": txt.strip()[:200]})
+
+def normalize(obj):
+    """Guarantee the full schema so downstream consumers never see missing keys.
+    The 1B model intermittently omits signals/suggestion; coerce to defaults and
+    correct types rather than leak None/wrong shapes into the rolling output."""
+    if not isinstance(obj, dict):
+        obj = {"raw": str(obj)[:200]}
+    out = {
+        "intent": str(obj.get("intent") or ""),
+        "state": str(obj.get("state") or "idle"),
+        "activity": str(obj.get("activity") or ""),
+        "signals": obj.get("signals") if isinstance(obj.get("signals"), list) else
+                   ([obj["signals"]] if obj.get("signals") else []),
+        "suggestion": str(obj.get("suggestion") or ""),
+    }
+    out["signals"] = [str(s) for s in out["signals"] if str(s).strip()]
+    if "raw" in obj:
+        out["raw"] = obj["raw"]
+    return out
 
 def load(path):
     out = []
