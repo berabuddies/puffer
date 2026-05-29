@@ -72,6 +72,52 @@ test("home composer → run_agent_turn → ConversationView renders the assistan
   ).toBeVisible();
 });
 
+// Regression for the `state_unsafe_mutation` crash on DIRECT navigation to an
+// existing session (sidebar click / Home task card / page reload). Unlike the
+// create-flow above — which pre-seeds the controller state via
+// `createSessionFromText` before navigating — landing straight on
+// `/agent/<id>` makes Agent.svelte the first thing to touch the session state.
+// When the controller was created inside a `$derived` (T5 v1), `createController`
+// → `ensureState` mutated `chatStates` inside a tracked read scope and Svelte 5
+// threw `state_unsafe_mutation` (fatal in WebKit/Tauri), blanking the page.
+// Seeding the controller in a `$effect` instead is the fix; this guards it by
+// failing on ANY uncaught pageerror while asserting the seeded timeline renders.
+test("direct goto /agent/<id> hydrates the timeline without a pageerror", async ({ page }) => {
+  const pageErrors: Error[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "seeded-1",
+        timeline: [
+          { kind: "user_message", id: "u-1", text: "ping from history", createdAtMs: 1 },
+          { kind: "assistant_message", id: "a-1", text: "pong from history", createdAtMs: 2 }
+        ]
+      }
+    ]
+  });
+  await bootOnboarded(page, daemon);
+
+  // Hard-navigate straight to the session — no create-flow, no pre-seeded
+  // controller state. This is the path that crashed before the fix.
+  await page.goto("/#/agent/seeded-1");
+  await expect(page).toHaveURL(/#\/agent\/seeded-1$/);
+
+  // ConversationView must hydrate and render the persisted transcript.
+  await expect(
+    page.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "ping from history" })
+  ).toBeVisible();
+  await expect(
+    page
+      .locator('.pf-msg[data-role="agent"] .pf-msg-text')
+      .filter({ hasText: "pong from history" })
+  ).toBeVisible();
+
+  // No uncaught error (the state_unsafe_mutation regression would surface here).
+  expect(pageErrors, pageErrors.map((e) => e.message).join("\n")).toHaveLength(0);
+});
+
 // Regression for the Sidebar "+ new chat" Promise-stringification bug:
 // startNewChat used to template-literal the Promise into the URL, producing
 // `/agent/[object Promise]`. The async-then refactor must navigate to the

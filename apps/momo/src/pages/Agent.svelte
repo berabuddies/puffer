@@ -32,37 +32,49 @@
 
   let { taskId }: Props = $props();
 
-  // Bind a chat controller to this session id. `createController` is a thin
-  // façade over the module-level `chatStates` record, so it survives the
-  // route remount that fires on `{#key currentRoute.path}` — the underlying
-  // state outlives this component.
-  let controller = $derived(createController(taskId ?? ""));
+  // Bind a chat controller to this session id. `createController` calls
+  // `ensureState`, which *mutates* the module-level `chatStates` $state. Svelte 5
+  // forbids that in a `$derived` / template read scope (`state_unsafe_mutation`,
+  // fatal in WebKit/Tauri — see agentChat.svelte.ts:129-134), and direct
+  // navigation to `/agent/<id>` (sidebar click / Home task card / page reload)
+  // hits exactly that path with no pre-seeded state. So the controller is seeded
+  // inside a `$effect` (mutation allowed) and stays null until the first effect
+  // run; every template/derived read below null-guards it. The underlying state
+  // lives at module scope, so the controller survives the `{#key}` route remount.
+  let controller = $state<ReturnType<typeof createController> | null>(null);
 
-  // Subscribe this session's daemon events into the reducer and hydrate the
-  // persisted transcript once per session. Both are idempotent; the effect
+  // Seed the controller, subscribe this session's daemon events into the
+  // reducer, and hydrate the persisted transcript. All idempotent; the effect
   // re-runs when `taskId` changes (new route → new session).
   $effect(() => {
-    if (!taskId) return;
-    controller.ensureSubscription();
-    void controller.loadDetail();
+    if (!taskId) {
+      controller = null;
+      return;
+    }
+    const c = createController(taskId);
+    c.ensureSubscription();
+    void c.loadDetail();
+    controller = c;
   });
 
   // Pull the rendered timeline through the controller getters. These recompute
   // from `$state` on read, so they stay reactive inside the template/derived.
-  let timeline = $derived<TimelineItem[]>(taskId ? controller.combinedTimeline() : []);
-  let pendingPermissions = $derived(taskId ? controller.pendingPermissions() : []);
-  let pendingQuestions = $derived(taskId ? controller.pendingQuestions() : []);
-  let turnRunning = $derived(taskId ? controller.turnRunning() : false);
+  // `controller` is null on the very first frame (before the $effect runs),
+  // hence the guards.
+  let timeline = $derived<TimelineItem[]>(controller ? controller.combinedTimeline() : []);
+  let pendingPermissions = $derived(controller ? controller.pendingPermissions() : []);
+  let pendingQuestions = $derived(controller ? controller.pendingQuestions() : []);
+  let turnRunning = $derived(controller ? controller.turnRunning() : false);
   // Hydration loading state: the persisted detail hasn't landed yet and the
   // live stream is empty. `ConversationView` shows its own "Loading…" row when
-  // `loading && timeline.length === 0`.
+  // `loading && timeline.length === 0`. Treat the pre-seed frame as loading too.
   let loading = $derived(
-    taskId ? controller.state().sessionDetail === null && timeline.length === 0 : false
+    controller ? controller.state().sessionDetail === null && timeline.length === 0 : Boolean(taskId)
   );
   // ConversationView's composer is gated on `session`; momo drives input from
   // the shell <Composer> below instead, so the session lets the timeline +
   // approval prompts scope correctly without surfacing a second input.
-  let session = $derived(taskId ? (controller.state().sessionDetail?.session ?? null) : null);
+  let session = $derived(controller ? (controller.state().sessionDetail?.session ?? null) : null);
 
   function goHome(event: MouseEvent): void {
     event.preventDefault();
@@ -100,8 +112,11 @@
       the controller's `TimelineItem[]` directly. Its own internal composer is
       hidden via the `:global(.pf-composer-wrap)` rule below; momo drives input
       through the shell <Composer> row underneath so the page keeps a single
-      visible input. The Approval / QuestionPrompt callbacks still route through
-      ConversationView so pending requests resolve inline with their turn.
+      visible input. `onSubmitMessage` is therefore intentionally inert here
+      (the hidden composer never fires it) — sending goes through the shell
+      Composer, NOT this prop, so there's no double-send. The Approval /
+      QuestionPrompt callbacks still route through ConversationView so pending
+      requests resolve inline with their turn.
     -->
     <section class="agent__thread" aria-label="Conversation">
       <ConversationView
@@ -111,11 +126,11 @@
         {pendingQuestions}
         {turnRunning}
         {loading}
-        onSubmitMessage={(message) => controller.appendUserMessage(message)}
-        onResolvePermission={(id, choice) => controller.resolvePermission(id, choice)}
+        onSubmitMessage={(message) => controller?.appendUserMessage(message)}
+        onResolvePermission={(id, choice) => controller?.resolvePermission(id, choice)}
         onResolveUserQuestion={(id, answers, annotations) =>
-          controller.resolveUserQuestion(id, answers, annotations)}
-        onCancelTurn={() => controller.cancelCurrentTurn()}
+          controller?.resolveUserQuestion(id, answers, annotations)}
+        onCancelTurn={() => controller?.cancelCurrentTurn()}
       />
     </section>
 
@@ -129,7 +144,7 @@
         <Composer
           placeholder="Hi, Tomo. How's my luck today?"
           running={turnRunning}
-          onCancel={() => controller.cancelCurrentTurn()}
+          onCancel={() => controller?.cancelCurrentTurn()}
         />
       </div>
     </div>
