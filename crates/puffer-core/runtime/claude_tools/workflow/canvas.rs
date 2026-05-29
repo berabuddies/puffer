@@ -25,14 +25,25 @@ pub fn render_canvas(spec: &Value, bridge: Option<&Value>) -> String {
         .get("title")
         .and_then(Value::as_str)
         .unwrap_or("Canvas");
-    let spec_json = serde_json::to_string(spec).unwrap_or_else(|_| "{}".to_string());
-    let bridge_json = bridge
-        .map(|b| serde_json::to_string(b).unwrap_or_else(|_| "null".into()))
-        .unwrap_or_else(|| "null".into());
+    let spec_json = js_embed(&serde_json::to_string(spec).unwrap_or_else(|_| "{}".to_string()));
+    let bridge_json = js_embed(
+        &bridge
+            .map(|b| serde_json::to_string(b).unwrap_or_else(|_| "null".into()))
+            .unwrap_or_else(|| "null".into()),
+    );
     TEMPLATE
         .replace("__TITLE__", &escape_html(title))
         .replace("__SPEC__", &spec_json)
         .replace("__BRIDGE__", &bridge_json)
+}
+
+/// Make a JSON string safe to embed inside an HTML `<script>` element: escape
+/// `<` (so a `</script>` inside any value can't terminate the tag → no XSS) and
+/// the JS line separators. Output stays valid JSON (`<` decodes to `<`).
+fn js_embed(json: &str) -> String {
+    json.replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 /// Resolve a daemon callback bridge from the on-disk handshake, if a daemon is
@@ -53,6 +64,21 @@ fn resolve_bridge(session_id: &str) -> Option<Value> {
 
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Atomically create a new file owner-only (0600 on unix) and write `data`.
+/// `create_new` fails rather than following a pre-existing symlink at the path.
+fn write_owner_only(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(data)
 }
 
 /// Best-effort open of a file in the OS default app. Never fails the tool.
@@ -96,15 +122,15 @@ pub fn execute_canvas(state: &mut AppState, cwd: &Path, input: Value) -> Result<
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let path = dir.join(format!("canvas-{stamp}.html"));
-    std::fs::write(&path, &html)
+    // Create owner-only ATOMICALLY (the page may embed the daemon token) — avoids
+    // the umask race of write-then-chmod. create_new also refuses to follow an
+    // existing symlink at the target.
+    write_owner_only(&path, html.as_bytes())
         .with_context(|| format!("failed to write canvas {}", path.display()))?;
-    // Owner-only: the page may embed the daemon token for action callbacks.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    let opened = open_in_os(&path);
+    // Don't pop a browser in headless / CI / AgentEnv contexts.
+    let suppress_open = std::env::var_os("PUFFER_CANVAS_NO_OPEN").is_some()
+        || std::env::var_os("CI").is_some();
+    let opened = if suppress_open { false } else { open_in_os(&path) };
 
     Ok(serde_json::to_string_pretty(&json!({
         "status": "rendered",
@@ -159,6 +185,18 @@ mod tests {
         // no daemon bridge -> actions degrade
         assert!(html.contains("=null") || html.contains("= null") || html.contains(":null"),
                 "bridge is null without a daemon");
+    }
+
+    #[test]
+    fn render_escapes_script_breakout() {
+        // a spec value containing </script> must not break out of the JSON tag
+        let spec = json!({ "title": "T", "body": [
+            { "type": "finding", "title": "x", "evidence": "</script><script>steal()</script>" }
+        ]});
+        let html = render_canvas(&spec, None);
+        assert!(!html.contains("</script><script>steal()"), "raw breakout present — XSS");
+        assert!(html.contains("\\u003c/script>") || html.contains("\\u003cscript>"),
+                "the < was escaped to \\u003c");
     }
 
     #[test]
