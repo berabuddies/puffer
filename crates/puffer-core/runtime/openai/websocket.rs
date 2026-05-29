@@ -406,16 +406,18 @@ where
         };
         let input_tokens = response.input_tokens;
         if let Some(input) = input_tokens {
-            state.last_input_tokens = Some(input as u32);
-            let cached = response.cached_tokens.unwrap_or(0);
-            let output = response.output_tokens.unwrap_or(0);
-            state.update_cache_stats(input as u64, cached as u64);
-            on_event(TurnStreamEvent::Usage(super::super::TurnUsageReport {
-                input_tokens: input as u64,
-                output_tokens: output as u64,
-                cache_read_tokens: cached as u64,
-                cache_creation_tokens: 0,
-            }));
+            if input > 0 {
+                state.last_input_tokens = Some(input as u32);
+                let cached = response.cached_tokens.unwrap_or(0);
+                let output = response.output_tokens.unwrap_or(0);
+                state.update_cache_stats(input as u64, cached as u64);
+                on_event(TurnStreamEvent::Usage(super::super::TurnUsageReport {
+                    input_tokens: input as u64,
+                    output_tokens: output as u64,
+                    cache_read_tokens: cached as u64,
+                    cache_creation_tokens: 0,
+                }));
+            }
         }
 
         if response.tool_calls.is_empty() {

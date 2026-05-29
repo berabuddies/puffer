@@ -300,7 +300,9 @@ where
         };
         let input_tokens = response.input_tokens;
         if let Some(tokens) = input_tokens {
-            state.last_input_tokens = Some(tokens as u32);
+            if tokens > 0 {
+                state.last_input_tokens = Some(tokens as u32);
+            }
         }
         // Emit per-turn usage with cache hit data.
         if let Some(input) = response.input_tokens {

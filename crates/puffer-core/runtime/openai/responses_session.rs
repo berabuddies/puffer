@@ -138,20 +138,17 @@ impl OpenAIResponsesTurnSession {
         body
     }
 
-    /// Reads typed token-usage fields from a Responses payload, updates
-    /// `state.last_input_tokens` + cache stats. Caller is responsible
-    /// for emitting any `TurnStreamEvent::Usage` event (streaming path
-    /// only).
+    /// Writes per-turn token counts onto `state` (guards placeholder zeros).
     fn record_usage(
         state: &mut AppState,
         input_tokens: Option<usize>,
         cached_tokens: u64,
     ) -> Option<usize> {
         if let Some(tokens) = input_tokens {
-            state.last_input_tokens = Some(tokens as u32);
-        }
-        if let Some(input) = input_tokens {
-            state.update_cache_stats(input as u64, cached_tokens);
+            if tokens > 0 {
+                state.last_input_tokens = Some(tokens as u32);
+                state.update_cache_stats(tokens as u64, cached_tokens);
+            }
         }
         input_tokens
     }

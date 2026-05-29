@@ -362,13 +362,17 @@ impl OpenAISseState {
                 .pointer("/usage/input_tokens")
                 .and_then(Value::as_u64)
             {
-                self.input_tokens = Some(tokens as usize);
+                if tokens > 0 {
+                    self.input_tokens = Some(tokens as usize);
+                }
             }
             if let Some(tokens) = response
                 .pointer("/usage/output_tokens")
                 .and_then(Value::as_u64)
             {
-                self.output_tokens = Some(tokens as usize);
+                if tokens > 0 {
+                    self.output_tokens = Some(tokens as usize);
+                }
             }
             if let Some(tokens) = response
                 .pointer("/usage/input_tokens_details/cached_tokens")
@@ -786,5 +790,41 @@ mod tests {
             .unwrap();
         assert_eq!(deltas, vec!["partial"]);
         assert_eq!(result.response_id.as_deref(), Some("resp_cancel"));
+    }
+
+    #[test]
+    fn typed_result_keeps_real_usage_against_trailing_zero_placeholders() {
+        let stream = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_z\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_z\",\"status\":\"completed\",\"usage\":{\"input_tokens\":148137,\"output_tokens\":420}}}\n\n",
+            "event: response.in_progress\n",
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_z\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n"
+        );
+
+        let result =
+            super::parse_openai_sse_reader_typed(BufReader::new(stream.as_bytes()), &mut |_| {})
+                .unwrap();
+
+        assert_eq!(result.input_tokens, Some(148137));
+        assert_eq!(result.output_tokens, Some(420));
+    }
+
+    #[test]
+    fn typed_result_keeps_zero_cached_tokens_as_legitimate_value() {
+        let stream = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_c\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1000,\"output_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
+        );
+
+        let result =
+            super::parse_openai_sse_reader_typed(BufReader::new(stream.as_bytes()), &mut |_| {})
+                .unwrap();
+
+        assert_eq!(result.input_tokens, Some(1000));
+        assert_eq!(result.cached_tokens, Some(0));
     }
 }

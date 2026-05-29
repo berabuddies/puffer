@@ -801,7 +801,11 @@ pub(crate) fn poll_pending_submit(
             }
             PendingSubmitEvent::Usage(report) => {
                 state.update_cache_stats(report.input_tokens, report.cache_read_tokens);
-                pending.status_hint = None; // clear retry hint on success
+                // Worker holds a clone of state; mirror back what the provider wrote.
+                if report.input_tokens > 0 {
+                    state.last_input_tokens = Some(report.input_tokens as u32);
+                }
+                pending.status_hint = None;
             }
             PendingSubmitEvent::PermissionRequest(request, response_tx) => {
                 tui.pending_permission_request = Some(PendingPermissionRequest { response_tx });
