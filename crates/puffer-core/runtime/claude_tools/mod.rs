@@ -720,6 +720,7 @@ pub fn execute_workflow_tool(
         "AskUserQuestion" => {
             workflow::ask_user_question::execute_ask_user_question(state, cwd, input)
         }
+        "Canvas" => workflow::canvas::execute_canvas(state, cwd, input),
         "ComfyUiAction" => workflow::comfyui_action::execute_comfyui_action(state, cwd, input),
         "ComputerUseAction" => {
             workflow::computer_use_action::execute_computer_use_action(state, cwd, input)

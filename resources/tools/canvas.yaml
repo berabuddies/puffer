@@ -1,0 +1,71 @@
+id: Canvas
+name: Canvas
+description: |-
+  Render a structured result as an interactive Canvas page and open it.
+
+  Canvas is a small DESIGN SYSTEM, not a fixed template: you COMPOSE a tree of
+  components into a page for the task at hand (a code review, a research
+  dashboard, a test report, an audit). You provide only the component tree; a
+  shared design system (tokens, layout, dark + light) renders it consistently.
+  Do NOT write HTML/CSS yourself.
+
+  Spec: { title, meta?: string[], summary?, body: Node[] }
+  Node: { type, ...props, children?: Node[] }
+
+  Components you can compose:
+  - Layout:  section{title} · grid{min} · columns · card{title} · divider
+  - Text:    heading{level,text} · text{value} · badge{text,tone}
+  - Data:    metrics{items:[{value,label,tone?}]}  (inline summary strip)
+             kv{rows:[[k,v]]} · table{columns,rows}
+  - Viz:     bar{items:[{label,value,max?,tone?}]}
+             heatmap{columns,rows:[{label,cells:[0-4]}]}
+  - Rich:    finding{severity,title,status?,locations?,body?,evidence?,
+                     actions?:[{id,label,intent?}]}
+             diff{text} · code{text} · callout{tone,title,body}
+  tone: "crit" | "high" | "ok" | "info"  ·  severity: critical|high|medium|low|info
+  intent (on actions): "fix" | "test" | "explain"
+
+  Compose what fits the task — do not force every result into the same shape.
+  Prefer information density over decoration.
+
+  IMPORTANT — make it actionable, not a static report: every `finding` SHOULD
+  carry `locations` and `evidence` (the actual diff/code, not a paraphrase), and
+  SHOULD expose `actions` (e.g. {id,label:"Suggest change",intent:"fix"} /
+  {label:"Add test",intent:"test"} / {label:"Explain",intent:"explain"}) whenever
+  the user could act. Action buttons continue the conversation with the agent
+  (carrying the finding's context) without the user typing — so a finding with no
+  action is a missed entry point. Do not emit decorative nodes with no evidence.
+
+  The page is written under .puffer/canvas/ and opened in the default browser.
+handler: runtime:workflow:canvas
+approval_policy: auto
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  description: The canvas component tree.
+  required:
+    - title
+    - body
+  properties:
+    title:
+      type: string
+      description: Page title.
+    meta:
+      type: array
+      items: { type: string }
+      description: Dense header tags, e.g. ["PR #210", "3 files"].
+    summary:
+      type: string
+      description: Optional one-paragraph summary under the title.
+    body:
+      type: array
+      description: The component tree. Each item is a node { type, ...props, children? }.
+      items:
+        type: object
+        properties:
+          type:
+            type: string
+            description: Component type (section, grid, card, metrics, table, bar, heatmap, finding, diff, code, callout, text, heading, badge, kv, columns, divider).
+        required: [type]
+        additionalProperties: true
+  additionalProperties: true

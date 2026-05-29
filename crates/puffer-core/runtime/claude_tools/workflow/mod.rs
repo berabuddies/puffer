@@ -2,6 +2,7 @@ pub mod agent;
 pub mod anthropic_stream;
 pub mod ask_user_question;
 mod ask_user_question_types;
+pub mod canvas;
 pub mod comfyui_action;
 pub mod computer_use_action;
 pub mod config;

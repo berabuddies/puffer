@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>__TITLE__</title>
+<style>
+:root{
+  color-scheme: dark light;
+  --bg:#0b0d10; --surface:#101317; --surface-2:#14181d; --border:#242a31; --border-strong:#343a43;
+  --fg:#e7e9ec; --fg-soft:#c5cad1; --muted:#828a96; --muted-2:#5e6672;
+  --accent:#4c9dff; --accent-soft:rgba(76,157,255,.14);
+  --critical:#ff6b6b; --high:#f59e0b; --medium:#cdb24a; --low:#7f8a99; --ok:#58a67a; --info:#4c9dff;
+  --rsm:4px; --r:6px;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,"Segoe UI","PingFang SC",sans-serif;
+}
+@media (prefers-color-scheme: light){:root:not([data-theme=dark]){
+  --bg:#f6f7f9; --surface:#fff; --surface-2:#eef1f4; --border:#dde1e7; --border-strong:#c6ccd5;
+  --fg:#14171b; --fg-soft:#363c44; --muted:#646c78; --muted-2:#8b93a0;
+  --accent:#2d7ff0; --accent-soft:rgba(45,127,240,.12);
+  --critical:#d83a3a; --high:#c2780a; --medium:#9a7d18; --low:#6b7480; --ok:#2f8156; --info:#2d7ff0;
+}}
+[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box} html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:13px;line-height:1.42;-webkit-font-smoothing:antialiased}
+.shell{max-width:1180px;margin:0 auto;padding:0 28px 72px}
+header{display:flex;align-items:baseline;gap:14px;padding:18px 0 12px;border-bottom:1px solid var(--border)}
+header .h-title{font-size:17px;font-weight:600;letter-spacing:.1px}
+header .h-meta{margin-left:auto;display:flex;gap:14px;color:var(--muted);font-size:12px;font-family:var(--mono)}
+.sub{color:var(--muted);font-size:12.5px;margin:10px 0 18px;max-width:780px}
+.cv{display:flex;flex-direction:column;gap:18px;margin-top:18px}
+.sec{display:flex;flex-direction:column;gap:10px}
+.sec>.sec-h{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted-2)}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(var(--min,220px),1fr))}
+.cols{display:flex;gap:14px;flex-wrap:wrap} .cols>*{flex:1;min-width:0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.card>.card-h{font-size:12px;color:var(--muted);margin-bottom:8px}
+.divider{height:1px;background:var(--border);border:0;margin:4px 0}
+.h1{font-size:18px;font-weight:600} .h2{font-size:15px;font-weight:600} .h3{font-size:13px;font-weight:600;color:var(--fg-soft)}
+.text{color:var(--fg-soft);white-space:pre-wrap}
+.metrics{display:flex;flex-wrap:wrap;align-items:center;gap:14px;font-size:12.5px}
+.metrics .m{color:var(--muted)} .metrics .m b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums;font-size:14px}
+.metrics .m.high b{color:var(--high)} .metrics .m.crit b{color:var(--critical)} .metrics .m.ok b{color:var(--ok)}
+.metrics .sep{width:1px;height:13px;background:var(--border-strong)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:12.5px}
+.kv .k{color:var(--muted)} .kv .v{color:var(--fg-soft)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--border);vertical-align:top}
+th{color:var(--muted-2);font-weight:600;font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+td{color:var(--fg-soft)}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:var(--rsm);border:1px solid var(--border-strong);color:var(--muted)}
+.badge.crit,.badge.critical{color:var(--critical);border-color:var(--critical)} .badge.high{color:var(--high);border-color:var(--high)}
+.badge.ok,.badge.low{color:var(--ok)} .badge.info{color:var(--accent)}
+.callout{border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:var(--r);padding:11px 14px;background:var(--surface)}
+.callout.high{border-left-color:var(--high)} .callout.crit{border-left-color:var(--critical)} .callout.ok{border-left-color:var(--ok)}
+.callout .c-t{font-weight:600;margin-bottom:3px} .callout .c-b{color:var(--fg-soft)}
+.finding{border-bottom:1px solid var(--border);border-left:2px solid transparent;padding:11px 14px}
+.finding[data-sev=critical]{border-left-color:var(--critical)} .finding[data-sev=high]{border-left-color:var(--high)}
+.finding[data-sev=medium]{border-left-color:var(--medium)} .finding[data-sev=low]{border-left-color:var(--low)}
+.finding .f1{display:flex;align-items:baseline;gap:10px}
+.finding .sev{font-size:10.5px;font-weight:650;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.finding[data-sev=critical] .sev{color:var(--critical)} .finding[data-sev=high] .sev{color:var(--high)}
+.finding .f-title{font-weight:550;font-size:13.5px} .finding .f-status{margin-left:auto;font-size:11px;color:var(--muted-2);font-family:var(--mono)}
+.finding .f-loc{font-family:var(--mono);font-size:11.5px;color:var(--accent);margin-top:3px}
+.finding .f-body{color:var(--fg-soft);margin-top:6px}
+pre.code{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:9px 11px;overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.5;margin:8px 0 0}
+pre.code .add{background:rgba(88,166,122,.12);color:var(--ok);display:block} pre.code .del{background:rgba(255,107,107,.10);color:var(--critical);display:block}
+.acts{display:flex;gap:7px;margin-top:9px}
+.btn{font:inherit;font-size:12px;height:27px;padding:0 11px;border-radius:5px;border:1px solid var(--border-strong);background:transparent;color:var(--fg-soft);cursor:pointer}
+.btn:hover{border-color:var(--muted);color:var(--fg)} .btn.primary{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.bar{display:flex;flex-direction:column;gap:7px}
+.bar .b-row{display:grid;grid-template-columns:130px 1fr 44px;align-items:center;gap:10px;font-size:12px}
+.bar .b-lab{color:var(--fg-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .b-track{height:8px;background:var(--surface-2);border-radius:99px;overflow:hidden}
+.bar .b-fill{height:100%;background:var(--accent);border-radius:99px} .bar .b-fill.high{background:var(--high)} .bar .b-fill.crit{background:var(--critical)} .bar .b-fill.ok{background:var(--ok)}
+.bar .b-val{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.heat{overflow:auto} .heat table{width:auto;border-collapse:separate;border-spacing:5px}
+.heat td.cell{width:30px;height:26px;border-radius:5px;background:var(--surface-2)}
+.heat td.cell[data-v="1"]{background:rgba(88,166,122,.5)} .heat td.cell[data-v="2"]{background:rgba(205,178,74,.6)}
+.heat td.cell[data-v="3"]{background:rgba(245,158,11,.7)} .heat td.cell[data-v="4"]{background:rgba(255,107,107,.8)}
+.heat td.rl{color:var(--fg-soft);font-size:12px;padding-right:8px;white-space:nowrap} .heat th{font-weight:500;color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0;border:0}
+.tt{position:fixed;top:14px;right:16px;font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:3px 8px;background:var(--surface);cursor:pointer}
+</style></head>
+<body>
+<button class="tt" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">theme</button>
+<div class="shell" id="app"></div>
+<script id="spec" type="application/json">__SPEC__</script>
+<script>
+const spec=JSON.parse(document.getElementById('spec').textContent);
+const BRIDGE=__BRIDGE__; // {url, token, sessionId} | null — lets actions continue the agent turn
+const E=(t,c,h)=>{const n=document.createElement(t);if(c)n.className=c;if(h!=null)n.innerHTML=h;return n};
+function toast(msg){let t=document.getElementById('pf-toast');if(!t){t=E('div');t.id='pf-toast';t.style.cssText='position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--surface);color:var(--fg);border:1px solid var(--border-strong);border-radius:8px;padding:9px 14px;font-size:12.5px;box-shadow:0 6px 24px rgba(0,0,0,.3);z-index:99';document.body.append(t)}t.textContent=msg;t.style.opacity='1';clearTimeout(t._h);t._h=setTimeout(()=>t.style.opacity='0',2600)}
+// Bundle a node's context into a follow-up message and continue the agent turn.
+function actionMessage(node,ac){
+  const intent=intentOf(ac);
+  const loc=(node.locations||[]).map(locText).filter(Boolean).join(', ');
+  const verb={fix:'Fix this issue',test:'Add tests for this',explain:'Explain this in depth'}[intent]||ac.label||'Continue on this';
+  let m=verb+' (from the Canvas).\n\nFinding: '+S(node.title)+(node.severity?'  ['+node.severity+']':'');
+  if(loc)m+='\nLocation: '+loc;
+  if(node.body)m+='\nContext: '+S(node.body);
+  if(node.evidence)m+='\nEvidence:\n'+S(node.evidence);
+  if(intent==='fix')m+='\n\nPropose the concrete change and apply it.';
+  if(intent==='test')m+='\n\nWrite tests covering the risk path and edge cases.';
+  return m;
+}
+function fireAction(node,ac){
+  const msg=actionMessage(node,ac);
+  if(!BRIDGE){navigator.clipboard&&navigator.clipboard.writeText(msg);toast('No live agent — action copied to clipboard');return}
+  try{
+    const ws=new WebSocket(BRIDGE.url+'?token='+encodeURIComponent(BRIDGE.token));
+    toast('Sending to agent…');
+    ws.onopen=()=>{ws.send(JSON.stringify({id:String(Date.now()),method:'run_agent_turn',params:{sessionId:BRIDGE.sessionId,message:msg}}));};
+    ws.onmessage=()=>{toast('Sent — continuing in the agent ('+(ac.label||ac.intent)+')');ws.close();};
+    ws.onerror=()=>{navigator.clipboard&&navigator.clipboard.writeText(msg);toast('Agent unreachable — action copied to clipboard')};
+  }catch(e){toast('Action failed: '+e.message)}
+}
+// coerce any value the model might emit into readable text (never [object Object])
+const S=v=>{if(v==null)return '';if(typeof v==='string')return v;if(Array.isArray(v))return v.map(S).join('\n');if(typeof v==='object'){for(const k of ['code','diff','text','value','content','body']){if(typeof v[k]==='string')return v[k]}try{return JSON.stringify(v,null,1)}catch(e){return ''}}return String(v)};
+const esc=s=>S(s).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+const diff=t=>esc(t).split('\n').map(l=>l[0]==='+'?`<span class="add">${l}</span>`:l[0]==='-'?`<span class="del">${l}</span>`:l).join('');
+// tolerant location: accept {path|file|location, line}; skip empties
+const locText=l=>{if(typeof l==='string')return l;const p=l.path||l.file||l.location||l.name||'';const ln=(l.line!=null)?':'+l.line:'';return (p+ln)||''};
+const intentOf=ac=>ac.intent||ac.kind||'';
+const kids=n=>(n.children||[]).map(render);
+// component registry — the Design System
+const COMP={
+ section:n=>{const s=E('div','sec');if(n.title)s.append(E('div','sec-h',esc(n.title)));kids(n).forEach(k=>s.append(k));return s},
+ grid:n=>{const g=E('div','grid');if(n.min)g.style.setProperty('--min',n.min+'px');kids(n).forEach(k=>g.append(k));return g},
+ columns:n=>{const c=E('div','cols');kids(n).forEach(k=>c.append(k));return c},
+ card:n=>{const c=E('div','card');if(n.title)c.append(E('div','card-h',esc(n.title)));kids(n).forEach(k=>c.append(k));return c},
+ divider:()=>E('hr','divider'),
+ heading:n=>E('div','h'+(n.level||2),esc(n.text)),
+ text:n=>E('div','text',esc(n.value||n.text||'')),
+ badge:n=>E('span','badge '+(n.tone||''),esc(n.text)),
+ metrics:n=>{const m=E('div','metrics');(n.items||[]).forEach((it,i)=>{if(i)m.append(E('span','sep'));const x=E('span','m'+(it.tone?' '+it.tone:''));x.innerHTML=`<b>${esc(it.value)}</b> ${esc(it.label)}`;m.append(x)});return m},
+ kv:n=>{const k=E('div','kv');(n.rows||[]).forEach(([a,b])=>{k.append(E('span','k',esc(a)));k.append(E('span','v',esc(b)))});return k},
+ callout:n=>{const c=E('div','callout '+(n.tone||''));if(n.title)c.append(E('div','c-t',esc(n.title)));if(n.body)c.append(E('div','c-b',esc(n.body)));return c},
+ code:n=>E('pre','code',diff(n.text||'')),
+ diff:n=>E('pre','code',diff(n.text||'')),
+ table:n=>{const t=E('table');const hr=E('tr');(n.columns||[]).forEach(c=>hr.append(E('th',null,esc(c))));const th=E('thead');th.append(hr);t.append(th);const tb=E('tbody');(n.rows||[]).forEach(r=>{const tr=E('tr');r.forEach(c=>tr.append(E('td',null,esc(c))));tb.append(tr)});t.append(tb);return t},
+ finding:n=>{const f=E('div','finding');f.dataset.sev=n.severity||'low';const f1=E('div','f1');if(n.severity)f1.append(E('span','sev',esc(n.severity)));f1.append(E('span','f-title',esc(n.title)));if(n.status)f1.append(E('span','f-status',esc(n.status)));f.append(f1);
+   {const locs=(n.locations||[]).map(locText).filter(Boolean);if(locs.length)f.append(E('div','f-loc',esc(locs.join('  '))))}
+   if(n.body)f.append(E('div','f-body',esc(n.body)));
+   if(n.evidence)f.append(E('pre','code',diff(S(n.evidence))));
+   if(n.actions&&n.actions.length){const a=E('div','acts');n.actions.forEach(ac=>{const b=E('button','btn'+(intentOf(ac)==='fix'?' primary':''),esc(ac.label||intentOf(ac)||'Action'));b.onclick=()=>fireAction(n,ac);a.append(b)});f.append(a)}
+   return f},
+ bar:n=>{const max=Math.max(1,...(n.items||[]).map(i=>i.value||0));const b=E('div','bar');(n.items||[]).forEach(it=>{const row=E('div','b-row');row.append(E('div','b-lab',esc(it.label)));const tr=E('div','b-track');const fl=E('div','b-fill'+(it.tone?' '+it.tone:''));fl.style.width=(100*(it.value||0)/(it.max||max))+'%';tr.append(fl);row.append(tr);row.append(E('div','b-val',esc(it.value)));b.append(row)});return b},
+ heatmap:n=>{const w=E('div','heat');const t=E('table');const hr=E('tr');hr.append(E('th'));(n.columns||[]).forEach(c=>hr.append(E('th',null,esc(c))));t.append(hr);(n.rows||[]).forEach(r=>{const tr=E('tr');tr.append(E('td','rl',esc(r.label)));(r.cells||[]).forEach(cell=>{const v=typeof cell==='object'?cell.v:cell;const td=E('td','cell');td.dataset.v=v;if(cell&&cell.note)td.title=cell.note;tr.append(td)});t.append(tr)});w.append(t);return w},
+};
+function render(n){if(!n||!n.type)return E('div');const f=COMP[n.type];if(f)return f(n);const d=E('div','text');d.style.color='var(--muted-2)';d.textContent='[unknown component: '+n.type+']';return d}
+// page
+const app=document.getElementById('app');
+const hd=E('header');hd.append(E('span','h-title',esc(spec.title||'Canvas')));
+if(spec.meta&&spec.meta.length){const m=E('div','h-meta');spec.meta.forEach(x=>m.append(E('span',null,esc(x))));hd.append(m)}
+app.append(hd);
+if(spec.summary)app.append(E('p','sub',esc(spec.summary)));
+const cv=E('div','cv');(spec.body||[]).forEach(node=>cv.append(render(node)));app.append(cv);
+</script></body></html>
