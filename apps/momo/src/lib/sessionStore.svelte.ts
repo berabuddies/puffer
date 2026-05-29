@@ -24,12 +24,39 @@
 
 import * as agent from "./agentClient";
 import type { SessionListItem } from "./agentClient";
+import { listGroupedSessions } from "./agent/daemonChat";
 import {
   getProjectCwd,
+  loadProjects,
   projectIdForCwd,
   DEFAULT_PROJECT_ID,
 } from "./projectStore.svelte";
 import { pushToast } from "./toast.svelte";
+
+/**
+ * Minimal view of a daemon `list_grouped_sessions` group we actually read.
+ * The daemon returns camelCase DTOs (`FolderGroupDto` / `SessionListItemDto`,
+ * same shape desktop's daemon path consumes); `listGroupedSessions()` types
+ * them as `unknown[]`, so we narrow here. We keep this loose (only the fields
+ * the sidebar + cwd filter touch are required) so a richer daemon payload
+ * passes through untouched.
+ */
+interface DaemonSessionGroup {
+  folderPath?: string | null;
+  cwd?: string | null;
+  sessions?: unknown[];
+}
+
+function asGroup(value: unknown): DaemonSessionGroup | null {
+  if (!value || typeof value !== "object") return null;
+  return value as DaemonSessionGroup;
+}
+
+function asSession(value: unknown): SessionListItem | null {
+  if (!value || typeof value !== "object") return null;
+  const s = value as Partial<SessionListItem>;
+  return typeof s.sessionId === "string" ? (value as SessionListItem) : null;
+}
 
 /** Flat, reactive list of every session known to the sidebar. */
 export const sessionList = $state<SessionListItem[]>([]);
@@ -63,20 +90,48 @@ function replaceList(next: SessionListItem[]): void {
   sessionList.splice(0, sessionList.length, ...merged);
 }
 
+/**
+ * Refetch the sidebar session list from the puffer **daemon**.
+ *
+ * `list_grouped_sessions` on the daemon is *global* — it returns every cwd
+ * group the daemon knows about, including the task-monitor sessions that
+ * live under unrelated cwds. Momo only surfaces sessions under its single
+ * default project, so we resolve that project's fixed cwd
+ * (`getProjectCwd("default")`, the same cwd `create_session` is handed) and
+ * keep only the matching group's sessions. `loadProjects()` is idempotent,
+ * so awaiting it here just guarantees the cwd is resolved before we filter
+ * (it usually already is — Shell kicks it off in parallel on mount).
+ */
 export async function loadSessions(): Promise<void> {
-  let groups: agent.FolderGroup[];
+  let raw: unknown[];
   try {
-    groups = await agent.listGroupedSessions();
+    await loadProjects();
+    raw = await listGroupedSessions();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     pushToast(`Could not load sessions: ${msg}`, "error");
     return;
   }
+
+  const defaultCwd = getProjectCwd(DEFAULT_PROJECT_ID);
+  // Until the default project's cwd is known we can't tell momo's own
+  // sessions from monitor sessions, so surface nothing rather than leak
+  // unrelated groups into the rail.
+  if (!defaultCwd) {
+    replaceList([]);
+    return;
+  }
+
   const flat: SessionListItem[] = [];
   const seen = new Set<string>();
-  for (const g of groups) {
-    for (const s of g.sessions) {
-      if (seen.has(s.sessionId)) continue;
+  for (const value of raw) {
+    const group = asGroup(value);
+    if (!group) continue;
+    const groupPath = group.folderPath ?? group.cwd;
+    if (groupPath !== defaultCwd) continue;
+    for (const sessionValue of group.sessions ?? []) {
+      const s = asSession(sessionValue);
+      if (!s || seen.has(s.sessionId)) continue;
       seen.add(s.sessionId);
       flat.push(s);
     }
