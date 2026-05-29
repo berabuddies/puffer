@@ -11,7 +11,7 @@
 momo 的 onboarding（Where → Role → Apps → Done）目前每屏只把选择存在页面本地 `$state` 并弹 toast，走完即丢——用户填的国家、职业没有任何通道传给 puffer agent。本 spec 做两件相关的事：
 
 1. **写画像**：onboarding 完成时把 **国家 + 职业** 写进 puffer 的**用户级全局 memory**，使后续所有对话里 agent 都知道"用户在哪、做什么"。
-2. **修 onboarding gate**：onboarding 是**电脑用户级一次性 gate**——完成**或** Skip 后都不该再出现入口，**切换账号也不行**。当前完成路径已正确落 flag，但从 Where/Role 页 Skip 会绕过它（见 §11），需补齐。
+2. **加固 onboarding gate**：onboarding 是**电脑用户级一次性 gate**——完成**或** Skip 后都不该再出现入口，**切换账号也不行**。该行为当前**已成立**（`App.svelte` 的 `/home` `$effect` + `signOut` 保留 flag，见 §11），本 spec 只做**显式兜底 + 回归测试**固化它，不是修 bug。
 
 ### puffer 全局 memory 机制（调研结论，实现前必读）
 
@@ -36,7 +36,7 @@ momo 的 onboarding（Where → Role → Apps → Done）目前每屏只把选�
 3. **写入时机 = A 走到 Done 一次性写**；中途 Skip（没到 Done）不写。
 4. **写入方式 = 方案 1**：前端经现有 1431 链路调 momo backend 新 RPC，由 Rust 直接落盘 + 托管块合并。
 5. **副作用知情接受**：写 `~/.puffer/AGENTS.md` 后，openai 会话因"AGENTS.md 命中即提前返回"将不再注入任何 `CLAUDE.md`（含 `~/.claude/CLAUDE.md`）。已知并接受。
-6. **onboarding gate = 机器级一次性**：Skip = 视为已 onboarded。修法选 **A**——在 `OnboardingShell.onSkip()` 统一 `markOnboarded()`（不加 Home 兜底）。画像不写（Skip 没采集），但 gate flag 落，入口不再出现。
+6. **onboarding gate = 机器级一次性，已成立，做显式加固**：所有退出路径当前都已落 flag（见 §11）。加固选 **A**——在 `OnboardingShell.onSkip()` 显式 `markOnboarded()`（防御性：覆盖"navigate 到 effect 之间被杀进程"的理论窗口 + 让"Skip=onboarded"意图本地可见 + 防 `App.svelte` 那个 `$effect` 将来被改动时回归），并加回归测试 pin Skip→onboarded。Skip 不写画像（没采集），但 gate flag 落，入口不再出现。
 
 ## 3. 数据流
 
@@ -63,15 +63,15 @@ Done.svelte (onMount) --commitProfile()
 - `commitProfile()` 调 `wsClient.request("write_user_profile", { country, role })`，fire-and-forget；失败弹 toast，**不阻断** Done → /home 的导航。
 
 ### ② `Where.svelte` / `Role.svelte` — 采集选择
-- 在现有 `pick` / `pickPreset` / 自定义输入回调里**追加** `setCountry` / `setRole`，其余行为（toast、300ms 自动前进、自定义输入 debounce）不动。
-- Role 取最终生效的 `selected`（含自定义输入的字符串）。
+- 在现有 `pick` / `pickPreset` 回调里**追加** `setCountry` / `setRole`，其余行为（toast、300ms 自动前进、自定义输入 debounce）不动。
+- Role 取最终生效的 `selected`（含自定义输入的字符串）：`onCustomInput`（debounce 自动前进路径）**和** `onCustomSubmit`（Enter 提交路径）**都要** `setRole`，否则 Enter 提交会漏采。
 
 ### ③ `Done.svelte` — 触发提交
 - `onMount` 调 `commitProfile()`。完成路径的 `markOnboarded()` 已存在，不动。
 
-### ③' `src/components/onboarding/OnboardingShell.svelte` — Skip 落 gate flag
+### ③' `src/components/onboarding/OnboardingShell.svelte` — Skip 显式落 gate flag（加固）
 - `onSkip()` 在 `navigate(skipTo)` 前调 `markOnboarded()`。一处覆盖 Where/Role/Apps 全部 Skip 链接（都共用此 shell）。
-- 这是修 onboarding gate 的全部代码改动（账号切换已天然满足，见 §11）。
+- 这是 gate 加固的全部代码改动。行为本就由 `App.svelte` 的 `/home` `$effect` 兜底（见 §11），此改动是显式化 + 防回归，非修 bug。
 
 ### ④ `src-tauri/src/user_profile.rs`（新）— 纯合并逻辑
 - `upsert_managed_block(existing: &str, block: &str) -> String`：
@@ -84,8 +84,8 @@ Done.svelte (onMount) --commitProfile()
 
 ### ⑤ `src-tauri/src/backend.rs` — 新 RPC `write_user_profile`
 - 在 `handle` 的 `match method` 加分支。
-- 解析 `country` / `role`（沿用 `optional_string_param`）。
-- 解析 `$HOME/.puffer`（env `HOME`，与 daemon / system_prompt 解析一致）→ `create_dir_all`。
+- 解析 `country` / `role`（用 `pub(crate) optional_trimmed_string_param`，自动 trim 空值）。
+- 解析 `$HOME/.puffer`（env `HOME`，与 daemon / system_prompt 解析一致）→ `create_dir_all`（onboarding 阶段该目录不保证存在，见 §6）。
 - 构造托管块（见 §5）；对 `AGENTS.md`、`CLAUDE.md` 各 read-or-empty → `upsert_managed_block` → 写回。
 - 返回 `{}`（或写入路径，便于测试断言）。
 
@@ -104,6 +104,7 @@ Done.svelte (onMount) --commitProfile()
 
 ## 6. 边界与错误处理
 
+- **`~/.puffer` 目录不存在**：daemon 不会主动 `create_dir_all(~/.puffer)`（session/auth 惰性落盘），onboarding 阶段该目录可能尚不存在 → 写前先 `create_dir_all($HOME/.puffer)`；失败按 `HOME` 解析失败同样处理（返错 + toast，非阻断）。
 - `HOME` 解析失败 → backend 返错；前端 toast，onboarding 照常完成（非阻断）。
 - 文件已有内容但无标记 → **追加**块，原内容不动。
 - 仅半个标记（残缺）→ 视为无有效块，追加新块。
@@ -119,9 +120,11 @@ Done.svelte (onMount) --commitProfile()
   - 有标记 → 替换且周围内容不动；
   - 幂等（写两次 == 写一次）；
   - 残缺标记 → 追加新块。
-- **前端**（扩展/新增 Playwright，复用 `tests/support/fakeDaemon.ts` + `bootHelpers.ts`）：选国家 + 职业 → 到 Done → 断言 `write_user_profile` 以 `{ country, role }` 被调用。
+- **前端**（扩展/新增 Playwright）：选国家 + 职业 → 到 Done → 断言 `write_user_profile` 以 `{ country, role }` 被调用。harness 要点：
+  - **测 onboarding flow 必须用 `daemon.open(page, { forceOnboarding: true })`**，不能用 `bootHelpers.bootOnboarded`（后者默认 seed `onboarded=true`，会直接跳过 onboarding）。
+  - **给 `FakeDaemon.dispatch` 加 `case "write_user_profile"`**（返回 `{}` + 记录到如 `lastUserProfile`）。FakeDaemon 一套 dispatcher 同时演 1431 `/ws` 与 daemon `/daemon`，未加 case 会走 `default` throw `Unhandled fake daemon method`，给每个 onboarding 测试带噪声。`record()` 在 `dispatch` 之前跑，`waitForRequest("write_user_profile", …)` 即便 dispatch 抛错也能断言被调用 + 参数，但仍应加 case 消噪。
 - **手动验收**：跑 onboarding → 查 `~/.puffer/AGENTS.md` + `CLAUDE.md` 含托管块 → 起 chat 确认 agent 知道用户国家/职业。
-- **onboarding gate**（扩展 `tests/onboarding-persistence.spec.ts`）：从 Where Skip → `puffer.onboarded === "true"` 且 root 解析为 `/home`（不回 onboarding）；从 Role Skip 同样。补齐现有"完成 + signOut 保留 + 账号切换"用例之外的 Skip 路径。
+- **onboarding gate 回归**（扩展 `tests/onboarding-persistence.spec.ts`）：从 Where Skip → `puffer.onboarded === "true"` 且 root 解析为 `/home`（不回 onboarding）；从 Role Skip 同样。这是固化"Skip→onboarded"现有行为的回归测试（防 §11 的 `App.svelte` `$effect` 或 onSkip 将来被改坏）。
 
 ## 8. 顺带订正文档
 
@@ -144,21 +147,23 @@ cargo test  --manifest-path src-tauri/Cargo.toml user_profile
 - 不改 puffer-core 的 memory 注入机制（现机制已够用）。
 - 不做 project 级 `MEMORY.md` 注册（本 spec 走全局 AGENTS/CLAUDE.md）。
 
-## 11. onboarding gate 现状与缺口（调研结论）
+## 11. onboarding gate 现状（调研结论 — 已经 reviewer 校正）
 
 flag `puffer.onboarded` 存 localStorage，是**机器级**判断（`src/lib/auth.svelte.ts`）：
 
-- `isOnboarded()` 读，`markOnboarded()` 写（幂等），`clearOnboarded()` 定义了但**全代码库无人调用**。
+- `isOnboarded()` 读（:94），`markOnboarded()` 写（:101，幂等）；`resetOnboarding()`（:109，**注意真名是 `resetOnboarding` 不是 `clearOnboarded`**）清 flag，但**全代码库无人调用**（仅 dev 用）。
 - gate 在 `getRootRedirect()`（`routes.ts:100`）：`signedIn && !isOnboarded()` → `/onboarding/where`，否则 `/home`。仅在根路径 `/` 解析时生效。
 - **账号切换已天然满足**：`signOut()`（auth.svelte.ts:786）只删 `TOKEN_KEY`/`REFRESH_TOKEN_KEY`/`API_KEY_KEY`/`API_KEY_OWNER_KEY`，**不删** `ONBOARDED_KEY`。已 onboarded 的机器，signOut→换账号登录后 `isOnboarded()` 仍为 true，不重弹。现有 `tests/onboarding-persistence.spec.ts` 已 pin。
 
-**唯一缺口 = Skip 未统一落 flag**：
+**所有退出路径当前都已落 flag**（关键：`App.svelte:100-104` 有个 `$effect`，路由进 `/home` 或 `/home/*` 即 `markOnboarded()`——注释明写"Whenever the user lands on /home … persist the onboarded flag so next launch skips the flow"）：
 
 | 退出方式 | 路径 | 当前是否落 flag |
 |---|---|---|
-| 完成 | → `Done.svelte` onMount `markOnboarded()` | ✓ |
+| 完成 | → `Done.svelte` onMount `markOnboarded()`（且随后 hop 到 `/home`） | ✓ |
 | Apps 页 Skip | `skipTo="/onboarding/done"` → Done | ✓ |
-| Where 页 Skip | `skipTo="/home"` 直接跳 | ✗ |
-| Role 页 Skip | `skipTo="/home"` 直接跳 | ✗ |
+| Where 页 Skip | `skipTo="/home"` → `App.svelte` `/home` `$effect` 落 flag | ✓ |
+| Role 页 Skip | `skipTo="/home"` → 同上 | ✓ |
 
-从 Where/Role Skip 落 `/home` 但不写 flag → 下次启动 root 解析 `!isOnboarded` → 又回 `/onboarding/where`。`Done.svelte` 注释提到 markOnboarded "safe to call on every /home hit"，但 `Home.svelte` 实际未兜底。修法 A（§4 ③'）在 `OnboardingShell.onSkip()` 统一 `markOnboarded()` 即补齐，不依赖 Home 兜底。
+> 早期草稿曾把 Where/Role Skip 列为"缺口"，是因为 grep `Home.svelte` 落空、漏看了 `App.svelte` 的 `$effect`（兜底在 App 层不在 Home.svelte）。reviewer 校正：**该缺口实际不复现**。唯一理论窗口 = Skip 后在 `$effect` 落 flag 前杀进程（同 tick 内，几乎不可能）。
+
+因此 §4 ③' 的 `OnboardingShell.onSkip()` 显式 `markOnboarded()` 是**加固而非修 bug**：① 覆盖上述理论窗口；② "Skip=onboarded"意图本地可见；③ `App.svelte` 那个 `$effect` 将来被改动时不回归（配合 §7 的回归测试）。
