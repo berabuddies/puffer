@@ -27,6 +27,7 @@
     getConnectorStatus,
     type ConnectorKind,
   } from "../lib/connectorClient";
+  import { createMonitor } from "../lib/taskApi";
   import { pushToast } from "../lib/toast.svelte";
 
   let apps = $state<AppEntry[]>(seedApps.map((a) => ({ ...a })));
@@ -35,6 +36,11 @@
   let emailOpen = $state(false);
   let disconnectTarget = $state<AppEntry | null>(null);
   let disconnectBusy = $state(false);
+
+  // Guard so we only auto-create the Telegram monitor on the transition into
+  // connected (and once on mount for already-connected returning users), not
+  // on every refresh. Plain `let` — this is control state, not UI-reactive.
+  let telegramWasConnected = false;
 
   void refreshStatus();
 
@@ -48,6 +54,16 @@
           app.status = status.email ? "connected" : "not_connected";
         }
       }
+      // When Telegram flips to connected (incl. the first refresh for an
+      // already-connected user), kick off the monitor so tasks start
+      // flowing. Fire-and-forget + idempotent (create-or-resume); a
+      // daemon-not-ready failure must never break the Connected Apps UI.
+      if (status.telegram && !telegramWasConnected) {
+        void createMonitor("telegram-user").catch((e) =>
+          console.warn("auto createMonitor failed", e),
+        );
+      }
+      telegramWasConnected = status.telegram;
     } catch {
       // Backend not ready yet — leave seed values. Re-tries on every
       // modal close, so a transient WS hiccup at boot resolves itself.

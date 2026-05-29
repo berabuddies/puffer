@@ -318,6 +318,15 @@ export class FakeDaemon {
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
   private externalCredentials: JsonRecord[];
+  /**
+   * Backs the `connector_status` RPC the Connected Apps page polls on mount
+   * and after each modal close. Flip `telegram`/`email` with
+   * `setConnectorStatus` to simulate a successful connect.
+   */
+  private connectorStatus: { telegram: boolean; email: boolean } = {
+    telegram: false,
+    email: false
+  };
   private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
     defaultProvider: "codex",
     defaultModel: "test-model"
@@ -978,6 +987,10 @@ export class FakeDaemon {
     this.authStatuses = auth;
   }
 
+  setConnectorStatus(status: Partial<{ telegram: boolean; email: boolean }>): void {
+    this.connectorStatus = { ...this.connectorStatus, ...status };
+  }
+
   setWorkflowSnapshot(snapshot: WorkflowSnapshotFixture): void {
     this.workflowSnapshot = {
       workflows: snapshot.workflows.map((workflow) => ({ ...workflow })),
@@ -1385,6 +1398,8 @@ export class FakeDaemon {
         return {};
       case "browser_recording":
         return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
+      case "connector_status":
+        return { ...this.connectorStatus };
       case "workflow_list":
         return this.workflowListResponse();
       case "task_monitor_create":

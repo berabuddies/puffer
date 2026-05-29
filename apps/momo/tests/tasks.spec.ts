@@ -80,6 +80,41 @@ test("navigating to /tasks renders both monitor task subjects", async ({ page })
   ).toBeVisible();
 });
 
+test("opening Connected Apps with Telegram connected auto-creates the monitor", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  // Simulate a returning user whose Telegram is already authenticated: the
+  // first refreshStatus on mount sees telegram=true and fires createMonitor.
+  daemon.setConnectorStatus({ telegram: true });
+  await bootOnboarded(page, daemon);
+
+  const monitorPromise = daemon.waitForRequest(
+    "task_monitor_create",
+    (req) => req.params.connection_slug === "telegram-user"
+  );
+
+  await page.goto("/#/apps");
+  await expect(page).toHaveURL(/#\/apps$/);
+
+  const request = await monitorPromise;
+  expect(request.params.connection_slug).toBe("telegram-user");
+});
+
+test("opening Connected Apps with Telegram disconnected does not create a monitor", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setConnectorStatus({ telegram: false });
+  await bootOnboarded(page, daemon);
+
+  await page.goto("/#/apps");
+  await expect(page).toHaveURL(/#\/apps$/);
+
+  // Status is polled on mount; wait for that round-trip to land so we know the
+  // guard has had its chance to (not) fire.
+  await daemon.waitForRequest("connector_status");
+  await expect
+    .poll(() => daemon.requests.filter((r) => r.method === "task_monitor_create").length)
+    .toBe(0);
+});
+
 test("clicking Ignore sends task_monitor_ignore with the right task_id", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowSnapshot(snapshotWith(twoTasks()));
