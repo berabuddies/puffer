@@ -171,6 +171,59 @@ test.describe("sidebar credits — loading", () => {
     expect(out.status).toBe("ready");
   });
 
+  test("pill keeps the balance during a background refresh (no flash to —)", async ({
+    page
+  }) => {
+    // First billing resolves immediately; the focus-triggered refresh is held
+    // open so we can sample the pill mid-refresh. The pill keys off the
+    // balance (not the loading status), so it must keep showing the last
+    // value rather than blanking to "—" while the refresh is in flight.
+    await page.route(`${CONTROL}/auth/exchange`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_token: "sess-xyz",
+          default_team_id: "team-1"
+        })
+      })
+    );
+    let billingCalls = 0;
+    await page.route(
+      `${CONTROL}/platform/v1/teams/team-1/billing-account`,
+      async (route) => {
+        billingCalls += 1;
+        // Hold the second (refresh) response open so the pill is observable
+        // while the store sits in its "loading" status mid-refresh.
+        if (billingCalls >= 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            team_id: "team-1",
+            credit_balance_usd: 12.34,
+            billing_account: {}
+          })
+        });
+      }
+    );
+    const daemon = new FakeDaemon({ sessions: [] });
+    await bootHomeSignedIn(page, daemon);
+
+    const pill = page.locator(".credits-pill__value");
+    await expect(pill).toHaveText("1,234 Credits");
+
+    // Trigger a window-focus refetch; its billing response is now delayed.
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+    // Mid-refresh (the refresh response is still pending) the pill must keep
+    // the previous balance, not blank to "—".
+    await page.waitForTimeout(300);
+    await expect(pill).toHaveText("1,234 Credits");
+  });
+
   test("loadCredits re-exchanges once on 401 then retries", async ({
     page
   }) => {

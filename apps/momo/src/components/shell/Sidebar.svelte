@@ -301,10 +301,15 @@
     (import.meta.env.VITE_WR_DASHBOARD_URL as string | undefined) ??
     "https://www.worldrouter.ai";
 
+  // Render the last known balance whenever we have one — even while a
+  // background refresh is in flight. `loadCredits` flips status to "loading"
+  // on every 30s poll / window-focus refetch but never clears `creditsUsd`,
+  // so keying the label off `creditsUsd` (not `status`) keeps the pill from
+  // flashing number → — → number on each refresh. "—" shows only when there
+  // is genuinely no balance yet (cold first load, or a load that never
+  // succeeded). The load path itself is untouched.
   let creditsLabel = $derived(
-    creditState.status === "ready" && creditState.creditsUsd !== null
-      ? formatCredits(creditState.creditsUsd)
-      : "—"
+    creditState.creditsUsd !== null ? formatCredits(creditState.creditsUsd) : "—"
   );
 
   function openTopUp(): void {
