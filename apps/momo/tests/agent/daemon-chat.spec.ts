@@ -110,15 +110,18 @@ test("createSession sends create_session with the cwd and resolves the full resu
   const createPromise = daemon.waitForRequest("create_session");
 
   const result = await page.evaluate(async () => {
+    // Use a provider the daemon actually knows (`openai`) — "puffer" is NOT a
+    // valid daemon provider and create_session would reject it (see the
+    // sidebar-new-chat regression below + fakeDaemon's isKnownDaemonProvider).
     return await (window as unknown as { __daemonChat: DaemonChatBridge }).__daemonChat.createSession(
       "/tmp/momo-work",
-      "puffer"
+      "openai"
     );
   });
 
   const create = await createPromise;
-  // The provider routing is forwarded so daemon-side session routing matches.
-  expect(create.params).toMatchObject({ cwd: "/tmp/momo-work", providerId: "puffer" });
+  // The provider routing is forwarded when given so daemon-side routing matches.
+  expect(create.params).toMatchObject({ cwd: "/tmp/momo-work", providerId: "openai" });
   // FakeDaemon mints `session-created-N`; the helper now returns the full
   // create_session payload (the sidebar needs cwd / timestamps for its stub).
   expect(result.sessionId).toMatch(/^session-created-/);

@@ -169,6 +169,19 @@ function defaultTimeline(): JsonRecord[] {
   ];
 }
 
+/**
+ * Whether `providerId` is one the daemon would accept in create_session.
+ * Mirrors `canonical_desktop_provider_id` + the provider registry in
+ * crates/puffer-cli/src/daemon.rs: canonical ids are `openai` / `anthropic`,
+ * with `codex` → openai and `claude` → anthropic aliases. Everything else
+ * (notably `puffer`) is unknown and the daemon rejects it.
+ */
+function isKnownDaemonProvider(providerId: string): boolean {
+  return ["openai", "anthropic", "codex", "claude"].includes(
+    providerId.trim().toLowerCase()
+  );
+}
+
 function sessionMeta(input: FakeDaemonSessionInput): JsonRecord {
   const {
     timeline: _timeline,
@@ -1615,6 +1628,16 @@ export class FakeDaemon {
 
   private createSession(params: JsonRecord): JsonRecord {
     const sessionId = `session-created-${this.sessions.size + 1}`;
+    // Mirror the real daemon's create_session routing: when the caller pins a
+    // providerId, the daemon canonicalizes it and looks it up in the provider
+    // registry, rejecting anything unknown (e.g. `bail!("unknown provider
+    // \`puffer\`")` — see crates/puffer-cli/src/daemon.rs
+    // resolve_create_session_routing). Echoing an arbitrary providerId here
+    // would mask that rejection, so reject unknown providers too. Omitting
+    // providerId entirely is the default-routing path and stays valid.
+    if (typeof params.providerId === "string" && !isKnownDaemonProvider(params.providerId)) {
+      throw new Error(`unknown provider \`${params.providerId}\``);
+    }
     const providerId = typeof params.providerId === "string" ? params.providerId : "codex";
     const modelId = typeof params.modelId === "string" ? params.modelId : "test-model";
     const cwd = typeof params.cwd === "string" ? params.cwd : session.cwd;

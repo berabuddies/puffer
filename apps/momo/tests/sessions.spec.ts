@@ -35,6 +35,38 @@ test('Tasks "+" creates a session that appears in the rail list', async ({ page 
   await expect(taskList(page).getByText("New chat", { exact: true })).toBeVisible();
 });
 
+// Regression: the sidebar "+ New chat" path must NOT pin a providerId on
+// create_session. It used to send `providerId: "puffer"`, which the real
+// daemon's create_session routing rejects with `unknown provider \`puffer\``
+// (canonical providers are openai / anthropic, not "puffer"), so the click
+// errored and never created a session. Omitting providerId routes through the
+// daemon's default routing — exactly what the composer's createSessionFromText
+// already does. fakeDaemon now rejects unknown providers too, so a regression
+// to "puffer" would both surface a toast here and fail the no-providerId check.
+test('Tasks "+" New chat does not send an unknown "puffer" provider to the daemon', async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await bootOnboarded(page, daemon);
+
+  const createPromise = daemon.waitForRequest("create_session");
+  await page.getByLabel("New chat").click();
+  const create = await createPromise;
+
+  // The request must not carry the bogus "puffer" provider. (We assert the
+  // exact failure mode that was broken; default routing sends no providerId.)
+  expect(create.params.providerId).not.toBe("puffer");
+  expect(create.params).not.toHaveProperty("providerId");
+
+  // The session is actually created (no "unknown provider" rejection): the
+  // route advances and the optimistic row renders.
+  await page.waitForURL(/#\/agent\/session-created-1$/);
+  await expect(taskList(page).getByText("New chat", { exact: true })).toBeVisible();
+
+  // No error toast surfaced — the create succeeded rather than rejecting.
+  await expect(page.locator(".toast.toast--error")).toHaveCount(0);
+});
+
 test("Rename via hover pencil updates the session title", async ({ page }) => {
   const seeded: FakeDaemonSessionInput = {
     sessionId: "seed-rename",

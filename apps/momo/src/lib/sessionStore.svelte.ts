@@ -163,7 +163,12 @@ export async function createNewSession(): Promise<string> {
   }
   let result: Awaited<ReturnType<typeof daemonCreateSession>>;
   try {
-    result = await daemonCreateSession(cwd, "puffer");
+    // Don't pin a providerId: the real daemon's create_session routing
+    // rejects an unknown provider (e.g. "unknown provider `puffer`"), and the
+    // canonical providers are openai / anthropic — not "puffer". Omitting it
+    // lets the daemon fall back to default routing (Task 1 set the daemon's
+    // default_provider), exactly like the composer's createSessionFromText.
+    result = await daemonCreateSession(cwd);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     pushToast(`Could not start session: ${msg}`, "error");
@@ -189,7 +194,7 @@ export async function createNewSession(): Promise<string> {
     tags: [],
     note: null,
     parentSessionId: null,
-    providerId: result.providerId ?? "puffer",
+    providerId: result.providerId ?? null,
     modelId: result.modelId ?? null,
   };
   // Drop any stale copy (defensive — shouldn't happen with fresh ids).
