@@ -2,7 +2,20 @@
 
 Standalone Tauri desktop app: puffer-powered chat + WorldClaw U-card wallet.
 
+> **Branch:** this app currently lives only on `feat/momo-desktop`, not on `master`.
+> After cloning, `git checkout feat/momo-desktop` — otherwise `apps/momo` won't exist.
+
 Forked out of `apps/puffer-desktop/src-v2/` and that codebase's V2 src-tauri pieces (May 2026).
+
+## Prerequisites
+
+- **Rust** stable toolchain (`cargo`) — builds the `puffer` agent and the Tauri host.
+- **Node.js** ≥ 20 LTS + npm (verified on Node 25 / npm 11).
+- **Tauri 2 system deps**:
+  - macOS: Xcode Command Line Tools (`xcode-select --install`).
+  - Linux: `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`.
+  - Authoritative list: https://v2.tauri.app/start/prerequisites/
+- For the Playwright UI tests (Verification below): `npx playwright install chromium webkit`.
 
 ## Provider
 
@@ -21,15 +34,28 @@ If you're migrating from V1 (Corbina): `cp -r ~/.corbina ~/.momo` before first r
 
 ## Auth
 
-OAuth flow: webview redirects to OS browser, browser hits `http://localhost:1457/callback`, Momo's loopback HTTP listener catches it. Port 1457 is shared with Corbina (V1) — only one of the two apps can have OAuth listening at a time.
+OAuth flow: webview redirects to OS browser → browser hits `http://localhost:1457/callback` → Momo's loopback HTTP listener catches it. Port 1457 is shared with Corbina (V1) — only one app can hold the OAuth listener at a time.
 
 Auth Station must also allow-list `http://localhost:1457` in its `ALLOWED_REDIRECT_ORIGINS`, or the browser redirect is rejected.
 
-`apps/momo/.env` (copy from `.env.example`):
+**Login depends on TWO external services**, and chat won't work until both succeed:
 
-```
-VITE_AUTH_STATION_URL=https://auth.worldrouter.ai
-```
+1. `VITE_AUTH_STATION_URL` (`auth.worldrouter.ai`) — the OAuth handshake.
+2. `VITE_WORLDROUTER_CONTROL_URL` (`control-api.worldrouter.ai`) — after login, the JWT is exchanged here, in two hops, for the `sk-worldrouter-...` key that gets written to `$MOMO_HOME/credentials.json` and drives puffer.
+
+If login looks successful but chat fails ("signed in but can't chat"), the key mint likely failed: check the browser console for mint errors and `$MOMO_HOME/credentials.json` for the puffer key.
+
+## Environment
+
+`apps/momo/.env` (copy from `.env.example`). Only `VITE_AUTH_STATION_URL` has no default — it's the one you must set; the rest fall back to the values below.
+
+| var | when needed | default | purpose |
+|---|---|---|---|
+| `VITE_AUTH_STATION_URL` | login (required) | — | Auth Station; missing → Sign-in button silently no-ops |
+| `VITE_WORLDROUTER_CONTROL_URL` | login → chat | `https://control-api.worldrouter.ai` | JWT → worldrouter API key exchange (2 hops) |
+| `VITE_PUFFER_WS_URL` | optional | `ws://127.0.0.1:1431/ws` | frontend ↔ Momo backend WS |
+| `VITE_BACKEND_BASE_URL` | wallet only | `http://127.0.0.1:8080` | U-card wallet REST base |
+| `VITE_USE_MOCK_WALLET` | optional | unset | wallet/KYC mock toggle |
 
 ## Development
 
@@ -42,9 +68,14 @@ prefer pnpm, stick to one and don't mix the two lockfiles.
 cp .env.example .env
 
 # 2. Make the `puffer` agent binary resolvable, or chat fails on the first message
-#    with "`puffer` is not installed or not executable". Pick ONE:
-cargo install --path ../../crates/puffer-cli           # installs onto ~/.cargo/bin (PATH)
-# export MOMO_PUFFER_BIN="$(git rev-parse --show-toplevel)/target/debug/puffer"  # or reuse the workspace debug build
+#    with "`puffer` is not installed or not executable".
+#    RECOMMENDED — build in-tree and point Momo at it (does NOT touch your global PATH):
+cargo build -p puffer-cli
+export MOMO_PUFFER_BIN="$(git rev-parse --show-toplevel)/target/debug/puffer"
+#    Alternative: `cargo install --path ../../crates/puffer-cli` installs onto ~/.cargo/bin —
+#    convenient, but OVERWRITES any existing global `puffer`.
+#    Note: `tauri dev` compiles puffer to target/debug via beforeDevCommand, but does NOT
+#    put it on PATH — you still need one of the two options above.
 
 # 3. Install deps and run.
 npm install
@@ -64,7 +95,11 @@ clash fails **silently** (logged to stderr only) — the app still opens but nev
 
 ```bash
 npm run check
+npx playwright install chromium webkit   # one-time, for the UI tests below
 npm run test:desktop-ui
 cargo check --manifest-path src-tauri/Cargo.toml
 npm run tauri build
 ```
+
+> `tauri.conf.json` `bundle.targets` is currently set to Linux targets (`deb`, `appimage`);
+> on macOS, adjust targets before `tauri build` (dev/run is unaffected).
