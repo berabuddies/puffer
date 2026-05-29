@@ -243,6 +243,21 @@ test("a persisted answered question hydrates as a collapsed card echoing the cho
   await expect(answered.locator("input:not([disabled])")).toHaveCount(0);
 });
 
+test("typing indicator shows while running and clears on turn-complete", async ({ page }) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await bootOnboarded(page, daemon);
+  const { sessionId, turnId } = await startTurnFromHome(page, daemon, "Think");
+
+  // turn-start pins the running state; the bottom typing indicator appears.
+  emitTurnStart(daemon, { sessionId, turnId });
+  await expect(page.locator(".momo-chat__typing")).toBeVisible();
+
+  // turn-complete clears currentTurnId + turnStartedAtMs (agentChat reducer),
+  // so turnRunning() flips false and the indicator unmounts.
+  daemon.emit(`session:${sessionId}:event`, { type: "turn-complete", turnId });
+  await expect(page.locator(".momo-chat__typing")).toHaveCount(0);
+});
+
 test("Stop button during a running turn sends cancel_turn", async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await bootOnboarded(page, daemon);

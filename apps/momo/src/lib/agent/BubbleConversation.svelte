@@ -32,12 +32,30 @@
   };
   let {
     session, timeline, pendingPermissions, pendingQuestions, loading,
-    turnRunning = false, turnThinking = false,
+    turnRunning = false, turnStartedAtMs = null, turnThinking = false,
     turnStatusHint = null, onResolvePermission, onResolveUserQuestion
   }: Props = $props();
-  // Reserved props consumed by later tasks (kept so Agent.svelte's binding is
-  // stable): `turnStartedAtMs` → Task 7 typing-elapsed timer; `onCancelTurn` →
-  // cancel wiring. momo currently drives Stop from the shell <Composer>.
+  // `onCancelTurn` is reserved (kept so Agent.svelte's binding stays stable);
+  // momo currently drives Stop from the shell <Composer>, not from here.
+
+  // View-internal clock for the typing indicator's elapsed-seconds suffix.
+  // Ticks only while a turn runs; the $effect cleanup clears the interval when
+  // the turn ends or the component unmounts (no runaway timer). The effect
+  // depends on `turnRunning` only — it writes `nowMs` but never reads it, so it
+  // never retriggers itself.
+  let nowMs = $state(0);
+  $effect(() => {
+    if (!turnRunning) return;
+    nowMs = Date.now();
+    const id = setInterval(() => { nowMs = Date.now(); }, 100);
+    return () => clearInterval(id);
+  });
+  let typingLabel = $derived(turnStatusHint ?? (turnThinking ? "思考中…" : "处理中…"));
+  let elapsedSuffix = $derived(
+    turnRunning && turnStartedAtMs && nowMs > turnStartedAtMs
+      ? ` (${((nowMs - turnStartedAtMs) / 1000).toFixed(1)}s)`
+      : ""
+  );
 
   let threadEl: HTMLDivElement | undefined;
   let lastSessionId: string | null = null;
@@ -111,7 +129,7 @@
 
       {#if turnRunning}
         <div class="momo-chat__typing" aria-live="polite">
-          {turnStatusHint ?? (turnThinking ? "思考中…" : "处理中…")}
+          {typingLabel}{elapsedSuffix}
         </div>
       {/if}
     </div>
