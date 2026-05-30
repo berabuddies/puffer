@@ -22,6 +22,7 @@
 
   import Mascot from "../common/Mascot.svelte";
   import { navigate } from "../../router.svelte";
+  import { markOnboarded } from "../../lib/auth.svelte";
 
   interface Props {
     title: string;
@@ -47,6 +48,10 @@
 
   function onSkip(event: MouseEvent): void {
     event.preventDefault();
+    // Skipping = the machine has seen onboarding; persist the gate flag so it
+    // never reappears (App.svelte's /home $effect also backstops this; this is
+    // the explicit, local guard + regression anchor — see the design spec §11).
+    markOnboarded();
     if (skipTo) navigate(skipTo);
   }
 </script>
