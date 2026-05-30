@@ -137,6 +137,11 @@ impl BackendState {
                 Ok(json!({}))
             }
             "resolve_user_question" => self.resolve_user_question(params),
+            "write_user_profile" => {
+                let country = optional_trimmed_string_param(&params, &["country"]);
+                let role = optional_trimmed_string_param(&params, &["role"]);
+                self.write_user_profile(country, role)
+            }
             other => bail!("unknown method: {other}"),
         }
     }
@@ -145,6 +150,16 @@ impl BackendState {
     /// WebSocket handshake so the frontend can dial the daemon directly.
     fn daemon_handshake(&self) -> Result<crate::daemon_launcher::DaemonHandshake> {
         self.launcher.ensure_started()
+    }
+
+    /// Persist the onboarding profile to puffer's user-level global memory
+    /// (`~/.puffer/AGENTS.md` + `~/.puffer/CLAUDE.md`). Returns `{ written }`.
+    fn write_user_profile(&self, country: Option<String>, role: Option<String>) -> Result<Value> {
+        let dir = home_dir().join(".puffer");
+        let written =
+            crate::user_profile::write_profile_files(&dir, country.as_deref(), role.as_deref())
+                .with_context(|| format!("writing user profile under {}", dir.display()))?;
+        Ok(json!({ "written": written }))
     }
 
     /// Best-effort pre-warm of the daemon at startup.
