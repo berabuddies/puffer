@@ -824,7 +824,41 @@ fn autostart_manifest(
             );
         }
     }
+    if let Some(manifest) = autostart_manifest_from_binding(manager, paths, topic)? {
+        return Ok(Some(manifest));
+    }
     direct_subscriber_manifest(&subscriber_manifest_roots(paths), topic)
+}
+
+fn autostart_manifest_from_binding(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    topic: &str,
+) -> Result<Option<Manifest>> {
+    for binding in manager.store().list() {
+        if binding.status != puffer_subscriptions::WorkflowBindingStatus::Enabled {
+            continue;
+        }
+        if binding.connection_slug != topic {
+            continue;
+        }
+        let Some(connector_slug) = binding.connector_slug.as_deref() else {
+            continue;
+        };
+        let Some(template) = manager.connector_store().get(connector_slug) else {
+            continue;
+        };
+        let connection =
+            ConnectionRecord::authenticated(topic.to_string(), connector_slug.to_string(), topic);
+        if let Some(manifest) = connection_subscriber_manifest(
+            &subscriber_manifest_roots(paths),
+            &connection,
+            &template,
+        )? {
+            return Ok(Some(manifest));
+        }
+    }
+    Ok(None)
 }
 
 fn autostart_topics(manager: &SubscriptionManager, paths: &ConfigPaths) -> Vec<String> {

@@ -25,6 +25,8 @@ Configuration command:
 Use `ConnectorAct` for configured Google Calendar Browser connections instead
 of opening a separate browser session. Google Calendar Browser actions are:
 
+- `list_events` to list visible Calendar agenda rows, optionally filtered by
+  `query`, `title`, `event_id`, `url`, `when`, `location`, and `limit`.
 - `get_detail` to open a monitored event and return the visible event details.
 - `accept` to RSVP yes to a Calendar invitation.
 - `deny` to RSVP no or decline a Calendar invitation.
@@ -34,11 +36,13 @@ of opening a separate browser session. Google Calendar Browser actions are:
 Newly observed visible Calendar events are emitted by the subscriber every 30
 seconds. Include `account` with the Google account address when a connection
 monitors multiple accounts. Event actions need one of `event_id`, `title`, or
-`url`; event payloads emitted by the subscriber include `event.id` and `url`.
+`url`; call `list_events` first when you need to discover one. Event payloads
+emitted by the subscriber include `event.id` and `url`.
 
 Connector action examples:
 
 ```json
+{"connector_slug":"gcal-browser","connection_slug":"gcal-browser","action":"list_events","input":{"account":"cs@agentenv.io","query":"planning","limit":10}}
 {"connector_slug":"gcal-browser","connection_slug":"gcal-browser","action":"get_detail","input":{"account":"cs@agentenv.io","event_id":"event-123"}}
 {"connector_slug":"gcal-browser","connection_slug":"gcal-browser","action":"accept","input":{"account":"cs@agentenv.io","event_id":"event-123"}}
 {"connector_slug":"gcal-browser","connection_slug":"gcal-browser","action":"deny","input":{"account":"cs@agentenv.io","url":"https://calendar.google.com/calendar/event?..."}}

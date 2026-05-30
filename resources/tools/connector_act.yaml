@@ -8,11 +8,13 @@ description: |-
   instead of opening a separate browser session. Email actions include
   list_emails, list_inbox, list_category, search_emails, mark_read,
   draft_reply, draft_forward, send_email, and delete. Google Calendar Browser
-  actions include get_detail, accept, and deny. The browser-backed connectors
-  also support requestuserbrowseraction when they need the user to complete a
-  sign-in or approval step in the global Puffer browser profile. The email
-  connector executes through IMAP/SMTP; gmail-browser and gcal-browser execute
-  through the daemon-managed global Chrome profile that owns browser-backed
+  actions include list_events, search_events, get_detail, accept, and deny.
+  Use list_events or search_events before get_detail when you do not already
+  have an event_id, title, or url. The browser-backed connectors also support
+  requestuserbrowseraction when they need the user to complete a sign-in or
+  approval step in the global Puffer browser profile. The email connector
+  executes through IMAP/SMTP; gmail-browser and gcal-browser execute through
+  the daemon-managed global Chrome profile that owns browser-backed
   connections. Do not use Slack/Lark read_messages for email or gmail-browser;
   use list_emails or search_emails instead.
 

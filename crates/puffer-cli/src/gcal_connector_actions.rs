@@ -71,7 +71,15 @@ pub(crate) fn is_gcal_connector(connector_slug: &str) -> bool {
 pub(crate) fn is_gcal_action(action: &str) -> bool {
     matches!(
         action,
-        "get_detail"
+        "list_events"
+            | "list"
+            | "list_event"
+            | "list_calendar_events"
+            | "events"
+            | "search"
+            | "search_event"
+            | "search_events"
+            | "get_detail"
             | "get_details"
             | "get_event"
             | "event_detail"
@@ -208,6 +216,8 @@ mod tests {
 
     #[test]
     fn recognizes_gcal_action_surface() {
+        assert!(is_gcal_action("list_events"));
+        assert!(is_gcal_action("search_events"));
         assert!(is_gcal_action("get_detail"));
         assert!(is_gcal_action("accept"));
         assert!(is_gcal_action("deny"));

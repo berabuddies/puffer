@@ -436,8 +436,77 @@ fn synthetic_envelope(topic: &str, payload: &Value) -> EventEnvelope {
 
 fn connector_skill_template(template: &ConnectorTemplate) -> String {
     format!(
-        "# {}\n\nUse this connector guide to authenticate `{}` and explain its filter, output, action, and permission shapes.\n\n- Auth: use AskUserQuestion for user-provided auth inputs before creating a connection.\n- Auth check: call `auth-ok` for the connection slug before registering it.\n- Subscribe: emit JSONL event frames with cursors.\n- Act: accept one action JSON payload on stdin and return one JSON object.\n",
-        template.description, template.slug
+        r#"# {description}
+
+Use this guide when creating, registering, or operating the `{slug}` connector.
+
+## Choose the Runtime Shape
+
+- Use a connector protocol command when a standalone executable can implement
+  `auth-ok`, `subscribe`, and `act` for one connection.
+- Use a reusable subscriber manifest when multiple connections share one
+  long-lived poller or browser session. Store per-connection state under the
+  connector's `state_root`.
+- Use an internal/tool-backed connector only when the host must own the runtime
+  session, browser profile, or privileged API client.
+- Keep platform-specific parsing, auth, and filtering inside the connector or
+  subscriber. Do not add connector-specific behavior to the generic router.
+
+## Template Contract
+
+- `slug`: stable kebab-case connector id. `skill` should usually match it.
+- `requires_auth`: true unless the connector can run without user credentials.
+- `can_subscribe`: true only when workflow monitors can receive events.
+- `subscriber`: set this when events come from a reusable manifest; otherwise
+  command-backed connectors stream through `subscribe`.
+- `output_schema`: describe emitted event payloads, including stable IDs,
+  cursors, timestamps, sender/account identifiers, and target URLs when present.
+- `actions`: define every action the agent may call. Each action needs an input
+  schema, output schema, permission category, summary, and side-effect flag.
+
+## Auth and Setup
+
+- Route user-facing setup through `/connect <connector> <connection>` and
+  standard AskUserQuestion/browser questions.
+- `auth-ok <connection>` must be deterministic and safe to call repeatedly.
+  Return boolean output or JSON with `ok`/`success`.
+- Never import or mutate another app's live session unless the connector is
+  explicitly designed to do that. Prefer an independent Puffer-owned session.
+- Auth failures should be actionable: say which account/connection is broken
+  and what setup step should be rerun.
+
+## Streaming
+
+- `subscribe` receives one JSON command on stdin:
+  `{{"op":"subscribe","connection":"...","cursor":"..."}}`.
+- Emit newline-delimited JSON frames only: `event`, `checkpoint`, or `health`.
+- Every event must include a durable `id`, an ackable `cursor`, and a concise
+  payload. Use monotonic provider cursors when available.
+- Resume from the provided cursor. Avoid slow full backfills on restart.
+- After the host sends `ack`, the connector may persist that cursor. Do not
+  drop unacked events silently.
+
+## Actions
+
+- `act <connection> <action>` reads one JSON payload from stdin.
+- Return JSON with `success`, `summary`, optional `output`, and `retryable`.
+- Add list/search/read actions for any action that needs a target ID. Do not
+  make agents guess IDs before `get_detail`, `reply`, `accept`, `deny`, etc.
+- Side-effecting actions must use precise permissions and idempotency keys when
+  the provider supports them.
+
+## Verification
+
+- Unit-test template metadata, auth-ok parsing, action routing, and event frame
+  parsing.
+- Add an update spec for each touched component.
+- For stream connectors, test cursor resume, ack persistence, reconnects, and
+  duplicate suppression.
+- For browser-backed connectors, manually verify setup, list/search, detail,
+  and one safe action against the daemon-managed browser profile.
+"#,
+        description = template.description,
+        slug = template.slug
     )
 }
 

@@ -17,6 +17,7 @@ pub(super) fn handle_action(
 ) -> Result<Value> {
     let action = canonical_action(action);
     match action {
+        "list_events" => list_events(env, config, handshake, input),
         "get_detail" => get_detail(env, config, handshake, input),
         "accept" => rsvp(env, config, handshake, input, "accept"),
         "deny" => rsvp(env, config, handshake, input, "deny"),
@@ -26,11 +27,58 @@ pub(super) fn handle_action(
 
 fn canonical_action(action: &str) -> &str {
     match action {
+        "list"
+        | "list_event"
+        | "list_calendar_events"
+        | "events"
+        | "search"
+        | "search_event"
+        | "search_events" => "list_events",
         "get_details" | "get_event" | "event_detail" | "detail" => "get_detail",
         "accept_event" | "yes" => "accept",
         "decline" | "reject" | "no" => "deny",
         other => other,
     }
+}
+
+fn list_events(
+    env: &SubscriberEnv,
+    config: &GcalBrowserConfig,
+    handshake: &mut Option<crate::daemon::Handshake>,
+    input: &Value,
+) -> Result<Value> {
+    let account = action_account(config, input)?;
+    let filter = EventListFilter::from_input(input);
+    let handshake = super::ensure_browser_daemon(config, handshake)?;
+    open_gcal_url(
+        env,
+        &account,
+        handshake,
+        &super::gcal_agenda_url(&account),
+        "Google Calendar",
+    )?;
+    let result = wait_for_events(env, &account, handshake)?;
+    let rows = result
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let events = rows
+        .into_iter()
+        .filter(|row| filter.matches(row))
+        .take(filter.limit)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "action": "list_events",
+        "summary": format!("listed {} Google Calendar events", events.len()),
+        "account": account,
+        "count": events.len(),
+        "events": events,
+        "source": {
+            "href": result.get("href").cloned().unwrap_or(Value::Null),
+            "title": result.get("title").cloned().unwrap_or(Value::Null),
+        },
+    }))
 }
 
 fn get_detail(
@@ -191,6 +239,34 @@ fn wait_for_detail(
     }
 }
 
+fn wait_for_events(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+) -> Result<Value> {
+    let deadline = Instant::now() + ACTION_TIMEOUT;
+    loop {
+        let result = evaluate_gcal_script(env, account, handshake, super::GCAL_EVENTS_SCRIPT)
+            .context("read Google Calendar event list")?;
+        let status = result.get("status").and_then(Value::as_str).unwrap_or("ok");
+        match status {
+            "auth_required" => bail!("Google Calendar account `{account}` requires sign-in"),
+            "ok" => return Ok(result),
+            _ if super::gcal_poll_result_ready(&result) => return Ok(result),
+            _ if Instant::now() >= deadline => {
+                bail!(
+                    "Google Calendar account `{account}` returned status `{}`",
+                    result
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("loading")
+                );
+            }
+            _ => std::thread::sleep(ACTION_INTERVAL),
+        }
+    }
+}
+
 fn evaluate_gcal_script(
     env: &SubscriberEnv,
     account: &str,
@@ -246,14 +322,84 @@ impl EventTarget {
     fn from_input(input: &Value) -> Result<Self> {
         let target = Self {
             id: string_field(input, &["event_id", "id", "calendar_event_id"]),
-            title: string_field(input, &["title", "summary", "event_title"]),
+            title: string_field(
+                input,
+                &["title", "summary", "event_title", "query", "q", "search"],
+            ),
             url: string_field(input, &["url", "event_url"]),
         };
         if target.id.is_none() && target.title.is_none() && target.url.is_none() {
-            bail!("provide `event_id`, `title`, or `url` for the Google Calendar event");
+            bail!(
+                "provide `event_id`, `title`, or `url` for the Google Calendar event, or call `list_events` first"
+            );
         }
         Ok(target)
     }
+}
+
+#[derive(Debug)]
+struct EventListFilter {
+    query: Option<String>,
+    title: Option<String>,
+    id: Option<String>,
+    url: Option<String>,
+    when: Option<String>,
+    location: Option<String>,
+    limit: usize,
+}
+
+impl EventListFilter {
+    fn from_input(input: &Value) -> Self {
+        Self {
+            query: string_field(input, &["query", "q", "search", "contains", "text"]),
+            title: string_field(input, &["title", "summary", "event_title"]),
+            id: string_field(input, &["event_id", "id", "calendar_event_id"]),
+            url: string_field(input, &["url", "event_url"]),
+            when: string_field(input, &["when", "date", "time"]),
+            location: string_field(input, &["location", "where"]),
+            limit: numeric_field(input, &["limit", "max_results", "max"]).unwrap_or(10),
+        }
+    }
+
+    fn matches(&self, row: &Value) -> bool {
+        contains_optional(row_text(row), self.query.as_deref())
+            && contains_optional(row_field(row, "title"), self.title.as_deref())
+            && contains_optional(row_field(row, "id"), self.id.as_deref())
+            && contains_optional(row_field(row, "url"), self.url.as_deref())
+            && contains_optional(row_field(row, "when"), self.when.as_deref())
+            && contains_optional(row_field(row, "location"), self.location.as_deref())
+    }
+}
+
+fn numeric_field(input: &Value, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| input.get(*key).and_then(Value::as_u64))
+        .map(|value| value.clamp(1, 50) as usize)
+}
+
+fn row_field(row: &Value, key: &str) -> String {
+    row.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn row_text(row: &Value) -> String {
+    ["id", "title", "summary", "when", "location", "url"]
+        .into_iter()
+        .map(|key| row_field(row, key))
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn contains_optional(haystack: String, needle: Option<&str>) -> bool {
+    let Some(needle) = needle.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
 }
 
 fn gcal_open_event_script(target: &EventTarget) -> String {
@@ -407,6 +553,7 @@ mod tests {
 
     #[test]
     fn canonicalizes_action_aliases() {
+        assert_eq!(canonical_action("search_events"), "list_events");
         assert_eq!(canonical_action("get_details"), "get_detail");
         assert_eq!(canonical_action("decline"), "deny");
         assert_eq!(canonical_action("accept_event"), "accept");
@@ -418,5 +565,25 @@ mod tests {
         assert!(EventTarget::from_input(&json!({ "event_id": "abc" })).is_ok());
         assert!(EventTarget::from_input(&json!({ "title": "Planning" })).is_ok());
         assert!(EventTarget::from_input(&json!({ "url": "https://calendar.google.com/" })).is_ok());
+    }
+
+    #[test]
+    fn event_list_filter_matches_rows_case_insensitively() {
+        let filter = EventListFilter::from_input(&json!({
+            "query": "planning",
+            "limit": 200
+        }));
+        assert_eq!(filter.limit, 50);
+        assert!(filter.matches(&json!({
+            "id": "event-1",
+            "title": "Planning Review",
+            "when": "Tomorrow 10 AM",
+            "url": "https://calendar.google.com/event"
+        })));
+        assert!(!filter.matches(&json!({
+            "id": "event-2",
+            "title": "Lunch",
+            "when": "Tomorrow noon"
+        })));
     }
 }
