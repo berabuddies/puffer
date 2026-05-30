@@ -16,10 +16,8 @@
  *     the default project's fixed cwd.
  *   - `renameSession(id, title)` — server rename + local mutation so
  *     the row updates without a refetch.
- *
- * Wishlist for puffer backend (out of scope here):
- *   - `delete_session(sessionId)` RPC so the Trash icon can actually
- *     do something (today it's disabled with a tooltip).
+ *   - `deleteSession(id)` — server delete via the daemon's `delete_session`
+ *     RPC + local removal so the row disappears without a refetch.
  */
 
 import type { SessionListItem } from "./agentClient";
@@ -27,6 +25,7 @@ import {
   createSession as daemonCreateSession,
   listGroupedSessions,
   renameSession as daemonRenameSession,
+  deleteSession as daemonDeleteSession,
   subscribeSessionsChanged,
 } from "./agent/daemonChat";
 import { NEW_SESSION_TITLE } from "./sessionTitle";
@@ -249,4 +248,24 @@ export async function renameSession(id: string, title: string): Promise<void> {
     pushToast(`Rename failed: ${msg}`, "error");
     throw err;
   }
+}
+
+/**
+ * Delete a session through the daemon's `delete_session` (wipes the
+ * transcript + all sidecars under ~/.puffer; the backend broadcasts
+ * `workspace:sessions:changed` so other views reconcile). We splice the row
+ * out of the local list immediately so the rail updates without waiting for
+ * that broadcast's refetch. Rejects (after surfacing a toast) so the caller
+ * can keep its confirm dialog open instead of navigating away on a failure.
+ */
+export async function deleteSession(id: string): Promise<void> {
+  try {
+    await daemonDeleteSession(id);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    pushToast(`Delete failed: ${msg}`, "error");
+    throw err;
+  }
+  const idx = sessionList.findIndex((s) => s.sessionId === id);
+  if (idx >= 0) sessionList.splice(idx, 1);
 }

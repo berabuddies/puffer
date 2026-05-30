@@ -1356,6 +1356,8 @@ export class FakeDaemon {
         return this.renameSession(request.params);
       case "create_session":
         return this.createSession(request.params);
+      case "delete_session":
+        return this.deleteSession(request.params);
       case "run_agent_turn":
         return this.runAgentTurn(request.params);
       case "cancel_turn": {
@@ -1732,6 +1734,22 @@ export class FakeDaemon {
       ]);
     }
     return this.sessionDetail(sessionId);
+  }
+
+  private deleteSession(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? params.session_id ?? "");
+    if (!sessionId) throw new Error("missing sessionId");
+    // Mirror the real daemon (crates/puffer-session-store/src/store.rs::
+    // delete_session, dispatched in daemon.rs::handle_delete_session): drop
+    // the session metadata + transcript + detail sidecars. Idempotent — a
+    // Map.delete on an absent key is a no-op, matching the real store's
+    // "delete is idempotent when files missing" behaviour. The real daemon
+    // also broadcasts `workspace:sessions:changed`; the store removes the row
+    // optimistically so the fixture doesn't need to replay that here.
+    this.sessions.delete(sessionId);
+    this.timelines.delete(sessionId);
+    this.details.delete(sessionId);
+    return { ok: true, sessionId };
   }
 
   private updateConfig(params: JsonRecord): JsonRecord {

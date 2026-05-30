@@ -58,10 +58,12 @@
   } from "../../lib/creditStore.svelte";
   import { formatCredits } from "../../lib/format";
   import UserMenu from "./UserMenu.svelte";
+  import ConfirmDeleteSessionModal from "./ConfirmDeleteSessionModal.svelte";
   import {
     projectSessions,
     createNewSession,
-    renameSession
+    renameSession,
+    deleteSession
   } from "../../lib/sessionStore.svelte";
   import { sessionTitle, NEW_SESSION_TITLE } from "../../lib/sessionTitle";
   import type { SessionListItem } from "../../lib/agentClient";
@@ -102,6 +104,11 @@
   let editingValue = $state("");
   /** Element ref so we can autoselect on focus enter. */
   let editingInputEl = $state<HTMLInputElement | null>(null);
+
+  /** Session awaiting delete-confirmation, or null when the dialog is closed. */
+  let deletingSession = $state<SessionListItem | null>(null);
+  /** True while the delete_session RPC is in flight. */
+  let deleteBusy = $state(false);
 
   function beginRename(session: SessionListItem, event: MouseEvent): void {
     event.stopPropagation();
@@ -144,6 +151,39 @@
     } else if (event.key === "Escape") {
       event.preventDefault();
       cancelRename();
+    }
+  }
+
+  function beginDelete(session: SessionListItem, event: MouseEvent): void {
+    event.stopPropagation();
+    deletingSession = session;
+  }
+
+  function cancelDelete(): void {
+    // Ignore close attempts (ESC / backdrop / Cancel) while the RPC is in
+    // flight so the dialog can't be dropped mid-delete.
+    if (deleteBusy) return;
+    deletingSession = null;
+  }
+
+  async function confirmDelete(): Promise<void> {
+    const session = deletingSession;
+    if (!session || deleteBusy) return;
+    deleteBusy = true;
+    try {
+      await deleteSession(session.sessionId);
+    } catch {
+      // The store already surfaced a toast; keep the dialog open so the user
+      // can retry or back out.
+      deleteBusy = false;
+      return;
+    }
+    deleteBusy = false;
+    deletingSession = null;
+    // If we just deleted the session currently open in the agent view, its
+    // /agent/<id> route is now dead — bounce Home.
+    if (isAgentActive(session.sessionId)) {
+      navigate("/home");
     }
   }
 
@@ -505,11 +545,11 @@
                   <Pencil size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>
                 <button
-                  class="session-row__icon-btn session-row__icon-btn--disabled"
+                  class="session-row__icon-btn"
                   type="button"
                   aria-label="Delete session"
-                  title="Coming soon — requires backend support"
-                  disabled
+                  title="Delete"
+                  onclick={(e) => beginDelete(session, e)}
                 >
                   <Trash2 size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>
@@ -596,6 +636,14 @@
     </UserMenu>
   </div>
 </aside>
+
+<ConfirmDeleteSessionModal
+  open={deletingSession !== null}
+  name={deletingSession ? sessionLabel(deletingSession) : ""}
+  busy={deleteBusy}
+  onConfirm={confirmDelete}
+  onClose={cancelDelete}
+/>
 
 <style>
   .sidebar {
@@ -995,7 +1043,6 @@
     background: rgba(0, 0, 0, 0.06);
     color: var(--color-text-primary);
   }
-  .session-row__icon-btn--disabled,
   .session-row__icon-btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;

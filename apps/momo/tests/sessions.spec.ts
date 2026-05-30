@@ -4,7 +4,7 @@ import { bootOnboarded } from "./support/bootHelpers";
 
 /**
  * V2 sidebar session management — the Tasks "+", the inline rename, and the
- * shipped-disabled Trash. Mirrors the FakeDaemon-driven pattern used by
+ * delete-with-confirm Trash. Mirrors the FakeDaemon-driven pattern used by
  * chat.spec.ts so the suites stay readable side-by-side.
  *
  * Work / Life grouping is gone: every session lives under the single default
@@ -105,7 +105,7 @@ test("Rename via hover pencil updates the session title", async ({ page }) => {
   await expect(list.getByText("Original title", { exact: true })).toHaveCount(0);
 });
 
-test("Delete button is shipped-disabled with a 'coming soon' tooltip", async ({ page }) => {
+test("Delete via hover trash → confirm dialog → removes the session", async ({ page }) => {
   const seeded: FakeDaemonSessionInput = {
     sessionId: "seed-delete",
     displayName: "Trash target",
@@ -115,11 +115,84 @@ test("Delete button is shipped-disabled with a 'coming soon' tooltip", async ({ 
   const daemon = new FakeDaemon({ sessions: [seeded] });
   await bootOnboarded(page, daemon);
 
-  const row = taskList(page).locator(".session-row", { hasText: "Trash target" });
+  const list = taskList(page);
+  const row = list.locator(".session-row", { hasText: "Trash target" });
   await expect(row).toBeVisible();
   await row.hover();
 
-  const trash = row.getByRole("button", { name: "Delete session" });
-  await expect(trash).toBeDisabled();
-  await expect(trash).toHaveAttribute("title", "Coming soon — requires backend support");
+  // Trash is live now (no longer shipped-disabled). Clicking pops a confirm
+  // dialog rather than deleting outright — delete wipes the transcript and is
+  // irreversible, so the user gets a chance to back out.
+  await row.getByRole("button", { name: "Delete session" }).click({ force: true });
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+
+  const deletePromise = daemon.waitForRequest(
+    "delete_session",
+    (req) => req.params.sessionId === "seed-delete"
+  );
+  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+  await deletePromise;
+
+  // The row disappears from the rail (optimistic local removal in the store).
+  await expect(list.getByText("Trash target", { exact: true })).toHaveCount(0);
+  // No error toast — the delete succeeded.
+  await expect(page.locator(".toast.toast--error")).toHaveCount(0);
+});
+
+test("Canceling the delete dialog keeps the session and sends no delete_session", async ({
+  page
+}) => {
+  const seeded: FakeDaemonSessionInput = {
+    sessionId: "seed-keep",
+    displayName: "Keep me",
+    title: "Keep me",
+    timeline: []
+  };
+  const daemon = new FakeDaemon({ sessions: [seeded] });
+  await bootOnboarded(page, daemon);
+
+  const list = taskList(page);
+  const row = list.locator(".session-row", { hasText: "Keep me" });
+  await row.hover();
+  await row.getByRole("button", { name: "Delete session" }).click({ force: true });
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await expect(list.getByText("Keep me", { exact: true })).toBeVisible();
+  expect(daemon.requests.some((r) => r.method === "delete_session")).toBe(false);
+});
+
+test("Deleting the session you're viewing navigates Home", async ({ page }) => {
+  const seeded: FakeDaemonSessionInput = {
+    sessionId: "seed-active",
+    displayName: "Active chat",
+    title: "Active chat",
+    timeline: []
+  };
+  const daemon = new FakeDaemon({ sessions: [seeded] });
+  await bootOnboarded(page, daemon);
+
+  // Land on the session's own agent view so deletion has to move us off it.
+  await page.goto("/#/agent/seed-active");
+  await expect(page).toHaveURL(/#\/agent\/seed-active$/);
+
+  const list = taskList(page);
+  const row = list.locator(".session-row", { hasText: "Active chat" });
+  await row.hover();
+  await row.getByRole("button", { name: "Delete session" }).click({ force: true });
+
+  const deletePromise = daemon.waitForRequest("delete_session");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+  await deletePromise;
+
+  // Deleting the open session can't leave us on a dead /agent/<id> route.
+  await expect(page).toHaveURL(/#\/home$/);
 });

@@ -61,6 +61,26 @@ export async function renameSession(
   return c.request<RenameSessionResult>("rename_session", { sessionId, title });
 }
 
+/**
+ * Daemon `delete_session` response (see
+ * `crates/puffer-cli/src/daemon.rs::handle_delete_session`). The backend
+ * removes the session + all sidecars under ~/.puffer and broadcasts
+ * `workspace:sessions:changed` (reason `"delete_session"`), then echoes
+ * `{ ok, sessionId }`. Idempotent — deleting an already-gone session still
+ * resolves ok (the underlying store treats missing files as a no-op).
+ */
+export interface DeleteSessionResult {
+  ok: boolean;
+  sessionId: string;
+}
+
+export async function deleteSession(
+  sessionId: string
+): Promise<DeleteSessionResult> {
+  const c = await ensureDaemonClient();
+  return c.request<DeleteSessionResult>("delete_session", { sessionId });
+}
+
 export async function runAgentTurn(
   sessionId: string,
   message: string,
@@ -140,6 +160,7 @@ if (import.meta.env.DEV) {
       __daemonChat?: {
         createSession: typeof createSession;
         renameSession: typeof renameSession;
+        deleteSession: typeof deleteSession;
         runAgentTurn: typeof runAgentTurn;
         cancelTurn: typeof cancelTurn;
         resolvePermission: typeof resolvePermission;
@@ -151,6 +172,7 @@ if (import.meta.env.DEV) {
   ).__daemonChat = {
     createSession,
     renameSession,
+    deleteSession,
     runAgentTurn,
     cancelTurn,
     resolvePermission,
