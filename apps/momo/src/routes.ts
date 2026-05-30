@@ -28,6 +28,7 @@ import OnboardingWhere from "./pages/onboarding/Where.svelte";
 import OnboardingRole from "./pages/onboarding/Role.svelte";
 import OnboardingApps from "./pages/onboarding/Apps.svelte";
 import OnboardingDone from "./pages/onboarding/Done.svelte";
+import ChatGallery from "./pages/dev/ChatGallery.svelte";
 
 export interface RouteDef {
   pattern: string;
@@ -72,7 +73,23 @@ export const routes: readonly RouteDef[] = [
   { pattern: "/onboarding/where", component: OnboardingWhere as Component<Record<string, unknown>>, hasShell: false, displayName: "Onboarding · Where" },
   { pattern: "/onboarding/role", component: OnboardingRole as Component<Record<string, unknown>>, hasShell: false, displayName: "Onboarding · Role" },
   { pattern: "/onboarding/apps", component: OnboardingApps as Component<Record<string, unknown>>, hasShell: false, displayName: "Onboarding · Apps" },
-  { pattern: "/onboarding/done", component: OnboardingDone as Component<Record<string, unknown>>, hasShell: false, displayName: "Onboarding · Done" }
+  { pattern: "/onboarding/done", component: OnboardingDone as Component<Record<string, unknown>>, hasShell: false, displayName: "Onboarding · Done" },
+
+  // Dev-only chat UI gallery (`#/dev/chat-gallery`). Registered only in dev
+  // builds: Vite replaces import.meta.env.DEV with false in prod and drops both
+  // this entry and the ChatGallery import via dead-code elimination, so it
+  // never ships to production. Pure fixture data — no controller/daemon.
+  ...(import.meta.env.DEV
+    ? [
+        {
+          pattern: "/dev/chat-gallery",
+          component: ChatGallery as Component<Record<string, unknown>>,
+          hasShell: false,
+          fullbleed: true,
+          displayName: "Chat gallery (dev)"
+        }
+      ]
+    : [])
 ];
 
 /**
