@@ -83,6 +83,12 @@ npm run check
 npm run tauri dev
 ```
 
+> **Day-to-day (start & restart):** once `.env` and `puffer` are set up, just run
+> `./scripts/dev.sh` (from `apps/momo`, or `apps/momo/scripts/dev.sh` from anywhere).
+> It stops any running instance, reaps orphaned puffer daemons, then launches
+> `tauri dev` — idempotent, so the same command doubles as a restart. It only ever
+> touches this repo's `target/debug` binaries, never a global `puffer`.
+
 > First `tauri dev` runs `beforeDevCommand`, which compiles the whole Rust workspace
 > (puffer-cli + deps) before the window opens — this can take several minutes with no
 > progress output. It is not hung.
