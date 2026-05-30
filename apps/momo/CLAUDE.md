@@ -1,8 +1,20 @@
 # Momo Desktop — 架构与上下文
 
+> **⚠️ 技术栈别猜**:momo = **Tauri 2 + Svelte 5**(Vite/TS),**不是 Next.js/React**。没有 `hooks/use-*.ts`;状态层是 Svelte 5 runes `*.svelte.ts`(如 `src/lib/agent/agentChat.svelte.ts`、`src/router.svelte.ts`)。改前以 `package.json` 为准,别从应用名臆测。
+
 > Standalone Tauri 桌面 GUI:puffer 驱动的 chat + WorldClaw U-card 钱包。
 > Fork 自 `apps/puffer-desktop/src-v2/`(2026-05)。
 > 负责人:sean。对话用中文,git 产物(commit/PR/代码注释)用英文。
+
+## 项目家族:momo / Corbina / puffer-cli(三者关系)
+
+同一个 monorepo 里有**两个 Tauri+Svelte 桌面壳**和**一个 agent runtime**,先分清:
+
+- **`crates/puffer-cli` → `puffer` 二进制 = agent runtime 真身**。三种用法:`puffer daemon`(WS/NDJSON server,把 puffer-core 的 session/chat/workflow/task/file/lsp/pty/browser RPC 暴露给前端——**两个桌面壳都连它**;入口 `crates/puffer-cli/src/daemon.rs`)、`puffer non-interactive`(一次性子进程,momo 旧 chat 路径,**已弃**)、TUI(`main.rs`,终端交互)。
+- **`apps/puffer-desktop`(产品名 **Corbina**,package `corbina`,端口 1420,数据 `~/.corbina`)= 全功能本地 coding-agent IDE**。**多 provider**:Puffer(via `puffer` CLI/daemon)/ Codex(`codex exec --json`)/ Claude(`claude --print`),新 session 创建时选 provider。IDE 能力(git/file/fs-watch/lsp/pty/CDP browser)是 **Corbina 自己的 Rust 服务,不走 puffer daemon**。连 Puffer provider 时经 `daemon_launcher.rs` 起 **local 或 SSH 远程**(`ssh <target> puffer daemon`)的 daemon,workspace cwd **可变**(面向任意工作区,session 落 `<cwd>/.puffer/`)。bin 覆盖 `CORBINA_PUFFER_BIN`。
+- **`apps/momo`(本项目,端口 1466,数据 `~/.momo` + daemon `~/.puffer`)= 从 Corbina 精简 fork 出来的消费级 chat + WorldClaw U-card 钱包**。**puffer-only**:只连 **local** `puffer daemon`(砍掉 Codex/Claude 多 provider、砍掉 IDE 面板 browser/lsp/pty/git);workspace **固定 = $HOME → `~/.puffer`**(不可变,单一 default project)。额外加了 Corbina 没有的:`connectors`(Connected Apps)、`oauth_listener`(WorldRouter Auth Station 登录)、`user_profile`(onboarding)、钱包。bin 覆盖 `MOMO_PUFFER_BIN`|`PUFFER_BINARY`。
+
+**共同点(同源,所以易混)**:都 Tauri 2 + Svelte 5 + Vite;都 `cargo build -p puffer-cli` 拿同一个 `puffer`;都用 `src-tauri/src/daemon_launcher.rs` spawn `puffer daemon` + 前端 `daemonClient.ts` 直连。**momo 的 chat 渲染组件直接照搬 Corbina**,所以同源 chat bug 两边都有,改时别回归(见下「两个已修 chat bug」)。
 
 ## momo 与 puffer 的关系(最重要)
 
