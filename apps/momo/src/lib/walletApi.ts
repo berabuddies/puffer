@@ -9,6 +9,7 @@
  */
 
 import { backendFetch, BackendError } from './backendFetch';
+import { transactionKey } from './walletTxnId';
 import type {
   CardBalance,
   CardListEntry,
@@ -79,7 +80,7 @@ function mapTransType(raw: string | undefined): Transaction['type'] {
   return t === 'refund' || t === 'credit' ? 'credit' : 'debit';
 }
 
-function normalizeTransaction(raw: RawBackendTransaction): Transaction {
+function normalizeTransaction(raw: RawBackendTransaction, index: number): Transaction {
   // Backend returns amount / merchantAmount as integer cents in string
   // form. UI works in major-unit dollars / yen / etc.
   const amountCents = parseInt(raw.amount ?? '0', 10) || 0;
@@ -97,7 +98,11 @@ function normalizeTransaction(raw: RawBackendTransaction): Transaction {
   void merchantCurrency;
 
   return {
-    id: String(raw.id ?? raw.authRefNum ?? Math.random()),
+    // The backend returns `id: 0` for every row — keying the UI list off it
+    // collapses every transaction to "0" and crashes Svelte's keyed `{#each}`
+    // (each_key_duplicate), stranding the wallet on "Loading…". Derive a
+    // unique, stable key from authRefNum + index instead. See walletTxnId.ts.
+    id: transactionKey(raw, index),
     date: raw.dateCreated || raw.dateSettled || '',
     description: (raw.description || '').trim(),
     amount: amountCents / 100,
