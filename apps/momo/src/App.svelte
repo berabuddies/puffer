@@ -112,7 +112,13 @@
    *
    * Everything else demands a signedIn status.
    */
-  const PUBLIC_PATHS = new Set(["/login", "/auth/callback"]);
+  const PUBLIC_PATHS = new Set([
+    "/login",
+    "/auth/callback",
+    // Dev-only chat UI gallery — public so it opens on any origin/port without
+    // sign-in. import.meta.env.DEV keeps it (and its route) out of prod.
+    ...(import.meta.env.DEV ? ["/dev/chat-gallery"] : [])
+  ]);
 
   $effect(() => {
     // Don't gate while we're still figuring out auth state — the splash
