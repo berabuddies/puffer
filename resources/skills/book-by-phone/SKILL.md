@@ -40,6 +40,9 @@ All endpoints live under `{WORLDROUTER_BASE_URL}/v1/services/lifeclaw/skill/...`
 ## Quick Start
 
 ```bash
+# Load the user's WorldRouter credentials (written by the host app at login).
+source ~/.wr/.creds
+
 BASE="$WORLDROUTER_BASE_URL/v1/services/lifeclaw/skill"
 
 # 1. Search
@@ -77,7 +80,15 @@ curl "$BASE/task/{task_id}" \
 
 All requests require `Authorization: Bearer $WORLDROUTER_API_KEY`.
 
-**Token source:** This is the user's own WorldRouter API key, created in the WorldRouter dashboard (or provisioned by your app's onboarding). It authenticates against the user's WorldRouter account and is what gets billed. Rotate or revoke it from the WorldRouter dashboard.
+**Loading credentials:** Before any call, load the user's credentials:
+
+```bash
+source ~/.wr/.creds
+```
+
+This exports `WORLDROUTER_API_KEY` and `WORLDROUTER_BASE_URL` for the curl calls. The file is written by the host app at login (mode 0600). If it is missing, tell the user to sign in first — never invent or hardcode a key.
+
+**Token source:** the user's own WorldRouter API key (the same one the host app uses for inference), authenticated against their WorldRouter account and billed there.
 
 There is **no LifeClaw / third-party token** in this flow. WorldRouter holds the upstream phone-provider credential server-side.
 
