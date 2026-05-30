@@ -152,6 +152,7 @@ impl BackendState {
                 let jwt = string_param(&params, &["jwt", "accessToken", "access_token"])?;
                 self.write_ucard_creds(&base_url, &jwt)
             }
+            "install_card_agent_assets" => self.install_card_agent_assets(),
             other => bail!("unknown method: {other}"),
         }
     }
@@ -187,6 +188,16 @@ impl BackendState {
         crate::ucard_creds::write_creds_file(&dir, base_url, jwt)
             .with_context(|| format!("writing ucard creds under {}", dir.display()))?;
         Ok(json!({ "written": true }))
+    }
+
+    fn install_card_agent_assets(&self) -> Result<Value> {
+        let project_cwd = app_home()?.join("projects").join("default");
+        crate::card_agent_env::ensure_acl_grant(&project_cwd)
+            .with_context(|| format!("granting momo-card ACL under {}", project_cwd.display()))?;
+        let user_puffer = home_dir().join(".puffer");
+        crate::card_agent_env::install_skill(&user_puffer)
+            .with_context(|| format!("installing pay-with-card skill under {}", user_puffer.display()))?;
+        Ok(json!({ "installed": true }))
     }
 
     /// Best-effort pre-warm of the daemon at startup.
