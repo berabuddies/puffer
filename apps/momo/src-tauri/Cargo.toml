@@ -3,6 +3,9 @@ name = "momo"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+# Two bins exist (momo from src/main.rs, momo-card from src/bin/momo-card.rs);
+# pin the default so tauri's bare `cargo run` (devCommand) knows which to launch.
+default-run = "momo"
 
 [lib]
 name = "momo_lib"

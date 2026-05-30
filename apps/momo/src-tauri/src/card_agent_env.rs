@@ -2,7 +2,9 @@
 //!   1. A project ACL rule (`100 allow bash argv momo-card`) so the bin runs
 //!      through the puffer permission gate without escalation.
 //!   2. A user-level `pay-with-card` skill that tells the agent to call the
-//!      bin as a SINGLE command and that it only ever receives last4 + expiry.
+//!      bin as a SINGLE command (`momo-card reveal --full`) to obtain the full
+//!      card (PAN+CVV) for a payment, using it only for that step and reporting
+//!      only the last4 back to the user.
 //!
 //! Both are idempotent: the ACL line is added only if absent; the SKILL.md is
 //! overwritten with the canonical text.
