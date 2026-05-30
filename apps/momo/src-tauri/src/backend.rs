@@ -147,6 +147,11 @@ impl BackendState {
                 let base_url = string_param(&params, &["baseUrl", "base_url"])?;
                 self.write_wr_creds(&api_key, &base_url)
             }
+            "write_ucard_creds" => {
+                let base_url = string_param(&params, &["baseUrl", "base_url"])?;
+                let jwt = string_param(&params, &["jwt", "accessToken", "access_token"])?;
+                self.write_ucard_creds(&base_url, &jwt)
+            }
             other => bail!("unknown method: {other}"),
         }
     }
@@ -174,6 +179,13 @@ impl BackendState {
         let dir = home_dir().join(".wr");
         crate::wr_creds::write_creds_file(&dir, api_key, base_url)
             .with_context(|| format!("writing wr creds under {}", dir.display()))?;
+        Ok(json!({ "written": true }))
+    }
+
+    fn write_ucard_creds(&self, base_url: &str, jwt: &str) -> Result<Value> {
+        let dir = home_dir().join(".ucard");
+        crate::ucard_creds::write_creds_file(&dir, base_url, jwt)
+            .with_context(|| format!("writing ucard creds under {}", dir.display()))?;
         Ok(json!({ "written": true }))
     }
 
