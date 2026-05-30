@@ -18,6 +18,9 @@ benchmark/*.pyc
 .omx/
 .playwright-mcp/
 
+# Superpowers brainstorming visual-companion scratch
+.superpowers/
+
 # Local audit and bug-triage artifacts.
 audit_scope.txt
 import_scope.json
