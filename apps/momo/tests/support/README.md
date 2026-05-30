@@ -16,6 +16,7 @@ large `fakeDaemon.ts` is *reference-only* — nobody patches it, helpers wrap it
 | Hold an RPC open until you say go | `const p = deferRpc(daemon, "run_agent_turn"); /* assert… */ p.resolve();` (chatTiming.ts; backed by `FakeDaemon.deferRpc`; see the harness self-test in `chat-smoke.spec.ts`) |
 | Make an RPC take a fixed ms | `delayRpc(daemon, "load_session_detail", 800)` (chatTiming.ts) |
 | Target a chat surface in the DOM | locate the `BubbleConversation` markup directly (messages: `.mb-row[data-role] .mb-bubble` / `.pf-msg-text`; cards: `.pf-tool` / `.pf-approval` / `.pf-question`); the legacy `chatLocators.ts` helpers were removed with the old chat UI |
+| **Eyeball the whole chat UI** (every state at once, no live agent) | open the dev-only gallery at `#/dev/chat-gallery` (`src/pages/dev/ChatGallery.svelte`) — real `BubbleConversation` + a fixture covering user/assistant bubbles, tool pill collapse/expand, failed tool, diff, approval card, options-card question + answered echo, system note, typing. Run on any free port: `cd apps/momo && npx vite --host 127.0.0.1 --port 1456` then open `http://localhost:1456/#/dev/chat-gallery` (1466 collides with the dev/test server). Dev-only: route + `PUBLIC_PATHS` entry are gated by `import.meta.env.DEV`, so Vite drops it from prod |
 | Type + Enter + IME / state | drive the shell `Composer` directly (`page.getByLabel("Message")`); the legacy `composerHelpers.ts` were removed with the old chat UI |
 | Build a fixture session in 1 line | `makeSession({ id, timeline })` (sessionFixtures.ts) |
 
