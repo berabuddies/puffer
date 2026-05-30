@@ -1338,6 +1338,8 @@ export class FakeDaemon {
         return this.loginProvider(request.params, "api_key");
       case "logout_provider":
         return this.logoutProvider(request.params);
+      case "write_user_profile":
+        return { written: true };
       case "list_external_credentials":
         return this.externalCredentials;
       case "import_external_credential":
