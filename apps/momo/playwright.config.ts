@@ -2,6 +2,9 @@ import { defineConfig } from "@playwright/test";
 
 const nodeExecutable = JSON.stringify(process.execPath);
 const shouldReuseExistingServer = !process.env.CI && !process.env.CODEX_CI;
+// Default to 1466 (matches the dev port); override with MOMO_TEST_PORT to run a
+// throwaway server on a free port when 1466 is occupied by a dev vite.
+const testPort = process.env.MOMO_TEST_PORT ?? "1466";
 
 export default defineConfig({
   testDir: "tests",
@@ -12,8 +15,8 @@ export default defineConfig({
     timeout: 10_000
   },
   webServer: {
-    command: `${nodeExecutable} ./node_modules/vite/bin/vite.js --host localhost --port 1466`,
-    url: "http://localhost:1466/?skipOnboarding",
+    command: `${nodeExecutable} ./node_modules/vite/bin/vite.js --host localhost --port ${testPort}`,
+    url: `http://localhost:${testPort}/?skipOnboarding`,
     reuseExistingServer: shouldReuseExistingServer,
     timeout: 120_000,
     // wsClient.ts reads VITE_PUFFER_WS_URL at module load; this points the
@@ -26,7 +29,7 @@ export default defineConfig({
     env: { VITE_PUFFER_WS_URL: "ws://127.0.0.1:17777/ws", VITE_USE_MOCK_WALLET: "true" }
   },
   use: {
-    baseURL: "http://localhost:1466",
+    baseURL: `http://localhost:${testPort}`,
     headless: true
   }
 });

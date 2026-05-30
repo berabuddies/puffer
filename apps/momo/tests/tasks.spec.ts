@@ -87,6 +87,27 @@ test("Home renders both monitor task subjects", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("Home auto-refreshes new monitor tasks without navigating away", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  // Start empty: the user is sitting on Home, "all caught up".
+  daemon.setWorkflowSnapshot(snapshotWith([]));
+  await bootOnboarded(page, daemon);
+  await daemon.waitForRequest("workflow_list");
+
+  await expect(
+    page.getByRole("heading", { name: "You're all caught up" })
+  ).toBeVisible();
+
+  // A new Telegram message arrives and triage creates a monitor task while the
+  // user never leaves Home. The store must poll and surface it on its own —
+  // without this, the feed only refreshes on mount (navigate away + back).
+  daemon.setWorkflowSnapshot(snapshotWith(twoTasks()));
+
+  await expect(
+    page.getByRole("heading", { name: "Reply to Alice about the deploy" })
+  ).toBeVisible({ timeout: 15_000 });
+});
+
 test("opening Connected Apps with Telegram connected auto-creates the monitor", async ({ page }) => {
   const daemon = new FakeDaemon();
   // Simulate a returning user whose Telegram is already authenticated: the
@@ -186,11 +207,15 @@ test("clicking a task action runs its prompt in a fresh agent session", async ({
   expect(String(turn.params.message)).toContain(
     "Draft a concise reply to Alice with the deployment status."
   );
+  // It must NOT tell the agent to TaskUpdate the monitor task complete: from a
+  // momo chat session that call resolves under the session cwd, never finds the
+  // monitor task, and silently fails. Completion is the user's Ignore action.
+  expect(String(turn.params.message)).not.toContain("TaskUpdate");
   // A brand-new session was minted and we navigated into it.
   await expect(page).toHaveURL(/#\/agent\/session-created-/);
 });
 
-test("clicking Open runs `/tasks show <id>` in a fresh agent session", async ({ page }) => {
+test("clicking Open seeds a fresh session with the task context inlined", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowSnapshot(snapshotWith(twoTasks()));
   await bootOnboarded(page, daemon);
@@ -199,12 +224,22 @@ test("clicking Open runs `/tasks show <id>` in a fresh agent session", async ({ 
   const card = taskCard(page, "Confirm the lunch reservation");
   const turnPromise = daemon.waitForRequest(
     "run_agent_turn",
-    (req) => String(req.params.message) === "/tasks show monitor-b"
+    (req) => String(req.params.message).includes("monitor-b")
   );
 
   // The Bot source-icon button is the Open affordance.
   await card.getByRole("button", { name: "Open in source app" }).click();
 
-  await turnPromise;
+  const turn = await turnPromise;
+  const message = String(turn.params.message);
+  // Open must inline the task's subject + description so the agent has the full
+  // context without a `/tasks show <id>` / TaskGet lookup. That lookup resolves
+  // the monitor task store under the chat session's cwd (~/.momo/projects/default),
+  // not the daemon root (~/.puffer) where the Telegram monitor actually writes
+  // monitor_tasks.json — so it would always come back "not found".
+  expect(message).toContain("monitor-b");
+  expect(message).toContain("Confirm the lunch reservation");
+  expect(message).toContain("Bob wants to know if 12:30 still works.");
+  expect(message).not.toContain("/tasks show");
   await expect(page).toHaveURL(/#\/agent\/session-created-/);
 });

@@ -67,3 +67,44 @@ export async function ignoreTask(taskId: string): Promise<void> {
     pushToast("Failed to ignore task", "error");
   }
 }
+
+/** Background poll interval for the monitor task feed. */
+const POLL_INTERVAL_MS = 15_000;
+
+let pollHandle: ReturnType<typeof setInterval> | null = null;
+let focusHandler: (() => void) | null = null;
+
+/**
+ * Start polling the monitor task feed so new Telegram tasks surface on Home
+ * without the user navigating away and back.
+ *
+ * The puffer daemon does NOT push a workflow/task-changed event — the triage
+ * agent that creates a monitor task writes `monitor_tasks.json` from a
+ * background cron thread with no access to the daemon's event bus, so there is
+ * nothing to subscribe to (the upstream puffer-desktop Tasks screen only
+ * refreshes on mount + a manual Refresh button for the same reason). Polling
+ * `workflow_list` is the only way the feed can self-update.
+ *
+ * Also refetches on window focus so returning to the app shows fresh tasks
+ * immediately (mirrors `creditStore`'s poll + focus pattern). Idempotent:
+ * calling twice without an intervening `stopTaskPolling()` is a no-op, so Home
+ * remounts don't stack intervals/listeners.
+ */
+export function startTaskPolling(): void {
+  if (pollHandle !== null) return;
+  void loadTasks();
+  pollHandle = setInterval(() => void loadTasks(), POLL_INTERVAL_MS);
+  focusHandler = () => void loadTasks();
+  window.addEventListener("focus", focusHandler);
+}
+
+export function stopTaskPolling(): void {
+  if (pollHandle !== null) {
+    clearInterval(pollHandle);
+    pollHandle = null;
+  }
+  if (focusHandler !== null) {
+    window.removeEventListener("focus", focusHandler);
+    focusHandler = null;
+  }
+}

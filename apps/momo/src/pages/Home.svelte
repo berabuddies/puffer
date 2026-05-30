@@ -12,7 +12,7 @@
   here now). TaskCard is owned by another agent and not modified; we wrap
   each card in a clickable layer and delegate clicks off the rendered
   button classes:
-    - .task-card__source (Bot icon)  → Open  → `/tasks show <id>`
+    - .task-card__source (Bot icon)  → Open  → task context inlined into a prompt
     - .btn--primary (cream)          → the task's first action prompt
                                         (falls back to Open when the task
                                         carries no actions)
@@ -41,7 +41,8 @@
   import {
     monitorTasks,
     taskState,
-    loadTasks,
+    startTaskPolling,
+    stopTaskPolling,
     ignoreTask,
   } from "../lib/taskStore.svelte";
   import type {
@@ -49,8 +50,12 @@
     WorkflowMonitorTaskAction,
   } from "../lib/taskApi";
 
+  // Poll the monitor feed while Home is mounted so new Telegram tasks appear
+  // on their own (the daemon emits no task-changed event to subscribe to).
+  // onMount's returned teardown stops the poll when Home unmounts.
   onMount(() => {
-    void loadTasks();
+    startTaskPolling();
+    return () => stopTaskPolling();
   });
 
   /** id of the task whose action/Open is currently minting a session. */
@@ -148,13 +153,33 @@
       "",
       action.prompt,
       "",
-      `When the action is fully handled, update task ${mt.task_id} with TaskUpdate status=completed. If you need more context, inspect the connector or ask the user.`,
+      // Don't ask the agent to TaskUpdate the monitor task complete: monitor
+      // tasks live under the daemon root (~/.puffer), but a momo chat session
+      // runs at ~/.momo/projects/default, so the per-session TaskUpdate tool
+      // resolves a different (empty) store and the call silently fails. The user
+      // dismisses a handled task from the Home feed (Ignore → task_monitor_ignore).
+      `If you need more context, inspect the connector or ask the user.`,
     ].join("\n");
   }
 
-  /** The slash command "Open" submits so the agent expands this task. */
-  function taskShowCommand(mt: WorkflowMonitorTask): string {
-    return `/tasks show ${mt.task_id}`;
+  /**
+   * The prompt "Open" submits so the agent expands this task. We inline the
+   * task's subject + description rather than emitting `/tasks show <id>`: that
+   * command makes the agent call TaskGet, which resolves the monitor task store
+   * under the chat session's cwd (~/.momo/projects/default) instead of the
+   * daemon root (~/.puffer) where the Telegram monitor writes monitor_tasks.json
+   * — so it always reports the task "not found". The frontend already holds the
+   * task's content, so we hand it to the agent directly.
+   */
+  function taskOpenPrompt(mt: WorkflowMonitorTask): string {
+    return [
+      `Open monitored task ${mt.task_id}: ${mt.subject}`,
+      "",
+      "Task description:",
+      mt.description,
+      "",
+      `Summarize this task and help me handle it. If you need more context, inspect the connector or ask me.`,
+    ].join("\n");
   }
 
   /**
@@ -176,15 +201,15 @@
     }
   }
 
-  /** Open = run `/tasks show <id>` in a new session. */
+  /** Open = seed a new session with the task context inlined. */
   function openTask(mt: WorkflowMonitorTask): void {
-    void runTaskCommand(mt, taskShowCommand(mt));
+    void runTaskCommand(mt, taskOpenPrompt(mt));
   }
 
   /** Primary = run the first action's prompt (or Open when there are none). */
   function runPrimary(mt: WorkflowMonitorTask): void {
     const action = mt.actions?.[0];
-    void runTaskCommand(mt, action ? taskActionPrompt(mt, action) : taskShowCommand(mt));
+    void runTaskCommand(mt, action ? taskActionPrompt(mt, action) : taskOpenPrompt(mt));
   }
 
   /**
