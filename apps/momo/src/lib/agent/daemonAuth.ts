@@ -14,6 +14,7 @@
  */
 import { ensureDaemonClient } from "../daemonClient";
 import { request as backendRequest } from "../wsClient";
+import { getAuthToken } from "../auth.svelte";
 
 // Inference endpoint the minted worldrouter key is sent to. MUST track the
 // same environment as the control-api that mints the key
@@ -49,6 +50,25 @@ export async function loginWorldRouter(apiKey: string): Promise<void> {
     await backendRequest("write_wr_creds", { apiKey, baseUrl: controlUrl });
   } catch (e) {
     console.warn("[wr] write_wr_creds failed (book-by-phone may lack creds)", e);
+  }
+
+  // Also persist the ucard backend base URL + the Auth-Station JWT to
+  // ~/.ucard/.creds so the `momo-card` bin can reveal the card off-agent.
+  // The base URL is the REAL backend (the bin isn't a browser → no CORS / no
+  // Vite proxy), so we use VITE_BACKEND_BASE_URL directly. Best-effort.
+  const ucardBase =
+    (import.meta.env.VITE_BACKEND_BASE_URL as string | undefined) ??
+    "http://127.0.0.1:8080";
+  const jwt = getAuthToken();
+  if (jwt) {
+    try {
+      await backendRequest("write_ucard_creds", { baseUrl: ucardBase, jwt });
+      await backendRequest("install_card_agent_assets", {});
+    } catch (e) {
+      console.warn("[ucard] write_ucard_creds/install assets failed", e);
+    }
+  } else {
+    console.warn("[ucard] no JWT at login — skipping ucard creds write");
   }
 }
 
