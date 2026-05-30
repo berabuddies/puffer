@@ -10,6 +10,7 @@
 
 import { backendFetch, BackendError } from './backendFetch';
 import { transactionKey } from './walletTxnId';
+import { parseTransactionAmount } from './walletAmount';
 import type {
   CardBalance,
   CardListEntry,
@@ -81,10 +82,13 @@ function mapTransType(raw: string | undefined): Transaction['type'] {
 }
 
 function normalizeTransaction(raw: RawBackendTransaction, index: number): Transaction {
-  // Backend returns amount / merchantAmount as integer cents in string
-  // form. UI works in major-unit dollars / yen / etc.
-  const amountCents = parseInt(raw.amount ?? '0', 10) || 0;
-  const merchantCents = parseInt(raw.merchantAmount ?? '0', 10) || 0;
+  // Amounts arrive in two encodings depending on the backend path that served
+  // the row: Strada/broker (primary) passes a major-unit USD string ("0.99")
+  // while the DB fallback formats integer cents ("99"). parseTransactionAmount
+  // normalizes both to major-unit dollars — see walletAmount.ts. (The old
+  // `parseInt(amount) / 100` turned every Strada row into $0.00.)
+  const amount = parseTransactionAmount(raw.amount);
+  const merchantAmount = parseTransactionAmount(raw.merchantAmount);
 
   const status = mapTransStatus(raw.transStatus);
   const type = mapTransType(raw.transType);
@@ -105,8 +109,8 @@ function normalizeTransaction(raw: RawBackendTransaction, index: number): Transa
     id: transactionKey(raw, index),
     date: raw.dateCreated || raw.dateSettled || '',
     description: (raw.description || '').trim(),
-    amount: amountCents / 100,
-    merchantAmount: merchantCents / 100,
+    amount,
+    merchantAmount,
     type,
     status,
     // Strada returns merchantName padded with trailing spaces.
