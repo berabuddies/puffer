@@ -97,8 +97,8 @@ at compile time — rebuild/reinstall to update it.
 
 ## Third-party skills that need secrets (env / token)
 
-A skill that calls an external API (e.g. `lifeclaw-partner` →
-`LIFECLAW_PARTNER_API_TOKEN`) reads the secret from an environment
+A skill that calls an external API (e.g. `book-by-phone` →
+`WORLDROUTER_API_KEY`) reads the secret from an environment
 variable. The puffer process **inherits the parent's environment**:
 
 - **momo dev**: `export THE_TOKEN=... ` in the terminal **before**
