@@ -34,8 +34,11 @@ import type {
   CardDetails,
   CardListEntry,
   CreateCardHolderParams,
+  CreateDepositIntentParams,
   IssueCardResult,
   DepositAddress,
+  DepositIntent,
+  DepositRecord,
   KycStatus,
   KycStatusResponse,
   StartKycResult,
@@ -61,6 +64,8 @@ interface MockState {
   /** Available balance in dollars. */
   balance: number;
   transactions: Transaction[];
+  /** On-chain deposit records surfaced by getDeposits (Top up polling). */
+  deposits: DepositRecord[];
 }
 
 function initialState(): MockState {
@@ -71,7 +76,8 @@ function initialState(): MockState {
     submittedParams: null,
     cards: [],
     balance: 0,
-    transactions: []
+    transactions: [],
+    deposits: []
   };
 }
 
@@ -219,6 +225,37 @@ function simulateDeposit(
     },
     ...mockState.transactions
   ];
+  // Also surface it as a credited on-chain deposit record so the Top up modal's
+  // getDeposits polling shows the same money landing (depositStatus 2).
+  pushDepositRecord(amountUsd, 2);
+}
+
+/** Build + prepend a deposit record to mock state. Amount is encoded in base
+ *  units (USD1 has 18 decimals) like the real backend; status drives the Top
+ *  up modal's poll display (0 waiting · 1 crediting · 2 credited · 3 failed). */
+function pushDepositRecord(amountUsd: number, status: 0 | 1 | 2 | 3): void {
+  const baseUnits = (BigInt(Math.round(amountUsd * 100)) * 10n ** 16n).toString();
+  const cardId = mockState.cards[0]?.cardId ?? MOCK_CARD_ID;
+  mockState.deposits = [
+    {
+      txHash: `0x${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`,
+      amount: baseUnits,
+      txStatus: 1,
+      confirmStatus: 1,
+      loadingTxId: Math.floor(Math.random() * 100000),
+      auditStatus: 3,
+      cardId,
+      depositStatus: status
+    },
+    ...mockState.deposits
+  ];
+}
+
+/** Push a still-pending on-chain deposit (depositStatus 0) WITHOUT crediting
+ *  the balance — lets dev/tests exercise the modal's "waiting → credited"
+ *  transition before calling simulateDeposit to settle it. */
+function simulatePendingDeposit(amountUsd: number = 5): void {
+  pushDepositRecord(amountUsd, 0);
 }
 
 /** Agent paid a vendor → debit balance + push a debit txn. */
@@ -470,6 +507,39 @@ export const mockWalletClient: WalletClient = {
     );
     if (fail) return fail;
     return delay({ addresses: [SAMPLE_DEPOSIT] });
+  },
+
+  async createDepositIntent(
+    p: CreateDepositIntentParams
+  ): Promise<DepositIntent> {
+    const fail = consumeCallSlot<DepositIntent>("createDepositIntent");
+    if (fail) return fail;
+    // Mirror the real backend: echo a stable pay-to `address` (the same one
+    // getDepositAddress hands out, so tests assert one constant) plus an
+    // `addressOut` (debug-only gateway address) and the enforced minimum.
+    return delay({
+      intentId: 3,
+      cardId: p.cardId ?? mockState.cards[0]?.cardId ?? MOCK_CARD_ID,
+      chainId: p.chainId,
+      assetSymbol: p.assetSymbol,
+      address: SAMPLE_DEPOSIT.depositAddress,
+      addressOut: "0x5bad62a1918ea07f598503a62fcb59480507ece0",
+      minimumAmount: "1",
+      callbackUrl:
+        "https://ucard-test.tomo.services/api/card/deposit-webhooks/cryptapi/mock",
+      status: "pending"
+    });
+  },
+
+  async getDeposits(opts?: {
+    offset?: number;
+    limit?: number;
+  }): Promise<DepositRecord[]> {
+    const fail = consumeCallSlot<DepositRecord[]>("getDeposits");
+    if (fail) return fail;
+    const offset = opts?.offset ?? 0;
+    const limit = opts?.limit ?? 20;
+    return delay(mockState.deposits.slice(offset, offset + limit));
   }
 };
 
@@ -507,6 +577,7 @@ if (typeof window !== "undefined") {
     simulateApproveKyc,
     simulateDeclineKyc,
     simulateDeposit,
+    simulatePendingDeposit,
     simulateSpend,
     reset: resetMockState,
     getState: getMockState,

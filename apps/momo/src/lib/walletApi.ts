@@ -17,8 +17,12 @@ import type {
   CardDetails,
   CardListEntry,
   CreateCardHolderParams,
+  CreateDepositIntentParams,
   IssueCardResult,
   DepositAddress,
+  DepositIntent,
+  DepositRecord,
+  DepositStatus,
   KycStatus,
   KycStatusResponse,
   StartKycResult,
@@ -118,6 +122,54 @@ function normalizeTransaction(raw: RawBackendTransaction, index: number): Transa
     status,
     // Strada returns merchantName padded with trailing spaces.
     merchantName: (raw.merchantName || '').trim(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Deposit normalizer
+// ---------------------------------------------------------------------------
+
+interface RawDeposit {
+  txHash?: string;
+  amount?: string;
+  txStatus?: number;
+  confirmStatus?: number;
+  loadingTxId?: number;
+  auditStatus?: number;
+  cardId?: number;
+  depositStatus?: number;
+}
+
+// The /card/deposits envelope's `data` wrapper key isn't pinned down in the
+// integration spec, so accept either a bare array or a common wrapper
+// ({deposits|records|list|userDepositRecords}) instead of guessing one.
+function extractDepositRows(data: unknown): RawDeposit[] {
+  if (Array.isArray(data)) return data as RawDeposit[];
+  if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
+    for (const key of ['deposits', 'records', 'list', 'userDepositRecords']) {
+      if (Array.isArray(obj[key])) return obj[key] as RawDeposit[];
+    }
+  }
+  return [];
+}
+
+// Clamp the wire value to the known lifecycle; an unrecognized status reads as
+// 0 (waiting) so a new code never trips the "credited" branch by accident.
+function toDepositStatus(n: number | undefined): DepositStatus {
+  return n === 1 || n === 2 || n === 3 ? n : 0;
+}
+
+function normalizeDeposit(raw: RawDeposit): DepositRecord {
+  return {
+    txHash: raw.txHash ?? '',
+    amount: raw.amount ?? '0',
+    txStatus: raw.txStatus ?? 0,
+    confirmStatus: raw.confirmStatus ?? 0,
+    loadingTxId: raw.loadingTxId,
+    auditStatus: raw.auditStatus ?? 0,
+    cardId: raw.cardId ?? 0,
+    depositStatus: toDepositStatus(raw.depositStatus),
   };
 }
 
@@ -265,6 +317,52 @@ export class RestWalletClient implements WalletClient {
       '/card/deposit-address',
     );
     return { addresses: data.addresses ?? [] };
+  }
+
+  async createDepositIntent(p: CreateDepositIntentParams): Promise<DepositIntent> {
+    // POST /card/deposit-intent — mint a crypto deposit address for the card.
+    // chainId/assetSymbol are required; cardId + expectedAmount are optional, so
+    // we only include them when provided (omitting cardId lets the backend pick
+    // the user's first depositable card).
+    const body: Record<string, unknown> = {
+      chainId: p.chainId,
+      assetSymbol: p.assetSymbol,
+    };
+    if (p.cardId != null) body.cardId = p.cardId;
+    if (p.expectedAmount) body.expectedAmount = p.expectedAmount;
+
+    const data = await backendFetch<{
+      intentId?: number;
+      cardId?: number;
+      chainId?: number;
+      assetSymbol?: string;
+      address?: string;
+      addressOut?: string;
+      minimumAmount?: string;
+      callbackUrl?: string;
+      status?: string;
+    }>('/card/deposit-intent', { method: 'POST', body });
+
+    return {
+      intentId: data.intentId ?? 0,
+      cardId: data.cardId ?? 0,
+      chainId: data.chainId ?? p.chainId,
+      assetSymbol: data.assetSymbol ?? p.assetSymbol,
+      address: data.address ?? '',
+      addressOut: data.addressOut ?? '',
+      minimumAmount: data.minimumAmount ?? '',
+      callbackUrl: data.callbackUrl ?? '',
+      status: data.status ?? 'pending',
+    };
+  }
+
+  async getDeposits(
+    opts?: { offset?: number; limit?: number },
+  ): Promise<DepositRecord[]> {
+    const data = await backendFetch<unknown>('/card/deposits', {
+      query: { limit: opts?.limit, offset: opts?.offset },
+    });
+    return extractDepositRows(data).map(normalizeDeposit);
   }
 }
 

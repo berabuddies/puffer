@@ -343,7 +343,7 @@
   <Composer placeholder="Ask Alice to pay, order, or top up…" />
 </div>
 
-<TopUpModal open={topUpOpen} onClose={closeTopUp} />
+<TopUpModal open={topUpOpen} onClose={closeTopUp} cardId={walletState.cardId} />
 
 <style>
   /* Page-column claim. The /wallet route is `fullbleed: true` (see routes.ts),
