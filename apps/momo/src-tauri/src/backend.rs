@@ -142,6 +142,11 @@ impl BackendState {
                 let role = optional_trimmed_string_param(&params, &["role"]);
                 self.write_user_profile(country, role)
             }
+            "write_wr_creds" => {
+                let api_key = string_param(&params, &["apiKey", "api_key"])?;
+                let base_url = string_param(&params, &["baseUrl", "base_url"])?;
+                self.write_wr_creds(&api_key, &base_url)
+            }
             other => bail!("unknown method: {other}"),
         }
     }
@@ -160,6 +165,16 @@ impl BackendState {
             crate::user_profile::write_profile_files(&dir, country.as_deref(), role.as_deref())
                 .with_context(|| format!("writing user profile under {}", dir.display()))?;
         Ok(json!({ "written": written }))
+    }
+
+    /// Persist the user's WorldRouter API key + control-api base URL to
+    /// `~/.wr/.creds` (0600) so WorldRouter-backed skills (e.g. `book-by-phone`)
+    /// can `source` it from the agent's bash. Card/CVV data never goes here.
+    fn write_wr_creds(&self, api_key: &str, base_url: &str) -> Result<Value> {
+        let dir = home_dir().join(".wr");
+        crate::wr_creds::write_creds_file(&dir, api_key, base_url)
+            .with_context(|| format!("writing wr creds under {}", dir.display()))?;
+        Ok(json!({ "written": true }))
     }
 
     /// Best-effort pre-warm of the daemon at startup.

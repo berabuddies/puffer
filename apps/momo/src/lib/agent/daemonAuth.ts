@@ -13,6 +13,7 @@
  * `.request(method, params)` sends a daemon-protocol RPC.
  */
 import { ensureDaemonClient } from "../daemonClient";
+import { request as backendRequest } from "../wsClient";
 
 // Inference endpoint the minted worldrouter key is sent to. MUST track the
 // same environment as the control-api that mints the key
@@ -35,6 +36,20 @@ export async function loginWorldRouter(apiKey: string): Promise<void> {
     defaultProvider: "openai",
     defaultModel: WORLDROUTER_DEFAULT_MODEL
   });
+
+  // Also persist the key to ~/.wr/.creds (via momo's 1431 backend) so
+  // WorldRouter-backed skills like book-by-phone can `source` it from the
+  // agent's bash. NOTE: the base URL here is the *control-api* (where the
+  // lifeclaw skill route lives), NOT the inference endpoint used for chat
+  // above. Best-effort — don't block login if it fails.
+  const controlUrl =
+    (import.meta.env.VITE_WORLDROUTER_CONTROL_URL as string | undefined) ??
+    "https://control-api.worldrouter.ai";
+  try {
+    await backendRequest("write_wr_creds", { apiKey, baseUrl: controlUrl });
+  } catch (e) {
+    console.warn("[wr] write_wr_creds failed (book-by-phone may lack creds)", e);
+  }
 }
 
 // Test bridge: lets Playwright drive the daemon round-trip without wiring a
