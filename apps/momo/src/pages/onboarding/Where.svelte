@@ -10,6 +10,7 @@
   import OnboardingShell from "../../components/onboarding/OnboardingShell.svelte";
   import { navigate } from "../../router.svelte";
   import { pushToast } from "../../lib/toast.svelte";
+  import { setCountry } from "../../lib/onboarding.svelte";
 
   // Default selection per design (United States is filled black).
   let selected = $state<string>("United States");
@@ -20,6 +21,7 @@
   function pick(country: string): void {
     if (advancing) return;
     selected = country;
+    setCountry(country);
     advancing = true;
     pushToast(`Where: ${country}`, "info");
     // Brief pause so the chip's selected state visibly registers before

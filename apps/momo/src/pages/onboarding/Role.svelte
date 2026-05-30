@@ -17,6 +17,7 @@
   import OnboardingShell from "../../components/onboarding/OnboardingShell.svelte";
   import { navigate } from "../../router.svelte";
   import { pushToast } from "../../lib/toast.svelte";
+  import { setRole } from "../../lib/onboarding.svelte";
 
   const presetRoles = [
     "Founder",
@@ -38,6 +39,7 @@
   function pickPreset(role: string): void {
     if (advancing) return;
     selected = role;
+    setRole(role);
     customRole = "";
     if (customTimer) {
       clearTimeout(customTimer);
@@ -54,6 +56,7 @@
     // While typing, the custom value becomes the selected role; preset chips
     // visually deselect (none of them will match this string).
     selected = value;
+    setRole(value.trim());
     if (customTimer) clearTimeout(customTimer);
     if (value.trim().length === 0) return;
     customTimer = setTimeout(() => {
@@ -67,6 +70,7 @@
     event.preventDefault();
     if (advancing) return;
     if (customRole.trim().length === 0) return;
+    setRole(customRole.trim());
     if (customTimer) clearTimeout(customTimer);
     advancing = true;
     navigate("/onboarding/apps");

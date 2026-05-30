@@ -11,6 +11,7 @@
   import OnboardingShell from "../../components/onboarding/OnboardingShell.svelte";
   import { navigate } from "../../router.svelte";
   import { markOnboarded } from "../../lib/auth.svelte";
+  import { commitProfile } from "../../lib/onboarding.svelte";
 
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -18,6 +19,7 @@
     // Mark as onboarded immediately so a refresh during the 3s hold also
     // resolves to the main app, then navigate after the pause.
     markOnboarded();
+    void commitProfile();
     timer = setTimeout(() => navigate("/home"), 3000);
   });
 
