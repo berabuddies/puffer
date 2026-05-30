@@ -164,28 +164,17 @@ test("direct goto /agent/<id> hydrates the timeline without a pageerror", async 
   expect(pageErrors, pageErrors.map((e) => e.message).join("\n")).toHaveLength(0);
 });
 
-// Regression for the Sidebar "+ new chat" Promise-stringification bug:
-// startNewChat used to template-literal the Promise into the URL, producing
-// `/agent/[object Promise]`. The async-then refactor must navigate to the
-// resolved sessionId.
-test('sidebar "+" New chat navigates to a real session id, not [object Promise]', async ({ page }) => {
+// The sidebar "+" now opens the /new page instead of minting a session inline,
+// so the old [object Promise] stringification bug is structurally gone (no
+// Promise is awaited into the URL). Guard that the click navigates to /new and
+// creates nothing.
+test('sidebar "+" opens the /new page and creates no session on click', async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await bootOnboarded(page, daemon);
 
   await page.getByLabel("New chat").click();
-  await daemon.waitForRequest("create_session");
-
-  // Wait for the navigation to land. Hash routing means the URL contains
-  // `#/agent/<id>`.
-  await page.waitForURL(/#\/agent\//);
-  const url = page.url();
-
-  expect(url).not.toContain("Promise");
-  expect(url).not.toContain("%5B");
-  expect(url).not.toContain("[");
-  // Accept FakeDaemon's `session-created-N` shape as well as real UUIDs —
-  // both are alphanumeric-plus-hyphen and prove the Promise wasn't stringified.
-  expect(url).toMatch(/#\/agent\/[a-z0-9-]+$/i);
+  await expect(page).toHaveURL(/#\/new$/);
+  expect(daemon.requests.some((r) => r.method === "create_session")).toBe(false);
 });
 
 // Harness self-test: prove `deferRpc` actually pins an RPC and `resolve()`
@@ -195,11 +184,12 @@ test("harness: deferRpc pins create_session until resolve() is called", async ({
   const daemon = new FakeDaemon({ sessions: [] });
   await bootOnboarded(page, daemon);
 
-  // Pin the next create_session response. The webview will fire the RPC but
-  // not get a result back until we call pending.resolve().
+  // Pin the next create_session response. The Home composer send fires the RPC
+  // (the sidebar "+" no longer does), but won't get a result until resolve().
   const pending = deferRpc(daemon, "create_session");
 
-  await page.getByLabel("New chat").click();
+  await page.getByLabel("Message").fill("pin me");
+  await page.getByLabel("Message").press("Enter");
   // The request reaches the daemon synchronously, but we did NOT resolve yet.
   await daemon.waitForRequest("create_session");
   // URL stays on /home — navigation only fires after the sessionId resolves.

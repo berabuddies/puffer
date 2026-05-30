@@ -22,6 +22,7 @@ import WalletKycForm from "./pages/WalletKycForm.svelte";
 import WalletKycVerify from "./pages/WalletKycVerify.svelte";
 import ConnectedApps from "./pages/ConnectedApps.svelte";
 import Agent from "./pages/Agent.svelte";
+import NewChat from "./pages/NewChat.svelte";
 import Login from "./pages/Login.svelte";
 import AuthCallback from "./pages/AuthCallback.svelte";
 import OnboardingWhere from "./pages/onboarding/Where.svelte";
@@ -68,6 +69,7 @@ export const routes: readonly RouteDef[] = [
 
   { pattern: "/apps", component: ConnectedApps as Component<Record<string, unknown>>, hasShell: true, displayName: "Connected Apps" },
 
+  { pattern: "/new", component: NewChat as Component<Record<string, unknown>>, hasShell: true, fullbleed: true, displayName: "New chat" },
   { pattern: "/agent/:taskId", component: Agent as Component<Record<string, unknown>>, hasShell: true, fullbleed: true, displayName: "Agent" },
 
   { pattern: "/onboarding/where", component: OnboardingWhere as Component<Record<string, unknown>>, hasShell: false, displayName: "Onboarding · Where" },

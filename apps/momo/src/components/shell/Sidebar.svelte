@@ -61,7 +61,6 @@
   import ConfirmDeleteSessionModal from "./ConfirmDeleteSessionModal.svelte";
   import {
     projectSessions,
-    createNewSession,
     renameSession,
     deleteSession
   } from "../../lib/sessionStore.svelte";
@@ -320,18 +319,13 @@
   }
 
   /**
-   * Mint a fresh empty puffer session in the default project's fixed cwd
-   * and navigate into it. The session row appears in the sidebar
-   * immediately via the local optimistic insert inside the store.
+   * Open the bare "/new" page. We deliberately do NOT create a session here —
+   * the session is minted only when the user sends their first message on that
+   * page (via the composer's createSessionFromText). This avoids stray empty
+   * "New task" rows from clicks that never lead to a message.
    */
   function startNewChat(): void {
-    void createNewSession()
-      .then((sessionId) => {
-        navigate(`/agent/${sessionId}`);
-      })
-      .catch(() => {
-        // Toast already surfaced inside the store.
-      });
+    navigate("/new");
   }
 
   /* ───── Credits ─────
