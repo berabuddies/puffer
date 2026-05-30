@@ -62,7 +62,8 @@
   import {
     projectSessions,
     renameSession,
-    deleteSession
+    deleteSession,
+    optimisticTitle
   } from "../../lib/sessionStore.svelte";
   import { sessionTitle, NEW_SESSION_TITLE } from "../../lib/sessionTitle";
   import type { SessionListItem } from "../../lib/agentClient";
@@ -187,7 +188,7 @@
   }
 
   function sessionLabel(session: SessionListItem): string {
-    return sessionTitle(session) ?? NEW_SESSION_TITLE;
+    return sessionTitle(session) ?? optimisticTitle(session.sessionId) ?? NEW_SESSION_TITLE;
   }
 
   /* ───── Search dropdown ─────

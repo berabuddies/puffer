@@ -12,8 +12,8 @@
  *     (already cwd-filtered in `loadSessions()`), sorted by `updatedAtMs` desc.
  *   - `projectSessions()` — the rail list (returns `sessionList` as-is).
  *   - `loadSessions()` — refetch from the daemon.
- *   - `createNewSession()` — mint a new session via the puffer daemon under
- *     the default project's fixed cwd.
+ *   - `registerOptimisticSession()` — insert an optimistic rail row (+ instant
+ *     placeholder title) for a session just created from a first message.
  *   - `renameSession(id, title)` — server rename + local mutation so
  *     the row updates without a refetch.
  *   - `deleteSession(id)` — server delete via the daemon's `delete_session`
@@ -22,13 +22,13 @@
 
 import type { SessionListItem } from "./agentClient";
 import {
-  createSession as daemonCreateSession,
   listGroupedSessions,
   renameSession as daemonRenameSession,
   deleteSession as daemonDeleteSession,
   subscribeSessionsChanged,
+  type CreateSessionResult,
 } from "./agent/daemonChat";
-import { NEW_SESSION_TITLE } from "./sessionTitle";
+import { NEW_SESSION_TITLE, sessionTitle, firstChars } from "./sessionTitle";
 import {
   getProjectCwd,
   loadProjects,
@@ -65,6 +65,20 @@ function asSession(value: unknown): SessionListItem | null {
 export const sessionList = $state<SessionListItem[]>([]);
 
 /**
+ * Front-end-only optimistic titles: sessionId → first-10-chars of the first
+ * message. Shown in the rail the instant a session is created, until the
+ * daemon's `generatedTitle` lands. NEVER persisted via rename_session — that
+ * would set `display_name` and permanently disable the daemon's small-model
+ * auto-title (see daemon_title.rs::should_auto_title).
+ */
+const optimisticTitles = $state<Record<string, string>>({});
+
+/** The optimistic placeholder for a session, or undefined when none. */
+export function optimisticTitle(id: string): string | undefined {
+  return optimisticTitles[id];
+}
+
+/**
  * Svelte 5 forbids `export const x = $derived(...)` from `.svelte.ts`
  * modules (svelte/derived_invalid_export) — derivations have to live in
  * component instances or be exposed as functions. We export a thin filter
@@ -74,7 +88,7 @@ export const sessionList = $state<SessionListItem[]>([]);
  *
  * The rail shows every session in `sessionList`. Membership is already
  * narrowed to the default project's cwd in `loadSessions()` (it keeps only
- * the matching daemon group), and `createNewSession()` only ever stubs rows
+ * the matching daemon group), and optimistic stubs are only ever created
  * under that same cwd, so no second cwd filter is needed here.
  */
 export function projectSessions(): SessionListItem[] {
@@ -86,12 +100,21 @@ function sortByUpdatedDesc(list: SessionListItem[]): SessionListItem[] {
 }
 
 function replaceList(next: SessionListItem[]): void {
-  // Preserve local-only entries (e.g. an optimistic stub from
-  // createNewSession whose create_session response landed before this
+  // Preserve local-only entries (e.g. an optimistic stub from a freshly
+  // created session whose create_session response landed before this
   // listGroupedSessions snapshot) so we don't drop them on reconcile.
   const nextIds = new Set(next.map((s) => s.sessionId));
   const localOnly = sessionList.filter((s) => !nextIds.has(s.sessionId));
   const merged = sortByUpdatedDesc([...next, ...localOnly]);
+  // Once the daemon has an authoritative title (display name / generated
+  // title), the optimistic placeholder is no longer needed — drop it so the
+  // map doesn't grow unbounded. The title resolution order already prefers the
+  // daemon title, so this is just cleanup.
+  for (const s of merged) {
+    if (optimisticTitles[s.sessionId] && sessionTitle(s)) {
+      delete optimisticTitles[s.sessionId];
+    }
+  }
   sessionList.splice(0, sessionList.length, ...merged);
 }
 
@@ -170,41 +193,23 @@ export async function subscribeSessionChanges(): Promise<void> {
 }
 
 /**
- * Mint a fresh empty session via the puffer **daemon** under the default
- * project's fixed cwd. Returns the new sessionId so the caller can navigate
- * to `/agent/<id>`. Goes through the same daemon RPC (`create_session`) that
- * `loadSessions()` reads back via `list_grouped_sessions`, so a new chat
- * shows up in the rail on the next refetch — no data-source split between
- * the daemon (~/.puffer) and the legacy 1431 store.
- *
- * The new row is pushed onto the local list immediately so the sidebar
- * updates without waiting for a reload — the next `loadSessions()`
- * reconciles any drift.
+ * Insert an optimistic rail row for a session just created from a first
+ * message, and record its first-10-chars placeholder title. Called by
+ * `createSessionFromText` right after `create_session` returns, so the sidebar
+ * shows the new chat (with a meaningful title, never "New task") before the
+ * next `loadSessions()` reconciles. The daemon's generated title replaces the
+ * placeholder when `workspace:sessions:changed` fires (see `replaceList`).
  */
-export async function createNewSession(): Promise<string> {
-  const cwd = getProjectCwd(DEFAULT_PROJECT_ID);
-  if (!cwd) {
-    pushToast("Project not ready yet — try again in a moment.", "error");
-    throw new Error("default project cwd not loaded");
-  }
-  let result: Awaited<ReturnType<typeof daemonCreateSession>>;
-  try {
-    // Don't pin a providerId: the real daemon's create_session routing
-    // rejects an unknown provider (e.g. "unknown provider `puffer`"), and the
-    // canonical providers are openai / anthropic — not "puffer". Omitting it
-    // lets the daemon fall back to default routing (Task 1 set the daemon's
-    // default_provider), exactly like the composer's createSessionFromText.
-    result = await daemonCreateSession(cwd);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    pushToast(`Could not start session: ${msg}`, "error");
-    throw err;
-  }
+export function registerOptimisticSession(
+  result: CreateSessionResult,
+  firstMessage: string
+): void {
   const id = result.sessionId;
-  // Synthesize a SessionListItem so the sidebar can render the row before
-  // the next loadSessions() returns. The fields not supplied by
-  // create_session default to safe placeholders; loadSessions() will
-  // overwrite them with authoritative values on next refetch.
+  const placeholder = firstChars(firstMessage);
+  if (placeholder) optimisticTitles[id] = placeholder;
+  // Synthesize a SessionListItem so the sidebar can render the row before the
+  // next loadSessions() returns. Fields not supplied by create_session default
+  // to safe placeholders; loadSessions() overwrites them on the next refetch.
   const stub: SessionListItem = {
     sessionId: id,
     displayName: result.displayName,
@@ -227,7 +232,6 @@ export async function createNewSession(): Promise<string> {
   const existing = sessionList.findIndex((s) => s.sessionId === id);
   if (existing >= 0) sessionList.splice(existing, 1);
   sessionList.unshift(stub);
-  return id;
 }
 
 export async function renameSession(id: string, title: string): Promise<void> {

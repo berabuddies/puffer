@@ -52,6 +52,7 @@ import {
   type ConnectionState
 } from "../daemonClient";
 import { getProjectCwd, loadProjects, DEFAULT_PROJECT_ID } from "../projectStore.svelte";
+import { registerOptimisticSession } from "../sessionStore.svelte";
 import type {
   AgentTurnOptions,
   AskUserQuestionItem,
@@ -1383,7 +1384,9 @@ export async function createSessionFromText(text: string): Promise<string> {
   if (!cwd) {
     throw new Error("Default project cwd is unavailable; cannot start a session.");
   }
-  const { sessionId } = await createSession(cwd);
+  const result = await createSession(cwd);
+  const sessionId = result.sessionId;
+  registerOptimisticSession(result, trimmed);
   ensureState(sessionId);
   ensureSubscription(sessionId);
   if (trimmed) {

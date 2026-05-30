@@ -35,3 +35,55 @@ test("firstChars: collapses whitespace, code-point-safe slice, ellipsis when tru
   // 11 single-scalar emoji → first 10 + ellipsis (Array.from keeps code points whole).
   expect(results.emoji).toBe("👍👍👍👍👍👍👍👍👍👍…");
 });
+
+test("first send shows the first-10-chars title instantly, never \"New task\"", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await bootOnboarded(page, daemon);
+
+  await page.getByLabel("New chat").click();
+  await expect(page).toHaveURL(/#\/new$/);
+
+  // 11 CJK code points → optimistic title is the first 10 + ellipsis.
+  const prompt = "帮我订一张去东京的机票";
+  await page.getByLabel("Message").fill(prompt);
+  await page.getByLabel("Message").press("Enter");
+
+  await daemon.waitForRequest("create_session");
+  await page.waitForURL(/#\/agent\/session-created-1$/);
+
+  await expect(taskList(page).getByText("帮我订一张去东京的机…", { exact: true })).toBeVisible();
+  await expect(taskList(page).getByText("New task", { exact: true })).toHaveCount(0);
+});
+
+test("daemon generated title replaces the optimistic placeholder", async ({ page }) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await bootOnboarded(page, daemon);
+
+  await page.getByLabel("New chat").click();
+  const prompt = "帮我订一张去东京的机票";
+  await page.getByLabel("Message").fill(prompt);
+  await page.getByLabel("Message").press("Enter");
+
+  await daemon.waitForRequest("create_session");
+  const sessionId = "session-created-1";
+  await page.waitForURL(new RegExp(`#/agent/${sessionId}$`));
+  await expect(taskList(page).getByText("帮我订一张去东京的机…", { exact: true })).toBeVisible();
+
+  // Wait until the store has wired the workspace listener before broadcasting,
+  // or the one-shot event races the subscription.
+  await daemon.waitForRequest(
+    "subscribe_event",
+    (req) => req.params.event === "workspace:sessions:changed"
+  );
+  daemon.updateSessionMetadata(sessionId, {
+    displayName: null,
+    generatedTitle: "预订东京机票",
+    title: "预订东京机票"
+  });
+  daemon.emit("workspace:sessions:changed", { reason: "generated_title", sessionId });
+
+  await expect(taskList(page).getByText("预订东京机票", { exact: true })).toBeVisible();
+  await expect(taskList(page).getByText("帮我订一张去东京的机…", { exact: true })).toHaveCount(0);
+});
