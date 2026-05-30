@@ -31,8 +31,10 @@
 
 import type {
   CardBalance,
+  CardDetails,
   CardListEntry,
   CreateCardHolderParams,
+  IssueCardResult,
   DepositAddress,
   KycStatus,
   KycStatusResponse,
@@ -175,19 +177,13 @@ export function resetMockState(): void {
 
 /* ─── Simulated backend events ─────────────────────────────────────── */
 
-/** eKYC webhook approved → flip status, synthesize a card. Does NOT
- *  credit balance — the user (or simulateDeposit) does that explicitly. */
+/** eKYC webhook approved → flip status to approved. Does NOT issue a card and
+ *  does NOT credit balance — both happen via explicit user actions, mirroring
+ *  the real backend: approving KYC leaves the user card-less until they POST
+ *  /card/issue (the "Activate card" button). Tests that want an approved+card
+ *  state without walking the activate flow use setMockKycStatus("approved"). */
 function simulateApproveKyc(): void {
   mockState.kycStatus = "approved";
-  if (mockState.cards.length === 0) {
-    mockState.cards = [
-      {
-        cardId: MOCK_CARD_ID,
-        maskedCardNumber: MOCK_MASKED,
-        status: "active"
-      }
-    ];
-  }
   // The ekyc URL is one-shot; the verify page is done with it.
   mockState.ekycUrl = null;
   walletState.ekycUrl = null;
@@ -274,7 +270,14 @@ export function setMockKycStatus(s: KycStatus): void {
     // Wipe to a clean baseline first so a previous "Verified full" run
     // doesn't bleed balance / txns into a fresh "Verified empty" jump.
     Object.assign(mockState, initialState());
-    simulateApproveKyc();
+    mockState.kycStatus = "approved";
+    // Legacy teleport keeps a card present so existing has-card tests
+    // (A3/A4/D/E/F/G) stay green. The realistic webhook path
+    // (simulateApproveKyc) no longer auto-issues — that gap is exactly what
+    // the Activate-card button exercises.
+    mockState.cards = [
+      { cardId: MOCK_CARD_ID, maskedCardNumber: MOCK_MASKED, status: "active" }
+    ];
     return;
   }
   // pending / draft / in_review / declined / error / admin_decline:
@@ -368,6 +371,70 @@ export const mockWalletClient: WalletClient = {
     const fail = consumeCallSlot<CardListEntry[]>("getCardList");
     if (fail) return fail;
     return delay(mockState.cards.slice());
+  },
+
+  async issueCard(): Promise<IssueCardResult> {
+    const fail = consumeCallSlot<IssueCardResult>("issueCard");
+    if (fail) return fail;
+    // Enforce the backend's 3-card cap (closed cards excluded; the mock has no
+    // closed state, so every card counts). Mirrors BackendError(1000) +
+    // "card limit reached" so isCardLimitReachedError matches in the UI.
+    if (mockState.cards.length >= 3) {
+      const ms =
+        latencyOverride !== null
+          ? Math.max(0, latencyOverride)
+          : 200 + Math.floor(Math.random() * 200);
+      return new Promise<IssueCardResult>((_resolve, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new BackendError(
+                1000,
+                "card limit reached: maximum 3 cards per user",
+                "card limit reached: maximum 3 cards per user"
+              )
+            ),
+          ms
+        )
+      );
+    }
+    // First card uses the canonical MOCK ids so getCardDetails / masked-number
+    // assertions line up; later cards get distinct ids.
+    const n = mockState.cards.length;
+    const cardId = MOCK_CARD_ID + n;
+    mockState.cards = [
+      ...mockState.cards,
+      { cardId, maskedCardNumber: MOCK_MASKED, status: "active" }
+    ];
+    return delay({ cardId, maskedCardNumber: MOCK_MASKED });
+  },
+
+  async getCardDetails(cardId: number): Promise<CardDetails> {
+    const fail = consumeCallSlot<CardDetails>("getCardDetails");
+    if (fail) return fail;
+    const known = mockState.cards.some((c) => c.cardId === cardId);
+    if (!known) {
+      // Mirror the backend's ResourceNotFound for an unknown card so callers
+      // exercise the same error path the real client would hit.
+      const ms =
+        latencyOverride !== null
+          ? Math.max(0, latencyOverride)
+          : 200 + Math.floor(Math.random() * 200);
+      return new Promise<CardDetails>((_resolve, reject) =>
+        setTimeout(
+          () => reject(new BackendError(1001, "Card not found", "card")),
+          ms
+        )
+      );
+    }
+    // Plaintext sample matching MOCK_MASKED ("•••• 4242"). Stable values so
+    // tests can assert exactly what the chat-time handoff would send.
+    return delay({
+      cardNumber: "4242424242424242",
+      expMonth: "12",
+      expYear: "29",
+      cvv: "123"
+    });
   },
 
   async getBalance(cardId: number): Promise<CardBalance> {

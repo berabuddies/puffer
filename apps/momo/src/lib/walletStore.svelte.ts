@@ -22,6 +22,8 @@
  */
 
 import { walletClient } from "./walletClient.svelte";
+import { describeBackendError } from "./backendFetch";
+import { isCardLimitReachedError } from "./walletApi";
 import type { KycStatus, Transaction } from "./walletTypes";
 
 export type WalletStatus = "loading" | "ready" | "error";
@@ -37,6 +39,21 @@ export const walletState = $state<{
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Fetch a card's balance + recent transactions and fold them into
+ * `walletState`. Shared by `loadWallet` (approved-with-card path) and
+ * `activateCard` (post-issue refresh) so the two stay in lockstep. Throws on
+ * fetch failure — callers decide how to surface it.
+ */
+async function loadCardBalanceAndTxns(cardId: number): Promise<void> {
+  const [b, t] = await Promise.all([
+    walletClient.getBalance(cardId),
+    walletClient.getTransactions(cardId, { limit: 10 })
+  ]);
+  walletState.balance = b.availableBalance;
+  walletState.txns = t.transactions;
 }
 
 /**
@@ -67,12 +84,7 @@ export async function loadWallet(): Promise<string | null> {
       const first = cards[0];
       if (first) {
         walletState.cardId = first.cardId;
-        const [b, t] = await Promise.all([
-          walletClient.getBalance(first.cardId),
-          walletClient.getTransactions(first.cardId, { limit: 10 })
-        ]);
-        walletState.balance = b.availableBalance;
-        walletState.txns = t.transactions;
+        await loadCardBalanceAndTxns(first.cardId);
       } else {
         // Approved but no card yet — treat the wallet as $0 + empty list.
         walletState.cardId = null;
@@ -92,6 +104,45 @@ export async function loadWallet(): Promise<string | null> {
     walletState.txns = [];
   }
 
+  walletState.status = "ready";
+  return null;
+}
+
+/**
+ * Issue (activate) the user's card, then refresh the snapshot so the new
+ * card's balance + transactions fold into `walletState` and the page drops the
+ * activate view. Returns an error message when issuing failed (for the toast),
+ * else `null`.
+ *
+ * This does NOT itself de-dupe concurrent calls — the page disables the button
+ * while it's pending. The backend is idempotent and 3-card-capped regardless,
+ * so a stray double-fire can never over-issue.
+ */
+export async function activateCard(): Promise<string | null> {
+  let issued;
+  try {
+    issued = await walletClient.issueCard();
+  } catch (err) {
+    // Map to friendly copy: the 3-card cap surfaces as a backend code-1000
+    // BackendError whose raw field text we don't want to show verbatim.
+    if (isCardLimitReachedError(err)) {
+      return "Wallet activation limit reached.";
+    }
+    return describeBackendError(err, errMessage(err));
+  }
+  // The card now exists on the backend. Reflect it from the AUTHORITATIVE issue
+  // result before the balance fetch — so a transient balance/txn failure (or a
+  // read-after-write lag in a full getCardList reload) can't strand the page on
+  // the activate prompt with a card that was actually created. (`needsCard`
+  // keys on `cardId`.) We also skip the redundant getKycStatus/getCardList that
+  // a full loadWallet() would re-run — approval is a precondition of this call.
+  walletState.cardId = issued.cardId;
+  try {
+    await loadCardBalanceAndTxns(issued.cardId);
+  } catch (err) {
+    walletState.status = "ready";
+    return errMessage(err);
+  }
   walletState.status = "ready";
   return null;
 }

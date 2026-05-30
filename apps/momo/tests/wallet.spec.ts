@@ -782,17 +782,31 @@ test("end-to-end flow walks the state machine", async ({ page }) => {
   await expect(page).toHaveURL(/#\/wallet\/kyc\/verify$/, { timeout: 5000 });
 
   // Simulate the eKYC webhook firing (real backend would do this when
-  // the provider posts the approval result).
+  // the provider posts the approval result). Approving KYC does NOT issue a
+  // card — the user is approved but card-less until they activate one.
   await page.evaluate(() => window.__wallet?.simulateApproveKyc());
   // Drive the bounce-home that the simulate button does for the user.
   // Calling via __wallet doesn't navigate, so do it manually to mirror
   // the click path.
   await page.goto("/#/wallet");
 
-  // Back at /wallet, Verified badge visible, balance $0.00.
+  // Back at /wallet: Verified badge visible, but no card yet → the Activate
+  // prompt stands in for the balance row.
   await expect(page).toHaveURL(/#\/wallet$/);
   await expect(page.getByText("Verified", { exact: true })).toBeVisible();
-  await expect(page.getByText("$0.00", { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Activate wallet" })
+  ).toBeVisible();
+
+  // Activate the card → issueCard fires, the snapshot reloads, and the normal
+  // balance view ($0.00, no funds yet) replaces the prompt.
+  await page.getByRole("button", { name: "Activate wallet" }).click();
+  await expect(page.getByText("$0.00", { exact: true }).first()).toBeVisible({
+    timeout: 5000
+  });
+  await expect(
+    page.getByRole("button", { name: "Activate wallet" })
+  ).toBeHidden();
 
   // Open Top up modal → address visible → close.
   await page.getByRole("button", { name: /Top up/ }).click();
@@ -818,4 +832,102 @@ test("end-to-end flow walks the state machine", async ({ page }) => {
   await expect(page.getByText("$500.00").first()).toBeVisible({ timeout: 5000 });
   await expect(page.getByText("Crypto top up", { exact: true })).toBeVisible();
   await expect(page.getByText("+$500.00")).toBeVisible();
+});
+
+/* ─────────────────────────────────────────────────────────────────────
+   I. Card activation (approved but no card)
+   ─────────────────────────────────────────────────────────────────────
+   The realistic webhook path (simulateApproveKyc) leaves the user approved
+   but card-less — mirroring the real backend, where a card is only created
+   on POST /card/issue. The wallet must then show an explicit "Activate
+   wallet" button (we never auto-issue: each user is capped at 3 cards). */
+
+test.describe("I. Card activation", () => {
+  async function bootApprovedNoCard(page: Page): Promise<void> {
+    // simulateApproveKyc flips status to approved WITHOUT issuing a card.
+    await page.evaluate(() => window.__wallet?.simulateApproveKyc());
+    await page.goto("/#/wallet");
+    await expect(page).toHaveURL(/#\/wallet$/);
+  }
+
+  test("I1: approved + no card shows the Activate prompt, not a balance", async ({
+    page
+  }) => {
+    await bootApprovedNoCard(page);
+    await expect(page.getByText("Verified", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Activate your wallet" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Activate wallet" })
+    ).toBeVisible();
+    // The balance row is replaced — no Top up affordance while card-less.
+    await expect(page.getByText("AVAILABLE BALANCE")).toBeHidden();
+  });
+
+  test("I2: clicking Activate issues exactly one card and reveals the balance", async ({
+    page
+  }) => {
+    await bootApprovedNoCard(page);
+    const before = (await page.evaluate(() =>
+      window.__wallet?.getCallCount("issueCard")
+    )) as number;
+
+    await page.getByRole("button", { name: "Activate wallet" }).click();
+
+    // Balance view appears ($0.00 — newly issued card has no funds).
+    await expect(page.getByText("$0.00", { exact: true }).first()).toBeVisible({
+      timeout: 5000
+    });
+    await expect(page.getByText("AVAILABLE BALANCE")).toBeVisible();
+    // Activate prompt is gone.
+    await expect(
+      page.getByRole("button", { name: "Activate wallet" })
+    ).toBeHidden();
+
+    const after = (await page.evaluate(() =>
+      window.__wallet?.getCallCount("issueCard")
+    )) as number;
+    expect(after - before).toBe(1);
+  });
+
+  test("I3: double-click fires issueCard at most once", async ({ page }) => {
+    await bootApprovedNoCard(page);
+    // Slow the mock so a second click can race the first request.
+    await page.evaluate(() => window.__wallet?.setMockLatency(400));
+    const btn = page.getByRole("button", { name: /Activat/ });
+    await expect(btn).toBeEnabled();
+    await btn.click();
+    // The button disables mid-flight; a forced second click must not re-fire.
+    await btn.click({ force: true }).catch(() => undefined);
+    await page.waitForTimeout(900);
+    const calls = (await page.evaluate(() =>
+      window.__wallet?.getCallCount("issueCard")
+    )) as number;
+    expect(calls, "issueCard must fire at most once").toBeLessThanOrEqual(1);
+  });
+
+  test("I4: a failed issue keeps the Activate view and doesn't crash", async ({
+    page
+  }) => {
+    await bootApprovedNoCard(page);
+    await page.evaluate(() =>
+      window.__wallet?.setMockFailure(
+        "issueCard",
+        "card limit reached: maximum 3 cards per user"
+      )
+    );
+    await page.getByRole("button", { name: "Activate wallet" }).click();
+    await page.waitForTimeout(800);
+    // Still on the activate view; the button recovers to enabled for a retry.
+    await expect(
+      page.getByRole("button", { name: "Activate wallet" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Activate wallet" })
+    ).toBeEnabled();
+    await expect(
+      page.getByRole("heading", { name: "Wallet", exact: true })
+    ).toBeVisible();
+  });
 });

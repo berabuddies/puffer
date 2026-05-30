@@ -31,6 +31,7 @@
   import KpiCard from "../components/wallet/KpiCard.svelte";
   import ActivityRow from "../components/wallet/ActivityRow.svelte";
   import TopUpModal from "../components/wallet/TopUpModal.svelte";
+  import Button from "../components/common/Button.svelte";
   import {
     setMockKycStatus,
     setMockHasFunds
@@ -51,7 +52,7 @@
     return (window as unknown as { __wallet?: WalletMock }).__wallet ?? null;
   }
   import type { KycStatus, Transaction } from "../lib/walletTypes";
-  import { walletState, loadWallet } from "../lib/walletStore.svelte";
+  import { walletState, loadWallet, activateCard } from "../lib/walletStore.svelte";
   import type { WalletActivity } from "../data/types";
   import { navigate } from "../router.svelte";
   import { pushToast } from "../lib/toast.svelte";
@@ -65,6 +66,10 @@
   // Only the view-local toggles stay here.
   let balanceHidden = $state<boolean>(false);
   let topUpOpen = $state<boolean>(false);
+  // True while a card-activation request is in flight — disables the button so
+  // a double-click can't fire issueCard twice (the backend is idempotent +
+  // 3-card-capped too, but the UI shouldn't rely on that alone).
+  let activating = $state<boolean>(false);
 
   async function refresh(): Promise<void> {
     const error = await loadWallet();
@@ -87,6 +92,26 @@
   function handleTopUp(): void {
     if (walletState.kyc !== "approved") return;
     topUpOpen = true;
+  }
+
+  // Approved but no card yet → the user issues their first card on demand. We
+  // never auto-issue (each user is capped at 3 cards) — the explicit button is
+  // the only path. activateCard() POSTs /card/issue then reloads the snapshot,
+  // so on success `walletState.cardId` becomes non-null and the activate view
+  // is replaced by the normal balance view.
+  async function handleActivate(): Promise<void> {
+    if (activating) return;
+    activating = true;
+    try {
+      const error = await activateCard();
+      if (error) {
+        pushToast(`Wallet activation failed: ${error}`, "error");
+      } else {
+        pushToast("Wallet activated", "info");
+      }
+    } finally {
+      activating = false;
+    }
   }
 
   function closeTopUp(): void {
@@ -183,6 +208,10 @@
   let activitiesDisplay = $derived(walletState.txns.map(txnToActivity));
   let isApproved = $derived(walletState.kyc === "approved");
   let identityLabel = $derived(isApproved ? "Verified" : "In Review");
+  // Approved + no card on file → show the activate prompt in place of the
+  // balance/top-up row. cardId is null both for non-approved states and for
+  // approved-but-card-less, so gate on isApproved too.
+  let needsCard = $derived(isApproved && walletState.cardId === null);
 </script>
 
 <div class="wallet">
@@ -222,27 +251,47 @@
          the wallet page before bouncing. -->
     <p class="wallet-loading">Loading…</p>
   {:else}
-    <section class="wallet-balance">
-      <div class="wallet-balance__text">
-        <span class="text-eyebrow">AVAILABLE BALANCE</span>
-        <button
-          type="button"
-          class="wallet-balance__amount-btn"
-          aria-label={balanceHidden ? "Show balance" : "Hide balance"}
-          onclick={toggleBalance}
-        >
-          <span class="wallet-balance__amount">{balanceDisplay}</span>
-        </button>
-      </div>
-      <div class="wallet-balance__action">
-        <Chip
-          label="Top up"
-          variant="cream"
-          onclick={isApproved ? handleTopUp : undefined}
-          title={isApproved ? undefined : "Verify identity first"}
-        />
-      </div>
-    </section>
+    {#if needsCard}
+      <section class="wallet-activate">
+        <span class="text-eyebrow">WALLET</span>
+        <h2 class="wallet-activate__title">Activate your wallet</h2>
+        <p class="wallet-activate__body">
+          Your identity is verified. Activate your wallet to receive top-ups
+          and let Agent pay on your behalf.
+        </p>
+        <div class="wallet-activate__action">
+          <Button
+            variant="primary"
+            size="md"
+            label={activating ? "Activating…" : "Activate wallet"}
+            disabled={activating}
+            onclick={handleActivate}
+          />
+        </div>
+      </section>
+    {:else}
+      <section class="wallet-balance">
+        <div class="wallet-balance__text">
+          <span class="text-eyebrow">AVAILABLE BALANCE</span>
+          <button
+            type="button"
+            class="wallet-balance__amount-btn"
+            aria-label={balanceHidden ? "Show balance" : "Hide balance"}
+            onclick={toggleBalance}
+          >
+            <span class="wallet-balance__amount">{balanceDisplay}</span>
+          </button>
+        </div>
+        <div class="wallet-balance__action">
+          <Chip
+            label="Top up"
+            variant="cream"
+            onclick={isApproved ? handleTopUp : undefined}
+            title={isApproved ? undefined : "Verify identity first"}
+          />
+        </div>
+      </section>
+    {/if}
 
     <section class="wallet-kpis">
       <button type="button" class="kpi-btn" onclick={() => tapKpi("Monthly spend")}>
@@ -335,6 +384,39 @@
     font-family: var(--font-system);
     font-size: var(--font-size-body);
     padding-top: var(--space-5);
+  }
+
+  /* Approved-but-card-less prompt — occupies the balance row's slot
+   * (flex-shrink: 0) so the KPI + activity layout below is unchanged. */
+  .wallet-activate {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding-bottom: var(--space-5);
+  }
+
+  .wallet-activate__title {
+    margin: 0;
+    font-family: var(--font-serif);
+    font-size: 28px;
+    line-height: 34px;
+    font-weight: var(--font-weight-regular);
+    color: var(--color-text-primary);
+  }
+
+  .wallet-activate__body {
+    margin: 0;
+    max-width: 460px;
+    font-family: var(--font-system);
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--color-text-secondary);
+  }
+
+  .wallet-activate__action {
+    padding-top: var(--space-3);
   }
 
   .wallet-balance {

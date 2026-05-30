@@ -3,9 +3,10 @@
  * its raw shapes to the shared wallet contract in `./walletTypes.ts`.
  *
  * Ported from worldclaw-app/lib/card-api.ts. Out-of-scope endpoints
- * (createCard / closeCard / getCardDetails / bindAddress / getUserInfo /
- * getDeposits) are intentionally not implemented here — the desktop
- * surface only needs the read-side + KYC entry points.
+ * (closeCard / bindAddress / getUserInfo / getDeposits) are intentionally
+ * not implemented here — the desktop surface needs the read-side + KYC entry
+ * points, issueCard (the Activate-card button), and getCardDetails for the
+ * chat-time card-number + CVV handoff.
  */
 
 import { backendFetch, BackendError } from './backendFetch';
@@ -13,8 +14,10 @@ import { transactionKey } from './walletTxnId';
 import { parseTransactionAmount } from './walletAmount';
 import type {
   CardBalance,
+  CardDetails,
   CardListEntry,
   CreateCardHolderParams,
+  IssueCardResult,
   DepositAddress,
   KycStatus,
   KycStatusResponse,
@@ -190,6 +193,43 @@ export class RestWalletClient implements WalletClient {
     }));
   }
 
+  async issueCard(): Promise<IssueCardResult> {
+    // POST /card/issue — create + activate a virtual card. Idempotent on the
+    // backend (returns the existing active card if one exists) and capped at
+    // 3 cards/user, enforced under a distributed lock. We send an empty body;
+    // nameOnCard / alias are optional and the backend derives the name from
+    // the cardholder record. A "card limit reached" rejection comes back as
+    // BackendError(1000) — see isCardLimitReachedError below.
+    const data = await backendFetch<{ cardId: number; maskedCardNumber: string }>(
+      '/card/issue',
+      { method: 'POST', body: {} },
+    );
+    return {
+      cardId: data.cardId,
+      maskedCardNumber: data.maskedCardNumber,
+    };
+  }
+
+  async getCardDetails(cardId: number): Promise<CardDetails> {
+    // Sensitive: returns the plaintext PAN + CVV. The endpoint is plural
+    // (`/card/details`); the backend splits expiry into expMonth / expYear
+    // (ucard-backend jsonmodel.go → ViewCardDetails). We deliberately do NOT
+    // cache the result — every call hits the backend so the chat-time handoff
+    // always sends a live CVV.
+    const data = await backendFetch<{
+      cardNumber?: string;
+      expMonth?: string;
+      expYear?: string;
+      cvv?: string;
+    }>('/card/details', { query: { cardId } });
+    return {
+      cardNumber: data.cardNumber ?? '',
+      expMonth: data.expMonth ?? '',
+      expYear: data.expYear ?? '',
+      cvv: data.cvv ?? '',
+    };
+  }
+
   async getBalance(cardId: number): Promise<CardBalance> {
     const data = await backendFetch<{
       cardId: number;
@@ -229,10 +269,10 @@ export class RestWalletClient implements WalletClient {
 }
 
 /**
- * Recognise the "card limit reached" rejection from POST /card/issue.
- * Kept here for parity with the donor even though the desktop UI does
- * not call /card/issue today — leave callers a single place to import
- * from when the time comes.
+ * Recognise the "card limit reached" rejection from POST /card/issue — the
+ * backend caps users at 3 cards (BackendError code 1000, field "card limit
+ * reached: maximum 3 cards per user"). The Activate-card flow uses this to
+ * show a friendly message instead of the raw backend text.
  */
 export function isCardLimitReachedError(err: unknown): boolean {
   return (
