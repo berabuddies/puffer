@@ -112,6 +112,14 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
             cmd.env("PUFFER_BUILTIN_RESOURCES_DIR", resources_dir);
         }
     }
+    // Make the `momo-card` bin reachable by name on the daemon's PATH, so the
+    // agent's single-command `momo-card reveal` resolves and matches the
+    // `bash argv momo-card` project ACL rule.
+    if let Some(card_dir) = resolve_momo_card_dir() {
+        let existing = std::env::var("PATH").unwrap_or_default();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        cmd.env("PATH", format!("{}{sep}{existing}", card_dir.display()));
+    }
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning `{}` daemon", binary.display()))?;
@@ -203,6 +211,38 @@ fn resolve_puffer_binary() -> Result<PathBuf> {
     }
     // Last resort: rely on PATH.
     Ok(PathBuf::from(bin_name))
+}
+
+/// Directory containing the `momo-card` bin, so the spawned daemon's PATH can
+/// include it — the agent runs `momo-card` by name, which the `bash argv
+/// momo-card` project ACL requires (an absolute/`$VAR` path would not match).
+///
+/// `momo-card` is a workspace-member bin, so `cargo build` places it in the
+/// workspace-shared `target/<profile>/` — the same dir as the momo host binary
+/// (`current_exe`) in dev, or alongside the app binary in a release bundle.
+/// We look for it as a sibling of `current_exe` first, then by walking up for
+/// a `target/<profile>/momo-card`. Returns None if not found (PATH unchanged).
+fn resolve_momo_card_dir() -> Option<PathBuf> {
+    let bin_name = if cfg!(windows) { "momo-card.exe" } else { "momo-card" };
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    // Sibling of the host binary (dev workspace target, or release bundle).
+    if dir.join(bin_name).exists() {
+        return Some(dir.to_path_buf());
+    }
+    // Walk up looking for `target/<profile>/momo-card` matching our own profile.
+    let profile = dir.file_name().and_then(|name| name.to_str())?;
+    let mut up = dir.to_path_buf();
+    for _ in 0..6 {
+        let candidate_dir = up.join("target").join(profile);
+        if candidate_dir.join(bin_name).exists() {
+            return Some(candidate_dir);
+        }
+        if !up.pop() {
+            break;
+        }
+    }
+    None
 }
 
 /// Finds the bundled `resources/` directory by walking up from the puffer
