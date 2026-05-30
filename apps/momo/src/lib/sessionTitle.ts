@@ -35,3 +35,19 @@ interface TitledSession {
 export function sessionTitle(session: TitledSession | null | undefined): string | null {
   return session?.displayName?.trim() || session?.generatedTitle?.trim() || null;
 }
+
+/**
+ * First `n` Unicode code points of the user's first message, with collapsed
+ * whitespace and a trailing ellipsis when truncated. Used as an *instant*
+ * optimistic rail title the moment a session is created from a message, until
+ * the daemon's small-model `generatedTitle` lands and replaces it.
+ *
+ * `Array.from` iterates by code point, so CJK characters and single-scalar
+ * emoji are never split mid-character the way `String.prototype.slice` would.
+ */
+export function firstChars(text: string, n = 10): string {
+  const collapsed = text.trim().replace(/\s+/g, " ");
+  const chars = Array.from(collapsed);
+  const head = chars.slice(0, n).join("");
+  return chars.length > n ? `${head}…` : head;
+}

@@ -1,4 +1,7 @@
 references/
+# but skill bundles ship their own references/ (resources/skills/*/references) — keep tracked
+!resources/skills/**/references/
+!resources/skills/**/references/**
 target/
 .worktree/
 .worktrees/

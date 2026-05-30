@@ -55,7 +55,7 @@ puffer daemon(= puffer-core runtime)暴露的 RPC 分组(定义见 `crates/puffe
 
 ### skill 系统(装 / 更新 / 移除)
 
-puffer 原生 skill(`<name>/SKILL.md` + builtin/user/workspace 三层加载 + `resources/plugins/puffer-builtins.yaml` 注册)。**注意触发是「软提示」**:skill 加载且进 system prompt ≠ 模型一定调用——worldrouter 的 native `web_search` 会压过「找/查」类意图,需用 web_search 做不到的意图措辞(如「打电话/预订」)才触发。完整的安装 / 更新 / 移除流程与坑(尤其**删除内置 skill 必须重编译**,嵌入副本删目录删不掉)见 [`docs/architecture/skills.md`](../../docs/architecture/skills.md)。momo 已内置 `lifeclaw-partner`(AI 电话预订,需 env `LIFECLAW_PARTNER_API_TOKEN`)。
+puffer 原生 skill(`<name>/SKILL.md` + builtin/user/workspace 三层加载 + `resources/plugins/puffer-builtins.yaml` 注册)。**注意触发是「软提示」**:skill 加载且进 system prompt ≠ 模型一定调用——worldrouter 的 native `web_search` 会压过「找/查」类意图,需用 web_search 做不到的意图措辞(如「打电话/预订」)才触发。完整的安装 / 更新 / 移除流程与坑(尤其**删除内置 skill 必须重编译**,嵌入副本删目录删不掉)见 [`docs/architecture/skills.md`](../../docs/architecture/skills.md)。momo 已内置 `book-by-phone`(搜索本地商家 + AI 电话预订/取消/改期/咨询;走 WorldRouter API,认证/计费记在用户自己的 WorldRouter 账号——**需 env `WORLDROUTER_API_KEY` + `WORLDROUTER_BASE_URL`,无第三方 token**)。
 
 ### 两个跨概念的坑(已踩过)
 
@@ -68,6 +68,12 @@ puffer 原生 skill(`<name>/SKILL.md` + builtin/user/workspace 三层加载 + `r
 - **momo 自己的 `~/.momo`**(覆盖用 `MOMO_HOME`):`config.json` / `credentials.json`(WorldRouter key 缓存) / `permissions.json` / `pins.json` / `projects/default`(default project cwd)。**`sessions.json` 自管 transcript 已废弃**(chat session 迁 daemon)。
 - 端口:Vite 1466 / Tauri WS backend 1431 / OAuth loopback 1457(与 V1 Corbina 共用,同时只能一个 app 监听)。
 - Auth:momo 有自己的 auth(WorldRouter Auth Station,`VITE_AUTH_STATION_URL`),OAuth 走 OS browser → `http://localhost:1457/callback`;登录后 mint 的 `sk-worldrouter-…` key 经 daemon `login_with_api_key("openai")` 落 `~/.puffer/auth.json`(详见上 chat 架构 provider/key)。
+
+> **⚠️ 在普通浏览器里登录走不通(只有桌面 app 能登)**:web 路径下 `goToLogin()`(`src/lib/auth.svelte.ts:641-643`)用 `window.location.origin` 当 `redirect_uri`,即 **`http://localhost:1466/auth/callback`**;但 Auth Station 的 `ALLOWED_REDIRECT_ORIGINS` **没有 1466**(实测含 `1456`/`1457`/`3000-3002`/`3011`)。桌面 app 走 `1457` loopback(在白名单)所以正常;浏览器走 1466 会**静默失败**——auth station 不报错、照样 307 跳 WorkOS,但**把 `redirect_uri` 从签名 `state` 里删掉** → 登录成功后 fallback 到 `return_to:"/"`(落 auth 自己域名),token 永远回不到 1466,表现为"点登录登一圈回不来"。
+>   - **判白名单别看 HTTP 码**(所有端口都 307):探 `/login?redirect_uri=http://localhost:<port>/auth/callback&client_state=x` 的 302 `state=`,base64url decode 看 JSON 里 `redirect_uri` 是否被保留。**auth-deploy skill 文档里的白名单已过期(漏了 1456/1457),判真值要 live 探测。**
+>   - **浏览器调试 UI/登录的临时解(不改任何文件)**:`./node_modules/.bin/vite --host 127.0.0.1 --port 1456 --strictPort`,浏览器开 `localhost:1456` 即可走通(1456 在白名单)。
+>   - **永久修**(二选一,今天没做):① 把 dev 端口 1466→1456,需同步改 `package.json`/`vite.config.ts`/`src-tauri/tauri.conf.json`/`playwright.config.ts` 并重启 vite+桌面 app;② 走 `auth-deploy` skill 给 `ALLOWED_REDIRECT_ORIGINS` 加 `http://localhost:1466` 并 redeploy。生产正式登录始终走桌面 app `1457`,与 vite 端口无关。
+>   - 溯源:1456 是 puffer-desktop 时代 vite 端口(`src-tauri/src/oauth_listener.rs:20` 残留注释),迁 momo 时 vite 挪到 1466 却没同步给白名单加 1466——这就是不一致根源。
 
 ## 关键文件
 
