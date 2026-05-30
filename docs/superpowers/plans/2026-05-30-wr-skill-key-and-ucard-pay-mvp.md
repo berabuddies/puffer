@@ -213,12 +213,7 @@ git commit -m "feat(skills): book-by-phone reads key from ~/.wr/.creds via sourc
 
 # Part B — U-card 敏感卡数据获取(卡号/CVV)
 
-> ⏸ **ON HOLD — 待后续详聊,本段暂不实现(TODO)。**
-> 当前只实施 **Part A**。Part B 的任务清单(B1–B6)保留在下方作为待办。
-> **开聊前必须先回答的生死前提**:Task B1 —— ucard-backend / Strada 能否**程序化 reveal CVV**?
-> - 能 → 按本段"前端取卡"方案细化。
-> - 不能 → 整个前端取卡作废,回退**模式 A(卡不出后端、后端代付)**,Part B 需重设计。
-> 其余待详聊点:D-SINK(卡注入给谁)、D-TRIGGER(user-question vs 新工具)、step-up 与 PCI(MVP 后回填)。
+> 🚫 **SUPERSEDED (2026-05-31).** 本段 Part B 描述的方案(B1–B6:「前端取卡 / 模式 B / `paymentBridge` / `cardReveal.ts` / `user-question` sink」)**最终没有实施**。Part B 实际改为 **momo 自有 `momo-card` bin + 路 A**:bin 内 reveal,`momo-card reveal --full` 出完整卡号+CVV 给 agent;creds 走 `~/.ucard/.creds`;project ACL `100 allow bash argv momo-card` 免审批运行;`pay-with-card` skill 由 `card_agent_env.rs` 在登录时装到 `~/.puffer`。**权威实现见 [`2026-05-30-momo-card-reveal-bin.md`](./2026-05-30-momo-card-reveal-bin.md)**。下方 B1–B6 仅作历史设计记录保留,**勿照此实施**。
 
 ## B.现状
 
