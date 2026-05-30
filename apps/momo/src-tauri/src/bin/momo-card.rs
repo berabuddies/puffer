@@ -1,16 +1,22 @@
-//! `momo-card` — reveal a U-card's live PAN/CVV INSIDE THIS PROCESS, then print
-//! ONLY the non-sensitive summary (`{"last4","expiry"}`). The full card number
-//! and CVV never leave this process: not printed, not logged, scrubbed before
-//! exit. The agent that runs this bin via bash only ever sees the summary.
+//! `momo-card` — reveal a U-card's live PAN/CVV from the ucard backend.
+//!
+//! Default (`momo-card reveal`): prints ONLY a non-sensitive confirmation
+//! (`{"last4","expiry"}`) and scrubs the card before exit — the full PAN/CVV
+//! never leave the process.
+//!
+//! `momo-card reveal --full`: prints the COMPLETE card
+//! (`{"cardNumber","cvv","expMonth","expYear"}`) so the caller can complete a
+//! payment. This intentionally lets the PAN + CVV enter the caller's (agent's)
+//! context — use only when a payment step actually requires the full card.
 //!
 //! Auth: reads `~/.ucard/.creds` (written by momo at login) for the backend
 //! base URL + Auth-Station JWT, exchanges the JWT for a short-lived ucard
 //! sessionToken (POST /api/auth/exchange), then GETs /api/card/details.
 //!
-//! Invoked as a SINGLE bash command (`momo-card reveal [--card-id N]`) so the
-//! puffer permission gate (which forces approval on compound commands with
-//! `&&`/`|`) does not trip; momo grants `bash argv momo-card` in the project
-//! ACL so it runs without escalation.
+//! Invoked as a SINGLE bash command (`momo-card reveal [--full] [--card-id N]`)
+//! so the puffer permission gate (which forces approval on compound commands
+//! with `&&`/`|`) does not trip; momo grants `bash argv momo-card` in the
+//! project ACL so it runs without escalation.
 
 use std::io::Write;
 
@@ -193,6 +199,7 @@ fn card_details(
 
 fn reveal(args: &[String]) -> Result<()> {
     let mut card_id: Option<i64> = None;
+    let mut full = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -200,6 +207,10 @@ fn reveal(args: &[String]) -> Result<()> {
                 let v = args.get(i + 1).context("--card-id needs a value")?;
                 card_id = Some(v.parse().context("--card-id must be an integer")?);
                 i += 2;
+            }
+            "--full" => {
+                full = true;
+                i += 1;
             }
             other => bail!("unknown flag `{other}`"),
         }
@@ -216,11 +227,24 @@ fn reveal(args: &[String]) -> Result<()> {
     };
     let mut card = card_details(&client, &creds.base_url, &session, id)?;
 
-    // Build ONLY the non-sensitive summary, then scrub the sensitive strings.
-    let summary = json!({
-        "last4": last4(&card.number),
-        "expiry": expiry(&card.exp_month, &card.exp_year),
-    });
+    // `--full` emits the COMPLETE card (PAN + CVV) so the caller can complete a
+    // payment — an explicit opt-in to the card entering the caller's context.
+    // Default emits only a non-sensitive confirmation (last4 + expiry).
+    let output = if full {
+        json!({
+            "cardNumber": card.number.clone(),
+            "cvv": card.cvv.clone(),
+            "expMonth": card.exp_month.clone(),
+            "expYear": card.exp_year.clone(),
+        })
+    } else {
+        json!({
+            "last4": last4(&card.number),
+            "expiry": expiry(&card.exp_month, &card.exp_year),
+        })
+    };
+    // Scrub the in-process copy. (For `--full` the data is already in `output`
+    // by the caller's explicit request; this still avoids it lingering.)
     card.number.clear();
     card.cvv.clear();
     card.exp_month.clear();
@@ -228,7 +252,7 @@ fn reveal(args: &[String]) -> Result<()> {
     drop(card);
 
     let mut out = std::io::stdout();
-    out.write_all(summary.to_string().as_bytes())?;
+    out.write_all(output.to_string().as_bytes())?;
     out.write_all(b"\n")?;
     Ok(())
 }

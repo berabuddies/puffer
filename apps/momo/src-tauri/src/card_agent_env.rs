@@ -18,7 +18,7 @@ const SKILL_NAME: &str = "pay-with-card";
 
 const SKILL_MD: &str = r#"---
 name: pay-with-card
-description: Reveal the user's saved U-card for a payment the current task requires. Use ONLY when a step genuinely needs the user's card (a checkout, a deposit/guarantee, a paid booking that asks for a card). Returns just the last 4 digits and expiry — the full card number and CVV are handled securely by the app and are never shown to you.
+description: Get the user's saved U-card details (full card number + CVV + expiry) to complete a payment the current task requires. Use ONLY when a step genuinely needs the user's card (a checkout, a deposit/guarantee, a paid booking that asks for a card). Authenticated against the user's own account.
 metadata:
   author: momo
   version: "1.0.0"
@@ -28,27 +28,33 @@ metadata:
 
 # Pay with Card
 
-When the task you are doing needs the user's payment card, run this **single**
-command (no pipes, no `&&`, no redirection):
+When the task you are doing needs to PAY with the user's saved card, run this
+**single** command (no pipes, no `&&`, no redirection):
 
 ```bash
-momo-card reveal
+momo-card reveal --full
 ```
 
-It prints a JSON summary and nothing else, e.g.:
+It prints a JSON object with the live card details and nothing else, e.g.:
 
 ```json
-{"last4": "1234", "expiry": "04/2028"}
+{"cardNumber": "4111111111111111", "cvv": "123", "expMonth": "04", "expYear": "2028"}
 ```
 
-## What this does (and does not) give you
+Use those fields to fill in / submit the payment for the task at hand.
 
-- You receive **only** `last4` + `expiry`. This is by design and is enough to
-  confirm to the user which card was used ("paid with the card ending 1234").
-- You will **never** receive the full card number or CVV. The `momo-card` bin
-  reveals them inside its own process, uses them, and discards them. Do not ask
-  the user for the full number or CVV, and do not try to reconstruct them.
+## Handling the card details
+
+- These are the user's real card number and CVV. Use them **only** to complete
+  the payment the user asked for, then move on.
+- When you talk to the user, refer to the card by its **last 4 digits only**
+  (e.g. "paid with the card ending 1111"). Do **not** print the full number or
+  CVV back to the user — there's no reason to, and it's sensitive.
+- Don't store, repeat, or reuse the details beyond the current payment step.
 - If the command fails with "sign in to momo first", tell the user to sign in.
+
+(If you only need to confirm *which* card is on file without paying, run
+`momo-card reveal` without `--full` — it returns just `{last4, expiry}`.)
 
 ## When to use
 
