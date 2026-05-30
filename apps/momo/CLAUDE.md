@@ -72,7 +72,10 @@ puffer 原生 skill(`<name>/SKILL.md` + builtin/user/workspace 三层加载 + `r
 ### 两个跨概念的坑(已踩过)
 
 - **momo 只有一个固定 default project,puffer task 也不按它分组**。momo 把所有会话收在单一 default project 下(`backend.rs::list_projects`,cwd = `$MOMO_HOME/projects/default`;Work/Life 分类已于 2026-05 移除)。puffer task 的 `task_scope` 是 `workspace` / `session:<id>` / `team:<id>` / `monitor`,与 momo 的 project 无关。要做"首页 task 列表",momo 拿到 `tasks[]` 后按 `session:<id> → session.cwd → 是否命中 default project` 自己 roll up。task 由 puffer-core agent 用 `TaskCreate` 工具产生。
-- **memory 是 project 级,没有"用户级全局 memory"**。puffer 有 project `MEMORY.md`(`~/.puffer/projects/<slug>/MEMORY.md`,需在 `~/.puffer/projects.toml` 注册;puffer-core 跑 agent 时**按 cwd 自动注入**上下文)。没有专门的"写 memory" RPC,但可用 `write_file` 把 md 落到 `MEMORY.md` 或 cwd 的 `AGENTS.md`(agent 启动读取)。onboarding 国家/职业这类用户画像若要"对该用户所有对话生效",因 momo 所有对话都在单一 default cwd 下,写进该 project 即可覆盖;真正跨 cwd 的全局画像 puffer 目前没有,需向 puffer 提需求。
+- **有"用户级全局 memory"(`~/.puffer/AGENTS.md` / `~/.puffer/CLAUDE.md`),也有 project 级 `MEMORY.md`,别搞混**。
+  - **全局**:`~/.puffer/AGENTS.md` 和 `~/.puffer/CLAUDE.md` 会被**注入每一个 puffer session 的 system prompt,与 cwd 无关**;puffer-core 每轮都**从磁盘重新读取**(`crates/puffer-core/runtime/system_prompt.rs::load_memory_prompt`),改了**无需重启 daemon**。文件名取决于 provider:`openai` provider(momo 用的就是它)**先读 `AGENTS.md`,只有任何位置都没有 AGENTS.md 时才 fallback 到 `CLAUDE.md`**(注意:openai 一旦命中 AGENTS.md 就短路,不再读 CLAUDE.md);其它 provider(anthropic 等)读 `CLAUDE.md`、忽略 AGENTS.md。
+  - **project 级**:puffer 还有 project `MEMORY.md`(`~/.puffer/projects/<slug>/MEMORY.md`,需在 `~/.puffer/projects.toml` 注册;puffer-core 跑 agent 时**按 cwd 自动注入**上下文)。
+  - **momo 落地**:onboarding 国家/职业这类用户画像,momo 在 onboarding Done 屏触发 1431 backend RPC `write_user_profile`(`src-tauri/src/backend.rs` → `src-tauri/src/user_profile.rs`,以分隔符包起的 "managed block"),**同时写进 `~/.puffer/AGENTS.md` 和 `~/.puffer/CLAUDE.md`**,从而对该用户所有对话生效。设计见 `docs/superpowers/specs/2026-05-30-momo-onboarding-profile-design.md`。
 
 ## 存储与端口
 
