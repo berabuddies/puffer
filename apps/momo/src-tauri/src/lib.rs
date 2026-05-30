@@ -1,6 +1,8 @@
 mod backend;
 mod user_profile;
 mod wr_creds;
+mod ucard_creds;
+mod card_agent_env;
 mod codex_app_server;
 mod connectors;
 mod daemon_launcher;
