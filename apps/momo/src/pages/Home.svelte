@@ -254,63 +254,110 @@
   }
 </script>
 
-<PageHeader title={greetingTitle} subtitle={attentionSubtitle}>
-  {#snippet accessory()}
-    <button
-      type="button"
-      class="mascot-btn"
-      aria-label="Say hi to Momo"
-      onclick={onMascotClick}
-    >
-      <Mascot size="md" />
-    </button>
-  {/snippet}
-</PageHeader>
+<!--
+  Three-row layout (mirrors Agent.svelte): the greeting header stays pinned
+  at the top, the task feed is the only scrolling region, and the Composer
+  stays pinned at the bottom. Relies on the Shell rendering us in `fullbleed`
+  mode (routes.ts `/home` → `fullbleed: true`), which locks .page__column to
+  the viewport height and drops its top padding — without it the column would
+  grow with the list and the composer would scroll off-screen.
+-->
+<div class="home">
+  <div class="home__header">
+    <PageHeader title={greetingTitle} subtitle={attentionSubtitle}>
+      {#snippet accessory()}
+        <button
+          type="button"
+          class="mascot-btn"
+          aria-label="Say hi to Momo"
+          onclick={onMascotClick}
+        >
+          <Mascot size="md" />
+        </button>
+      {/snippet}
+    </PageHeader>
+  </div>
 
-<section class="feed">
-  {#if taskState.error}
-    <div class="feed__notice" role="alert">
-      <p class="text-task-title feed__notice-title">Daemon not ready</p>
-      <p class="feed__notice-body">{taskState.error}</p>
-    </div>
-  {:else if monitorTasks.length === 0}
-    <div class="feed__empty">
-      <Mascot size="lg" />
-      <h2 class="feed__empty-title text-display">You're all caught up</h2>
-      <p class="feed__empty-body">
-        Momo will surface Telegram tasks here when they need your attention.
-      </p>
-    </div>
-  {:else}
-    <ul class="feed__list">
-      {#each monitorTasks as mt (mt.task_id)}
-        {@const card = monitorTaskToCard(mt)}
-        <li>
-          <div
-            class="task-wrap"
-            role="button"
-            tabindex="0"
-            aria-label={`Open ${mt.subject}`}
-            onclick={(e) => onCardClick(e, mt)}
-            onkeydown={(e) => onCardKey(e, mt)}
-          >
-            <TaskCard task={card} />
-          </div>
-        </li>
-      {/each}
-    </ul>
-  {/if}
-</section>
+  <section class="feed" aria-label="Tasks">
+    {#if taskState.error}
+      <div class="feed__notice" role="alert">
+        <p class="text-task-title feed__notice-title">Daemon not ready</p>
+        <p class="feed__notice-body">{taskState.error}</p>
+      </div>
+    {:else if monitorTasks.length === 0}
+      <div class="feed__empty">
+        <Mascot size="lg" />
+        <h2 class="feed__empty-title text-display">You're all caught up</h2>
+        <p class="feed__empty-body">
+          Momo will surface Telegram tasks here when they need your attention.
+        </p>
+      </div>
+    {:else}
+      <ul class="feed__list">
+        {#each monitorTasks as mt (mt.task_id)}
+          {@const card = monitorTaskToCard(mt)}
+          <li>
+            <div
+              class="task-wrap"
+              role="button"
+              tabindex="0"
+              aria-label={`Open ${mt.subject}`}
+              onclick={(e) => onCardClick(e, mt)}
+              onkeydown={(e) => onCardKey(e, mt)}
+            >
+              <TaskCard task={card} />
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
 
-<Composer placeholder="Hi, Tomo. How's my luck today?" />
+  <div class="home__composer">
+    <Composer placeholder="Hi, Tomo. How's my luck today?" />
+  </div>
+</div>
 
 <style>
+  /* Full-height column: header + composer are fixed bookends, only .feed
+   * scrolls. `min-height: 0` lets the middle scroller shrink below its
+   * content size (the classic flexbox overflow gotcha). Depends on the
+   * Shell's fullbleed column (height: 100%, no top padding). */
+  .home {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    width: 100%;
+  }
+
+  /* Pinned greeting header. The fullbleed column has no top padding, so we
+   * clear the macOS traffic-light spacer here (same as Agent's header).
+   * PageHeader supplies its own bottom padding. */
+  .home__header {
+    flex-shrink: 0;
+    background: var(--color-surface-app);
+    padding-top: calc(var(--shell-traffic-spacer) + var(--space-2));
+  }
+
+  /* The only scrolling region. */
   .feed {
     flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     gap: var(--space-5);
     padding-bottom: var(--space-5);
+  }
+
+  /* Pinned composer. The shared Composer ships its own top border, which
+   * doubles as the divider between the scrolling list and the input. */
+  .home__composer {
+    flex-shrink: 0;
+    background: var(--color-surface-app);
   }
 
   /* Error notice — calm, not alarming; matches the card surface vocabulary

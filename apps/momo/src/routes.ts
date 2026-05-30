@@ -57,7 +57,7 @@ export const routes: readonly RouteDef[] = [
   { pattern: "/auth/callback", component: AuthCallback as Component<Record<string, unknown>>, hasShell: false, displayName: "Auth callback" },
 
   { pattern: "/home/empty", component: HomeEmpty as Component<Record<string, unknown>>, hasShell: true, displayName: "Home (empty)" },
-  { pattern: "/home", component: Home as Component<Record<string, unknown>>, hasShell: true, displayName: "Home" },
+  { pattern: "/home", component: Home as Component<Record<string, unknown>>, hasShell: true, fullbleed: true, displayName: "Home" },
 
   { pattern: "/contact/:id", component: ContactDetail as Component<Record<string, unknown>>, hasShell: true, displayName: "Contact detail" },
   { pattern: "/contact", component: Contact as Component<Record<string, unknown>>, hasShell: true, displayName: "Contact" },
