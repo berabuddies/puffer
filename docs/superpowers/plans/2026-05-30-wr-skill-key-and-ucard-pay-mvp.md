@@ -25,6 +25,7 @@
 - **PAN/CVV 经过前端 JS(WebView 渲染进程)**:暴露面高于 backend/bin 方案。
 - **PCI scope**:模式 B 把客户端拉入 PAN/CVV 处理范围,需专业合规审查。
 - **Part A 的 WorldRouter key 会进 agent bash 上下文**(`source` 后的 env);book 阶段判定可接受。
+- **🔴 全局 full-access(TEMP,2026-05-30)**:Part A 跑通靠把 turn `permissionMode` 临时设成 `full-access`(yolo / grant-all-tools)。根因(systematic-debugging 挖出):`workspace-write` 下 skill 的 `source ~/.wr/.creds && curl …` 复合命令**必被拦** —— shell 控制操作符(`&&`/`|`)强制要批准(`permissions.rs:294`),且 daemon 的 auto-review LLM 把"碰凭据的命令"判 **Deny 且不弹给用户**(session 里无 `permission-request` 事件)。`bash_argv_is_preapproved` 白名单(`acl.rs:344`)只对**单命令**有效,对复合命令无效。**代价:momo 所有 agent bash/文件操作全免批准。** **真正修法(择一,后续做)**:① 把 book 调用封装成**单命令 bin**(`puffer wr book`,无操作符,argv0 加 ACL/preapproved → 直接 Allow)——最干净;② daemon auto-review **opt-out**,让 Ask 转交用户手动 Approve。**还原点**:`apps/momo/src/lib/agent/daemonChat.ts` 的 `permissionMode` 默认值改回 `"workspace-write"`。
 
 ## 仍需拍板的小决策(带推荐;不阻塞动笔,影响 Part B 末端)
 
