@@ -1,5 +1,7 @@
 references/
 target/
+.release/
+release/
 .worktree/
 .worktrees/
 .puffer/
