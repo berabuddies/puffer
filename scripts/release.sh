@@ -610,6 +610,7 @@ EOF
   patch_cef_tab_helpers_compatibility "$src"
   patch_cef_browser_delegate_compatibility "$src"
   patch_cef_touch_selection_compatibility "$src"
+  patch_cef_originating_process_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
   patch_cef_chrome_lifecycle_compatibility "$src"
   patch_cef_content_main_compatibility "$src"
@@ -2059,6 +2060,30 @@ patch_cef_touch_selection_compatibility() {
       fail "failed to patch CEF touch selection active status compatibility"
     fi
   fi
+}
+
+patch_cef_originating_process_compatibility() {
+  local src="$1"
+  local file
+  for file in \
+    "$src/cef/libcef/browser/net_service/browser_urlrequest_impl.cc" \
+    "$src/cef/libcef/browser/net_service/resource_request_handler_wrapper.cc"; do
+    if [[ ! -f "$file" ]]; then
+      continue
+    fi
+    if grep -Fq 'services/network/public/cpp/originating_process.h' "$file"; then
+      log "patching CEF originating process include for current Chromium in ${file#$src/}"
+      perl -0pi -e 's#"services/network/public/cpp/originating_process.h"#"services/network/public/mojom/network_context.mojom.h"#g' "$file"
+    fi
+    if grep -Fq 'network::OriginatingProcess::browser()' "$file"; then
+      log "patching CEF originating process constant for current Chromium in ${file#$src/}"
+      perl -0pi -e 's#network::OriginatingProcess::browser\(\)#network::mojom::kBrowserProcessId#g' "$file"
+    fi
+    if grep -Fq 'services/network/public/cpp/originating_process.h' "$file" ||
+      grep -Fq 'network::OriginatingProcess::browser()' "$file"; then
+      fail "failed to patch CEF originating process compatibility in ${file#$src/}"
+    fi
+  done
 }
 
 patch_cef_context_menu_compatibility() {
