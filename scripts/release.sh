@@ -605,6 +605,7 @@ EOF
 
   patch_cef_context_menu_compatibility "$src"
   patch_cef_browser_widget_compatibility "$src"
+  patch_cef_toolbar_view_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
   patch_cef_chrome_lifecycle_compatibility "$src"
   patch_cef_content_main_compatibility "$src"
@@ -1511,6 +1512,92 @@ replace(
 """,
     "BrowserWidget CEF-safe destructor guard",
 )
+PY
+}
+
+patch_cef_toolbar_view_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF toolbar view patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_toolbar_header():
+    path = src / "chrome/browser/ui/views/toolbar/toolbar_view.h"
+    if not path.exists():
+        return
+    text = read(path)
+    if "#include <optional>" not in text:
+        marker = "#include <memory>\n"
+        if marker not in text:
+            raise SystemExit(
+                f"failed to patch ToolbarView optional include: marker not found in {path}"
+            )
+        text = text.replace(marker, marker + "#include <optional>\n", 1)
+    sentinel = (
+        "  ToolbarView(Browser* browser,\n"
+        "              BrowserView* browser_view,\n"
+        "              std::optional<DisplayMode> display_mode = std::nullopt);\n"
+    )
+    if sentinel not in text:
+        old = "  ToolbarView(Browser* browser, BrowserView* browser_view);\n"
+        if old not in text:
+            raise SystemExit(
+                f"failed to patch ToolbarView constructor declaration: pattern not found in {path}"
+            )
+        text = text.replace(old, sentinel, 1)
+    write(path, text)
+
+
+def patch_toolbar_definition():
+    path = src / "chrome/browser/ui/views/toolbar/toolbar_view.cc"
+    if not path.exists():
+        return
+    text = read(path)
+    sentinel = (
+        "ToolbarView::ToolbarView(Browser* browser,\n"
+        "                         BrowserView* browser_view,\n"
+        "                         std::optional<DisplayMode> display_mode)"
+    )
+    if sentinel not in text:
+        old = "ToolbarView::ToolbarView(Browser* browser, BrowserView* browser_view)\n"
+        if old not in text:
+            raise SystemExit(
+                f"failed to patch ToolbarView constructor definition: pattern not found in {path}"
+            )
+        text = text.replace(old, sentinel + "\n", 1)
+    old_init = "      display_mode_(GetDisplayMode(browser)) {\n"
+    new_init = "      display_mode_(display_mode.value_or(GetDisplayMode(browser))) {\n"
+    if old_init in text:
+        text = text.replace(old_init, new_init, 1)
+    write(path, text)
+
+    patched = read(path)
+    if sentinel not in patched or new_init not in patched:
+        raise SystemExit("failed to patch ToolbarView display-mode compatibility")
+
+
+patch_toolbar_header()
+patch_toolbar_definition()
 PY
 }
 
