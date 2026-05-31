@@ -19,7 +19,8 @@ use crate::daemon::ServerEnvelope;
 
 use super::chrome::{
     close_page_target, create_page_target, initial_page_target, read_devtools_ws_url,
-    read_remote_devtools_ws_url, resolve_chrome_executable, ChromePageTarget,
+    read_remote_devtools_ws_url, resolve_chrome_executable, wait_for_initial_page_target,
+    ChromePageTarget,
 };
 use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
@@ -49,6 +50,7 @@ use super::{
 use crate::browser_profiles::prepare_managed_profile;
 
 type UploadReply = Sender<std::result::Result<(), String>>;
+const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(super) struct BrowserRootSession {
@@ -127,9 +129,16 @@ impl BrowserRootSession {
             Ok(browser_ws) => browser_ws,
             Err(_) => return Ok(None),
         };
-        let reusable_target = initial_page_target(&browser_ws)
-            .context("read CEF DevTools page target")?
-            .ok_or_else(|| anyhow!("CEF DevTools target list did not include a page"))?;
+        let reusable_target =
+            match wait_for_initial_page_target(&browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)
+                .context("read CEF DevTools page target")?
+            {
+                Some(target) => target,
+                None => match create_page_target(&browser_ws, DEFAULT_URL) {
+                    Ok(target) => target,
+                    Err(_) => return Ok(None),
+                },
+            };
         Ok(Some(Self {
             inner: Arc::new(Mutex::new(BrowserRootState {
                 profile_dir: profile_dir.clone(),
@@ -152,17 +161,23 @@ impl BrowserRootSession {
         if inner.owns_targets {
             create_page_target(&inner.browser_ws, DEFAULT_URL)
         } else {
-            initial_page_target(&inner.browser_ws)?
-                .ok_or_else(|| anyhow!("CEF DevTools target list did not include a page"))
+            create_page_target(&inner.browser_ws, DEFAULT_URL).or_else(|create_error| {
+                wait_for_initial_page_target(&inner.browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "CEF DevTools endpoint did not provide a page target and creating one failed: {create_error}"
+                        )
+                    })
+            })
         }
     }
 
-    pub(super) fn close_target(&self, target_id: &str) -> Result<()> {
+    pub(super) fn close_target(&self, target: &ChromePageTarget) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         touch_root(&mut inner);
         ensure_root_alive(&mut inner)?;
-        if inner.owns_targets {
-            close_page_target(&inner.browser_ws, target_id)
+        if inner.owns_targets || target.close_on_release {
+            close_page_target(&inner.browser_ws, &target.target_id)
         } else {
             Ok(())
         }
@@ -171,7 +186,11 @@ impl BrowserRootSession {
     /// Terminates the shared Chrome process for this root owner.
     pub(super) fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.reusable_target = None;
+        if let Some(target) = inner.reusable_target.take() {
+            if inner.owns_targets || target.close_on_release {
+                let _ = close_page_target(&inner.browser_ws, &target.target_id);
+            }
+        }
         let Some(child) = inner.child.as_mut() else {
             return Ok(());
         };
@@ -505,7 +524,7 @@ fn run_cdp_worker(
         Ok((socket, _)) => socket,
         Err(error) => {
             emit_state_error(&events, &channel_state, error);
-            let _ = root.close_target(&target.target_id);
+            let _ = root.close_target(&target);
             alive.store(false, Ordering::SeqCst);
             return;
         }
@@ -584,7 +603,7 @@ fn run_cdp_worker(
         }
     }
     let _ = socket.close(None);
-    let _ = root.close_target(&target.target_id);
+    let _ = root.close_target(&target);
     alive.store(false, Ordering::SeqCst);
     if let Some(reply) = shutdown_reply {
         let _ = reply.send(());
