@@ -538,6 +538,20 @@ EOF
     fi
   fi
 
+  local ui_base_build="$src/ui/base/BUILD.gn"
+  if [[ -f "$ui_base_build" ]] &&
+    grep -Fq 'IS_OZONE_X11=$ozone_platform_x11' "$ui_base_build" &&
+    ! grep -Fq 'SUPPORTS_OZONE_X11=' "$ui_base_build" &&
+    grep -RIl 'BUILDFLAG(SUPPORTS_OZONE_X11)' "$src/cef" >/dev/null 2>&1; then
+    log "patching CEF Ozone X11 buildflag name for current Chromium"
+    while IFS= read -r cef_source; do
+      perl -0pi -e 's#BUILDFLAG\(SUPPORTS_OZONE_X11\)#BUILDFLAG(IS_OZONE_X11)#g' "$cef_source"
+    done < <(grep -RIl 'BUILDFLAG(SUPPORTS_OZONE_X11)' "$src/cef")
+    if grep -RIl 'BUILDFLAG(SUPPORTS_OZONE_X11)' "$src/cef" >/dev/null 2>&1; then
+      fail "failed to patch CEF Ozone X11 buildflag compatibility"
+    fi
+  fi
+
   local content_client_h="$src/content/public/browser/content_browser_client.h"
   local create_window_hook='virtual void CreateWindowResult(RenderFrameHost* opener, bool success)'
 
