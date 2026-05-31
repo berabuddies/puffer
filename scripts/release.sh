@@ -606,6 +606,7 @@ EOF
   patch_cef_context_menu_compatibility "$src"
   patch_cef_browser_widget_compatibility "$src"
   patch_cef_toolbar_view_compatibility "$src"
+  patch_cef_browser_view_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
   patch_cef_chrome_lifecycle_compatibility "$src"
   patch_cef_content_main_compatibility "$src"
@@ -1598,6 +1599,233 @@ def patch_toolbar_definition():
 
 patch_toolbar_header()
 patch_toolbar_definition()
+PY
+}
+
+patch_cef_browser_view_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF browser view patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def replace_required(path, old, new, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if new in text:
+        return
+    if old not in text:
+        raise SystemExit(f"failed to patch {desc}: pattern not found in {path}")
+    write(path, text.replace(old, new, 1))
+
+
+def patch_browser_window_release():
+    path = src / "chrome/browser/ui/browser.h"
+    if not path.exists():
+        return
+    text = read(path)
+    sentinel = "  void ReleaseBrowserWindow() { window_.release(); }\n"
+    if sentinel in text:
+        return
+    marker = "  BrowserWindow* window() const { return window_.get(); }\n"
+    if marker not in text:
+        raise SystemExit(
+            f"failed to patch Browser window release hook: marker not found in {path}"
+        )
+    addition = "\n  // Used when the BrowserWindow will outlive this Browser.\n" + sentinel
+    write(path, text.replace(marker, marker + addition, 1))
+
+
+def patch_browser_view_header():
+    path = src / "chrome/browser/ui/views/frame/browser_view.h"
+    if not path.exists():
+        return
+    text = read(path)
+    if "  BrowserView();\n" not in text:
+        old = "  explicit BrowserView(Browser* browser);\n"
+        new = "  BrowserView();\n  explicit BrowserView(Browser* browser);\n"
+        if old not in text:
+            raise SystemExit(
+                f"failed to patch BrowserView default constructor: pattern not found in {path}"
+            )
+        text = text.replace(old, new, 1)
+    if "  void InitBrowser(Browser* browser);\n" not in text:
+        old = "  explicit BrowserView(Browser* browser);\n"
+        new = "  explicit BrowserView(Browser* browser);\n  void InitBrowser(Browser* browser);\n"
+        if old not in text:
+            raise SystemExit(
+                f"failed to patch BrowserView InitBrowser declaration: pattern not found in {path}"
+            )
+        text = text.replace(old, new, 1)
+    hook = "  virtual ToolbarView* OverrideCreateToolbar() { return nullptr; }\n"
+    if hook not in text:
+        old = """ protected:
+  // BrowserWindow:
+  void DeleteBrowserWindow() final;
+
+ private:
+"""
+        new = """  // Called during Toolbar destruction to remove dependent objects that have
+  // dangling references.
+  virtual void WillDestroyToolbar();
+
+  // BrowserWindow:
+  void DeleteBrowserWindow() final;
+
+ protected:
+  virtual ToolbarView* OverrideCreateToolbar() { return nullptr; }
+
+ private:
+"""
+        if old not in text:
+            raise SystemExit(
+                f"failed to patch BrowserView CEF hook declarations: pattern not found in {path}"
+            )
+        text = text.replace(old, new, 1)
+    write(path, text)
+
+
+def patch_browser_view_source():
+    path = src / "chrome/browser/ui/views/frame/browser_view.cc"
+    if not path.exists():
+        return
+    text = read(path)
+    if "void BrowserView::InitBrowser(Browser* browser)" not in text:
+        old = """BrowserView::BrowserView(Browser* browser)
+    : views::ClientView(nullptr, nullptr),
+      exclusive_access_context_(
+          std::make_unique<ExclusiveAccessContextImpl>(*this)),
+      browser_(browser),
+      accessibility_mode_observer_(
+          std::make_unique<AccessibilityModeObserver>(this)) {
+  SetShowIcon(::ShouldShowWindowIcon(
+      browser_.get(), AppUsesWindowControlsOverlay(), AppUsesTabbed()));
+"""
+        new = """BrowserView::BrowserView() : BrowserView(nullptr) {}
+
+BrowserView::BrowserView(Browser* browser)
+    : views::ClientView(nullptr, nullptr),
+      exclusive_access_context_(
+          std::make_unique<ExclusiveAccessContextImpl>(*this)),
+      accessibility_mode_observer_(
+          std::make_unique<AccessibilityModeObserver>(this)) {
+  if (browser) {
+    InitBrowser(browser);
+  }
+}
+
+void BrowserView::InitBrowser(Browser* browser) {
+  DCHECK(!browser_);
+  browser_ = browser;
+
+  SetShowIcon(::ShouldShowWindowIcon(
+      browser_.get(), AppUsesWindowControlsOverlay(), AppUsesTabbed()));
+"""
+        if old not in text:
+            raise SystemExit(
+                f"failed to patch BrowserView deferred initialization: pattern not found in {path}"
+            )
+        text = text.replace(old, new, 1)
+    toolbar_old = """  toolbar_ = top_container_->AddChildView(
+      std::make_unique<ToolbarView>(browser_.get(), this));
+"""
+    toolbar_new = """  toolbar_ = OverrideCreateToolbar();
+  if (!toolbar_) {
+    toolbar_ = new ToolbarView(browser_.get(), this);
+  }
+  top_container_->AddChildView(std::unique_ptr<ToolbarView>(toolbar_.get()));
+"""
+    if "  toolbar_ = OverrideCreateToolbar();\n" not in text:
+        if toolbar_old not in text:
+            raise SystemExit(
+                f"failed to patch BrowserView toolbar creation: pattern not found in {path}"
+            )
+        text = text.replace(toolbar_old, toolbar_new, 1)
+    destructor_marker = "BrowserView::~BrowserView() {\n"
+    destructor_addition = (
+        "  // If the Toolbar is overridden, detach it before the remaining\n"
+        "  // BrowserView children are removed.\n"
+        "  WillDestroyToolbar();\n\n"
+    )
+    if destructor_addition not in text:
+        if destructor_marker not in text:
+            raise SystemExit(
+                f"failed to patch BrowserView toolbar teardown call: marker not found in {path}"
+            )
+        text = text.replace(
+            destructor_marker, destructor_marker + destructor_addition, 1
+        )
+    will_destroy = """void BrowserView::WillDestroyToolbar() {
+  autofill_bubble_handler_.reset();
+
+  toolbar_button_provider_ = nullptr;
+  if (toolbar_ && toolbar_->parent()) {
+    toolbar_->parent()->RemoveChildView(toolbar_);
+    toolbar_.ClearAndDelete();
+  } else {
+    toolbar_ = nullptr;
+  }
+}
+
+"""
+    if "void BrowserView::WillDestroyToolbar()" not in text:
+        marker = "bool BrowserView::IsLoadingAnimationRunning() const {\n"
+        if marker not in text:
+            raise SystemExit(
+                f"failed to patch BrowserView toolbar teardown hook: marker not found in {path}"
+            )
+        text = text.replace(marker, will_destroy + marker, 1)
+    delete_old = """void BrowserView::DeleteBrowserWindow() {
+  CHECK(browser_widget_);
+"""
+    delete_new = """void BrowserView::DeleteBrowserWindow() {
+  if (!browser_widget_) {
+    return;
+  }
+"""
+    if delete_old in text:
+        text = text.replace(delete_old, delete_new, 1)
+    write(path, text)
+
+    patched = read(path)
+    required = (
+        "void BrowserView::InitBrowser(Browser* browser)",
+        "toolbar_ = OverrideCreateToolbar();",
+        "void BrowserView::WillDestroyToolbar()",
+        "if (!browser_widget_)",
+    )
+    missing = [item for item in required if item not in patched]
+    if missing:
+        raise SystemExit(
+            "failed to patch BrowserView CEF compatibility: missing "
+            + ", ".join(missing)
+        )
+
+
+patch_browser_window_release()
+patch_browser_view_header()
+patch_browser_view_source()
 PY
 }
 
