@@ -1,10 +1,11 @@
 //! Native Chromium Embedded Framework host commands for Puffer Desktop.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::ffi::{CStr, CString, c_char, c_void};
+use serde_json::{json, Value};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tauri::Window;
 
 const DEFAULT_REMOTE_DEBUGGING_PORT: u16 = 9333;
@@ -31,18 +32,45 @@ pub(crate) struct CefBrowserRect {
     height: f64,
 }
 
+#[derive(Debug, Clone)]
+struct CefRuntime {
+    root: PathBuf,
+    helper: PathBuf,
+}
+
+static CEF_INITIALIZATION: OnceLock<Result<CefRuntime, String>> = OnceLock::new();
+
+/// Initializes native CEF before Tauri enters the AppKit event loop.
+pub(crate) fn warm_up_native() -> Result<()> {
+    initialize_native_once().map(|_| ())
+}
+
 /// Returns native CEF availability for the current desktop process.
 #[tauri::command]
 pub(crate) fn browser_cef_native_status() -> Value {
-    let runtime = CefRuntime::discover();
+    let discovered_runtime = CefRuntime::discover();
+    let initialization = CEF_INITIALIZATION.get();
+    let initialized_runtime = initialization.and_then(|value| value.as_ref().ok());
+    let discovery_error = discovered_runtime
+        .as_ref()
+        .err()
+        .map(|error| error.to_string());
+    let diagnostic_runtime = initialized_runtime.or_else(|| discovered_runtime.as_ref().ok());
+    let initialization_error = initialization.and_then(|value| value.as_ref().err().cloned());
+    let not_initialized_error = (initialization.is_none()
+        && discovery_error.is_none()
+        && native_enabled())
+    .then_some("native CEF was not initialized before the desktop event loop started".to_string());
     json!(CefNativeStatus {
-        available: runtime.is_ok(),
-        active: native_enabled(),
-        root: runtime.as_ref().ok().map(|value| display_path(&value.root)),
-        helper: runtime.as_ref().ok().map(|value| display_path(&value.helper)),
+        available: initialized_runtime.is_some(),
+        active: initialized_runtime.is_some(),
+        root: diagnostic_runtime.map(|value| display_path(&value.root)),
+        helper: diagnostic_runtime.map(|value| display_path(&value.helper)),
         remote_debugging_port: remote_debugging_port(),
         build_enabled: native_enabled(),
-        error: runtime.err().map(|error| error.to_string()),
+        error: initialization_error
+            .or(discovery_error)
+            .or(not_initialized_error),
     })
 }
 
@@ -84,7 +112,8 @@ pub(crate) fn browser_cef_native_navigate(
     session_id: String,
     url: String,
 ) -> Result<Value, String> {
-    native_navigate(&session_id, &url)
+    ensure_native_initialized()
+        .and_then(|()| native_navigate(&session_id, &url))
         .and_then(|()| native_state(&session_id))
         .map_err(|error| error.to_string())
 }
@@ -92,7 +121,8 @@ pub(crate) fn browser_cef_native_navigate(
 /// Reloads a native CEF browser.
 #[tauri::command]
 pub(crate) fn browser_cef_native_reload(session_id: String) -> Result<Value, String> {
-    native_reload(&session_id)
+    ensure_native_initialized()
+        .and_then(|()| native_reload(&session_id))
         .and_then(|()| native_state(&session_id))
         .map_err(|error| error.to_string())
 }
@@ -108,7 +138,8 @@ pub(crate) fn browser_cef_native_history(
     } else {
         1
     };
-    native_history(&session_id, direction)
+    ensure_native_initialized()
+        .and_then(|()| native_history(&session_id, direction))
         .and_then(|()| native_state(&session_id))
         .map_err(|error| error.to_string())
 }
@@ -116,7 +147,8 @@ pub(crate) fn browser_cef_native_history(
 /// Closes a native CEF browser.
 #[tauri::command]
 pub(crate) fn browser_cef_native_close(session_id: String) -> Result<Value, String> {
-    native_close(&session_id)
+    ensure_native_initialized()
+        .and_then(|()| native_close(&session_id))
         .map(|()| json!({ "ok": true }))
         .map_err(|error| error.to_string())
 }
@@ -132,8 +164,11 @@ where
 }
 
 fn ensure_native_initialized() -> Result<()> {
-    let runtime = CefRuntime::discover()?;
-    native_initialize(&runtime)
+    match CEF_INITIALIZATION.get() {
+        Some(Ok(_)) => Ok(()),
+        Some(Err(error)) => bail!("{error}"),
+        None => bail!("native CEF was not initialized before the desktop event loop started"),
+    }
 }
 
 fn window_handle(window: &Window) -> Result<*mut c_void> {
@@ -150,24 +185,20 @@ fn window_handle(window: &Window) -> Result<*mut c_void> {
     }
 }
 
-#[derive(Debug)]
-struct CefRuntime {
-    root: PathBuf,
-    helper: PathBuf,
-}
-
 impl CefRuntime {
     fn discover() -> Result<Self> {
         #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
         {
-            let root = option_env!("PUFFER_DESKTOP_CEF_ROOT")
-                .map(PathBuf::from)
-                .filter(|path| path.is_dir())
-                .or_else(runtime_root_from_env)
+            let root = runtime_root_from_env()
+                .or_else(runtime_root_from_bundle)
+                .or_else(runtime_root_from_compiled_env)
                 .ok_or_else(|| anyhow!("CEF runtime root was not found"))?;
-            let helper = option_env!("PUFFER_DESKTOP_CEF_HELPER")
-                .map(PathBuf::from)
-                .filter(|path| path.is_file())
+            let helper = runtime_helper_from_env()
+                .or_else(|| {
+                    option_env!("PUFFER_DESKTOP_CEF_HELPER")
+                        .map(PathBuf::from)
+                        .filter(|path| path.is_file())
+                })
                 .or_else(|| helper_for_root(&root))
                 .ok_or_else(|| anyhow!("CEF helper executable was not found"))?;
             Ok(Self { root, helper })
@@ -176,6 +207,18 @@ impl CefRuntime {
         {
             bail!("native CEF bridge was not compiled for this desktop build")
         }
+    }
+}
+
+fn initialize_native_once() -> Result<&'static CefRuntime> {
+    let initialization = CEF_INITIALIZATION.get_or_init(|| {
+        let runtime = CefRuntime::discover().map_err(|error| error.to_string())?;
+        native_initialize(&runtime).map_err(|error| error.to_string())?;
+        Ok(runtime)
+    });
+    match initialization {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => bail!("{error}"),
     }
 }
 
@@ -193,8 +236,43 @@ fn runtime_root_from_env() -> Option<PathBuf> {
     None
 }
 
+fn runtime_root_from_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let mut roots = vec![exe_dir.to_path_buf()];
+    if let Some(contents_dir) = exe_dir.parent() {
+        roots.push(contents_dir.join("Frameworks"));
+        roots.push(contents_dir.join("Resources").join("cef"));
+    }
+    for root in roots {
+        for candidate in root_candidates(root) {
+            if cef_framework_binary(&candidate).is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn runtime_root_from_compiled_env() -> Option<PathBuf> {
+    let root = option_env!("PUFFER_DESKTOP_CEF_ROOT").map(PathBuf::from)?;
+    root_candidates(root)
+        .into_iter()
+        .find(|candidate| cef_framework_binary(candidate).is_file())
+}
+
+fn runtime_helper_from_env() -> Option<PathBuf> {
+    std::env::var_os("PUFFER_CEF_HELPER")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
 fn root_candidates(root: PathBuf) -> Vec<PathBuf> {
-    vec![root.clone(), root.join("Release_GN_arm64"), root.join("Release")]
+    vec![
+        root.clone(),
+        root.join("Release_GN_arm64"),
+        root.join("Release"),
+    ]
 }
 
 fn cef_framework_binary(root: &Path) -> PathBuf {
@@ -320,7 +398,12 @@ fn native_initialize(_runtime: &CefRuntime) -> Result<()> {
 }
 
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
-fn native_open(session_id: &str, ns_window: *mut c_void, url: &str, rect: CefBrowserRect) -> Result<()> {
+fn native_open(
+    session_id: &str,
+    ns_window: *mut c_void,
+    url: &str,
+    rect: CefBrowserRect,
+) -> Result<()> {
     let session_id = CString::new(session_id).context("encode CEF session id")?;
     let url = CString::new(url).context("encode CEF URL")?;
     let mut error = ErrorBuffer::new();
@@ -341,7 +424,12 @@ fn native_open(session_id: &str, ns_window: *mut c_void, url: &str, rect: CefBro
 }
 
 #[cfg(not(all(target_os = "macos", puffer_desktop_cef_native)))]
-fn native_open(_session_id: &str, _ns_window: *mut c_void, _url: &str, _rect: CefBrowserRect) -> Result<()> {
+fn native_open(
+    _session_id: &str,
+    _ns_window: *mut c_void,
+    _url: &str,
+    _rect: CefBrowserRect,
+) -> Result<()> {
     bail!("native CEF bridge was not compiled for this desktop build")
 }
 
@@ -394,7 +482,8 @@ fn native_navigate(_session_id: &str, _url: &str) -> Result<()> {
 fn native_reload(session_id: &str) -> Result<()> {
     let session_id = CString::new(session_id).context("encode CEF session id")?;
     let mut error = ErrorBuffer::new();
-    let ok = unsafe { ffi::puffer_cef_reload(session_id.as_ptr(), error.as_mut_ptr(), error.len()) };
+    let ok =
+        unsafe { ffi::puffer_cef_reload(session_id.as_ptr(), error.as_mut_ptr(), error.len()) };
     error.result(ok, "reload native CEF browser")
 }
 
@@ -493,5 +582,20 @@ impl ErrorBuffer {
             bail!("{context} failed");
         }
         bail!("{context}: {message}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_status_is_unavailable_before_setup_initialization() {
+        if CEF_INITIALIZATION.get().is_some() {
+            return;
+        }
+        let status = browser_cef_native_status();
+        assert_eq!(status["available"], serde_json::json!(false));
+        assert_eq!(status["active"], serde_json::json!(false));
     }
 }

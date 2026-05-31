@@ -425,6 +425,10 @@ pub fn run() {
         )
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            #[cfg(target_os = "macos")]
+            if let Err(err) = cef_host::warm_up_native() {
+                eprintln!("native CEF unavailable; using screencast fallback: {err}");
+            }
             if let Err(err) = app.global_shortcut().register(mini_shortcut) {
                 eprintln!(
                     "mini-window shortcut unavailable (continuing without it): {err}"

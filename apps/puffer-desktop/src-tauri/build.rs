@@ -207,9 +207,16 @@ fn collect_cef_wrapper_sources(dir: &Path, sources: &mut Vec<PathBuf>) {
 
 #[cfg(target_os = "macos")]
 fn ensure_dev_framework_link(runtime_root: &Path) {
-    let Some(target_dir) = cargo_target_dir() else {
+    let Some(target_dirs) = cargo_target_dirs() else {
         return;
     };
+    for target_dir in target_dirs {
+        ensure_dev_framework_link_at(runtime_root, &target_dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_dev_framework_link_at(runtime_root: &Path, target_dir: &Path) {
     let framework = runtime_root.join("Chromium Embedded Framework.framework");
     let frameworks_dir = target_dir.join("Frameworks");
     let link = frameworks_dir.join("Chromium Embedded Framework.framework");
@@ -265,7 +272,9 @@ fn ensure_symlink(source: &Path, link: &Path) {
 }
 
 #[cfg(target_os = "macos")]
-fn cargo_target_dir() -> Option<PathBuf> {
+fn cargo_target_dirs() -> Option<Vec<PathBuf>> {
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR")?);
-    out_dir.ancestors().nth(4).map(Path::to_path_buf)
+    let profile_dir = out_dir.ancestors().nth(3)?.to_path_buf();
+    let workspace_target_dir = profile_dir.parent()?.to_path_buf();
+    Some(vec![workspace_target_dir, profile_dir])
 }
