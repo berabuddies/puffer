@@ -11,6 +11,8 @@ CEF_RELEASE_TAG="${CEF_RELEASE_TAG:-$RELEASE_TAG}"
 GITHUB_REPO="${GITHUB_REPO:-berabuddies/puffer}"
 CHROMIUM_TINTIN_DIR="${CHROMIUM_TINTIN_DIR:-$HOME/chromium_tintin}"
 CHROMIUM_TINTIN_REPO="${CHROMIUM_TINTIN_REPO:-git@github.com:agentenv/chromium_tintin.git}"
+CEF_REPO="${CEF_REPO:-https://github.com/chromiumembedded/cef.git}"
+CEF_BRANCH="${CEF_BRANCH:-}"
 LINUX_HOST="${LINUX_HOST:-c@65.19.161.135}"
 LINUX_REPO_DIR="${LINUX_REPO_DIR:-/mnt/lvm_data/puffer}"
 LINUX_CHROMIUM_TINTIN_DIR="${LINUX_CHROMIUM_TINTIN_DIR:-/mnt/lvm_data/chromium_tintin}"
@@ -43,6 +45,8 @@ Common env:
   RELEASE_TAG=ct
   GITHUB_REPO=berabuddies/puffer
   CHROMIUM_TINTIN_DIR=$HOME/chromium_tintin
+  CEF_REPO=https://github.com/chromiumembedded/cef.git
+  CEF_BRANCH=<chromium-build-number>
   LINUX_HOST=c@65.19.161.135
   LINUX_REPO_DIR=/mnt/lvm_data/puffer
   LINUX_CHROMIUM_TINTIN_DIR=/mnt/lvm_data/chromium_tintin
@@ -358,6 +362,41 @@ ensure_chromium_checkout() {
   printf '%s\n' "$src"
 }
 
+cef_branch_for_chromium() {
+  local src="$1"
+  if [[ -n "$CEF_BRANCH" ]]; then
+    printf '%s\n' "$CEF_BRANCH"
+    return
+  fi
+  awk -F= '$1 == "BUILD" { print $2 }' "$src/chrome/VERSION"
+}
+
+ensure_cef_checkout() {
+  local src="$1"
+  local cef_dir="$src/cef"
+  local branch
+  branch="$(cef_branch_for_chromium "$src")"
+  [[ -n "$branch" ]] || fail "could not infer CEF branch from $src/chrome/VERSION"
+  require_command git
+
+  if [[ ! -d "$cef_dir/.git" ]]; then
+    log "cloning CEF branch $branch to $cef_dir"
+    git clone --branch "$branch" --single-branch "$CEF_REPO" "$cef_dir" >&2
+    return
+  fi
+
+  local current_branch=""
+  current_branch="$(git -C "$cef_dir" branch --show-current 2>/dev/null || true)"
+  if [[ "$current_branch" == "$branch" && -z "$(git -C "$cef_dir" status --porcelain)" ]]; then
+    log "pulling CEF checkout branch $branch"
+    git -C "$cef_dir" pull --ff-only >&2
+    return
+  fi
+
+  log "CEF checkout is detached, dirty, or on $current_branch; fetching branch $branch only"
+  git -C "$cef_dir" fetch origin "$branch" >&2 || true
+}
+
 autoninja_path() {
   if command -v autoninja >/dev/null 2>&1; then
     command -v autoninja
@@ -395,6 +434,7 @@ run_cef_build() {
     out_dir="$(default_cef_out_dir "$src")"
   fi
   ninja="$(autoninja_path)"
+  ensure_cef_checkout "$src"
   [[ -x "$src/cef/cef_create_projects.sh" ]] || fail "CEF project generator missing at $src/cef/cef_create_projects.sh"
   log "generating CEF projects"
   (cd "$src" && ./cef/cef_create_projects.sh >&2)
