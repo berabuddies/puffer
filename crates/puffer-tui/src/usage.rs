@@ -800,18 +800,7 @@ fn extra_usage_lines(
     let monthly_limit = extra_usage.monthly_limit?;
     let used_credits = extra_usage.used_credits?;
     let current = OffsetDateTime::now_utc().to_offset(local_offset());
-    let next_month = if current.month() == Month::December {
-        current
-            .replace_year(current.year() + 1)
-            .ok()?
-            .replace_month(Month::January)
-            .ok()?
-    } else {
-        current.replace_month(current.month().next()).ok()?
-    };
-    let reset = next_month
-        .replace_day(1)
-        .ok()?
+    let reset = next_extra_usage_reset(current)?
         .replace_hour(0)
         .ok()?
         .replace_minute(0)
@@ -831,6 +820,21 @@ fn extra_usage_lines(
         resets_at: reset_text,
     };
     limit_bar_lines("Extra usage", &limit, max_width, false, Some(extra_subtext))
+}
+
+fn next_extra_usage_reset(current: OffsetDateTime) -> Option<OffsetDateTime> {
+    let first_of_month = current.replace_day(1).ok()?;
+    if first_of_month.month() == Month::December {
+        first_of_month
+            .replace_year(first_of_month.year() + 1)
+            .ok()?
+            .replace_month(Month::January)
+            .ok()
+    } else {
+        first_of_month
+            .replace_month(first_of_month.month().next())
+            .ok()
+    }
 }
 
 fn bar_with_text(bar: Vec<Span<'static>>, used_text: &str) -> Vec<Span<'static>> {
@@ -965,35 +969,4 @@ fn month_name(month: Month) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scroll_methods_update_snapshot_offset() {
-        let overlay = UsageOverlay::unavailable_for_test();
-        overlay.scroll_down();
-        overlay.page_down();
-        overlay.scroll_up();
-        let snapshot = overlay.snapshot();
-        assert_eq!(snapshot.scroll, 10);
-    }
-
-    #[test]
-    fn unavailable_overlay_shows_expected_note() {
-        let overlay = UsageOverlay::unavailable_for_test();
-        let snapshot = overlay.snapshot();
-        let lines = body_lines(&snapshot.view, 60)
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>();
-        assert!(lines.contains(&"Usage".to_string()));
-        assert!(lines.contains(&"Select a provider to view usage.".to_string()));
-    }
-
-    #[test]
-    fn format_count_adds_grouping() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(1234), "1,234");
-        assert_eq!(format_count(9876543), "9,876,543");
-    }
-}
+mod tests;

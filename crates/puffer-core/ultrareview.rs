@@ -166,6 +166,7 @@ pub fn run_review_blocking(
     Ok(format!("{}\n{}", out.markdown, footer))
 }
 
+/// Runs the UltraReview planner, lane reviewers, aggregation, and final filter.
 pub async fn orchestrate_async(
     req: OrchestrateRequest,
     progress: &dyn Fn(String),
@@ -369,6 +370,7 @@ pub async fn orchestrate_async(
     })
 }
 
+/// Fetches a pull request diff through the GitHub CLI.
 pub fn fetch_diff_via_gh(pr_url: &str) -> Result<String> {
     fetch_diff_via_gh_in(Path::new("."), pr_url)
 }
@@ -389,6 +391,7 @@ fn fetch_diff_via_gh_in(cwd: &Path, pr_url: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Returns the default directory containing bundled UltraReview agent prompts.
 pub fn default_agents_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(root) = exe

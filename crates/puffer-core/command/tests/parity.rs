@@ -267,6 +267,10 @@ fn ask_user_question_tool_prompt_matches_claude_reference() {
     let expected = format!("{prompt}\n{preview}").replace(
         "- Users will always be able to select \"Other\" to provide custom text input\n- Use multiSelect: true to allow multiple answers to be selected for a question",
         "- Use `type: \"choice\"` or omit `type` when the user should select from options\n- Use `type: \"input\"` when the user should type a value such as a phone number, login code, password, host, URL, or sender list\n- Choice questions let users select \"Other\" to provide custom text input\n- Use `searchable: true` for single-select catalog questions where users should filter a longer option list\n- Input questions collect the typed answer directly\n- Use multiSelect: true to allow multiple answers to be selected for a question",
+    )
+    .replace(
+        "- Configuration examples\n\nPreview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported. When any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and preview on the right.",
+        "- Configuration examples\n- Markdown images, for example generated QR codes as `![label](data:image/svg+xml;base64,...)`\n\nPreview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported, and markdown image syntax is rendered as an image for safe image URLs (`data:image/*`, `https`, or `http`). Question text may also include markdown image syntax when the user must inspect an image before answering. When any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and preview on the right.",
     );
 
     assert_eq!(tool.description.trim_end(), expected.trim_end());

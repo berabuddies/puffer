@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const TMUX_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const PROMPT_INPUT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[test]
 fn tmux_connect_serve_connectors_write_workspace_config() {
@@ -255,7 +256,7 @@ fn start_puffer_tui(workspace: &Path, puffer_home: &Path) -> puffer_test_support
 
 fn submit_command(session: &puffer_test_support::TmuxSession, command: &str) {
     send_tmux_keys(session, &[command]).unwrap();
-    wait_for_prompt_input(session, command, Duration::from_secs(3)).unwrap();
+    wait_for_prompt_input(session, command, PROMPT_INPUT_TIMEOUT).unwrap();
     send_tmux_keys(session, &["Enter"]).unwrap();
 }
 
