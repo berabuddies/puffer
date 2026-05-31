@@ -454,10 +454,56 @@ run_cef_build() {
   if [[ -z "$out_dir" ]]; then
     out_dir="$(default_cef_out_dir "$src")"
   fi
+  ensure_cef_required_gn_args "$out_dir"
+  regenerate_cef_gn "$src" "$out_dir" "$depot_tools_path"
   ninja="$(autoninja_path)"
   log "building CEF target(s) ${CEF_BUILD_TARGETS:-cefsimple} in $out_dir"
   (cd "$src" && PATH="$depot_tools_path" "$ninja" -C "$out_dir" ${CEF_BUILD_TARGETS:-cefsimple} >&2)
   printf '%s\n' "$out_dir"
+}
+
+set_gn_arg() {
+  local args_file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { done = 0 }
+    $1 == key && $2 == "=" {
+      print key " = " value
+      done = 1
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print key " = " value
+      }
+    }
+  ' "$args_file" > "$tmp"
+  mv "$tmp" "$args_file"
+}
+
+ensure_cef_required_gn_args() {
+  local out_dir="$1"
+  [[ "$(asset_platform)" == "linux" ]] || return
+  local args_file="$out_dir/args.gn"
+  [[ -f "$args_file" ]] || return
+  set_gn_arg "$args_file" enable_widevine true
+  set_gn_arg "$args_file" clang_use_chrome_plugins false
+}
+
+regenerate_cef_gn() {
+  local src="$1"
+  local out_dir="$2"
+  local depot_tools_path="$3"
+  local rel_out="$out_dir"
+  case "$out_dir" in
+    "$src"/*) rel_out="${out_dir#"$src"/}" ;;
+  esac
+  log "regenerating GN files for CEF in $rel_out"
+  (cd "$src" && PATH="$depot_tools_path" gn gen "$rel_out" >&2)
 }
 
 cef_root_for_runtime() {
