@@ -61,6 +61,7 @@
   let query = $state("");
   let sourceFilter = $state<SourceFilter>("all");
   let statusFilter = $state("all");
+  let selectedTaskKey = $state<string | null>(null);
   let commandRunningFor = $state<string | null>(null);
   let ignoreMenuTaskId = $state<string | null>(null);
   let showTaskConfig = $state(false);
@@ -98,6 +99,7 @@
     ).sort()
   ]);
   let visibleTasks = $derived(filteredTasks());
+  let selectedTask = $derived(selectedTaskValue());
   let nonIgnoredCount = $derived(tasks.filter((task) => !taskIgnored(task)).length);
   let agentCount = $derived(tasks.filter((task) => task.source === "agent" && !taskIgnored(task)).length);
   let monitorCount = $derived(tasks.filter((task) => task.source === "monitor" && !taskIgnored(task)).length);
@@ -179,6 +181,16 @@
   $effect(() => {
     if (!statusOptions.includes(statusFilter)) {
       statusFilter = "all";
+    }
+  });
+
+  $effect(() => {
+    if (visibleTasks.length === 0) {
+      selectedTaskKey = null;
+      return;
+    }
+    if (selectedTaskKey && !visibleTasks.some((task) => taskKey(task) === selectedTaskKey)) {
+      selectedTaskKey = null;
     }
   });
 
@@ -301,6 +313,25 @@
         .toLowerCase();
       return searchTerms.every((term) => haystack.includes(term));
     });
+  }
+
+  function taskKey(task: WorkflowTask): string {
+    return `${task.task_scope ?? task.source}:${task.task_id}`;
+  }
+
+  function selectTask(task: WorkflowTask) {
+    selectedTaskKey = taskKey(task);
+    ignoreMenuTaskId = null;
+  }
+
+  function closeSelectedTask() {
+    selectedTaskKey = null;
+    ignoreMenuTaskId = null;
+  }
+
+  function selectedTaskValue(): WorkflowTask | null {
+    if (!selectedTaskKey) return null;
+    return visibleTasks.find((task) => taskKey(task) === selectedTaskKey) ?? null;
   }
 
   function canCreateMonitor(connection: WorkflowConnection): boolean {
@@ -895,92 +926,184 @@
     </div>
   {/if}
 
-  <div class="pf-tasks-list" aria-label="Task list">
-    {#if loading && tasks.length === 0}
-      <div class="pf-tasks-empty">Loading tasks...</div>
-    {:else if visibleTasks.length === 0}
-      <div class="pf-tasks-empty">
-        {tasks.length === 0 ? "No agent or monitor tasks yet." : sourceFilter === "ignored" ? "No ignored tasks." : "No tasks match the current filters."}
+  <div class="pf-tasks-workspace" data-inspector={selectedTask !== null}>
+    <section class="pf-tasks-list-panel">
+      <div class="pf-tasks-list-head">
+        <strong>{visibleTasks.length} shown</strong>
+        <span>{sourceFilter === "ignored" ? "ignored tasks" : statusFilter === "all" ? "latest first" : statusFilter}</span>
       </div>
-    {:else}
-      {#each visibleTasks as task ((task.task_scope ?? task.source) + ":" + task.task_id)}
-        <article class="pf-task-row" data-source={task.source} data-terminal={taskTerminal(task)}>
-          <div class="pf-task-row-main">
-            <div class="pf-task-row-title">
-              <span class="pf-task-source">{taskSourceLabel(task)}</span>
-              <strong>{task.subject || task.task_id}</strong>
-              <span class="pf-task-status" data-status={taskStatusValue(task)}>{taskStatusValue(task)}</span>
-            </div>
-            <p>{taskDescription(task)}</p>
-            <div class="pf-task-meta">
-              <code>{task.task_id}</code>
-              <span>{taskKindLabel(task)}</span>
-              <span>{taskOwnerLabel(task)}</span>
-              {#if taskScopeLabel(task)}
-                <span>{taskScopeLabel(task)}</span>
-              {/if}
-              <span>{taskWhen(task)}</span>
-            </div>
+      <div class="pf-tasks-list" aria-label="Task list">
+        {#if loading && tasks.length === 0}
+          <div class="pf-tasks-empty">Loading tasks...</div>
+        {:else if visibleTasks.length === 0}
+          <div class="pf-tasks-empty">
+            {tasks.length === 0 ? "No agent or monitor tasks yet." : sourceFilter === "ignored" ? "No ignored tasks." : "No tasks match the current filters."}
           </div>
-          <div class="pf-task-actions">
-            {#if task.actions?.length}
-              {#each (task.actions ?? []).slice(0, 2) as action (action.name)}
+        {:else}
+          {#each visibleTasks as task (taskKey(task))}
+            <article
+              class="pf-task-row"
+              data-source={task.source}
+              data-terminal={taskTerminal(task)}
+              data-selected={selectedTaskKey === taskKey(task)}
+            >
+              <button
+                type="button"
+                class="pf-task-row-main"
+                aria-pressed={selectedTaskKey === taskKey(task)}
+                onclick={() => selectTask(task)}
+              >
+                <span class="pf-task-row-title">
+                  <span class="pf-task-source">{taskSourceLabel(task)}</span>
+                  <strong>{task.subject || task.task_id}</strong>
+                  <span class="pf-task-status" data-status={taskStatusValue(task)}>{taskStatusValue(task)}</span>
+                </span>
+                <span class="pf-task-row-summary">{taskDescription(task)}</span>
+                <span class="pf-task-meta">
+                  <code>{task.task_id}</code>
+                  <span>{taskKindLabel(task)}</span>
+                  <span>{taskOwnerLabel(task)}</span>
+                  {#if taskScopeLabel(task)}
+                    <span>{taskScopeLabel(task)}</span>
+                  {/if}
+                  <span>{taskWhen(task)}</span>
+                </span>
+              </button>
+              <div class="pf-task-actions">
+                {#if task.actions?.length}
+                  {#each (task.actions ?? []).slice(0, 2) as action (action.name)}
+                    <button
+                      type="button"
+                      class="sc-btn"
+                      data-variant="outline"
+                      data-size="sm"
+                      disabled={commandRunningFor !== null}
+                      onclick={() => void runTaskAction(task, action)}
+                    >
+                      {action.name}
+                    </button>
+                  {/each}
+                {/if}
+                {#if task.source === "monitor" && !task.ignored}
+                  <div class="pf-task-ignore-menu">
+                    <button
+                      type="button"
+                      class="sc-btn pf-task-ignore"
+                      data-variant="ghost"
+                      data-size="sm"
+                      aria-haspopup={ignoreReasons(task).length > 0 ? "menu" : undefined}
+                      aria-expanded={ignoreMenuTaskId === task.task_id}
+                      disabled={commandRunningFor !== null}
+                      onclick={() => toggleIgnoreMenu(task)}
+                    >
+                      <Icon name="x" size={12} />Ignore
+                      {#if ignoreReasons(task).length > 0}
+                        <Icon name="chevD" size={12} />
+                      {/if}
+                    </button>
+                    {#if ignoreReasons(task).length > 0 && ignoreMenuTaskId === task.task_id}
+                      <div class="pf-task-ignore-options" role="menu" aria-label={`Ignore ${task.task_id}`}>
+                        <button type="button" role="menuitem" onclick={() => void ignoreTask(task)}>
+                          Ignore task
+                        </button>
+                        {#each ignoreReasons(task) as reason (reason)}
+                          <button type="button" role="menuitem" onclick={() => void ignoreTask(task, reason)}>
+                            {reason}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
                 <button
                   type="button"
                   class="sc-btn"
-                  data-variant="outline"
-                  data-size="sm"
-                  disabled={commandRunningFor !== null}
-                  onclick={() => void runTaskAction(task, action)}
-                >
-                  {action.name}
-                </button>
-              {/each}
-            {/if}
-            {#if task.source === "monitor" && !task.ignored}
-              <div class="pf-task-ignore-menu">
-                <button
-                  type="button"
-                  class="sc-btn pf-task-ignore"
                   data-variant="ghost"
                   data-size="sm"
-                  aria-haspopup={ignoreReasons(task).length > 0 ? "menu" : undefined}
-                  aria-expanded={ignoreMenuTaskId === task.task_id}
-                  disabled={commandRunningFor !== null}
-                  onclick={() => toggleIgnoreMenu(task)}
+                  disabled={commandRunningFor !== null || !onRunTaskCommand}
+                  onclick={() => void openTask(task)}
                 >
-                  <Icon name="x" size={12} />Ignore
-                  {#if ignoreReasons(task).length > 0}
-                    <Icon name="chevD" size={12} />
-                  {/if}
+                  <Icon name="external" size={12} />Open
                 </button>
-                {#if ignoreReasons(task).length > 0 && ignoreMenuTaskId === task.task_id}
-                  <div class="pf-task-ignore-options" role="menu" aria-label={`Ignore ${task.task_id}`}>
-                    <button type="button" role="menuitem" onclick={() => void ignoreTask(task)}>
-                      Ignore task
-                    </button>
-                    {#each ignoreReasons(task) as reason (reason)}
-                      <button type="button" role="menuitem" onclick={() => void ignoreTask(task, reason)}>
-                        {reason}
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
               </div>
-            {/if}
+            </article>
+          {/each}
+        {/if}
+      </div>
+    </section>
+
+    {#if selectedTask}
+      {@const detailTask = selectedTask}
+      <aside class="pf-task-detail" aria-label="Selected task">
+        <header class="pf-task-detail-head">
+          <div class="pf-task-detail-titlebar">
+            <div class="pf-task-detail-kicker">
+              <span class="pf-task-source">{taskSourceLabel(detailTask)}</span>
+              <span class="pf-task-status" data-status={taskStatusValue(detailTask)}>{taskStatusValue(detailTask)}</span>
+            </div>
             <button
               type="button"
               class="sc-btn"
               data-variant="ghost"
               data-size="sm"
-              disabled={commandRunningFor !== null || !onRunTaskCommand}
-              onclick={() => void openTask(task)}
+              aria-label="Close selected task"
+              onclick={closeSelectedTask}
             >
-              <Icon name="external" size={12} />Open
+              <Icon name="x" size={12} />
             </button>
           </div>
-        </article>
-      {/each}
+          <h2>{detailTask.subject || detailTask.task_id}</h2>
+          <p>{taskDescription(detailTask)}</p>
+        </header>
+
+        <section class="pf-task-detail-section">
+          <div class="pf-task-detail-section-head">
+            <strong>Context</strong>
+            <span>{taskWhen(detailTask)}</span>
+          </div>
+          <dl class="pf-task-detail-meta">
+            <div>
+              <dt>ID</dt>
+              <dd><code>{detailTask.task_id}</code></dd>
+            </div>
+            <div>
+              <dt>Owner</dt>
+              <dd>{taskOwnerLabel(detailTask)}</dd>
+            </div>
+            <div>
+              <dt>Kind</dt>
+              <dd>{taskKindLabel(detailTask)}</dd>
+            </div>
+            {#if taskScopeLabel(detailTask)}
+              <div>
+                <dt>Scope</dt>
+                <dd>{taskScopeLabel(detailTask)}</dd>
+              </div>
+            {/if}
+            {#if detailTask.monitor_memory_path}
+              <div>
+                <dt>Memory</dt>
+                <dd><code>{detailTask.monitor_memory_path}</code></dd>
+              </div>
+            {/if}
+          </dl>
+        </section>
+
+        {#if detailTask.ignored}
+          <section class="pf-task-detail-section">
+            <div class="pf-task-detail-section-head">
+              <strong>Ignore analysis</strong>
+              <span>{detailTask.ignore_analysis_status ?? (detailTask.ignore_analysis_started ? "running" : "not started")}</span>
+            </div>
+            {#if detailTask.ignore_reason}
+              <p class="pf-task-detail-copy">Reason: {detailTask.ignore_reason}</p>
+            {/if}
+            <p class="pf-task-detail-copy">{ignoreAnalysisText(detailTask)}</p>
+            <span class="pf-task-detail-usage">{tokenUsageLabel(detailTask.ignore_analysis_usage)}</span>
+          </section>
+        {/if}
+
+      </aside>
     {/if}
   </div>
 
