@@ -608,6 +608,7 @@ EOF
   patch_cef_toolbar_view_compatibility "$src"
   patch_cef_browser_view_compatibility "$src"
   patch_cef_tab_helpers_compatibility "$src"
+  patch_cef_browser_delegate_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
   patch_cef_chrome_lifecycle_compatibility "$src"
   patch_cef_content_main_compatibility "$src"
@@ -1892,6 +1893,149 @@ if "friend class CefBrowserPlatformDelegateAlloy;" not in text:
     text = text.replace(marker, marker + friend, 1)
 
 path.write_text(text, encoding="utf-8")
+PY
+}
+
+patch_cef_browser_delegate_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF browser delegate patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def patch_browser_header():
+    path = src / "chrome/browser/ui/browser.h"
+    if not path.exists():
+        return
+    text = read(path)
+    if '#include "cef/libcef/features/features.h"\n' not in text:
+        marker = '#include "build/build_config.h"\n'
+        if marker not in text:
+            raise SystemExit(
+                f"failed to patch Browser CEF feature include: marker not found in {path}"
+            )
+        text = text.replace(
+            marker, marker + '#include "cef/libcef/features/features.h"\n', 1
+        )
+    if '#include "cef/libcef/browser/chrome/browser_delegate.h"\n' not in text:
+        marker = '#if BUILDFLAG(IS_ANDROID)\n'
+        if marker not in text:
+            raise SystemExit(
+                f"failed to patch Browser CEF delegate include: marker not found in {path}"
+            )
+        include = """#if BUILDFLAG(ENABLE_CEF)
+#include "cef/libcef/browser/chrome/browser_delegate.h"
+#endif
+
+"""
+        text = text.replace(marker, include + marker, 1)
+    if "scoped_refptr<cef::BrowserDelegate::CreateParams> cef_params;" not in text:
+        marker = """    // Specifies the width for the uncollapsed Vertical Tab Strip.
+    std::optional<int> vertical_tab_strip_uncollapsed_width;
+
+   private:
+"""
+        addition = """    // Specifies the width for the uncollapsed Vertical Tab Strip.
+    std::optional<int> vertical_tab_strip_uncollapsed_width;
+
+#if BUILDFLAG(ENABLE_CEF)
+    // Opaque CEF-specific configuration. Will be propagated to new Browsers.
+    scoped_refptr<cef::BrowserDelegate::CreateParams> cef_params;
+
+    // Specify the Browser that is opening this popup.
+    // Currently only used with TYPE_PICTURE_IN_PICTURE and TYPE_DEVTOOLS.
+    raw_ptr<BrowserWindowInterface, DanglingUntriaged> opener = nullptr;
+#endif
+
+   private:
+"""
+        if marker not in text:
+            raise SystemExit(
+                f"failed to patch Browser CreateParams CEF fields: marker not found in {path}"
+            )
+        text = text.replace(marker, addition, 1)
+    if "cef::BrowserDelegate* cef_delegate() const" not in text:
+        marker = """  BrowserWindowFeatures* browser_window_features() const {
+    return features_.get();
+  }
+
+"""
+        addition = marker + """#if BUILDFLAG(ENABLE_CEF)
+  cef::BrowserDelegate* cef_delegate() const {
+    return cef_browser_delegate_.get();
+  }
+#endif
+
+"""
+        if marker not in text:
+            raise SystemExit(
+                f"failed to patch Browser CEF delegate accessor: marker not found in {path}"
+            )
+        text = text.replace(marker, addition, 1)
+    if "std::unique_ptr<cef::BrowserDelegate> cef_browser_delegate_;" not in text:
+        marker = "  std::unique_ptr<TabStripModelDelegate> const tab_strip_model_delegate_;\n"
+        addition = """#if BUILDFLAG(ENABLE_CEF)
+  std::unique_ptr<cef::BrowserDelegate> cef_browser_delegate_;
+#endif
+
+"""
+        if marker not in text:
+            raise SystemExit(
+                f"failed to patch Browser CEF delegate member: marker not found in {path}"
+            )
+        text = text.replace(marker, addition + marker, 1)
+    write(path, text)
+
+
+def patch_browser_source():
+    path = src / "chrome/browser/ui/browser.cc"
+    if not path.exists():
+        return
+    text = read(path)
+    if "cef::BrowserDelegate::Create(this, params.cef_params, params.opener)" in text:
+        return
+    marker = """      type_(params.type),
+      profile_(params.profile),
+      window_(nullptr),
+      tab_strip_model_delegate_(
+"""
+    addition = """      type_(params.type),
+      profile_(params.profile),
+      window_(nullptr),
+#if BUILDFLAG(ENABLE_CEF)
+      cef_browser_delegate_(
+          cef::BrowserDelegate::Create(this, params.cef_params, params.opener)),
+#endif
+      tab_strip_model_delegate_(
+"""
+    if marker not in text:
+        raise SystemExit(
+            f"failed to patch Browser CEF delegate construction: marker not found in {path}"
+        )
+    write(path, text.replace(marker, addition, 1))
+
+
+patch_browser_header()
+patch_browser_source()
 PY
 }
 
