@@ -609,6 +609,7 @@ EOF
   patch_cef_browser_view_compatibility "$src"
   patch_cef_tab_helpers_compatibility "$src"
   patch_cef_browser_delegate_compatibility "$src"
+  patch_cef_touch_selection_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
   patch_cef_chrome_lifecycle_compatibility "$src"
   patch_cef_content_main_compatibility "$src"
@@ -2037,6 +2038,23 @@ def patch_browser_source():
 patch_browser_header()
 patch_browser_source()
 PY
+}
+
+patch_cef_touch_selection_compatibility() {
+  local src="$1"
+  local touch_controller_h="$src/ui/touch_selection/touch_selection_controller.h"
+  local cef_touch_cc="$src/cef/libcef/browser/osr/touch_selection_controller_client_osr.cc"
+
+  if [[ -f "$touch_controller_h" && -f "$cef_touch_cc" ]] &&
+    grep -Fq 'ActiveStatus::kInactive' "$cef_touch_cc" &&
+    ! grep -Fq 'kInactive' "$touch_controller_h" &&
+    grep -Fq 'INACTIVE,' "$touch_controller_h"; then
+    log "patching CEF touch selection active status for current Chromium"
+    perl -0pi -e 's#ui::TouchSelectionController::ActiveStatus::kInactive#ui::TouchSelectionController::ActiveStatus::INACTIVE#g' "$cef_touch_cc"
+    if grep -Fq 'ActiveStatus::kInactive' "$cef_touch_cc"; then
+      fail "failed to patch CEF touch selection active status compatibility"
+    fi
+  fi
 }
 
 patch_cef_context_menu_compatibility() {
