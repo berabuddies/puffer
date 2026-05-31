@@ -268,6 +268,15 @@ ensure_cef_runtime_for_tauri() {
   printf '%s\n' "$runtime"
 }
 
+stage_tauri_cef_runtime() {
+  local runtime="$1"
+  local link="$TAURI_DIR/target/puffer-cef-runtime"
+  mkdir -p "$(dirname "$link")"
+  rm -rf "$link"
+  ln -s "$runtime" "$link"
+  printf '%s\n' "$link"
+}
+
 ensure_node_deps() {
   if [[ -d "$APP_DIR/node_modules" ]]; then
     return
@@ -291,9 +300,11 @@ build_tauri() {
   case "$platform" in
     macos)
       local cef_runtime
+      local staged_runtime
       cef_runtime="$(ensure_cef_runtime_for_tauri)"
+      staged_runtime="$(stage_tauri_cef_runtime "$cef_runtime")"
       log "building macOS Tauri app with CEF runtime $cef_runtime"
-      (cd "$APP_DIR" && PUFFER_CEF_PATH="$cef_runtime" npm run tauri -- build --bundles app)
+      (cd "$APP_DIR" && PUFFER_CEF_PATH="$staged_runtime" PUFFER_CEF_ROOT="$staged_runtime" npm run tauri -- build --bundles app)
       ;;
     linux)
       log "building Linux Tauri app"
@@ -395,8 +406,13 @@ run_cef_build() {
 cef_root_for_runtime() {
   local runtime="$1"
   local current="$runtime"
+  local packaged_root
   while [[ "$current" != "/" ]]; do
     if [[ -f "$current/cef/include/cef_app.h" && -d "$current/cef/libcef_dll" ]]; then
+      if packaged_root="$(packaged_cef_root_for_src "$current")"; then
+        printf '%s\n' "$packaged_root"
+        return 0
+      fi
       printf '%s\n' "$current/cef"
       return 0
     fi
@@ -406,6 +422,21 @@ cef_root_for_runtime() {
     fi
     current="$(dirname "$current")"
   done
+  return 1
+}
+
+packaged_cef_root_for_src() {
+  local src_root="$1"
+  local output_dir
+  output_dir="$(dirname "$src_root")/output"
+  [[ -d "$output_dir" ]] || return 1
+  local path
+  while IFS= read -r path; do
+    if [[ -f "$path/include/cef_config.h" && -d "$path/libcef_dll" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done < <(find "$output_dir" -maxdepth 1 -type d -name 'cef_binary_*' | sort)
   return 1
 }
 

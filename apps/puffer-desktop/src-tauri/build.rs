@@ -9,6 +9,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn build_macos_cef_bridge() {
+    emit_cef_rerun_hints();
     let Some(paths) = CefBuildPaths::discover() else {
         return;
     };
@@ -22,9 +23,6 @@ fn build_macos_cef_bridge() {
         paths.helper_executable.display()
     );
     println!("cargo:rerun-if-changed=src/cef_host_mac.mm");
-    println!("cargo:rerun-if-env-changed=PUFFER_CEF_PATH");
-    println!("cargo:rerun-if-env-changed=PUFFER_CEF_ROOT");
-    println!("cargo:rerun-if-env-changed=CEF_PATH");
 
     ensure_dev_framework_link(&paths.runtime_root);
     ensure_helper_library_links(&paths.runtime_root, &paths.helper_executable);
@@ -55,6 +53,14 @@ fn build_macos_cef_bridge() {
 }
 
 #[cfg(target_os = "macos")]
+fn emit_cef_rerun_hints() {
+    println!("cargo:rerun-if-env-changed=PUFFER_CEF_PATH");
+    println!("cargo:rerun-if-env-changed=PUFFER_CEF_ROOT");
+    println!("cargo:rerun-if-env-changed=CEF_PATH");
+    println!("cargo:rerun-if-changed=target/puffer-cef-runtime");
+}
+
+#[cfg(target_os = "macos")]
 struct CefBuildPaths {
     cef_root: PathBuf,
     runtime_root: PathBuf,
@@ -73,13 +79,14 @@ impl CefBuildPaths {
     }
 
     fn from_runtime_root(root: &Path) -> Option<Self> {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let framework_binary = root
             .join("Chromium Embedded Framework.framework")
             .join("Chromium Embedded Framework");
         if !framework_binary.is_file() {
             return None;
         }
-        let src_root = chromium_src_root(root)?;
+        let src_root = chromium_src_root(&root)?;
         let cef_root = packaged_cef_root(&src_root).unwrap_or_else(|| src_root.join("cef"));
         let helper_executable = root.join("cefsimple Helper.app/Contents/MacOS/cefsimple Helper");
         if cef_root.join("include/cef_app.h").is_file()
@@ -106,6 +113,10 @@ fn candidate_roots() -> Vec<PathBuf> {
         if let Some(path) = std::env::var_os(key) {
             add_root_candidates(&mut roots, PathBuf::from(path));
         }
+    }
+    if let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR") {
+        let root = PathBuf::from(manifest_dir).join("target/puffer-cef-runtime");
+        add_root_candidates(&mut roots, root);
     }
     if let Some(home) = std::env::var_os("HOME") {
         let root = PathBuf::from(home).join("chromium_tintin/src/out/Release_GN_arm64");
