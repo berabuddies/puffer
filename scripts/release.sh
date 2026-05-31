@@ -552,6 +552,19 @@ EOF
     fi
   fi
 
+  local cef_thread_impl="$src/cef/libcef/common/thread_impl.cc"
+  local platform_thread_h="$src/base/threading/platform_thread.h"
+  if [[ -f "$cef_thread_impl" && -f "$platform_thread_h" ]] &&
+    grep -Fq 'base::ThreadType::kPresentation' "$cef_thread_impl" &&
+    ! grep -Fq 'kPresentation' "$platform_thread_h" &&
+    grep -Fq 'kDisplayCritical' "$platform_thread_h"; then
+    log "patching CEF thread priority for current Chromium ThreadType"
+    perl -0pi -e 's#base::ThreadType::kPresentation#base::ThreadType::kDisplayCritical#g' "$cef_thread_impl"
+    if grep -Fq 'base::ThreadType::kPresentation' "$cef_thread_impl"; then
+      fail "failed to patch CEF ThreadType compatibility"
+    fi
+  fi
+
   local content_client_h="$src/content/public/browser/content_browser_client.h"
   local create_window_hook='virtual void CreateWindowResult(RenderFrameHost* opener, bool success)'
 
