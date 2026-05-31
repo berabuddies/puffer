@@ -429,7 +429,7 @@ default_cef_out_dir() {
     macos) printf '%s/out/Release_GN_arm64\n' "$src" ;;
     linux)
       local candidate
-      for candidate in "$src/out/Linux" "$src/out/LinuxNoOzone" "$src/out/Release" "$src/out/Release_GN_x64"; do
+      for candidate in "$src/out/Linux" "$src/out/LinuxNoOzone" "$src/out/Release_GN_x64" "$src/out/Release"; do
         if [[ -d "$candidate" ]]; then
           printf '%s\n' "$candidate"
           return
@@ -445,15 +445,15 @@ run_cef_build() {
   local src="$1"
   local out_dir="${CEF_OUT_DIR:-}"
   local ninja
-  if [[ -z "$out_dir" ]]; then
-    out_dir="$(default_cef_out_dir "$src")"
-  fi
   ensure_depot_tools_bootstrapped "$src"
-  ninja="$(autoninja_path)"
   ensure_cef_checkout "$src"
   [[ -x "$src/cef/cef_create_projects.sh" ]] || fail "CEF project generator missing at $src/cef/cef_create_projects.sh"
   log "generating CEF projects"
-  (cd "$src" && ./cef/cef_create_projects.sh >&2)
+  (cd "$src/cef" && ./cef_create_projects.sh >&2)
+  if [[ -z "$out_dir" ]]; then
+    out_dir="$(default_cef_out_dir "$src")"
+  fi
+  ninja="$(autoninja_path)"
   log "building CEF target(s) ${CEF_BUILD_TARGETS:-cefsimple} in $out_dir"
   (cd "$src" && "$ninja" -C "$out_dir" ${CEF_BUILD_TARGETS:-cefsimple} >&2)
   printf '%s\n' "$out_dir"
