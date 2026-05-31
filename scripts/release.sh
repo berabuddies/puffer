@@ -568,11 +568,17 @@ EOF
   local chrome_main_delegate_h="$src/chrome/app/chrome_main_delegate.h"
   local chrome_main_delegate_cc="$src/chrome/app/chrome_main_delegate.cc"
   if [[ -f "$chrome_main_delegate_h" ]] &&
+    ! grep -Fq 'ui/base/resource/resource_bundle.h' "$chrome_main_delegate_h"; then
+    log "patching ChromeMainDelegate resource bundle header include for CEF"
+    perl -0pi -e 's@(#include "content/public/app/content_main_delegate.h"\n)@$1#include "ui/base/resource/resource_bundle.h"\n@' "$chrome_main_delegate_h"
+    if ! grep -Fq 'ui/base/resource/resource_bundle.h' "$chrome_main_delegate_h"; then
+      fail "failed to patch ChromeMainDelegate resource bundle header include"
+    fi
+  fi
+
+  if [[ -f "$chrome_main_delegate_h" ]] &&
     ! grep -Fq 'GetResourceBundleDelegate()' "$chrome_main_delegate_h"; then
     log "patching ChromeMainDelegate resource bundle delegate hook for CEF"
-    if ! grep -Fq 'ui/base/resource/resource_bundle.h' "$chrome_main_delegate_h"; then
-      perl -0pi -e 's#(#include "content/public/app/content_main_delegate.h"\n)#${1}#include "ui/base/resource/resource_bundle.h"\n#' "$chrome_main_delegate_h"
-    fi
     perl -0pi -e 's#(  bool IsInitFeatureListEarly\(\) override;\n)#${1}\n  virtual ui::ResourceBundle::Delegate* GetResourceBundleDelegate() {\n    return nullptr;\n  }\n#' "$chrome_main_delegate_h"
     if ! grep -Fq 'GetResourceBundleDelegate()' "$chrome_main_delegate_h"; then
       fail "failed to patch ChromeMainDelegate resource bundle delegate hook"
