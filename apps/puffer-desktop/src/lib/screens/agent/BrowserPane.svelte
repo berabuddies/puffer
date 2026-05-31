@@ -1019,7 +1019,7 @@
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 
-  async function submitUrl(event: SubmitEvent) {
+  async function submitUrl(event: Event) {
     event.preventDefault();
     const requestedTab = activeTab;
     if (!activeTabId || !requestedTab) return;
@@ -1661,7 +1661,21 @@
       disabled={!browserAddressEnabled}
       bind:this={addressInput}
       bind:value={urlDraft}
+      onkeydown={(event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        event.stopPropagation();
+        void submitUrl(event);
+      }}
     />
+    <button
+      class="pf-browser-icon"
+      type="submit"
+      title="Go"
+      disabled={!browserAddressEnabled}
+    >
+      <Icon name="arrow" size={14} />
+    </button>
     <button
       class="pf-browser-icon"
       class:active={showDevtools}
