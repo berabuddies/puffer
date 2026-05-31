@@ -599,6 +599,21 @@ EOF
 
   patch_cef_context_menu_compatibility "$src"
 
+  local setting_helper_cc="$src/cef/libcef/browser/setting_helper.cc"
+  local content_settings_types="$src/components/content_settings/core/common/content_settings_types.mojom"
+  if [[ -f "$setting_helper_cc" && -f "$content_settings_types" ]] &&
+    grep -Fq 'TO_CEF_TYPE(PERSISTENT_STORAGE);' "$setting_helper_cc" &&
+    ! grep -Fq 'PERSISTENT_STORAGE' "$content_settings_types" &&
+    grep -Fq 'DURABLE_STORAGE' "$content_settings_types"; then
+    log "patching CEF persistent storage content setting for current Chromium"
+    perl -0pi -e 's#    TO_CEF_TYPE\(PERSISTENT_STORAGE\);#    case ContentSettingsType::DURABLE_STORAGE:\n      return CEF_CONTENT_SETTING_TYPE_PERSISTENT_STORAGE;#' "$setting_helper_cc"
+    perl -0pi -e 's#    FROM_CEF_TYPE\(PERSISTENT_STORAGE\);#    case CEF_CONTENT_SETTING_TYPE_PERSISTENT_STORAGE:\n      return ContentSettingsType::DURABLE_STORAGE;#' "$setting_helper_cc"
+    if grep -Fq 'TO_CEF_TYPE(PERSISTENT_STORAGE);' "$setting_helper_cc" ||
+      grep -Fq 'FROM_CEF_TYPE(PERSISTENT_STORAGE);' "$setting_helper_cc"; then
+      fail "failed to patch CEF persistent storage content setting compatibility"
+    fi
+  fi
+
   local content_client_h="$src/content/public/browser/content_browser_client.h"
   local create_window_hook='virtual void CreateWindowResult(RenderFrameHost* opener, bool success)'
 
