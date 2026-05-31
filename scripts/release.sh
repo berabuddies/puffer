@@ -445,17 +445,18 @@ run_cef_build() {
   local src="$1"
   local out_dir="${CEF_OUT_DIR:-}"
   local ninja
+  local depot_tools_path="$src/third_party/depot_tools:$PATH"
   ensure_depot_tools_bootstrapped "$src"
   ensure_cef_checkout "$src"
   [[ -x "$src/cef/cef_create_projects.sh" ]] || fail "CEF project generator missing at $src/cef/cef_create_projects.sh"
   log "generating CEF projects"
-  (cd "$src/cef" && ./cef_create_projects.sh >&2)
+  (cd "$src/cef" && PATH="$depot_tools_path" ./cef_create_projects.sh >&2)
   if [[ -z "$out_dir" ]]; then
     out_dir="$(default_cef_out_dir "$src")"
   fi
   ninja="$(autoninja_path)"
   log "building CEF target(s) ${CEF_BUILD_TARGETS:-cefsimple} in $out_dir"
-  (cd "$src" && "$ninja" -C "$out_dir" ${CEF_BUILD_TARGETS:-cefsimple} >&2)
+  (cd "$src" && PATH="$depot_tools_path" "$ninja" -C "$out_dir" ${CEF_BUILD_TARGETS:-cefsimple} >&2)
   printf '%s\n' "$out_dir"
 }
 
