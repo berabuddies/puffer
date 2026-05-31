@@ -548,6 +548,43 @@ EOF
       fail "failed to patch CEF CreateWindowResult compatibility"
     fi
   fi
+
+  local content_client_cc="$src/content/public/browser/content_browser_client.cc"
+  if [[ -f "$content_client_h" ]] && grep -Fq 'virtual void ConfigureNetworkContextParams(' "$content_client_h"; then
+    log "patching CEF ConfigureNetworkContextParams base return type"
+    perl -0pi -e 's#virtual void ConfigureNetworkContextParams\(#virtual bool ConfigureNetworkContextParams\(#' "$content_client_h"
+  fi
+  if [[ -f "$content_client_cc" ]] && grep -Fq 'void ContentBrowserClient::ConfigureNetworkContextParams(' "$content_client_cc"; then
+    perl -0pi -e 's#void ContentBrowserClient::ConfigureNetworkContextParams\(#bool ContentBrowserClient::ConfigureNetworkContextParams\(#; s#(  network_context_params->accept_language = "en-us,en";\n)(?!  return true;\n)#${1}  return true;\n#' "$content_client_cc"
+  fi
+
+  local chrome_client_h="$src/chrome/browser/chrome_content_browser_client.h"
+  local chrome_client_cc="$src/chrome/browser/chrome_content_browser_client.cc"
+  if [[ -f "$chrome_client_h" ]] && grep -Fq 'void ConfigureNetworkContextParams(' "$chrome_client_h"; then
+    log "patching CEF ConfigureNetworkContextParams Chrome return type"
+    perl -0pi -e 's#void ConfigureNetworkContextParams\(#bool ConfigureNetworkContextParams\(#' "$chrome_client_h"
+  fi
+  if [[ -f "$chrome_client_cc" ]] && grep -Fq 'void ChromeContentBrowserClient::ConfigureNetworkContextParams(' "$chrome_client_cc"; then
+    perl -0pi -e 's#void ChromeContentBrowserClient::ConfigureNetworkContextParams\(#bool ChromeContentBrowserClient::ConfigureNetworkContextParams\(#; s#(    network_context_params->accept_language = GetApplicationLocale\(\);\n  \}\n)(?!\n  return true;\n)#${1}\n  return true;\n#' "$chrome_client_cc"
+  fi
+
+  local shell_client_h="$src/content/shell/browser/shell_content_browser_client.h"
+  local shell_client_cc="$src/content/shell/browser/shell_content_browser_client.cc"
+  if [[ -f "$shell_client_h" ]] && grep -Fq 'void ConfigureNetworkContextParams(' "$shell_client_h"; then
+    perl -0pi -e 's#void ConfigureNetworkContextParams\(#bool ConfigureNetworkContextParams\(#' "$shell_client_h"
+  fi
+  if [[ -f "$shell_client_cc" ]] && grep -Fq 'void ShellContentBrowserClient::ConfigureNetworkContextParams(' "$shell_client_cc"; then
+    perl -0pi -e 's#void ShellContentBrowserClient::ConfigureNetworkContextParams\(#bool ShellContentBrowserClient::ConfigureNetworkContextParams\(#; s#(  ConfigureNetworkContextParamsForShell\(context, network_context_params,\n                                        cert_verifier_creation_params\);\n)(?!  return true;\n)#${1}  return true;\n#' "$shell_client_cc"
+  fi
+
+  local headless_client_h="$src/headless/lib/browser/headless_content_browser_client.h"
+  local headless_client_cc="$src/headless/lib/browser/headless_content_browser_client.cc"
+  if [[ -f "$headless_client_h" ]] && grep -Fq 'void ConfigureNetworkContextParams(' "$headless_client_h"; then
+    perl -0pi -e 's#void ConfigureNetworkContextParams\(#bool ConfigureNetworkContextParams\(#' "$headless_client_h"
+  fi
+  if [[ -f "$headless_client_cc" ]] && grep -Fq 'void HeadlessContentBrowserClient::ConfigureNetworkContextParams(' "$headless_client_cc"; then
+    perl -0pi -e 's#void HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#bool HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#; s#(      cert_verifier_creation_params\);\n)(?!  return true;\n)#${1}  return true;\n#' "$headless_client_cc"
+  fi
 }
 
 cef_root_for_runtime() {
