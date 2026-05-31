@@ -600,6 +600,7 @@ EOF
   patch_cef_context_menu_compatibility "$src"
   patch_cef_browser_widget_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
+  patch_cef_chrome_lifecycle_compatibility "$src"
 
   local setting_helper_cc="$src/cef/libcef/browser/setting_helper.cc"
   local content_settings_types="$src/components/content_settings/core/common/content_settings_types.mojom"
@@ -663,6 +664,232 @@ EOF
   if [[ -f "$headless_client_cc" ]] && grep -Fq 'void HeadlessContentBrowserClient::ConfigureNetworkContextParams(' "$headless_client_cc"; then
     perl -0pi -e 's#void HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#bool HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#; s#(      cert_verifier_creation_params\);\n)(?!  return true;\n)#${1}  return true;\n#' "$headless_client_cc"
   fi
+}
+
+patch_cef_chrome_lifecycle_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF Chrome lifecycle patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def insert_after(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, marker + addition, 1))
+
+
+def insert_before(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, addition + marker, 1))
+
+
+def replace_once(path, old, new, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if old not in text:
+        return
+    write(path, text.replace(old, new, 1))
+
+
+chrome_client_h = "chrome/browser/chrome_content_browser_client.h"
+insert_after(
+    chrome_client_h,
+    "  ~ChromeContentBrowserClient() override;\n",
+    "\n  virtual void CleanupOnUIThread();\n",
+    "virtual void CleanupOnUIThread();",
+    "ChromeContentBrowserClient CEF cleanup hook declaration",
+)
+
+chrome_client_cc = "chrome/browser/chrome_content_browser_client.cc"
+insert_after(
+    chrome_client_cc,
+    """ChromeContentBrowserClient::~ChromeContentBrowserClient() {
+  // std::vector<> does not guarantee any specific destruction order, so
+  // explicitly destroy elements in the reverse order per header comment.
+  while (!extra_parts_.empty()) {
+    extra_parts_.pop_back();
+  }
+}
+""",
+    """
+void ChromeContentBrowserClient::CleanupOnUIThread() {
+  keepalive_timer_.Stop();
+}
+""",
+    "ChromeContentBrowserClient::CleanupOnUIThread()",
+    "ChromeContentBrowserClient CEF cleanup hook definition",
+)
+
+content_client_h = "content/public/browser/content_browser_client.h"
+insert_after(
+    content_client_h,
+    """  virtual bool HandleExternalProtocol(
+      const GURL& url,
+      base::RepeatingCallback<WebContents*()> web_contents_getter,
+      FrameTreeNodeId frame_tree_node_id,
+      NavigationUIData* navigation_data,
+      bool is_primary_main_frame,
+      bool is_in_fenced_frame_tree,
+      network::mojom::WebSandboxFlags sandbox_flags,
+      ui::PageTransition page_transition,
+      bool has_user_gesture,
+      const std::optional<url::Origin>& initiating_origin,
+      RenderFrameHost* initiator_document,
+      const net::IsolationInfo& isolation_info,
+      mojo::PendingRemote<network::mojom::URLLoaderFactory>* out_factory);
+""",
+    """
+  // Same as above, but exposes the whole request for embedders that need to
+  // proxy or inspect external protocol navigations before Chrome handles them.
+  virtual bool HandleExternalProtocol(
+      base::RepeatingCallback<WebContents*()> web_contents_getter,
+      FrameTreeNodeId frame_tree_node_id,
+      NavigationUIData* navigation_data,
+      bool is_primary_main_frame,
+      bool is_in_fenced_frame_tree,
+      network::mojom::WebSandboxFlags sandbox_flags,
+      const network::ResourceRequest& request,
+      const std::optional<url::Origin>& initiating_origin,
+      RenderFrameHost* initiator_document,
+      const net::IsolationInfo& isolation_info,
+      mojo::PendingRemote<network::mojom::URLLoaderFactory>* out_factory) {
+    return false;
+  }
+""",
+    "Same as above, but exposes the whole request",
+    "ContentBrowserClient CEF external-protocol overload",
+)
+
+nav_loader = "content/browser/loader/navigation_url_loader_impl.cc"
+replace_once(
+    nav_loader,
+    "      resource_request.url, std::move(web_contents_getter),\n",
+    "      resource_request.url, web_contents_getter,\n",
+    "NavigationURLLoaderImpl reusable WebContents getter",
+)
+insert_after(
+    nav_loader,
+    """      request_info.isolation_info, &terminal_external_protocol);
+""",
+    """
+  if (!handled) {
+    handled = GetContentClient()->browser()->HandleExternalProtocol(
+        web_contents_getter, frame_tree_node->frame_tree_node_id(),
+        navigation_ui_data, request_info.is_primary_main_frame,
+        frame_tree_node->IsInFencedFrameTree(), request_info.sandbox_flags,
+        resource_request, initiating_origin,
+        request_info.initiator_document_token
+            ? RenderFrameHostImpl::FromDocumentToken(
+                  request_info.initiator_process_id,
+                  *request_info.initiator_document_token)
+            : nullptr,
+        request_info.isolation_info, &terminal_external_protocol);
+  }
+""",
+    "resource_request, initiating_origin",
+    "NavigationURLLoaderImpl CEF external-protocol request hook",
+)
+
+content_renderer_h = "content/public/renderer/content_renderer_client.h"
+insert_after(
+    content_renderer_h,
+    "  virtual void RenderThreadStarted() {}\n",
+    "\n  // Notifies that the RenderThread can now send sync IPC messages.\n"
+    "  virtual void RenderThreadConnected() {}\n",
+    "RenderThreadConnected()",
+    "ContentRendererClient render-thread-connected hook",
+)
+insert_before(
+    content_renderer_h,
+    "  // Allows subclasses to enable some runtime features before Blink has\n",
+    "  // Notifies that a DevTools agent has attached or detached.\n"
+    "  virtual void DevToolsAgentAttached() {}\n"
+    "  virtual void DevToolsAgentDetached() {}\n\n",
+    "DevToolsAgentAttached()",
+    "ContentRendererClient DevTools lifecycle hooks",
+)
+
+render_thread_impl = "content/renderer/render_thread_impl.cc"
+insert_after(
+    render_thread_impl,
+    """  url_loader_throttle_provider_ =
+      GetContentClient()->renderer()->CreateURLLoaderThrottleProvider(
+          blink::URLLoaderThrottleProviderType::kFrame);
+""",
+    "  GetContentClient()->renderer()->RenderThreadConnected();\n",
+    "RenderThreadConnected();",
+    "RenderThreadImpl CEF connected notification",
+)
+
+blink_platform_h = "content/renderer/renderer_blink_platform_impl.h"
+insert_after(
+    blink_platform_h,
+    "  void OnV8HeapLastResortGC() override;\n",
+    "\n  void DevToolsAgentAttached() override;\n"
+    "  void DevToolsAgentDetached() override;\n",
+    "void DevToolsAgentAttached() override;",
+    "RendererBlinkPlatformImpl DevTools hook declarations",
+)
+
+blink_platform_cc = "content/renderer/renderer_blink_platform_impl.cc"
+insert_after(
+    blink_platform_cc,
+    """blink::mojom::PerformanceTier
+RendererBlinkPlatformImpl::GetCpuPerformanceTier() {
+  if (auto* render_thread = RenderThreadImpl::current()) {
+    return render_thread->GetCpuPerformanceTier();
+  }
+  return blink::mojom::PerformanceTier::kUnknown;
+}
+""",
+    """
+void RendererBlinkPlatformImpl::DevToolsAgentAttached() {
+  GetContentClient()->renderer()->DevToolsAgentAttached();
+}
+
+void RendererBlinkPlatformImpl::DevToolsAgentDetached() {
+  GetContentClient()->renderer()->DevToolsAgentDetached();
+}
+""",
+    "RendererBlinkPlatformImpl::DevToolsAgentAttached()",
+    "RendererBlinkPlatformImpl DevTools hook definitions",
+)
+PY
 }
 
 patch_cef_permission_prompt_compatibility() {
