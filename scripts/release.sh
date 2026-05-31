@@ -415,7 +415,7 @@ ensure_depot_tools_bootstrapped() {
   local src="$1"
   local depot_tools="$src/third_party/depot_tools"
   [[ -x "$depot_tools/autoninja" ]] || return
-  if [[ -x "$depot_tools/python-bin/python3" ]]; then
+  if [[ -x "$depot_tools/python-bin/python3" && -f "$depot_tools/python3_bin_reldir.txt" ]]; then
     return
   fi
   [[ -x "$depot_tools/ensure_bootstrap" ]] || return
