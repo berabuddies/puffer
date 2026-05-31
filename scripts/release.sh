@@ -493,6 +493,7 @@ ensure_cef_required_gn_args() {
   [[ -f "$args_file" ]] || return
   set_gn_arg "$args_file" enable_widevine true
   set_gn_arg "$args_file" clang_use_chrome_plugins false
+  set_gn_arg "$args_file" blink_heap_inside_shared_library true
 }
 
 regenerate_cef_gn() {
