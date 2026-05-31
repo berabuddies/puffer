@@ -231,6 +231,30 @@ pub(crate) struct SettingsSnapshotDto {
     pub sessions: SettingsSessionSummaryDto,
     pub auth: Vec<AuthProviderStatusDto>,
     pub providers: Vec<ProviderSummaryDto>,
+    pub secrets: SecretsSettingsDto,
+}
+
+/// Describes the encrypted secret store status for the settings page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretsSettingsDto {
+    pub store_file: String,
+    pub key_source: String,
+    pub chrome_import_supported: bool,
+    pub items: Vec<SecretSummaryDto>,
+}
+
+/// Describes non-secret metadata for one saved secret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretSummaryDto {
+    pub id: String,
+    pub label: String,
+    pub username: Option<String>,
+    pub origin: Option<String>,
+    pub source: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
 }
 
 /// Describes the effective loaded Puffer config values.

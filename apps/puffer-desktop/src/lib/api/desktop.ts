@@ -16,6 +16,8 @@ import type {
   RemoteOperation,
   RepoActionResult,
   RepoStatus,
+  ChromeSecretsImportResult,
+  SaveSecretInput,
   SaveProxySettingsInput,
   SessionDetail,
   SessionGroupsPage,
@@ -248,6 +250,7 @@ type BackendSettingsSessionSummary = SettingsSnapshot["sessions"];
 type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
 type BackendNetworkProxySettings = SettingsSnapshot["networkProxy"];
+type BackendSecretsSettings = SettingsSnapshot["secrets"];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -261,7 +264,10 @@ type BackendSettingsSnapshot = {
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
   networkProxy: BackendNetworkProxySettings;
+  secrets: BackendSecretsSettings;
 };
+
+type BackendChromeSecretsImportResult = ChromeSecretsImportResult;
 
 type BackendRemoteOperation = RemoteOperation;
 
@@ -832,6 +838,51 @@ export async function saveProxySettings(
 ): Promise<SettingsSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<BackendSettingsSnapshot>("save_proxy_settings", input);
+}
+
+export async function saveSecret(input: SaveSecretInput): Promise<SettingsSnapshot> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("save_secret", input);
+  }
+  if (!canInvokeTauri()) {
+    return mockSettingsSnapshot;
+  }
+  return invoke<BackendSettingsSnapshot>("backend_request", {
+    method: "save_secret",
+    params: input
+  });
+}
+
+export async function deleteSecret(id: string): Promise<SettingsSnapshot> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("delete_secret", { id });
+  }
+  if (!canInvokeTauri()) {
+    return mockSettingsSnapshot;
+  }
+  return invoke<BackendSettingsSnapshot>("backend_request", {
+    method: "delete_secret",
+    params: { id }
+  });
+}
+
+export async function importChromeSecrets(): Promise<ChromeSecretsImportResult> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendChromeSecretsImportResult>("import_chrome_secrets");
+  }
+  if (!canInvokeTauri()) {
+    return {
+      settings: mockSettingsSnapshot,
+      report: { imported: 0, skipped: 0, errors: ["Chrome import requires the desktop backend."] }
+    };
+  }
+  return invoke<BackendChromeSecretsImportResult>("backend_request", {
+    method: "import_chrome_secrets",
+    params: {}
+  });
 }
 
 export async function testProxy(input: {

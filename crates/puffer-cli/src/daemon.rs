@@ -957,6 +957,11 @@ async fn dispatch_request(
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
         }
         "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
+        "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
+        "delete_secret" => respond!(detached!(|s, p| handle_delete_secret(&s, &p))),
+        "import_chrome_secrets" => {
+            respond!(detached!(|s| handle_import_chrome_secrets(&s)))
+        }
         "test_proxy" => respond!(detached!(|s, p| handle_test_proxy(&s, &p))),
         "create_openai_realtime_client_secret" => {
             respond!(detached!(|s, p| {
@@ -1516,6 +1521,25 @@ fn handle_load_settings_snapshot(state: &DaemonState) -> Result<Value> {
         &inputs.session_store,
     )?;
     Ok(serde_json::to_value(snapshot)?)
+}
+
+fn handle_save_secret(state: &DaemonState, params: &Value) -> Result<Value> {
+    crate::daemon_secrets::save_secret(state.config_paths(), params)?;
+    handle_load_settings_snapshot(state)
+}
+
+fn handle_delete_secret(state: &DaemonState, params: &Value) -> Result<Value> {
+    let _ = crate::daemon_secrets::delete_secret(state.config_paths(), params)?;
+    handle_load_settings_snapshot(state)
+}
+
+fn handle_import_chrome_secrets(state: &DaemonState) -> Result<Value> {
+    let report = crate::daemon_secrets::import_chrome_secrets(state.config_paths())?;
+    let settings = handle_load_settings_snapshot(state)?;
+    Ok(json!({
+        "settings": settings,
+        "report": report,
+    }))
 }
 
 fn handle_save_proxy_settings(state: &DaemonState, params: &Value) -> Result<Value> {

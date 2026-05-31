@@ -539,7 +539,20 @@ pub(super) fn execute_openai_tool_calls(
                     continue;
                 }
             };
-            let args = tc.arguments.clone();
+            let args = match super::secrets::expand_secret_placeholders(state, &tc.arguments) {
+                Ok(args) => args,
+                Err(error) => {
+                    results[i] = Some((
+                        super::secrets::redact_known_secrets(
+                            state,
+                            &format!("Tool execution failed: {error}"),
+                        ),
+                        false,
+                        Value::Null,
+                    ));
+                    continue;
+                }
+            };
             let pc = &provider_context;
             let sid = &state.session.id;
             let runner_clone = runner.clone();
@@ -642,6 +655,8 @@ pub(super) fn execute_openai_tool_calls(
         let (raw_output, success, metadata) = results[i]
             .take()
             .unwrap_or_else(|| ("Tool was not executed".to_string(), false, Value::Null));
+        let raw_output = super::secrets::redact_known_secrets(state, &raw_output);
+        let metadata = super::secrets::redact_json_value(state, &metadata);
         let output =
             super::process_tool_result(&raw_output, super::MAX_TOOL_RESULT_CHARS, session_id);
         outputs.push(OpenAIResponsesFunctionCallOutput {
@@ -725,6 +740,8 @@ fn execute_openai_tool_calls_serial(
                 Value::Null,
             ),
         };
+        let output = super::secrets::redact_known_secrets(state, &output);
+        let metadata = super::secrets::redact_json_value(state, &metadata);
         let output =
             super::process_tool_result(&output, super::MAX_TOOL_RESULT_CHARS, &state.session.id);
         outputs.push(OpenAIResponsesFunctionCallOutput {

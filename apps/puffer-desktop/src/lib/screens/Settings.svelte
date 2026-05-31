@@ -6,6 +6,7 @@
   import LoginView from "../components/LoginView.svelte";
   import LocalModelSetupCard from "../components/LocalModelSetupCard.svelte";
   import NetworkSettings from "./settings/NetworkSettings.svelte";
+  import SecretsSettings from "./settings/SecretsSettings.svelte";
   import BrowserPane from "./agent/BrowserPane.svelte";
   import { focusTrap } from "../focusTrap";
   import {
@@ -99,12 +100,13 @@
     props.onRefresh();
   }
 
-  type Section = "general" | "providers" | "network" | "connectors" | "permissions" | "skills" | "mcp" | "git" | "appearance" | "shortcuts";
+  type Section = "general" | "providers" | "secrets" | "network" | "connectors" | "permissions" | "skills" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
 
   const navItems: { id: Section; label: string; icon: IconName }[] = [
     { id: "general",     label: "General",    icon: "settings" },
     { id: "providers",   label: "Providers",  icon: "plug" },
+    { id: "secrets",     label: "Secrets",    icon: "key" },
     { id: "network",     label: "Network",    icon: "globe" },
     { id: "connectors",  label: "Connectors", icon: "server" },
     { id: "permissions", label: "Permissions", icon: "bolt" },
@@ -1589,6 +1591,13 @@
         onLoginOauth={props.onLoginOauth ?? (() => {})}
         onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
         onImportExternal={props.onImportExternal ?? (() => {})}
+        onRefresh={props.onRefresh}
+      />
+
+    {:else if section === "secrets"}
+      <SecretsSettings
+        snapshot={props.snapshot}
+        daemonReachable={daemonReachable}
         onRefresh={props.onRefresh}
       />
 

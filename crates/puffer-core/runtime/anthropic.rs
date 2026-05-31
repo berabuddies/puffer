@@ -1003,6 +1003,8 @@ pub(super) fn execute_anthropic_tool_calls(
         } else {
             format!("{}\n{}", execution.output.stdout, execution.output.stderr)
         };
+        let raw_output = super::secrets::redact_known_secrets(state, &raw_output);
+        let metadata = super::secrets::redact_json_value(state, &execution.output.metadata);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &state.session.id);
         results.push(json!({
@@ -1017,7 +1019,7 @@ pub(super) fn execute_anthropic_tool_calls(
             input: call.input.clone(),
             output: output_text.clone(),
             success: execution.success,
-            metadata: execution.output.metadata,
+            metadata,
             terminate: false,
         });
     }

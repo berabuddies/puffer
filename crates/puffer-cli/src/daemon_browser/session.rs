@@ -35,6 +35,7 @@ use super::selection::{parse_copy_selection_response, selection_eval_expression}
 use super::session_launch::{
     cef_remote_debugging_port, configure_chrome_command, remove_stale_devtools_port,
 };
+use super::state_events::{emit_state, emit_state_error, update_state_from_eval};
 use super::upload::{
     parse_upload_handle_response, parse_upload_runtime_response, parse_upload_set_files_response,
     upload_finalize_function, upload_prepare_function,
@@ -937,61 +938,6 @@ fn handle_cdp_message(
             }
         }
     }
-}
-
-fn update_state_from_eval(
-    events: &broadcast::Sender<ServerEnvelope>,
-    channel_state: &str,
-    state: &Arc<Mutex<BrowserState>>,
-    value: &Value,
-) {
-    let Some(result) = value.pointer("/result/result/value") else {
-        return;
-    };
-    let mut state = state.lock().unwrap();
-    if let Some(url) = result.get("url").and_then(Value::as_str) {
-        state.url = url.to_string();
-    }
-    if let Some(title) = result.get("title").and_then(Value::as_str) {
-        state.title = title.to_string();
-    }
-    state.loading = false;
-    emit_state(events, channel_state, &state);
-}
-
-fn emit_state(
-    events: &broadcast::Sender<ServerEnvelope>,
-    channel_state: &str,
-    state: &BrowserState,
-) {
-    let _ = events.send(ServerEnvelope::Event {
-        event: channel_state.to_string(),
-        payload: json!({
-            "url": state.url,
-            "title": state.title,
-            "loading": state.loading,
-            "width": state.width,
-            "height": state.height,
-            "popOut": false
-        }),
-    });
-}
-
-fn emit_state_error<E: std::fmt::Display>(
-    events: &broadcast::Sender<ServerEnvelope>,
-    channel_state: &str,
-    error: E,
-) {
-    let _ = events.send(ServerEnvelope::Event {
-        event: channel_state.to_string(),
-        payload: json!({
-            "url": DEFAULT_URL,
-            "title": "",
-            "loading": false,
-            "error": error.to_string(),
-            "popOut": false
-        }),
-    });
 }
 
 fn ensure_root_alive(inner: &mut BrowserRootState) -> Result<()> {

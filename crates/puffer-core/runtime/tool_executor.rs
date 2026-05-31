@@ -194,6 +194,11 @@ pub(super) fn execute_tool_call(
     };
     let hook_input = input.clone();
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
+    let execution_input = if definition.handler == "runtime:agent" {
+        input.clone()
+    } else {
+        super::secrets::expand_secret_placeholders(state, &input)?
+    };
     let lambda_skill_target_snapshot = if tool_id == "Skill"
         && state
             .pending_lambda_host_call
@@ -207,26 +212,42 @@ pub(super) fn execute_tool_call(
     } else {
         None
     };
-    let mut result = if definition.handler == "runtime:agent" {
-        let output =
-            execute_agent_tool(state, resources, providers, auth_store, cwd, input.clone())?;
-        successful_runtime_tool(tool_id, output)
-    } else if let Some(result) =
-        execute_legacy_builtin_alias(&definition, cwd, &filesystem_policy, &input)?
-    {
-        result
-    } else {
-        claude_tools::execute_tool(
+    let execution_result: Result<ToolExecutionResult> = if definition.handler == "runtime:agent" {
+        let output = execute_agent_tool(
             state,
             resources,
-            registry,
-            &definition,
+            providers,
+            auth_store,
             cwd,
-            &filesystem_policy,
-            input.clone(),
-            provider_context,
-        )?
+            execution_input,
+        );
+        output.map(|output| successful_runtime_tool(tool_id, output))
+    } else {
+        match execute_legacy_builtin_alias(&definition, cwd, &filesystem_policy, &execution_input) {
+            Ok(Some(result)) => Ok(result),
+            Ok(None) => claude_tools::execute_tool(
+                state,
+                resources,
+                registry,
+                &definition,
+                cwd,
+                &filesystem_policy,
+                execution_input,
+                provider_context,
+            ),
+            Err(error) => Err(error),
+        }
     };
+    let mut result = match execution_result {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(anyhow!(super::secrets::redact_known_secrets(
+                state,
+                &error.to_string()
+            )));
+        }
+    };
+    super::secrets::redact_tool_result(state, &mut result);
     if result.success {
         let post_skill_gate = lambda_skill_target_snapshot.as_ref().map(|_| {
             (

@@ -291,6 +291,7 @@ export class FakeDaemon {
     defaultProvider: "codex",
     defaultModel: "test-model"
   };
+  private secrets: JsonRecord[] = [];
   private permissions: JsonRecord = {
     path: "/tmp/puffer/.puffer/permissions.json",
     tools: { bash: "ask" }
@@ -1134,6 +1135,12 @@ export class FakeDaemon {
         return this.installLocalModel();
       case "save_proxy_settings":
         return this.saveProxySettings(request.params);
+      case "save_secret":
+        return this.saveSecret(request.params);
+      case "delete_secret":
+        return this.deleteSecret(request.params);
+      case "import_chrome_secrets":
+        return this.importChromeSecrets();
       case "test_proxy":
         return this.testProxy(request.params);
       case "list_permissions":
@@ -1705,6 +1712,53 @@ export class FakeDaemon {
     return this.settingsSnapshot();
   }
 
+  private saveSecret(params: JsonRecord): JsonRecord {
+    const id = typeof params.id === "string" && params.id.trim() ? params.id : `sec_${Date.now()}`;
+    const now = Date.now();
+    const existing = this.secrets.findIndex((secret) => secret.id === id);
+    const summary = {
+      id,
+      label: String(params.label ?? "Secret"),
+      username: typeof params.username === "string" ? params.username : null,
+      origin: typeof params.origin === "string" ? params.origin : null,
+      source: "manual",
+      createdAtMs: existing >= 0 ? Number(this.secrets[existing].createdAtMs ?? now) : now,
+      updatedAtMs: now
+    };
+    if (existing >= 0) {
+      this.secrets[existing] = summary;
+    } else {
+      this.secrets.push(summary);
+    }
+    return this.settingsSnapshot();
+  }
+
+  private deleteSecret(params: JsonRecord): JsonRecord {
+    const id = String(params.id ?? "");
+    this.secrets = this.secrets.filter((secret) => secret.id !== id);
+    return this.settingsSnapshot();
+  }
+
+  private importChromeSecrets(): JsonRecord {
+    const now = Date.now();
+    this.secrets = [
+      ...this.secrets,
+      {
+        id: `sec_chrome_${now}`,
+        label: "Chrome developer@example.com @ example.test",
+        username: "developer@example.com",
+        origin: "https://example.test",
+        source: "chrome",
+        createdAtMs: now,
+        updatedAtMs: now
+      }
+    ];
+    return {
+      settings: this.settingsSnapshot(),
+      report: { imported: 1, skipped: 0, errors: [] }
+    };
+  }
+
   private loginProvider(params: JsonRecord, kind: "api_key" | "oauth"): JsonRecord {
     const providerId = String(params.providerId ?? "");
     if (!providerId) return this.settingsSnapshot();
@@ -1868,6 +1922,12 @@ export class FakeDaemon {
           typeof this.networkProxy.lastTest === "object" && this.networkProxy.lastTest !== null
             ? { ...(this.networkProxy.lastTest as JsonRecord) }
             : null
+      },
+      secrets: {
+        storeFile: "/tmp/home/.puffer/secrets.json",
+        keySource: "local-key-file",
+        chromeImportSupported: true,
+        items: this.secrets.map((secret) => ({ ...secret }))
       },
       browserProfiles: []
     };

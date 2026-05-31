@@ -123,6 +123,18 @@ pub(super) fn execute_tool_batch(
                 }
             };
             let args: Value = serde_json::from_str(&tc.input).unwrap_or(Value::Null);
+            let args = match super::secrets::expand_secret_placeholders(inputs.state, &args) {
+                Ok(args) => args,
+                Err(error) => {
+                    results[i] = Some((
+                        format!("Tool execution failed: {error}"),
+                        false,
+                        false,
+                        Value::Null,
+                    ));
+                    continue;
+                }
+            };
             let resources = inputs.resources;
             let registry = inputs.registry;
             let provider_context_ref = &provider_context;
@@ -316,6 +328,8 @@ pub(super) fn execute_tool_batch(
                 Value::Null,
             )
         });
+        let raw_output = super::secrets::redact_known_secrets(inputs.state, &raw_output);
+        let metadata = super::secrets::redact_json_value(inputs.state, &metadata);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
         invocations.push(ToolInvocation {
@@ -379,8 +393,12 @@ fn execute_tool_batch_serial(
         ) {
             Ok(exec) => exec,
             Err(error) => {
-                let output_text = process_tool_result(
+                let raw_error = super::secrets::redact_known_secrets(
+                    inputs.state,
                     &format!("Tool execution failed: {error}"),
+                );
+                let output_text = process_tool_result(
+                    &raw_error,
                     MAX_TOOL_RESULT_CHARS,
                     &inputs.state.session.id,
                 );
@@ -416,8 +434,10 @@ fn execute_tool_batch_serial(
         } else {
             format!("{}\n{}", execution.output.stdout, execution.output.stderr)
         };
+        let raw_output = super::secrets::redact_known_secrets(inputs.state, &raw_output);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
+        let metadata = super::secrets::redact_json_value(inputs.state, &execution.output.metadata);
         if inputs.observability.is_some() {
             tool_span.set_content(
                 puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
@@ -438,7 +458,7 @@ fn execute_tool_batch_serial(
             input: call.input.clone(),
             output: output_text,
             success: execution.success,
-            metadata: execution.output.metadata,
+            metadata,
             terminate,
         });
     }

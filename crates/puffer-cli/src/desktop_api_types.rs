@@ -265,6 +265,28 @@ pub(crate) struct SettingsSnapshotDto {
     pub(crate) auth: Vec<AuthProviderStatusDto>,
     pub(crate) providers: Vec<ProviderSummaryDto>,
     pub(crate) network_proxy: NetworkProxySettingsDto,
+    pub(crate) secrets: SecretsSettingsDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretsSettingsDto {
+    pub(crate) store_file: String,
+    pub(crate) key_source: String,
+    pub(crate) chrome_import_supported: bool,
+    pub(crate) items: Vec<SecretSummaryDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretSummaryDto {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) username: Option<String>,
+    pub(crate) origin: Option<String>,
+    pub(crate) source: String,
+    pub(crate) created_at_ms: u64,
+    pub(crate) updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

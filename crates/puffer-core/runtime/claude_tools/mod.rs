@@ -799,6 +799,7 @@ pub fn execute_workflow_tool(
         "ProcessControl" => workflow::process_control::execute_process_control(state, cwd, input),
         "PowerShell" => workflow::powershell::execute_powershell(state, cwd, input),
         "Recall" => workflow::recall::execute_recall(state, cwd, input),
+        "RequestSecret" => workflow::request_secret::execute_request_secret(state, cwd, input),
         "SecretValue" => workflow::secret_value::execute_secret_value(state, cwd, input),
         "SendMessage" => workflow::send_message::execute_send_message(state, cwd, input),
         "SendUserMessage" | "Brief" => {

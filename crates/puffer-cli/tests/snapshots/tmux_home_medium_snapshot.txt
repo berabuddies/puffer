@@ -3,7 +3,7 @@
           ████████████████████
       ████████████████████████    ╭ Puffer Code ───────────────────────────────────────────────────╮
       ██████████████████████      │Account   anthropic via API key                                 │
-    ████████████████████████████  │Model     anthropic/claude-sonnet-4-5 · tools 82/90             │
+    ████████████████████████████  │Model     anthropic/claude-sonnet-4-5 · tools 83/91             │
 ██████████████████████████████    │Session   session-<id><id>│
   ████████████████████████████    │Mode      effort auto                                           │
       ████████████████████████    │Context   dockyard · 0 msgs · 0 wds · permissions ACL · 100% ...│

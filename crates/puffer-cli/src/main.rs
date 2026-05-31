@@ -22,6 +22,7 @@ mod daemon_lambda_skills;
 mod daemon_local_model;
 mod daemon_lsp;
 mod daemon_pty;
+mod daemon_secrets;
 mod daemon_singleton;
 mod daemon_title;
 mod daemon_turn_routing;

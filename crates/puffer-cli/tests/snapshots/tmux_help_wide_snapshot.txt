@@ -9,4 +9,4 @@ Supported commands
 /doctor      Diagnose and verify your Puffer Code installation and settings
 /config      Open config panel
 /skills      List available skills
-Resources: prompts 13 · tools 90 · skills 15
+Resources: prompts 13 · tools 91 · skills 15

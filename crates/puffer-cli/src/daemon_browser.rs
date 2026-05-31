@@ -34,6 +34,7 @@ mod screenshot;
 mod selection;
 mod session;
 mod session_launch;
+mod state_events;
 mod tabs;
 mod types;
 mod upload;

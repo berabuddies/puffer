@@ -373,6 +373,42 @@ export type SaveProxySettingsInput = {
   proxies: DraftProxyEndpoint[];
 };
 
+export type SecretSummary = {
+  id: string;
+  label: string;
+  username: string | null;
+  origin: string | null;
+  source: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type SecretsSettings = {
+  storeFile: string;
+  keySource: string;
+  chromeImportSupported: boolean;
+  items: SecretSummary[];
+};
+
+export type SaveSecretInput = {
+  id?: string | null;
+  label: string;
+  value: string;
+  username?: string | null;
+  origin?: string | null;
+};
+
+export type ChromeImportReport = {
+  imported: number;
+  skipped: number;
+  errors: string[];
+};
+
+export type ChromeSecretsImportResult = {
+  settings: SettingsSnapshot;
+  report: ChromeImportReport;
+};
+
 export type OpenAIRealtimeClientSecretOptions = {
   providerId?: string;
   model?: string;
@@ -401,6 +437,7 @@ export type SettingsSnapshot = {
   auth: AuthProviderStatus[];
   providers: ProviderSummary[];
   networkProxy: NetworkProxySettings;
+  secrets: SecretsSettings;
 };
 
 export type WorkflowTrigger =
