@@ -79,6 +79,29 @@ pub(super) fn initial_page_target(browser_ws: &str) -> Result<Option<ChromePageT
         .transpose()?)
 }
 
+/// Waits for an already-running DevTools HTTP endpoint to publish its browser WebSocket URL.
+pub(super) fn read_remote_devtools_ws_url(port: u16, timeout: Duration) -> Result<String> {
+    let endpoint = format!("http://127.0.0.1:{port}/json/version");
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("build DevTools HTTP client")?;
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(response) = client.get(&endpoint).send() {
+            if let Ok(response) = response.error_for_status() {
+                if let Ok(value) = response.json::<Value>() {
+                    if let Some(ws) = value.get("webSocketDebuggerUrl").and_then(Value::as_str) {
+                        return Ok(ws.to_string());
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("DevTools endpoint at {endpoint} did not publish a browser WebSocket URL");
+}
+
 /// Creates a new Chrome page target and returns its target id and DevTools WebSocket URL.
 pub(super) fn create_page_target(browser_ws: &str, url: &str) -> Result<ChromePageTarget> {
     let endpoint = format!(
@@ -145,13 +168,21 @@ pub(super) fn terminate_profile_processes(profile_dir: &Path) {
 fn chrome_candidates() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        vec![
+        let mut candidates = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(
+                PathBuf::from(home)
+                    .join("chromium_tintin/src/out/Release/Chromium.app/Contents/MacOS/Chromium"),
+            );
+        }
+        candidates.extend([
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             PathBuf::from(
                 "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             ),
             PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ]
+        ]);
+        candidates
     }
     #[cfg(target_os = "windows")]
     {

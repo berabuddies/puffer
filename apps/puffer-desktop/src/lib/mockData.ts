@@ -547,6 +547,7 @@ export const mockDesktopPreferences: DesktopPreferences = {
   launchInspectorOpen: true,
   defaultInspectorTab: "latest-diff",
   defaultInspectorWidth: 50,
+  browserRenderer: "cef",
   remoteEnabled: false,
   remoteTarget: "",
   remoteCwd: ""

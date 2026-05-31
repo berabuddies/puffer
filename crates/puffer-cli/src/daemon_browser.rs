@@ -19,6 +19,7 @@ use crate::daemon::ServerEnvelope;
 
 mod agent;
 mod cdp;
+mod cef;
 mod chrome;
 mod client;
 mod console;
@@ -32,6 +33,7 @@ mod rpc;
 mod screenshot;
 mod selection;
 mod session;
+mod session_launch;
 mod tabs;
 mod types;
 mod upload;
@@ -200,6 +202,11 @@ impl BrowserRegistry {
             return Ok(());
         }
         self.shutdown_root(session_id, false)
+    }
+
+    /// Reports which Browser renderer is active and why fallback may apply.
+    pub(crate) fn backend_status(&self, preferred_renderer: &str) -> Value {
+        cef::backend_status(preferred_renderer)
     }
 
     /// Lists daemon-owned browser tabs for an agent session.

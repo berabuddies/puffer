@@ -1,5 +1,6 @@
 mod backend;
 mod browser;
+mod cef_host;
 mod codex_app_server;
 mod daemon_launcher;
 mod dtos;
@@ -54,6 +55,13 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "summon_mini_window",
     "minicpm5_recommend",
     "minicpm5_install",
+    "browser_cef_native_status",
+    "browser_cef_native_open",
+    "browser_cef_native_resize",
+    "browser_cef_native_navigate",
+    "browser_cef_native_reload",
+    "browser_cef_native_history",
+    "browser_cef_native_close",
 ];
 
 fn backend_call(
@@ -452,6 +460,13 @@ pub fn run() {
             mini_window::summon_mini_window,
             minicpm5::minicpm5_recommend,
             minicpm5::minicpm5_install,
+            cef_host::browser_cef_native_status,
+            cef_host::browser_cef_native_open,
+            cef_host::browser_cef_native_resize,
+            cef_host::browser_cef_native_navigate,
+            cef_host::browser_cef_native_reload,
+            cef_host::browser_cef_native_history,
+            cef_host::browser_cef_native_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Corbina desktop");

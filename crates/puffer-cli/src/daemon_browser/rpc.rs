@@ -25,6 +25,19 @@ pub(crate) fn handle_browser_open(state: &Arc<DaemonState>, params: &Value) -> R
     Ok(state_json(&browser_state))
 }
 
+/// Handles `browser_backend_status`.
+pub(crate) fn handle_browser_backend_status(
+    state: &Arc<DaemonState>,
+    params: &Value,
+) -> Result<Value> {
+    let preferred = params
+        .get("preferredRenderer")
+        .or_else(|| params.get("preferred_renderer"))
+        .and_then(Value::as_str)
+        .unwrap_or("screencast");
+    Ok(state.browsers.backend_status(preferred))
+}
+
 /// Handles `browser_navigate`.
 pub(crate) fn handle_browser_navigate(state: &Arc<DaemonState>, params: &Value) -> Result<Value> {
     let session_id = required_string(params, "sessionId")?;

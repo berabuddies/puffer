@@ -3,6 +3,14 @@
   import Icon from "../../design/Icon.svelte";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
   import {
+    browserBackendStatus,
+    browserCefNativeClose,
+    browserCefNativeHistory,
+    browserCefNativeNavigate,
+    browserCefNativeOpen,
+    browserCefNativeReload,
+    browserCefNativeResize,
+    browserCefNativeStatus,
     browserClose,
     browserCopySelection,
     browserCursor,
@@ -18,6 +26,9 @@
     browserTabOpen,
     browserTabsList,
     isDaemonReachable,
+    type BrowserBackendStatus,
+    type BrowserCefNativeRect,
+    type BrowserCefNativeStatus,
     type BrowserDevtoolsEvent,
     type BrowserFrameEvent,
     type BrowserRecordedFrame,
@@ -25,9 +36,11 @@
     type BrowserTabInfo,
     type BrowserTabsState
   } from "../../api/desktop";
+  import type { BrowserRenderer } from "../../types";
 
   type Props = {
     sessionId: string;
+    browserRenderer?: BrowserRenderer;
   };
 
   type BrowserTab = {
@@ -67,7 +80,7 @@
     tabId: string;
   };
 
-  let { sessionId }: Props = $props();
+  let { sessionId, browserRenderer = "cef" }: Props = $props();
 
   let viewport: HTMLDivElement | null = $state(null);
   let canvas: HTMLCanvasElement | null = $state(null);
@@ -82,6 +95,10 @@
   let error = $state<string | null>(null);
   let loading = $state(false);
   let connected = $state(false);
+  let backendStatus = $state<BrowserBackendStatus | null>(null);
+  let backendStatusError = $state<string | null>(null);
+  let nativeCefStatus = $state<BrowserCefNativeStatus | null>(null);
+  let nativeCefRuntimeError = $state<string | null>(null);
   let frameWidth = $state(1);
   let frameHeight = $state(1);
   let browserCursorStyle = $state("default");
@@ -100,6 +117,8 @@
   let activeRootSessionId = "";
   let activeEventSessionId = "";
   let sessionGeneration = 0;
+  let backendStatusGeneration = 0;
+  let lastBackendStatusRequest = "";
   let lastResize = { width: 960, height: 720 };
   let activePointerId: number | null = null;
   let activeButton: "left" | "middle" | "right" | "none" = "none";
@@ -147,6 +166,32 @@
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
   let networkEvents = $derived(activeDevtools.filter((item) => item.kind === "network"));
+  let nativeCefReady = $derived(
+    browserRenderer === "cef" &&
+      nativeCefStatus?.available === true &&
+      nativeCefRuntimeError === null
+  );
+  let effectiveRenderer = $derived<BrowserRenderer>(
+    nativeCefReady
+      ? "cef"
+      : backendStatus?.activeRenderer ?? (browserRenderer === "screencast" ? "screencast" : "cef")
+  );
+  let rendererBadge = $derived(
+    nativeCefReady
+      ? "CEF"
+      : backendStatus?.fallbackReason
+      ? "Screencast fallback"
+      : effectiveRenderer === "cef"
+        ? "CEF"
+        : "Screencast"
+  );
+  let rendererBadgeTitle = $derived(
+    nativeCefReady
+      ? `Native CEF active on CDP port ${nativeCefStatus?.remoteDebuggingPort ?? ""}`
+      : nativeCefRuntimeError
+        ? `Native CEF failed; using screencast fallback. ${nativeCefRuntimeError}`
+        : backendStatusError ?? backendStatus?.fallbackReason ?? nativeCefStatus?.error ?? backendStatus?.cef.buildHint ?? ""
+  );
 
   onMount(async () => {
     if (!viewport || !canvas) return;
@@ -156,6 +201,8 @@
       error = "No backend connection is configured for this preview.";
       return;
     }
+    lastBackendStatusRequest = browserRenderer;
+    await refreshBackendStatus(browserRenderer);
 
     const ro = new ResizeObserver(() => {
       const size = measureViewport();
@@ -164,6 +211,15 @@
       if (connected && activeTabId) {
         const target = activeCommandTarget();
         if (!target) return;
+        if (effectiveRenderer === "cef") {
+          const rect = measureViewportRect();
+          if (rect) {
+            void browserCefNativeResize(target.backendSessionId, rect)
+              .then((next) => applyState(next, activeTabId))
+              .catch((err) => fallbackTargetToScreencast(target, err));
+          }
+          return;
+        }
         void browserResize(target.backendSessionId, size.width, size.height).catch((err) => {
           reportCommandError(target, err);
         });
@@ -186,6 +242,7 @@
     window.removeEventListener("pointercancel", globalPointerCancel);
     clearCursorTimer();
     clearNavigationFallbackTimers();
+    closeNativeTabs();
     disposeActiveSubscriptions();
     for (const dispose of disposers) {
       try {
@@ -197,10 +254,103 @@
     disposers = [];
   });
 
+  function closeNativeTabs() {
+    if (effectiveRenderer !== "cef") return;
+    closeNativeCefSessions();
+  }
+
+  function closeNativeCefSessions() {
+    for (const tab of tabs) {
+      void browserCefNativeClose(tab.backendSessionId).catch(() => {
+        /* Native CEF may already be unavailable during teardown or fallback. */
+      });
+    }
+  }
+
   $effect(() => {
     if (!mounted || disposed || activeRootSessionId === sessionId) return;
     void activateSession(sessionId);
   });
+
+  $effect(() => {
+    const requestedRenderer = browserRenderer;
+    if (!mounted || disposed || lastBackendStatusRequest === requestedRenderer) return;
+    nativeCefRuntimeError = null;
+    lastBackendStatusRequest = requestedRenderer;
+    void refreshBackendStatus(requestedRenderer);
+  });
+
+  async function refreshBackendStatus(preferredRenderer: BrowserRenderer) {
+    const generation = ++backendStatusGeneration;
+    backendStatusError = null;
+    const [backend, native] = await Promise.allSettled([
+      browserBackendStatus(preferredRenderer),
+      preferredRenderer === "cef" ? browserCefNativeStatus() : Promise.resolve(null)
+    ]);
+    if (disposed || generation !== backendStatusGeneration) return;
+    if (backend.status === "fulfilled") {
+      backendStatus = backend.value;
+    } else {
+      backendStatusError = browserActionErrorText(backend.reason);
+    }
+    if (native.status === "fulfilled") {
+      nativeCefStatus = native.value;
+    }
+  }
+
+  function demoteNativeCef(err: unknown): string {
+    const message = browserActionErrorText(err) || "Native CEF command failed";
+    nativeCefRuntimeError = message;
+    backendStatus = backendStatus
+      ? {
+          ...backendStatus,
+          activeRenderer: "screencast",
+          fallbackReason: `Native CEF failed; using screencast fallback. ${message}`
+        }
+      : backendStatus;
+    closeNativeCefSessions();
+    return message;
+  }
+
+  async function fallbackToScreencast(
+    generation: number,
+    tabId: string,
+    err: unknown
+  ): Promise<void> {
+    const message = demoteNativeCef(err);
+    if (disposed || generation !== sessionGeneration) return;
+    updateTab(tabId, {
+      connected: false,
+      loading: false,
+      status: "Starting screencast fallback",
+      error: null
+    });
+    if (activeTabId === tabId) {
+      connected = false;
+      loading = false;
+      error = null;
+      status = "Starting screencast fallback";
+    }
+    await connectActiveTab(generation);
+    if (!disposed && generation === sessionGeneration && activeTabId === tabId && error === null) {
+      backendStatus = backendStatus
+        ? {
+            ...backendStatus,
+            fallbackReason: `Native CEF failed; using screencast fallback. ${message}`
+          }
+        : backendStatus;
+    }
+  }
+
+  function fallbackTargetToScreencast(target: BrowserCommandTarget, err: unknown) {
+    clearNavigationPending(target.backendSessionId);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    if (!tabId) {
+      demoteNativeCef(err);
+      return;
+    }
+    void fallbackToScreencast(target.generation, tabId, err);
+  }
 
   function newBrowserTab(
     id: string,
@@ -672,9 +822,21 @@
     const target = activeCommandTarget();
     if (!target || !beginBrowserCommand(target, "history")) return;
     markNavigationPending(target);
-    void browserHistory(target.backendSessionId, direction)
+    const commandRenderer = effectiveRenderer;
+    const request =
+      commandRenderer === "cef"
+        ? browserCefNativeHistory(target.backendSessionId, direction).then((next) => {
+            const tabId = tabIdForBackendSession(target.backendSessionId);
+            if (tabId) applyState(next, tabId);
+          })
+        : browserHistory(target.backendSessionId, direction);
+    void request
       .catch((err) => {
-        clearCommandLoading(target, String(err));
+        if (commandRenderer === "cef") {
+          fallbackTargetToScreencast(target, err);
+        } else {
+          clearCommandLoading(target, String(err));
+        }
       })
       .finally(() => {
         finishBrowserCommand(target, "history");
@@ -685,9 +847,21 @@
     const target = activeCommandTarget();
     if (!target || !beginBrowserCommand(target, "reload")) return;
     markNavigationPending(target);
-    void browserReload(target.backendSessionId)
+    const commandRenderer = effectiveRenderer;
+    const request =
+      commandRenderer === "cef"
+        ? browserCefNativeReload(target.backendSessionId).then((next) => {
+            const tabId = tabIdForBackendSession(target.backendSessionId);
+            if (tabId) applyState(next, tabId);
+          })
+        : browserReload(target.backendSessionId);
+    void request
       .catch((err) => {
-        clearCommandLoading(target, String(err));
+        if (commandRenderer === "cef") {
+          fallbackTargetToScreencast(target, err);
+        } else {
+          clearCommandLoading(target, String(err));
+        }
       })
       .finally(() => {
         finishBrowserCommand(target, "reload");
@@ -695,6 +869,7 @@
   }
 
   function sendBrowserInput(event: Parameters<typeof browserInput>[1]) {
+    if (effectiveRenderer === "cef") return;
     const target = activeCommandTarget();
     if (!target) return;
     void browserInput(target.backendSessionId, event).catch((err) => {
@@ -743,6 +918,27 @@
     const eventSessionId = tab.backendSessionId || backendSessionId(tabId);
     const shouldOpen = !tab.connected;
     activeEventSessionId = eventSessionId;
+    if (effectiveRenderer === "cef") {
+      const rect = measureViewportRect();
+      if (!rect) return;
+      try {
+        const next = await browserCefNativeOpen({
+          sessionId: eventSessionId,
+          url: tab.url,
+          rect
+        });
+        if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+        applyState(next, tabId);
+        updateTab(tabId, { connected: true, status: "Connected", error: null });
+        connected = true;
+        status = "Connected";
+        error = null;
+      } catch (err) {
+        if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+        await fallbackToScreencast(generation, tabId, err);
+      }
+      return;
+    }
     try {
       const client = await ensureLocalDaemonClient();
       if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
@@ -918,6 +1114,18 @@
     };
   }
 
+  function measureViewportRect(): BrowserCefNativeRect | null {
+    if (!viewport) return null;
+    const rect = viewport.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    return {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.max(1, Math.round(rect.width)),
+      height: Math.max(1, Math.round(rect.height))
+    };
+  }
+
   function applyState(next: BrowserState, tabId = activeTabId) {
     if (disposed || !tabId) return;
     const existing = tabs.find((tab) => tab.id === tabId);
@@ -1034,6 +1242,7 @@
     };
     if (isDuplicateNavigationIntent(commandTarget, requestedUrl)) return;
     if (!beginBrowserCommand(commandTarget, "navigate")) return;
+    const commandRenderer = effectiveRenderer;
     error = null;
     markNavigationPending(commandTarget, requestedUrl);
     try {
@@ -1044,7 +1253,23 @@
         updatedAtMs: Date.now(),
         favicon: faviconFor(requestedUrl)
       });
-      if (connected) {
+      if (commandRenderer === "cef") {
+        const rect = measureViewportRect();
+        const next = connected
+          ? await browserCefNativeNavigate(requestedBackendSessionId, requestedUrl)
+          : await browserCefNativeOpen({
+              sessionId: requestedBackendSessionId,
+              url: requestedUrl,
+              rect: rect ?? {
+                x: 0,
+                y: 0,
+                width: lastResize.width,
+                height: lastResize.height
+              }
+            });
+        if (disposed || requestedGeneration !== sessionGeneration) return;
+        applyState(next, requestedTabId);
+      } else if (connected) {
         await browserNavigate(requestedBackendSessionId, requestedUrl);
       } else {
         const size = measureViewport() ?? lastResize;
@@ -1059,8 +1284,12 @@
     } catch (err) {
       if (disposed || requestedGeneration !== sessionGeneration) return;
       if (!tabs.some((tab) => tab.id === requestedTabId)) return;
-      const message = String(err);
-      clearCommandLoading(commandTarget, message);
+      if (commandRenderer === "cef") {
+        await fallbackToScreencast(requestedGeneration, requestedTabId, err);
+      } else {
+        const message = String(err);
+        clearCommandLoading(commandTarget, message);
+      }
     } finally {
       finishBrowserCommand(commandTarget, "navigate");
     }
@@ -1082,6 +1311,18 @@
     const requestedSessionId = sessionId;
     tabOpenPending = true;
     try {
+      if (effectiveRenderer === "cef") {
+        const tab = newBrowserTab(tabId, "New tab", requestedSessionId);
+        recentlyOpenedTabIds.set(tab.id, Date.now());
+        recentlyClosedTabIds.delete(tab.id);
+        tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
+        activeTabId = tab.id;
+        nextTabNumber = nextTabIndex(tabs);
+        saveTabs();
+        syncFromActiveTab();
+        void connectActiveTab(requestedAtGeneration);
+        return;
+      }
       const info = await browserTabOpen({
         sessionId: requestedSessionId,
         tabId,
@@ -1128,6 +1369,10 @@
     activeTabId = tabId;
     syncFromActiveTab();
     if (activeTab?.frame) renderFrame(activeTab.frame);
+    if (effectiveRenderer === "cef") {
+      void connectActiveTab();
+      return;
+    }
     void browserTabFocus(sessionId, tabId).catch((err) => {
       if (
         disposed ||
@@ -1194,6 +1439,17 @@
     if (index === -1) return;
     closingTabs = [...closingTabs, { sessionId: requestedSessionId, tabId }];
     try {
+      if (effectiveRenderer === "cef") {
+        await browserCefNativeClose(requestedBackendSessionId);
+        if (
+          disposed ||
+          requestedGeneration !== sessionGeneration ||
+          activeRootSessionId !== requestedSessionId
+        ) return;
+        error = null;
+        removeClosedTabLocally(tabId, index);
+        return;
+      }
       const state = await browserTabClose(requestedSessionId, tabId);
       if (
         disposed ||
@@ -1690,6 +1946,11 @@
     <button class="pf-browser-icon" type="button" title="Open externally" disabled={!activeTab} onclick={openExternal}>
       <Icon name="external" size={14} />
     </button>
+    <span
+      class="pf-browser-renderer"
+      data-fallback={backendStatus?.fallbackReason ? "true" : "false"}
+      title={rendererBadgeTitle}
+    >{rendererBadge}</span>
     <span class="pf-browser-status" class:loading>{status}</span>
   </form>
   {#if error}
@@ -1940,6 +2201,32 @@
 
   .pf-browser-address:focus {
     border-color: var(--ring);
+  }
+
+  .pf-browser-renderer {
+    flex: 0 0 auto;
+    max-width: 132px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--muted) 20%, transparent);
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .pf-browser-renderer[data-fallback="true"] {
+    border-color: color-mix(in oklab, oklch(0.72 0.18 70) 42%, var(--border));
+    color: oklch(0.48 0.13 70);
+    background: color-mix(in oklab, oklch(0.72 0.18 70) 10%, transparent);
   }
 
   .pf-browser-status {

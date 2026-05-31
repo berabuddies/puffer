@@ -239,6 +239,7 @@
     launchInspectorOpen: true,
     defaultInspectorTab: "latest-diff",
     defaultInspectorWidth: 50,
+    browserRenderer: "cef",
     remoteEnabled: false,
     remoteTarget: "",
     remoteCwd: ""
@@ -834,6 +835,10 @@
           typeof parsed.defaultInspectorWidth === "number"
             ? parsed.defaultInspectorWidth
             : defaultDesktopPreferences.defaultInspectorWidth,
+        browserRenderer:
+          parsed.browserRenderer === "screencast"
+            ? "screencast"
+            : defaultDesktopPreferences.browserRenderer,
         remoteEnabled: parsed.remoteEnabled === true,
         remoteTarget: typeof parsed.remoteTarget === "string" ? parsed.remoteTarget : "",
         remoteCwd: typeof parsed.remoteCwd === "string" ? parsed.remoteCwd : ""
@@ -3790,6 +3795,7 @@
                 turnStatusHint={turnStatusHint}
                 settingsSnapshot={settingsSnapshot}
                 backendConnected={connectionState === "open"}
+                browserRenderer={desktopPreferences.browserRenderer}
                 userDisplayName={tweaks.userName}
                 onBack={onCloseAgent}
                 onSubmitMessage={submitMessage}

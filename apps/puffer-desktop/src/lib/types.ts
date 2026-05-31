@@ -1,4 +1,5 @@
 export type InspectorTab = "latest-diff" | "history" | "tool-details";
+export type BrowserRenderer = "cef" | "screencast";
 export type AppView = "workspace" | "settings" | "login";
 
 export type TimelineKind =
@@ -256,6 +257,7 @@ export type DesktopPreferences = {
   launchInspectorOpen: boolean;
   defaultInspectorTab: InspectorTab;
   defaultInspectorWidth: number;
+  browserRenderer: BrowserRenderer;
   remoteEnabled: boolean;
   remoteTarget: string;
   remoteCwd: string;

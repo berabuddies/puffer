@@ -3,6 +3,7 @@ import type {
   AgentActivityStatus,
   AuthProviderStatus,
   AskUserQuestionItem,
+  BrowserRenderer,
   DesktopPinState,
   DiffSnapshot,
   DraftProxyEndpoint,
@@ -1817,6 +1818,109 @@ export type BrowserRecordedFrame = {
 export type BrowserRecordingSnapshot = {
   frames: BrowserRecordedFrame[];
 };
+
+export type BrowserBackendStatus = {
+  preferredRenderer: BrowserRenderer;
+  activeRenderer: BrowserRenderer;
+  fallbackReason: string | null;
+  cef: {
+    available: boolean;
+    root: string | null;
+    frameworkPath: string | null;
+    missing: string[];
+    tintinChromium: {
+      executable: string | null;
+      appBundle: string | null;
+      isCefRuntime: boolean;
+    };
+    buildHint: string;
+  };
+  screencast: {
+    chromiumExecutable: string | null;
+  };
+};
+
+export type BrowserCefNativeStatus = {
+  available: boolean;
+  active: boolean;
+  root: string | null;
+  helper: string | null;
+  remoteDebuggingPort: number;
+  buildEnabled: boolean;
+  error: string | null;
+};
+
+export type BrowserCefNativeRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type BrowserCefNativeState = BrowserState & {
+  connected: boolean;
+  remoteDebuggingPort?: number;
+};
+
+/** Report the preferred Browser renderer and the runtime fallback state. */
+export async function browserBackendStatus(
+  preferredRenderer: BrowserRenderer
+): Promise<BrowserBackendStatus> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserBackendStatus>("browser_backend_status", { preferredRenderer });
+}
+
+/** Report whether the Tauri process can host a native CEF browser view. */
+export async function browserCefNativeStatus(): Promise<BrowserCefNativeStatus | null> {
+  try {
+    return await invoke<BrowserCefNativeStatus>("browser_cef_native_status");
+  } catch {
+    return null;
+  }
+}
+
+/** Open or focus a native CEF browser inside the Tauri window. */
+export async function browserCefNativeOpen(params: {
+  sessionId: string;
+  url?: string;
+  rect: BrowserCefNativeRect;
+}): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_open", params);
+}
+
+/** Resize a native CEF browser inside the Tauri window. */
+export async function browserCefNativeResize(
+  sessionId: string,
+  rect: BrowserCefNativeRect
+): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_resize", { sessionId, rect });
+}
+
+/** Navigate a native CEF browser. */
+export async function browserCefNativeNavigate(
+  sessionId: string,
+  url: string
+): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_navigate", { sessionId, url });
+}
+
+/** Reload a native CEF browser. */
+export async function browserCefNativeReload(sessionId: string): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_reload", { sessionId });
+}
+
+/** Move a native CEF browser backward or forward in history. */
+export async function browserCefNativeHistory(
+  sessionId: string,
+  direction: "back" | "forward"
+): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_history", { sessionId, direction });
+}
+
+/** Close a native CEF browser. */
+export async function browserCefNativeClose(sessionId: string): Promise<void> {
+  await invoke("browser_cef_native_close", { sessionId });
+}
 
 /** Open or reuse the Chrome-backed browser session for a Puffer session. */
 export async function browserOpen(params: {

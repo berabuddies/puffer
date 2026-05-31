@@ -1,5 +1,6 @@
 <script lang="ts">
   import type {
+    BrowserRenderer,
     DesktopPreferences,
     InspectorTab,
     RemoteOperation,
@@ -46,6 +47,12 @@
   function updateTab(value: string) {
     if (value === "latest-diff" || value === "history" || value === "tool-details") {
       onPreferenceChange("defaultInspectorTab", value satisfies InspectorTab);
+    }
+  }
+
+  function updateBrowserRenderer(value: string) {
+    if (value === "cef" || value === "screencast") {
+      onPreferenceChange("browserRenderer", value satisfies BrowserRenderer);
     }
   }
 </script>
@@ -138,6 +145,18 @@
           />
           <strong>{preferences.defaultInspectorWidth}%</strong>
         </div>
+      </label>
+
+      <label class="field">
+        <span>Browser renderer</span>
+        <select
+          value={preferences.browserRenderer}
+          on:change={(event) =>
+            updateBrowserRenderer((event.currentTarget as HTMLSelectElement).value)}
+        >
+          <option value="cef">CEF</option>
+          <option value="screencast">Screencast</option>
+        </select>
       </label>
 
       <button class="reset" on:click={onResetPreferences}>Reset desktop preferences</button>

@@ -250,6 +250,9 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    if std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT").is_none() {
+        cmd.env("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333");
+    }
     // Resources (providers, tools, prompts…) load relative to the workspace
     // root by default. When the daemon is rooted at $HOME there's no
     // bundled `resources/` next to it, so the LoginView shows "No

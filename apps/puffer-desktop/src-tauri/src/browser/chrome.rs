@@ -141,13 +141,21 @@ pub(super) fn terminate_profile_processes(profile_dir: &Path) {
 fn chrome_candidates() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        vec![
+        let mut candidates = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(
+                PathBuf::from(home)
+                    .join("chromium_tintin/src/out/Release/Chromium.app/Contents/MacOS/Chromium"),
+            );
+        }
+        candidates.extend([
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             PathBuf::from(
                 "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             ),
             PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ]
+        ]);
+        candidates
     }
     #[cfg(target_os = "windows")]
     {

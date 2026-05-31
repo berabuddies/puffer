@@ -9,6 +9,7 @@
   } from "../../data/mockProjects";
   import { sessionDisplayName, sessionDisplayTitle } from "../../sessionDisplay";
   import type {
+    BrowserRenderer,
     PermissionTimelineItem,
     SessionDetail,
     SessionListItem,
@@ -37,6 +38,7 @@
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
     backendConnected?: boolean;
+    browserRenderer?: BrowserRenderer;
     userDisplayName?: string;
     onBack: () => void;
     onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
@@ -67,6 +69,7 @@
     turnStatusHint = null,
     settingsSnapshot = null,
     backendConnected = true,
+    browserRenderer = "cef",
     userDisplayName = "Otter",
     onBack,
     onSubmitMessage,
@@ -609,6 +612,7 @@
         {turnStatusHint}
         {settingsSnapshot}
         {backendConnected}
+        {browserRenderer}
         {userDisplayName}
         {onSubmitMessage}
         {onResolvePermission}
@@ -661,6 +665,7 @@
           {turnStatusHint}
           {settingsSnapshot}
           {backendConnected}
+          {browserRenderer}
           {userDisplayName}
           {onSubmitMessage}
           {onResolvePermission}

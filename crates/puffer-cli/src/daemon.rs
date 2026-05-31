@@ -994,6 +994,9 @@ async fn dispatch_request(
         "browser_open" => respond!(detached!(
             |s, p| crate::daemon_browser::handle_browser_open(&s, &p)
         )),
+        "browser_backend_status" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_backend_status(&s, &p)
+        })),
         "browser_navigate" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_navigate(&s, &p)
         })),
