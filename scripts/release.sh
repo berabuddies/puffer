@@ -565,6 +565,38 @@ EOF
     fi
   fi
 
+  local chrome_main_delegate_h="$src/chrome/app/chrome_main_delegate.h"
+  local chrome_main_delegate_cc="$src/chrome/app/chrome_main_delegate.cc"
+  if [[ -f "$chrome_main_delegate_h" ]] &&
+    ! grep -Fq 'GetResourceBundleDelegate()' "$chrome_main_delegate_h"; then
+    log "patching ChromeMainDelegate resource bundle delegate hook for CEF"
+    if ! grep -Fq 'ui/base/resource/resource_bundle.h' "$chrome_main_delegate_h"; then
+      perl -0pi -e 's#(#include "content/public/app/content_main_delegate.h"\n)#${1}#include "ui/base/resource/resource_bundle.h"\n#' "$chrome_main_delegate_h"
+    fi
+    perl -0pi -e 's#(  bool IsInitFeatureListEarly\(\) override;\n)#${1}\n  virtual ui::ResourceBundle::Delegate* GetResourceBundleDelegate() {\n    return nullptr;\n  }\n#' "$chrome_main_delegate_h"
+    if ! grep -Fq 'GetResourceBundleDelegate()' "$chrome_main_delegate_h"; then
+      fail "failed to patch ChromeMainDelegate resource bundle delegate hook"
+    fi
+  fi
+
+  if [[ -f "$chrome_main_delegate_cc" ]] &&
+    grep -Fq 'chrome_feature_list_creator, invoked_in_browser->is_running_test' "$chrome_main_delegate_cc"; then
+    log "patching ChromeMainDelegate browser resource bundle delegate call"
+    perl -0pi -e 's#std::string actual_locale = LoadLocalState\(\n      chrome_feature_list_creator, invoked_in_browser->is_running_test\);#std::string actual_locale = LoadLocalState(\n      chrome_feature_list_creator, GetResourceBundleDelegate(),\n      invoked_in_browser->is_running_test);#' "$chrome_main_delegate_cc"
+    if grep -Fq 'chrome_feature_list_creator, invoked_in_browser->is_running_test' "$chrome_main_delegate_cc"; then
+      fail "failed to patch ChromeMainDelegate browser resource bundle delegate call"
+    fi
+  fi
+
+  if [[ -f "$chrome_main_delegate_cc" ]] &&
+    grep -Fq 'locale, nullptr, ui::ResourceBundle::LOAD_COMMON_RESOURCES' "$chrome_main_delegate_cc"; then
+    log "patching ChromeMainDelegate subprocess resource bundle delegate call"
+    perl -0pi -e 's#locale, nullptr, ui::ResourceBundle::LOAD_COMMON_RESOURCES#locale, GetResourceBundleDelegate(),\n            ui::ResourceBundle::LOAD_COMMON_RESOURCES#' "$chrome_main_delegate_cc"
+    if grep -Fq 'locale, nullptr, ui::ResourceBundle::LOAD_COMMON_RESOURCES' "$chrome_main_delegate_cc"; then
+      fail "failed to patch ChromeMainDelegate subprocess resource bundle delegate call"
+    fi
+  fi
+
   local content_client_h="$src/content/public/browser/content_browser_client.h"
   local create_window_hook='virtual void CreateWindowResult(RenderFrameHost* opener, bool success)'
 
