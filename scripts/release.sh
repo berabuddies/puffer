@@ -537,6 +537,17 @@ EOF
       fail "failed to patch CEF accessibility StringToInt compatibility"
     fi
   fi
+
+  local content_client_h="$src/content/public/browser/content_browser_client.h"
+  local create_window_hook='virtual void CreateWindowResult(RenderFrameHost* opener, bool success)'
+
+  if [[ -f "$content_client_h" ]] && ! grep -Fq "$create_window_hook" "$content_client_h"; then
+    log "patching CEF CreateWindowResult browser client hook"
+    perl -0pi -e 's#(      bool opener_suppressed,\n      bool\* no_javascript_access\);\n)#${1}\n  // Called after CreateNewWindow finishes for embedders that track pending\n  // window creation state.\n  virtual void CreateWindowResult(RenderFrameHost* opener, bool success) {}\n#' "$content_client_h"
+    if ! grep -Fq "$create_window_hook" "$content_client_h"; then
+      fail "failed to patch CEF CreateWindowResult compatibility"
+    fi
+  fi
 }
 
 cef_root_for_runtime() {
