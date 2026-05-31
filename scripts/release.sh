@@ -598,6 +598,7 @@ EOF
   fi
 
   patch_cef_context_menu_compatibility "$src"
+  patch_cef_browser_widget_compatibility "$src"
 
   local setting_helper_cc="$src/cef/libcef/browser/setting_helper.cc"
   local content_settings_types="$src/components/content_settings/core/common/content_settings_types.mojom"
@@ -661,6 +662,183 @@ EOF
   if [[ -f "$headless_client_cc" ]] && grep -Fq 'void HeadlessContentBrowserClient::ConfigureNetworkContextParams(' "$headless_client_cc"; then
     perl -0pi -e 's#void HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#bool HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#; s#(      cert_verifier_creation_params\);\n)(?!  return true;\n)#${1}  return true;\n#' "$headless_client_cc"
   fi
+}
+
+patch_cef_browser_widget_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF browser widget patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def patch(path, old, new, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if old not in text:
+        raise SystemExit(f"failed to patch {desc}: pattern not found in {path}")
+    write(path, text.replace(old, new, 1))
+
+
+def replace(path, old, new, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if old not in text:
+        return
+    write(path, text.replace(old, new, 1))
+
+
+browser_widget_h = "chrome/browser/ui/views/frame/browser_widget.h"
+patch(
+    browser_widget_h,
+    """ public:
+  explicit BrowserWidget(BrowserView* browser_view);
+""",
+    """ public:
+  BrowserWidget();
+  explicit BrowserWidget(BrowserView* browser_view);
+""",
+    "BrowserWidget();",
+    "BrowserWidget default constructor declaration",
+)
+replace(
+    browser_widget_h,
+    "  void UserChangedTheme(BrowserThemeChangeType theme_change_type);\n",
+    "  virtual void UserChangedTheme(BrowserThemeChangeType theme_change_type);\n",
+    "BrowserWidget virtual theme-change hook",
+)
+patch(
+    browser_widget_h,
+    """  void SetTabDragKind(TabDragKind tab_drag_kind);
+  TabDragKind tab_drag_kind() const { return tab_drag_kind_; }
+
+ protected:
+""",
+    """  void SetTabDragKind(TabDragKind tab_drag_kind);
+  TabDragKind tab_drag_kind() const { return tab_drag_kind_; }
+
+  BrowserView* browser_view() const { return browser_view_.get(); }
+
+ protected:
+""",
+    "BrowserView* browser_view() const",
+    "BrowserWidget browser_view accessor",
+)
+replace(
+    browser_widget_h,
+    """  // Callback for MenuRunner.
+  void OnMenuClosed();
+
+  // Select a native theme that is appropriate for the current context. This is
+  // currently only needed for Linux to switch between the regular NativeTheme
+  // and the GTK NativeTheme instance.
+  void SelectNativeTheme();
+
+  // Regenerate the frame on theme change if necessary. Returns true if
+""",
+    """  // Callback for MenuRunner.
+  void OnMenuClosed();
+
+  // Regenerate the frame on theme change if necessary. Returns true if
+""",
+    "BrowserWidget private SelectNativeTheme declaration",
+)
+patch(
+    browser_widget_h,
+    """ protected:
+  // views::Widget:
+""",
+    """ protected:
+  void SetBrowserFrameView(BrowserFrameView* browser_frame_view);
+  void SetBrowserView(BrowserView* browser_view);
+
+  // Select a native theme that is appropriate for the current context. This is
+  // currently only needed for Linux to switch between the regular NativeTheme
+  // and the GTK NativeTheme instance.
+  void SelectNativeTheme();
+
+  // views::Widget:
+""",
+    "void SetBrowserFrameView(BrowserFrameView* browser_frame_view);",
+    "BrowserWidget CEF protected accessors",
+)
+
+browser_widget_cc = "chrome/browser/ui/views/frame/browser_widget.cc"
+patch(
+    browser_widget_cc,
+    """////////////////////////////////////////////////////////////////////////////////
+// BrowserWidget, public:
+
+BrowserWidget::BrowserWidget(BrowserView* browser_view)
+""",
+    """////////////////////////////////////////////////////////////////////////////////
+// BrowserWidget, public:
+
+BrowserWidget::BrowserWidget() : BrowserWidget(nullptr) {}
+
+BrowserWidget::BrowserWidget(BrowserView* browser_view)
+""",
+    "BrowserWidget::BrowserWidget() : BrowserWidget(nullptr) {}",
+    "BrowserWidget default constructor definition",
+)
+patch(
+    browser_widget_cc,
+    """  set_focus_on_creation(false);
+}
+
+BrowserWidget::~BrowserWidget() {
+""",
+    """  set_focus_on_creation(false);
+}
+
+void BrowserWidget::SetBrowserFrameView(BrowserFrameView* browser_frame_view) {
+  browser_frame_view_ = browser_frame_view;
+}
+
+void BrowserWidget::SetBrowserView(BrowserView* browser_view) {
+  browser_view_ = browser_view;
+}
+
+BrowserWidget::~BrowserWidget() {
+""",
+    "BrowserWidget::SetBrowserFrameView",
+    "BrowserWidget CEF setter definitions",
+)
+replace(
+    browser_widget_cc,
+    """  browser_view_->browser()->GetFeatures().TearDownPreBrowserWindowDestruction();
+""",
+    """  if (browser_view_ && browser_view_->browser()) {
+    browser_view_->browser()->GetFeatures().TearDownPreBrowserWindowDestruction();
+  }
+""",
+    "BrowserWidget CEF-safe destructor guard",
+)
+PY
 }
 
 patch_cef_context_menu_compatibility() {
