@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import Icon from "../../design/Icon.svelte";
-  import { ensureLocalDaemonClient } from "../../api/daemonClient";
+  import { canInvokeTauri, ensureLocalDaemonClient } from "../../api/daemonClient";
   import {
     browserBackendStatus,
     browserCefNativeClose,
@@ -142,11 +142,13 @@
   const recentlyOpenedTabIds = new Map<string, number>();
   const recentlyClosedTabIds = new Map<string, number>();
   let pendingNavigationUrls = new Map<string, string>();
+  let pendingActiveTabSelection: { tabId: string; at: number } | null = null;
   let pendingFrame: BrowserFrameEvent | null = null;
   let frameDecodeInFlight = false;
   const NAVIGATION_IDLE_FALLBACK_MS = 1_200;
   const TAB_INFO_STALE_GRACE_MS = 250;
   const LOCAL_TAB_TRANSITION_GRACE_MS = 5_000;
+  const LOCAL_TAB_SELECTION_GRACE_MS = 2_500;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserCommandPending = $derived(
@@ -166,15 +168,18 @@
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
   let networkEvents = $derived(activeDevtools.filter((item) => item.kind === "network"));
+  let runtimeBrowserRenderer = $derived<BrowserRenderer>(
+    canInvokeTauri() ? browserRenderer : "screencast"
+  );
   let nativeCefReady = $derived(
-    browserRenderer === "cef" &&
+    runtimeBrowserRenderer === "cef" &&
       nativeCefStatus?.available === true &&
       nativeCefRuntimeError === null
   );
   let effectiveRenderer = $derived<BrowserRenderer>(
     nativeCefReady
       ? "cef"
-      : backendStatus?.activeRenderer ?? (browserRenderer === "screencast" ? "screencast" : "cef")
+      : backendStatus?.activeRenderer ?? runtimeBrowserRenderer
   );
   let rendererBadge = $derived(
     nativeCefReady
@@ -201,8 +206,8 @@
       error = "No backend connection is configured for this preview.";
       return;
     }
-    lastBackendStatusRequest = browserRenderer;
-    await refreshBackendStatus(browserRenderer);
+    lastBackendStatusRequest = runtimeBrowserRenderer;
+    await refreshBackendStatus(runtimeBrowserRenderer);
 
     const ro = new ResizeObserver(() => {
       const size = measureViewport();
@@ -273,7 +278,7 @@
   });
 
   $effect(() => {
-    const requestedRenderer = browserRenderer;
+    const requestedRenderer = runtimeBrowserRenderer;
     if (!mounted || disposed || lastBackendStatusRequest === requestedRenderer) return;
     nativeCefRuntimeError = null;
     lastBackendStatusRequest = requestedRenderer;
@@ -430,6 +435,7 @@
       devtoolsView = "console";
       tabOpenPending = false;
       pendingBrowserCommands = [];
+      pendingActiveTabSelection = null;
       pendingNavigationSessions.clear();
       clearNavigationFallbackTimers();
       resetPointer(activePointerId ?? undefined);
@@ -457,11 +463,16 @@
     const validActiveTabId = state.activeTabId && activeEventFresh && nextTabs.some((tab) => tab.id === state.activeTabId)
       ? state.activeTabId
       : null;
+    const pendingSelectedTabId = pendingSelectedTab(nextTabs);
+    if (pendingSelectedTabId && validActiveTabId === pendingSelectedTabId) {
+      pendingActiveTabSelection = null;
+    }
     tabs = nextTabs;
-    activeTabId = validActiveTabId || connectedTabId || nextTabs[0].id;
+    activeTabId = pendingSelectedTabId || validActiveTabId || connectedTabId || nextTabs[0].id;
     nextTabNumber = nextTabIndex(nextTabs);
     saveTabs(nextTabs);
     syncFromActiveTab();
+    if (activeTabId !== previousActiveTabId) syncFrameFromActiveTab();
     if (!connected || activeTabId !== previousActiveTabId) {
       resetPointer(activePointerId ?? undefined);
     }
@@ -475,6 +486,22 @@
     for (const [tabId, at] of recentlyClosedTabIds) {
       if (at < cutoff) recentlyClosedTabIds.delete(tabId);
     }
+    if (
+      pendingActiveTabSelection &&
+      Date.now() - pendingActiveTabSelection.at > LOCAL_TAB_SELECTION_GRACE_MS
+    ) {
+      pendingActiveTabSelection = null;
+    }
+  }
+
+  function pendingSelectedTab(nextTabs: BrowserTab[]): string | null {
+    pruneLocalTabTransitions();
+    if (!pendingActiveTabSelection) return null;
+    if (!nextTabs.some((tab) => tab.id === pendingActiveTabSelection?.tabId)) {
+      pendingActiveTabSelection = null;
+      return null;
+    }
+    return pendingActiveTabSelection.tabId;
   }
 
   async function activateSession(nextSessionId: string) {
@@ -484,6 +511,7 @@
     disposeSessionSubscriptions();
     tabOpenPending = false;
     pendingBrowserCommands = [];
+    pendingActiveTabSelection = null;
     clearCursorTimer();
     pendingNavigationSessions.clear();
     pendingNavigationUrls = new Map();
@@ -900,6 +928,14 @@
     error = tab.error;
     loading = tab.loading;
     connected = tab.connected;
+  }
+
+  function syncFrameFromActiveTab() {
+    if (activeTab?.frame) {
+      renderFrame(activeTab.frame);
+    } else {
+      clearCanvas();
+    }
   }
 
   async function connectActiveTab(generation = sessionGeneration) {
@@ -1366,9 +1402,10 @@
     if (tabId === activeTabId) return;
     const requestedSessionId = sessionId;
     const requestedGeneration = sessionGeneration;
+    pendingActiveTabSelection = { tabId, at: Date.now() };
     activeTabId = tabId;
     syncFromActiveTab();
-    if (activeTab?.frame) renderFrame(activeTab.frame);
+    syncFrameFromActiveTab();
     if (effectiveRenderer === "cef") {
       void connectActiveTab();
       return;
@@ -1380,6 +1417,7 @@
         activeRootSessionId !== requestedSessionId ||
         activeTabId !== tabId
       ) return;
+      if (pendingActiveTabSelection?.tabId === tabId) pendingActiveTabSelection = null;
       error = String(err);
     });
     void connectActiveTab();
@@ -1424,6 +1462,7 @@
     if (tabId === activeTabId) {
       activeTabId = nextTabs[Math.max(0, index - 1)]?.id ?? nextTabs[0].id;
       syncFromActiveTab();
+      syncFrameFromActiveTab();
       void connectActiveTab();
     }
   }
