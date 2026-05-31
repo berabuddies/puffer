@@ -607,6 +607,7 @@ EOF
   patch_cef_browser_widget_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
   patch_cef_chrome_lifecycle_compatibility "$src"
+  patch_cef_content_main_compatibility "$src"
 
   local setting_helper_cc="$src/cef/libcef/browser/setting_helper.cc"
   local content_settings_types="$src/components/content_settings/core/common/content_settings_types.mojom"
@@ -670,6 +671,285 @@ EOF
   if [[ -f "$headless_client_cc" ]] && grep -Fq 'void HeadlessContentBrowserClient::ConfigureNetworkContextParams(' "$headless_client_cc"; then
     perl -0pi -e 's#void HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#bool HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#; s#(      cert_verifier_creation_params\);\n)(?!  return true;\n)#${1}  return true;\n#' "$headless_client_cc"
   fi
+}
+
+patch_cef_content_main_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF content main patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def insert_after(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, marker + addition, 1))
+
+
+def insert_before(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, addition + marker, 1))
+
+
+def replace_once(path, old, new, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if old not in text:
+        raise SystemExit(f"failed to patch {desc}: pattern not found in {path}")
+    write(path, text.replace(old, new, 1))
+
+
+def replace_optional(path, old, new):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if old in text:
+        write(path, text.replace(old, new, 1))
+
+
+content_main_h = "content/public/app/content_main.h"
+insert_after(
+    content_main_h,
+    """#elif !BUILDFLAG(IS_ANDROID)
+  int argc = 0;
+  raw_ptr<const char*> argv = nullptr;
+#endif
+""",
+    """
+#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_ANDROID)
+  bool disable_signal_handlers = false;
+#endif
+""",
+    "disable_signal_handlers",
+    "ContentMainParams CEF signal-handler flag",
+)
+insert_after(
+    content_main_h,
+    """#elif !BUILDFLAG(IS_ANDROID)
+    copy.argc = argc;
+    copy.argv = argv;
+#endif
+""",
+    """#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_ANDROID)
+    copy.disable_signal_handlers = disable_signal_handlers;
+#endif
+""",
+    "copy.disable_signal_handlers",
+    "ContentMainParams CEF signal-handler copy",
+)
+insert_after(
+    content_main_h,
+    """CONTENT_EXPORT int RunContentProcess(ContentMainParams params,
+                                     ContentMainRunner* content_main_runner);
+""",
+    """
+CONTENT_EXPORT int ContentMainInitialize(
+    ContentMainParams params,
+    ContentMainRunner* content_main_runner);
+CONTENT_EXPORT int ContentMainRun(ContentMainRunner* content_main_runner);
+CONTENT_EXPORT void ContentMainShutdown(ContentMainRunner* content_main_runner);
+""",
+    "ContentMainInitialize(",
+    "content main split entrypoint declarations",
+)
+
+content_main_cc = "content/app/content_main.cc"
+replace_once(
+    content_main_cc,
+    """// This function must be marked with NO_STACK_PROTECTOR or it may crash on
+// return, see the --change-stack-guard-on-fork command line flag.
+NO_STACK_PROTECTOR int RunContentProcess(
+    ContentMainParams params,
+    ContentMainRunner* content_main_runner) {
+""",
+    """int ContentMainInitialize(
+    ContentMainParams params,
+    ContentMainRunner* content_main_runner) {
+""",
+    "int ContentMainInitialize(",
+    "content main initialize split",
+)
+replace_optional(
+    content_main_cc,
+    """  int exit_code = -1;
+#if BUILDFLAG(IS_MAC)
+  base::apple::ScopedNSAutoreleasePool autorelease_pool;
+#endif
+
+""",
+    "  int exit_code = -1;\n",
+)
+replace_once(
+    content_main_cc,
+    "    SetupSignalHandlers();\n",
+    """    if (!params.disable_signal_handlers) {
+      SetupSignalHandlers();
+    }
+""",
+    "params.disable_signal_handlers",
+    "content main optional signal handlers",
+)
+replace_optional(
+    content_main_cc,
+    """#if BUILDFLAG(IS_MAC)
+    // We need this pool for all the objects created before we get to the event
+    // loop, but we don't want to leave them hanging around until the app quits.
+    // Each "main" needs to flush this pool right before it goes into its main
+    // event loop to get rid of the cruft. TODO(crbug.com/40260311): This
+    // is not safe. Each main loop should create and destroy its own pool; it
+    // should not be flushing the pool at the base of the autorelease pool
+    // stack.
+    params.autorelease_pool = &autorelease_pool;
+    InitializeMac();
+#endif
+""",
+    """#if BUILDFLAG(IS_MAC)
+    InitializeMac();
+#endif
+""",
+)
+replace_once(
+    content_main_cc,
+    """  if (IsSubprocess())
+    CommonSubprocessInit();
+  exit_code = content_main_runner->Run();
+
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
+  content_main_runner->Shutdown();
+#endif
+
+  return exit_code;
+}
+""",
+    """  if (IsSubprocess()) {
+    CommonSubprocessInit();
+  }
+
+  return exit_code;
+}
+
+// This function must be marked with NO_STACK_PROTECTOR or it may crash on
+// return, see the --change-stack-guard-on-fork command line flag.
+NO_STACK_PROTECTOR int ContentMainRun(
+    ContentMainRunner* content_main_runner) {
+  return content_main_runner->Run();
+}
+
+void ContentMainShutdown(ContentMainRunner* content_main_runner) {
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
+  content_main_runner->Shutdown();
+#endif
+}
+
+// This function must be marked with NO_STACK_PROTECTOR or it may crash on
+// return, see the --change-stack-guard-on-fork command line flag.
+NO_STACK_PROTECTOR int RunContentProcess(
+    ContentMainParams params,
+    ContentMainRunner* content_main_runner) {
+#if BUILDFLAG(IS_MAC)
+  base::apple::ScopedNSAutoreleasePool autorelease_pool;
+  params.autorelease_pool = &autorelease_pool;
+#endif
+
+  int exit_code =
+      ContentMainInitialize(std::move(params), content_main_runner);
+  if (exit_code >= 0) {
+    return exit_code;
+  }
+
+  exit_code = ContentMainRun(content_main_runner);
+  ContentMainShutdown(content_main_runner);
+  return exit_code;
+}
+""",
+    "NO_STACK_PROTECTOR int ContentMainRun(",
+    "content main run and shutdown split",
+)
+
+runner_h = "content/app/content_main_runner_impl.h"
+insert_after(
+    runner_h,
+    "  void Shutdown() override;\n",
+    "\n  void ShutdownOnUIThread();\n",
+    "ShutdownOnUIThread()",
+    "ContentMainRunnerImpl CEF UI-thread shutdown declaration",
+)
+
+runner_cc = "content/app/content_main_runner_impl.cc"
+insert_after(
+    runner_cc,
+    """  delegate_ = nullptr;
+  is_shutdown_ = true;
+}
+""",
+    """
+void ContentMainRunnerImpl::ShutdownOnUIThread() {
+  discardable_shared_memory_manager_.reset();
+  browser_memory_consumer_registry_.reset();
+  memory_pressure_listener_registry_.reset();
+}
+""",
+    "ContentMainRunnerImpl::ShutdownOnUIThread()",
+    "ContentMainRunnerImpl CEF UI-thread shutdown definition",
+)
+
+chrome_main_h = "chrome/app/chrome_main_delegate.h"
+insert_after(
+    chrome_main_h,
+    "  ~ChromeMainDelegate() override;\n",
+    "\n  virtual void CleanupOnUIThread();\n",
+    "virtual void CleanupOnUIThread();",
+    "ChromeMainDelegate CEF cleanup declaration",
+)
+
+chrome_main_cc = "chrome/app/chrome_main_delegate.cc"
+insert_before(
+    chrome_main_cc,
+    "std::optional<int> ChromeMainDelegate::PostEarlyInitialization(\n",
+    """void ChromeMainDelegate::CleanupOnUIThread() {}
+
+""",
+    "ChromeMainDelegate::CleanupOnUIThread()",
+    "ChromeMainDelegate CEF cleanup definition",
+)
+PY
 }
 
 patch_cef_chrome_lifecycle_compatibility() {
