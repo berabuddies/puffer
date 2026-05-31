@@ -6,14 +6,15 @@ APP_DIR="$ROOT/apps/puffer-desktop"
 TAURI_DIR="$APP_DIR/src-tauri"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT/release}"
 CACHE_DIR="${PUFFER_RELEASE_CACHE:-$ROOT/.release}"
-RELEASE_TAG="${RELEASE_TAG:-ct}"
-CEF_RELEASE_TAG="${CEF_RELEASE_TAG:-$RELEASE_TAG}"
+RELEASE_TAG="${RELEASE_TAG:-0.0.1-alpha}"
+CEF_RELEASE_TAG="${CEF_RELEASE_TAG:-ct}"
 LEGACY_GITHUB_REPO="${GITHUB_REPO:-}"
 SOURCE_GITHUB_REPO="${SOURCE_GITHUB_REPO:-${LEGACY_GITHUB_REPO:-berabuddies/puffer}}"
 RELEASE_GITHUB_REPO="${RELEASE_GITHUB_REPO:-${LEGACY_GITHUB_REPO:-berabuddies/puffer}}"
 CEF_GITHUB_REPO="${CEF_GITHUB_REPO:-berabuddies/ct}"
 CHROME_RELEASE_TAG="${CHROME_RELEASE_TAG:-$CEF_RELEASE_TAG}"
 CHROME_GITHUB_REPO="${CHROME_GITHUB_REPO:-$CEF_GITHUB_REPO}"
+UPLOAD_TUI_ARTIFACTS="${UPLOAD_TUI_ARTIFACTS:-0}"
 CHROMIUM_TINTIN_DIR="${CHROMIUM_TINTIN_DIR:-$HOME/chromium_tintin}"
 CHROMIUM_TINTIN_REPO="${CHROMIUM_TINTIN_REPO:-git@github.com:agentenv/chromium_tintin.git}"
 CEF_REPO="${CEF_REPO:-https://github.com/chromiumembedded/cef.git}"
@@ -43,18 +44,20 @@ Targets:
   build-release-cef  Clone/pull/build CEF and upload puffer-cef-* to GitHub.
   build-release-chrome
                       Package and upload Chromium Chrome from chromium_tintin.
-  pack-macos         Build and upload macOS .app zip plus TUI tarball.
+  pack-macos         Build and upload macOS .app zip.
   build-linux        Linux-only Rust + Tauri build. Hard fails off Linux.
   pack-linux         SSH-build Linux artifacts on c@65.19.161.135 and upload.
   pack-linux-local   Linux-only local package step used by pack-linux.
 
 Common env:
-  RELEASE_TAG=ct
+  RELEASE_TAG=0.0.1-alpha
+  CEF_RELEASE_TAG=ct
   SOURCE_GITHUB_REPO=berabuddies/puffer
   RELEASE_GITHUB_REPO=berabuddies/puffer
   CEF_GITHUB_REPO=berabuddies/ct
   CHROME_GITHUB_REPO=berabuddies/ct
   CHROME_RELEASE_TAG=$CEF_RELEASE_TAG
+  UPLOAD_TUI_ARTIFACTS=0
   CHROMIUM_TINTIN_DIR=$HOME/chromium_tintin
   CHROME_APP_PATH=<path-to-Chromium.app>
   CEF_REPO=https://github.com/chromiumembedded/cef.git
@@ -2876,7 +2879,7 @@ bundle_macos_app() {
   require_macos pack-macos
   require_command ditto
   build_macos
-  local source_app app_name stage app cef_runtime executable asset tui_asset tui_stage
+  local source_app app_name stage app cef_runtime executable asset
   source_app="$(mac_app_bundle)"
   [[ -n "$source_app" ]] || fail "Tauri macOS app bundle was not produced"
   app_name="$(basename "$source_app")"
@@ -2905,19 +2908,22 @@ bundle_macos_app() {
   verify_macos_app_zip "$asset" "$app_name"
   upload_asset "$RELEASE_TAG" "$asset"
 
-  tui_stage="$CACHE_DIR/stage/puffer-tui-$(asset_platform)-$(asset_arch)"
-  tui_asset="$ARTIFACT_DIR/$(tui_asset_name)"
-  reset_dir "$tui_stage"
-  cp "$ROOT/target/release/puffer" "$tui_stage/puffer"
-  tar -C "$(dirname "$tui_stage")" -czf "$tui_asset" "$(basename "$tui_stage")"
-  upload_asset "$RELEASE_TAG" "$tui_asset"
+  if [[ "$UPLOAD_TUI_ARTIFACTS" == "1" ]]; then
+    local tui_asset tui_stage
+    tui_stage="$CACHE_DIR/stage/puffer-tui-$(asset_platform)-$(asset_arch)"
+    tui_asset="$ARTIFACT_DIR/$(tui_asset_name)"
+    reset_dir "$tui_stage"
+    cp "$ROOT/target/release/puffer" "$tui_stage/puffer"
+    tar -C "$(dirname "$tui_stage")" -czf "$tui_asset" "$(basename "$tui_stage")"
+    upload_asset "$RELEASE_TAG" "$tui_asset"
+  fi
 }
 
 pack_linux_local() {
   require_linux pack-linux-local
   build_linux
   ensure_dirs
-  local stage asset tui_stage tui_asset appimage deb
+  local stage asset appimage deb
   stage="$CACHE_DIR/stage/puffer-desktop-linux-$(asset_arch)"
   asset="$ARTIFACT_DIR/$(desktop_asset_name)"
   reset_dir "$stage"
@@ -2933,12 +2939,15 @@ pack_linux_local() {
   tar -C "$(dirname "$stage")" -czf "$asset" "$(basename "$stage")"
   upload_asset "$RELEASE_TAG" "$asset"
 
-  tui_stage="$CACHE_DIR/stage/puffer-tui-linux-$(asset_arch)"
-  tui_asset="$ARTIFACT_DIR/$(tui_asset_name)"
-  reset_dir "$tui_stage"
-  cp "$ROOT/target/release/puffer" "$tui_stage/puffer"
-  tar -C "$(dirname "$tui_stage")" -czf "$tui_asset" "$(basename "$tui_stage")"
-  upload_asset "$RELEASE_TAG" "$tui_asset"
+  if [[ "$UPLOAD_TUI_ARTIFACTS" == "1" ]]; then
+    local tui_asset tui_stage
+    tui_stage="$CACHE_DIR/stage/puffer-tui-linux-$(asset_arch)"
+    tui_asset="$ARTIFACT_DIR/$(tui_asset_name)"
+    reset_dir "$tui_stage"
+    cp "$ROOT/target/release/puffer" "$tui_stage/puffer"
+    tar -C "$(dirname "$tui_stage")" -czf "$tui_asset" "$(basename "$tui_stage")"
+    upload_asset "$RELEASE_TAG" "$tui_asset"
+  fi
 }
 
 pack_linux_remote() {
@@ -2962,9 +2971,9 @@ cd "$LINUX_REPO_DIR"
 git fetch origin "$branch"
 git checkout "$branch" || git checkout -b "$branch" "origin/$branch"
 git pull --ff-only origin "$branch"
-CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" NO_UPLOAD=1 make build-release-cef
-CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" NO_UPLOAD=1 make build-release-chrome
-CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" NO_UPLOAD=1 make pack-linux-local
+CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" UPLOAD_TUI_ARTIFACTS="$UPLOAD_TUI_ARTIFACTS" NO_UPLOAD=1 make build-release-cef
+CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" UPLOAD_TUI_ARTIFACTS="$UPLOAD_TUI_ARTIFACTS" NO_UPLOAD=1 make build-release-chrome
+CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" UPLOAD_TUI_ARTIFACTS="$UPLOAD_TUI_ARTIFACTS" NO_UPLOAD=1 make pack-linux-local
 EOF
 
   remote_artifacts="$ARTIFACT_DIR/remote-linux"
@@ -2979,11 +2988,16 @@ EOF
     [[ -f "$asset" ]] || continue
     upload_chrome_asset "$asset"
   done
-  for asset in "$remote_artifacts"/puffer-desktop-linux-*.tar.gz \
-    "$remote_artifacts"/puffer-tui-linux-*.tar.gz; do
+  for asset in "$remote_artifacts"/puffer-desktop-linux-*.tar.gz; do
     [[ -f "$asset" ]] || continue
     upload_asset "$RELEASE_TAG" "$asset"
   done
+  if [[ "$UPLOAD_TUI_ARTIFACTS" == "1" ]]; then
+    for asset in "$remote_artifacts"/puffer-tui-linux-*.tar.gz; do
+      [[ -f "$asset" ]] || continue
+      upload_asset "$RELEASE_TAG" "$asset"
+    done
+  fi
 }
 
 case "${1:-help}" in

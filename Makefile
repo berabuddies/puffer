@@ -1,7 +1,7 @@
 SHELL := /usr/bin/env bash
 
-RELEASE_TAG ?= ct
-CEF_RELEASE_TAG ?= $(RELEASE_TAG)
+RELEASE_TAG ?= 0.0.1-alpha
+CEF_RELEASE_TAG ?= ct
 CHROME_RELEASE_TAG ?= $(CEF_RELEASE_TAG)
 SOURCE_GITHUB_REPO ?= berabuddies/puffer
 RELEASE_GITHUB_REPO ?= berabuddies/puffer
