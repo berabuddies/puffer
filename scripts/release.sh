@@ -597,6 +597,8 @@ EOF
     fi
   fi
 
+  patch_cef_context_menu_compatibility "$src"
+
   local content_client_h="$src/content/public/browser/content_browser_client.h"
   local create_window_hook='virtual void CreateWindowResult(RenderFrameHost* opener, bool success)'
 
@@ -644,6 +646,432 @@ EOF
   if [[ -f "$headless_client_cc" ]] && grep -Fq 'void HeadlessContentBrowserClient::ConfigureNetworkContextParams(' "$headless_client_cc"; then
     perl -0pi -e 's#void HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#bool HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#; s#(      cert_verifier_creation_params\);\n)(?!  return true;\n)#${1}  return true;\n#' "$headless_client_cc"
   fi
+}
+
+patch_cef_context_menu_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF compatibility patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def replace_once(path, old, new, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if new in text:
+        return
+    if old not in text:
+        raise SystemExit(f"failed to patch {desc}: pattern not found in {path}")
+    write(path, text.replace(old, new, 1))
+
+
+def insert_before(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, addition + marker, 1))
+
+
+def insert_after(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, marker + addition, 1))
+
+
+render_menu_cc = "chrome/browser/renderer_context_menu/render_view_context_menu.cc"
+insert_after(
+    render_menu_cc,
+    """base::OnceCallback<void(RenderViewContextMenu*)>* GetMenuShownCallback() {
+  static base::NoDestructor<base::OnceCallback<void(RenderViewContextMenu*)>>
+      callback;
+  return callback.get();
+}
+""",
+    """
+RenderViewContextMenu::MenuCreatedCallback* GetMenuCreatedCallback() {
+  static base::NoDestructor<RenderViewContextMenu::MenuCreatedCallback>
+      callback;
+  return callback.get();
+}
+
+RenderViewContextMenu::MenuShowHandlerCallback* GetMenuShowHandlerCallback() {
+  static base::NoDestructor<RenderViewContextMenu::MenuShowHandlerCallback>
+      callback;
+  return callback.get();
+}
+""",
+    "GetMenuCreatedCallback()",
+    "RenderViewContextMenu CEF callback storage",
+)
+insert_before(
+    render_menu_cc,
+    "  observers_.AddObserver(&autofill_context_menu_manager_);\n",
+    """  auto* cb = GetMenuCreatedCallback();
+  if (!cb->is_null()) {
+    first_observer_ = cb->Run(this);
+    if (first_observer_) {
+      observers_.AddObserver(first_observer_.get());
+    }
+  }
+
+""",
+    "first_observer_ = cb->Run(this);",
+    "RenderViewContextMenu CEF menu-created observer",
+)
+insert_before(
+    render_menu_cc,
+    """}
+
+Profile* RenderViewContextMenu::GetProfile() const {
+""",
+    """  if (first_observer_) {
+    first_observer_->InitMenu(params_);
+  }
+""",
+    "first_observer_->InitMenu(params_);",
+    "RenderViewContextMenu CEF observer init hook",
+)
+insert_after(
+    render_menu_cc,
+    """void RenderViewContextMenu::RemoveObserverForTesting(
+    RenderViewContextMenuObserver* observer) {
+  observers_.RemoveObserver(observer);
+}
+""",
+    """
+// static
+void RenderViewContextMenu::RegisterMenuCreatedCallback(
+    MenuCreatedCallback cb) {
+  *GetMenuCreatedCallback() = cb;
+}
+
+// static
+void RenderViewContextMenu::RegisterMenuShowHandlerCallback(
+    MenuShowHandlerCallback cb) {
+  *GetMenuShowHandlerCallback() = cb;
+}
+
+bool RenderViewContextMenu::UseShowHandler() {
+  auto* cb = GetMenuShowHandlerCallback();
+  return !cb->is_null() && cb->Run(this);
+}
+""",
+    "RegisterMenuCreatedCallback(",
+    "RenderViewContextMenu CEF callback methods",
+)
+
+render_menu_h = "chrome/browser/renderer_context_menu/render_view_context_menu.h"
+insert_before(
+    render_menu_h,
+    " protected:\n",
+    """
+  using MenuCreatedCallback = base::RepeatingCallback<
+      std::unique_ptr<RenderViewContextMenuObserver>(RenderViewContextMenu*)>;
+  static void RegisterMenuCreatedCallback(MenuCreatedCallback cb);
+
+  using MenuShowHandlerCallback =
+      base::RepeatingCallback<bool(RenderViewContextMenu*)>;
+  static void RegisterMenuShowHandlerCallback(MenuShowHandlerCallback cb);
+
+""",
+    "RegisterMenuCreatedCallback(MenuCreatedCallback cb)",
+    "RenderViewContextMenu CEF callback declarations",
+)
+insert_after(
+    render_menu_h,
+    " protected:\n",
+    "  bool UseShowHandler();\n\n",
+    "bool UseShowHandler();",
+    "RenderViewContextMenu CEF show-handler declaration",
+)
+insert_before(
+    render_menu_h,
+    "  // An observer that handles spelling suggestions, \"Add to dictionary\", and\n",
+    """  std::unique_ptr<RenderViewContextMenuObserver> first_observer_;
+
+""",
+    "first_observer_;",
+    "RenderViewContextMenu CEF first observer storage",
+)
+
+views_menu_cc = "chrome/browser/ui/views/renderer_context_menu/render_view_context_menu_views.cc"
+insert_after(
+    views_menu_cc,
+    """bool RenderViewContextMenuViews::GetAcceleratorForCommandId(
+    int command_id,
+    ui::Accelerator* accel) const {
+""",
+    """  if (RenderViewContextMenu::GetAcceleratorForCommandId(command_id, accel)) {
+    return true;
+  }
+
+""",
+    "RenderViewContextMenu::GetAcceleratorForCommandId(command_id, accel)",
+    "RenderViewContextMenuViews CEF accelerator lookup",
+)
+insert_after(
+    views_menu_cc,
+    "void RenderViewContextMenuViews::Show() {\n",
+    """  if (UseShowHandler()) {
+    return;
+  }
+
+""",
+    "UseShowHandler()",
+    "RenderViewContextMenuViews CEF show handler",
+)
+insert_before(
+    views_menu_cc,
+    "\nviews::Widget* RenderViewContextMenuViews::GetTopLevelWidget() {\n",
+    """
+bool RenderViewContextMenuViews::IsRunning() {
+  return static_cast<ToolkitDelegateViews*>(toolkit_delegate())
+      ->IsMenuRunning();
+}
+""",
+    "RenderViewContextMenuViews::IsRunning()",
+    "RenderViewContextMenuViews CEF running query",
+)
+insert_after(
+    "chrome/browser/ui/views/renderer_context_menu/render_view_context_menu_views.h",
+    "  void Show() override;\n",
+    "  bool IsRunning() override;\n",
+    "bool IsRunning() override;",
+    "RenderViewContextMenuViews CEF running declaration",
+)
+
+delegate_views_h = "chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.h"
+delegate_views_cc = "chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views.cc"
+insert_after(
+    delegate_views_h,
+    "  void ShowMenu(std::unique_ptr<RenderViewContextMenuBase> menu) override;\n",
+    "  bool IsMenuRunning() override;\n",
+    "bool IsMenuRunning() override;",
+    "ChromeWebContentsViewDelegateViews CEF running declaration",
+)
+insert_before(
+    delegate_views_cc,
+    "\nvoid ChromeWebContentsViewDelegateViews::ShowContextMenu(\n",
+    """
+bool ChromeWebContentsViewDelegateViews::IsMenuRunning() {
+  return context_menu_ && context_menu_->IsRunning();
+}
+""",
+    "ChromeWebContentsViewDelegateViews::IsMenuRunning()",
+    "ChromeWebContentsViewDelegateViews CEF running query",
+)
+
+mac_delegate_h = "chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views_mac.h"
+mac_delegate_mm = "chrome/browser/ui/views/tab_contents/chrome_web_contents_view_delegate_views_mac.mm"
+insert_after(
+    mac_delegate_h,
+    "  void ShowMenu(std::unique_ptr<RenderViewContextMenuBase> menu) override;\n",
+    "  bool IsMenuRunning() override;\n",
+    "bool IsMenuRunning() override;",
+    "ChromeWebContentsViewDelegateViewsMac CEF running declaration",
+)
+insert_before(
+    mac_delegate_mm,
+    "\ncontent::RenderWidgetHostView*\nChromeWebContentsViewDelegateViewsMac::GetActiveRenderWidgetHostView() const {\n",
+    """
+bool ChromeWebContentsViewDelegateViewsMac::IsMenuRunning() {
+  return context_menu_ && context_menu_->IsRunning();
+}
+""",
+    "ChromeWebContentsViewDelegateViewsMac::IsMenuRunning()",
+    "ChromeWebContentsViewDelegateViewsMac CEF running query",
+)
+
+context_delegate_h = "components/renderer_context_menu/context_menu_delegate.h"
+insert_after(
+    context_delegate_h,
+    "  virtual void ShowMenu(std::unique_ptr<RenderViewContextMenuBase> menu) = 0;\n",
+    "  virtual bool IsMenuRunning() = 0;\n",
+    "virtual bool IsMenuRunning()",
+    "ContextMenuDelegate CEF running API",
+)
+
+base_h = "components/renderer_context_menu/render_view_context_menu_base.h"
+insert_after(
+    base_h,
+    "  void Cancel();\n",
+    "\n  virtual bool IsRunning() = 0;\n",
+    "virtual bool IsRunning()",
+    "RenderViewContextMenuBase CEF running API",
+)
+insert_after(
+    base_h,
+    "  const content::ContextMenuParams& params() const { return params_; }\n",
+    "  content::WebContents* source_web_contents() const { return source_web_contents_; }\n",
+    "source_web_contents() const",
+    "RenderViewContextMenuBase CEF web contents accessor",
+)
+insert_after(
+    base_h,
+    "  bool IsCommandIdChecked(int command_id) const override;\n",
+    """  bool GetAcceleratorForCommandId(int command_id,
+                                  ui::Accelerator* accelerator) const override;
+""",
+    "GetAcceleratorForCommandId(int command_id",
+    "RenderViewContextMenuBase CEF accelerator declaration",
+)
+insert_before(
+    "components/renderer_context_menu/render_view_context_menu_base.cc",
+    "\nvoid RenderViewContextMenuBase::ExecuteCommand(int id, int event_flags) {\n",
+    """
+bool RenderViewContextMenuBase::GetAcceleratorForCommandId(
+    int id,
+    ui::Accelerator* accelerator) const {
+  for (auto& observer : observers_) {
+    if (observer.IsCommandIdSupported(id)) {
+      return observer.GetAccelerator(id, accelerator);
+    }
+  }
+
+  return false;
+}
+""",
+    "RenderViewContextMenuBase::GetAcceleratorForCommandId",
+    "RenderViewContextMenuBase CEF accelerator lookup",
+)
+
+observer_h = "components/renderer_context_menu/render_view_context_menu_observer.h"
+insert_after(
+    observer_h,
+    """namespace content {
+struct ContextMenuParams;
+}
+""",
+    """
+namespace ui {
+class Accelerator;
+}
+""",
+    "class Accelerator;",
+    "RenderViewContextMenuObserver CEF accelerator forward declaration",
+)
+insert_after(
+    observer_h,
+    "  virtual bool IsCommandIdEnabled(int command_id);\n",
+    "  virtual bool GetAccelerator(int command_id, ui::Accelerator* accel);\n",
+    "virtual bool GetAccelerator(int command_id",
+    "RenderViewContextMenuObserver CEF accelerator API",
+)
+insert_after(
+    "components/renderer_context_menu/render_view_context_menu_observer.cc",
+    """bool RenderViewContextMenuObserver::IsCommandIdEnabled(int command_id) {
+  return false;
+}
+""",
+    """
+bool RenderViewContextMenuObserver::GetAccelerator(int command_id,
+                                                   ui::Accelerator* accel) {
+  return false;
+}
+""",
+    "RenderViewContextMenuObserver::GetAccelerator",
+    "RenderViewContextMenuObserver CEF accelerator default",
+)
+
+toolkit_h = "components/renderer_context_menu/views/toolkit_delegate_views.h"
+toolkit_cc = "components/renderer_context_menu/views/toolkit_delegate_views.cc"
+insert_after(
+    toolkit_h,
+    "  views::MenuItemView* menu_view() { return menu_view_; }\n",
+    "  bool IsMenuRunning() const;\n",
+    "bool IsMenuRunning() const;",
+    "ToolkitDelegateViews CEF running declaration",
+)
+insert_before(
+    toolkit_cc,
+    "\nvoid ToolkitDelegateViews::Init(ui::SimpleMenuModel* menu_model) {\n",
+    """
+bool ToolkitDelegateViews::IsMenuRunning() const {
+  return menu_runner_ && menu_runner_->IsRunning();
+}
+""",
+    "ToolkitDelegateViews::IsMenuRunning()",
+    "ToolkitDelegateViews CEF running query",
+)
+
+for rel in [
+    "chrome/browser/ui/cocoa/renderer_context_menu/render_view_context_menu_mac_cocoa.h",
+    "chrome/browser/ui/cocoa/renderer_context_menu/render_view_context_menu_mac_remote_cocoa.h",
+]:
+    insert_after(
+        rel,
+        "  void Show() override;\n",
+        "  bool IsRunning() override;\n",
+        "bool IsRunning() override;",
+        "Mac RenderViewContextMenu CEF running declaration",
+    )
+
+insert_after(
+    "chrome/browser/ui/cocoa/renderer_context_menu/render_view_context_menu_mac_cocoa.mm",
+    "void RenderViewContextMenuMacCocoa::Show() {\n",
+    """  if (UseShowHandler()) {
+    return;
+  }
+
+""",
+    "UseShowHandler()",
+    "RenderViewContextMenuMacCocoa CEF show handler",
+)
+insert_before(
+    "chrome/browser/ui/cocoa/renderer_context_menu/render_view_context_menu_mac_cocoa.mm",
+    "\nvoid RenderViewContextMenuMacCocoa::CancelToolkitMenu() {\n",
+    """
+bool RenderViewContextMenuMacCocoa::IsRunning() {
+  return menu_controller_ && [menu_controller_ isMenuOpen];
+}
+""",
+    "RenderViewContextMenuMacCocoa::IsRunning()",
+    "RenderViewContextMenuMacCocoa CEF running query",
+)
+insert_before(
+    "chrome/browser/ui/cocoa/renderer_context_menu/render_view_context_menu_mac_remote_cocoa.mm",
+    "\nvoid RenderViewContextMenuMacRemoteCocoa::CancelToolkitMenu() {\n",
+    """
+bool RenderViewContextMenuMacRemoteCocoa::IsRunning() {
+  return runner_ && runner_->IsRunning();
+}
+""",
+    "RenderViewContextMenuMacRemoteCocoa::IsRunning()",
+    "RenderViewContextMenuMacRemoteCocoa CEF running query",
+)
+PY
 }
 
 cef_root_for_runtime() {
