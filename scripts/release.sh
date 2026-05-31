@@ -398,17 +398,29 @@ ensure_cef_checkout() {
 }
 
 autoninja_path() {
-  if command -v autoninja >/dev/null 2>&1; then
-    command -v autoninja
-    return
-  fi
   local src
   src="$(chromium_src_dir)"
   if [[ -x "$src/third_party/depot_tools/autoninja" ]]; then
     printf '%s\n' "$src/third_party/depot_tools/autoninja"
     return
   fi
+  if command -v autoninja >/dev/null 2>&1; then
+    command -v autoninja
+    return
+  fi
   fail "autoninja was not found"
+}
+
+ensure_depot_tools_bootstrapped() {
+  local src="$1"
+  local depot_tools="$src/third_party/depot_tools"
+  [[ -x "$depot_tools/autoninja" ]] || return
+  if [[ -x "$depot_tools/python-bin/python3" ]]; then
+    return
+  fi
+  [[ -x "$depot_tools/ensure_bootstrap" ]] || return
+  log "bootstrapping Chromium depot_tools"
+  (cd "$depot_tools" && ./ensure_bootstrap >&2)
 }
 
 default_cef_out_dir() {
@@ -416,11 +428,14 @@ default_cef_out_dir() {
   case "$(asset_platform)" in
     macos) printf '%s/out/Release_GN_arm64\n' "$src" ;;
     linux)
-      if [[ -d "$src/out/Linux" ]]; then
-        printf '%s/out/Linux\n' "$src"
-      else
-        printf '%s/out/LinuxNoOzone\n' "$src"
-      fi
+      local candidate
+      for candidate in "$src/out/Linux" "$src/out/LinuxNoOzone" "$src/out/Release" "$src/out/Release_GN_x64"; do
+        if [[ -d "$candidate" ]]; then
+          printf '%s\n' "$candidate"
+          return
+        fi
+      done
+      printf '%s/out/Release\n' "$src"
       ;;
     *) fail "unsupported CEF build platform: $(asset_platform)" ;;
   esac
@@ -433,6 +448,7 @@ run_cef_build() {
   if [[ -z "$out_dir" ]]; then
     out_dir="$(default_cef_out_dir "$src")"
   fi
+  ensure_depot_tools_bootstrapped "$src"
   ninja="$(autoninja_path)"
   ensure_cef_checkout "$src"
   [[ -x "$src/cef/cef_create_projects.sh" ]] || fail "CEF project generator missing at $src/cef/cef_create_projects.sh"
