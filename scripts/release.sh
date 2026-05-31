@@ -599,6 +599,7 @@ EOF
 
   patch_cef_context_menu_compatibility "$src"
   patch_cef_browser_widget_compatibility "$src"
+  patch_cef_permission_prompt_compatibility "$src"
 
   local setting_helper_cc="$src/cef/libcef/browser/setting_helper.cc"
   local content_settings_types="$src/components/content_settings/core/common/content_settings_types.mojom"
@@ -662,6 +663,166 @@ EOF
   if [[ -f "$headless_client_cc" ]] && grep -Fq 'void HeadlessContentBrowserClient::ConfigureNetworkContextParams(' "$headless_client_cc"; then
     perl -0pi -e 's#void HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#bool HeadlessContentBrowserClient::ConfigureNetworkContextParams\(#; s#(      cert_verifier_creation_params\);\n)(?!  return true;\n)#${1}  return true;\n#' "$headless_client_cc"
   fi
+}
+
+patch_cef_permission_prompt_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF permission prompt patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+
+
+def read(path):
+    return path.read_text(encoding="utf-8")
+
+
+def write(path, text):
+    path.write_text(text, encoding="utf-8")
+
+
+def insert_before(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, addition + marker, 1))
+
+
+def insert_after(path, marker, addition, sentinel, desc):
+    path = src / path
+    if not path.exists():
+        return
+    text = read(path)
+    if sentinel in text:
+        return
+    if marker not in text:
+        raise SystemExit(f"failed to patch {desc}: marker not found in {path}")
+    write(path, text.replace(marker, marker + addition, 1))
+
+
+permission_header = "chrome/browser/ui/permission_bubble/permission_prompt.h"
+insert_before(
+    permission_header,
+    "// Factory function to create permission prompts for chrome.\n",
+    """using CreatePermissionPromptFunctionPtr =
+    std::unique_ptr<permissions::PermissionPrompt> (*)(
+        content::WebContents* web_contents,
+        permissions::PermissionPrompt::Delegate* delegate,
+        bool* default_handling);
+void SetCreatePermissionPromptFunction(CreatePermissionPromptFunctionPtr);
+
+""",
+    "CreatePermissionPromptFunctionPtr",
+    "permission prompt CEF factory hook declaration",
+)
+
+factory_cc = "chrome/browser/ui/views/permissions/permission_prompt_factory.cc"
+insert_before(
+    factory_cc,
+    "\n}  // namespace\n\nstd::unique_ptr<permissions::PermissionPrompt> CreatePermissionPrompt(\n",
+    "\nCreatePermissionPromptFunctionPtr g_create_permission_prompt_ptr = nullptr;\n",
+    "g_create_permission_prompt_ptr",
+    "permission prompt CEF factory hook storage",
+)
+insert_after(
+    factory_cc,
+    "}  // namespace\n\n",
+    """void SetCreatePermissionPromptFunction(
+    CreatePermissionPromptFunctionPtr ptr) {
+  g_create_permission_prompt_ptr = ptr;
+}
+
+""",
+    "void SetCreatePermissionPromptFunction(",
+    "permission prompt CEF factory hook setter",
+)
+
+factory_path = src / factory_cc
+if factory_path.exists():
+    text = read(factory_path)
+    if "g_create_permission_prompt_ptr(web_contents, delegate," not in text:
+        marker = (
+            "std::unique_ptr<permissions::PermissionPrompt> CreatePermissionPrompt(\n"
+            "    content::WebContents* web_contents,\n"
+            "    permissions::PermissionPrompt::Delegate* delegate) {\n"
+        )
+        if marker not in text:
+            raise SystemExit(
+                "failed to patch permission prompt CEF factory hook call: "
+                f"marker not found in {factory_path}"
+            )
+        hook = """  if (g_create_permission_prompt_ptr) {
+    bool default_handling = true;
+    auto prompt =
+        g_create_permission_prompt_ptr(web_contents, delegate, &default_handling);
+    if (prompt) {
+      return prompt;
+    }
+    if (!default_handling) {
+      return nullptr;
+    }
+  }
+
+"""
+        write(factory_path, text.replace(marker, marker + hook, 1))
+
+delegate_header = src / "components/permissions/permission_prompt.h"
+cef_prompt = src / "cef/libcef/browser/permission_prompt.cc"
+if delegate_header.exists() and cef_prompt.exists():
+    delegate_text = read(delegate_header)
+    prompt_text = read(cef_prompt)
+    has_zero_arg_decisions = "void SetPromptOptions(PromptOptions prompt_options)" in delegate_text
+    uses_old_decision_calls = "delegate_->Accept(prompt_options)" in prompt_text
+
+    if has_zero_arg_decisions and uses_old_decision_calls:
+        prompt_text = prompt_text.replace(
+            "    const PromptOptions prompt_options(std::monostate{});\n"
+            "    switch (result) {\n",
+            "    delegate_->SetPromptOptions(PromptOptions(std::monostate{}));\n"
+            "    switch (result) {\n",
+            1,
+        )
+        prompt_text = prompt_text.replace(
+            "delegate_->Accept(prompt_options);", "delegate_->Accept();"
+        )
+        prompt_text = prompt_text.replace(
+            "delegate_->Deny(prompt_options);", "delegate_->Deny();"
+        )
+        prompt_text = prompt_text.replace(
+            "delegate_->Dismiss(prompt_options);", "delegate_->Dismiss();"
+        )
+        prompt_text = prompt_text.replace(
+            "delegate_->Ignore(prompt_options);", "delegate_->Ignore();"
+        )
+        write(cef_prompt, prompt_text)
+        prompt_text = read(cef_prompt)
+
+    stale_calls = (
+        "delegate_->Accept(prompt_options)",
+        "delegate_->Deny(prompt_options)",
+        "delegate_->Dismiss(prompt_options)",
+        "delegate_->Ignore(prompt_options)",
+    )
+    if has_zero_arg_decisions and any(call in prompt_text for call in stale_calls):
+        raise SystemExit(
+            "failed to patch CEF permission prompt delegate decision compatibility"
+        )
+PY
 }
 
 patch_cef_browser_widget_compatibility() {
