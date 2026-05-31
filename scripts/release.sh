@@ -1681,6 +1681,10 @@ def patch_browser_view_header():
                 f"failed to patch BrowserView InitBrowser declaration: pattern not found in {path}"
             )
         text = text.replace(old, new, 1)
+    const_browser_member = "  const raw_ptr<Browser> browser_;\n"
+    mutable_browser_member = "  raw_ptr<Browser> browser_;\n"
+    if const_browser_member in text:
+        text = text.replace(const_browser_member, mutable_browser_member, 1)
     hook = "  virtual ToolbarView* OverrideCreateToolbar() { return nullptr; }\n"
     if hook not in text:
         old = """ protected:
