@@ -713,7 +713,7 @@ def replace(path, old, new, desc):
 
 
 browser_widget_h = "chrome/browser/ui/views/frame/browser_widget.h"
-patch(
+replace(
     browser_widget_h,
     """ public:
   explicit BrowserWidget(BrowserView* browser_view);
@@ -722,7 +722,6 @@ patch(
   BrowserWidget();
   explicit BrowserWidget(BrowserView* browser_view);
 """,
-    "BrowserWidget();",
     "BrowserWidget default constructor declaration",
 )
 replace(
