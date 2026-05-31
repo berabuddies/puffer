@@ -607,6 +607,7 @@ EOF
   patch_cef_browser_widget_compatibility "$src"
   patch_cef_toolbar_view_compatibility "$src"
   patch_cef_browser_view_compatibility "$src"
+  patch_cef_tab_helpers_compatibility "$src"
   patch_cef_permission_prompt_compatibility "$src"
   patch_cef_chrome_lifecycle_compatibility "$src"
   patch_cef_content_main_compatibility "$src"
@@ -1826,6 +1827,71 @@ void BrowserView::InitBrowser(Browser* browser) {
 patch_browser_window_release()
 patch_browser_view_header()
 patch_browser_view_source()
+PY
+}
+
+patch_cef_tab_helpers_compatibility() {
+  local src="$1"
+  local python_bin
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  elif [[ -x "$src/third_party/depot_tools/python-bin/python3" ]]; then
+    python_bin="$src/third_party/depot_tools/python-bin/python3"
+  else
+    fail "python3 was not found for CEF tab helpers patching"
+  fi
+
+  "$python_bin" - "$src" <<'PY'
+from pathlib import Path
+import sys
+
+src = Path(sys.argv[1])
+path = src / "chrome/browser/ui/tab_helpers.h"
+if not path.exists():
+    raise SystemExit(f"failed to patch TabHelpers CEF access: missing {path}")
+
+text = path.read_text(encoding="utf-8")
+if '#include "cef/libcef/features/features.h"\n' not in text:
+    marker = '#include "build/build_config.h"\n'
+    if marker not in text:
+        raise SystemExit(
+            f"failed to patch TabHelpers CEF feature include: marker not found in {path}"
+        )
+    text = text.replace(
+        marker, marker + '#include "cef/libcef/features/features.h"\n', 1
+    )
+
+forward = """#if BUILDFLAG(ENABLE_CEF)
+class CefBrowserPlatformDelegateAlloy;
+#endif
+
+"""
+if "class CefBrowserPlatformDelegateAlloy;" not in text:
+    marker = """namespace tabs {
+class TabModel;
+}  // namespace tabs
+
+"""
+    if marker not in text:
+        raise SystemExit(
+            f"failed to patch TabHelpers CEF forward declaration: marker not found in {path}"
+        )
+    text = text.replace(marker, marker + forward, 1)
+
+friend = """#if BUILDFLAG(ENABLE_CEF)
+  friend class CefBrowserPlatformDelegateAlloy;
+#endif
+
+"""
+if "friend class CefBrowserPlatformDelegateAlloy;" not in text:
+    marker = "  friend class PreviewTab;\n\n"
+    if marker not in text:
+        raise SystemExit(
+            f"failed to patch TabHelpers CEF friend access: marker not found in {path}"
+        )
+    text = text.replace(marker, marker + friend, 1)
+
+path.write_text(text, encoding="utf-8")
 PY
 }
 
