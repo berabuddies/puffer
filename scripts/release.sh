@@ -8,7 +8,12 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT/release}"
 CACHE_DIR="${PUFFER_RELEASE_CACHE:-$ROOT/.release}"
 RELEASE_TAG="${RELEASE_TAG:-ct}"
 CEF_RELEASE_TAG="${CEF_RELEASE_TAG:-$RELEASE_TAG}"
-GITHUB_REPO="${GITHUB_REPO:-berabuddies/puffer}"
+LEGACY_GITHUB_REPO="${GITHUB_REPO:-}"
+SOURCE_GITHUB_REPO="${SOURCE_GITHUB_REPO:-${LEGACY_GITHUB_REPO:-berabuddies/puffer}}"
+RELEASE_GITHUB_REPO="${RELEASE_GITHUB_REPO:-${LEGACY_GITHUB_REPO:-berabuddies/puffer}}"
+CEF_GITHUB_REPO="${CEF_GITHUB_REPO:-berabuddies/ct}"
+CHROME_RELEASE_TAG="${CHROME_RELEASE_TAG:-$CEF_RELEASE_TAG}"
+CHROME_GITHUB_REPO="${CHROME_GITHUB_REPO:-$CEF_GITHUB_REPO}"
 CHROMIUM_TINTIN_DIR="${CHROMIUM_TINTIN_DIR:-$HOME/chromium_tintin}"
 CHROMIUM_TINTIN_REPO="${CHROMIUM_TINTIN_REPO:-git@github.com:agentenv/chromium_tintin.git}"
 CEF_REPO="${CEF_REPO:-https://github.com/chromiumembedded/cef.git}"
@@ -36,6 +41,8 @@ Targets:
   build-tauri        Build the platform Tauri app; macOS downloads CEF first.
   build-macos        macOS-only Rust + Tauri build. Hard fails off macOS.
   build-release-cef  Clone/pull/build CEF and upload puffer-cef-* to GitHub.
+  build-release-chrome
+                      Package and upload Chromium Chrome from chromium_tintin.
   pack-macos         Build and upload macOS .app zip plus TUI tarball.
   build-linux        Linux-only Rust + Tauri build. Hard fails off Linux.
   pack-linux         SSH-build Linux artifacts on c@65.19.161.135 and upload.
@@ -43,8 +50,13 @@ Targets:
 
 Common env:
   RELEASE_TAG=ct
-  GITHUB_REPO=berabuddies/puffer
+  SOURCE_GITHUB_REPO=berabuddies/puffer
+  RELEASE_GITHUB_REPO=berabuddies/puffer
+  CEF_GITHUB_REPO=berabuddies/ct
+  CHROME_GITHUB_REPO=berabuddies/ct
+  CHROME_RELEASE_TAG=$CEF_RELEASE_TAG
   CHROMIUM_TINTIN_DIR=$HOME/chromium_tintin
+  CHROME_APP_PATH=<path-to-Chromium.app>
   CEF_REPO=https://github.com/chromiumembedded/cef.git
   CEF_BRANCH=<chromium-build-number>
   LINUX_HOST=c@65.19.161.135
@@ -115,6 +127,15 @@ cef_asset_name() {
   printf 'puffer-cef-%s-%s.tar.gz' "$(asset_platform)" "$(asset_arch)"
 }
 
+chrome_asset_name() {
+  local platform
+  platform="$(asset_platform)"
+  case "$platform" in
+    macos) printf 'chromium-tintin-chrome-%s-%s.zip' "$platform" "$(asset_arch)" ;;
+    *) printf 'chromium-tintin-chrome-%s-%s.tar.gz' "$platform" "$(asset_arch)" ;;
+  esac
+}
+
 desktop_asset_name() {
   local platform
   platform="$(asset_platform)"
@@ -131,34 +152,51 @@ tui_asset_name() {
 ensure_release() {
   [[ "$NO_UPLOAD" == "1" ]] && return
   require_command gh
-  if gh release view "$RELEASE_TAG" -R "$GITHUB_REPO" >/dev/null 2>&1; then
+  if gh release view "$RELEASE_TAG" -R "$RELEASE_GITHUB_REPO" >/dev/null 2>&1; then
     return
   fi
-  log "creating GitHub release $RELEASE_TAG in $GITHUB_REPO"
+  log "creating GitHub release $RELEASE_TAG in $RELEASE_GITHUB_REPO"
   gh release create "$RELEASE_TAG" \
-    -R "$GITHUB_REPO" \
+    -R "$RELEASE_GITHUB_REPO" \
     --title "$RELEASE_TAG" \
     --notes "Puffer release artifacts for $RELEASE_TAG."
 }
 
-upload_asset() {
-  local tag="$1"
-  local asset="$2"
+upload_asset_to_repo() {
+  local repo="$1"
+  local tag="$2"
+  local asset="$3"
   [[ -f "$asset" ]] || fail "asset not found: $asset"
   if [[ "$NO_UPLOAD" == "1" ]]; then
     log "NO_UPLOAD=1; leaving asset at $asset"
     return
   fi
   require_command gh
-  if ! gh release view "$tag" -R "$GITHUB_REPO" >/dev/null 2>&1; then
-    log "creating GitHub release $tag in $GITHUB_REPO"
+  if ! gh release view "$tag" -R "$repo" >/dev/null 2>&1; then
+    log "creating GitHub release $tag in $repo"
     gh release create "$tag" \
-      -R "$GITHUB_REPO" \
+      -R "$repo" \
       --title "$tag" \
       --notes "Puffer release artifacts for $tag."
   fi
-  log "uploading $(basename "$asset") to $GITHUB_REPO@$tag"
-  gh release upload "$tag" -R "$GITHUB_REPO" "$asset" --clobber
+  log "uploading $(basename "$asset") to $repo@$tag"
+  gh release upload "$tag" -R "$repo" "$asset" --clobber
+}
+
+upload_asset() {
+  local tag="$1"
+  local asset="$2"
+  upload_asset_to_repo "$RELEASE_GITHUB_REPO" "$tag" "$asset"
+}
+
+upload_cef_asset() {
+  local asset="$1"
+  upload_asset_to_repo "$CEF_GITHUB_REPO" "$CEF_RELEASE_TAG" "$asset"
+}
+
+upload_chrome_asset() {
+  local asset="$1"
+  upload_asset_to_repo "$CHROME_GITHUB_REPO" "$CHROME_RELEASE_TAG" "$asset"
 }
 
 add_root_candidates() {
@@ -241,7 +279,7 @@ download_cef_release_runtime() {
   require_command gh
   log "checking GitHub release $CEF_RELEASE_TAG for $asset"
   if ! gh release download "$CEF_RELEASE_TAG" \
-    -R "$GITHUB_REPO" \
+    -R "$CEF_GITHUB_REPO" \
     --pattern "$asset" \
     --dir "$download_dir" \
     --clobber >/dev/null; then
@@ -2577,10 +2615,44 @@ ensure_macos_helper_links() {
     mkdir -p "$helper_dir"
     for name in libEGL.dylib libGLESv2.dylib libvk_swiftshader.dylib vk_swiftshader_icd.json; do
       [[ -e "$runtime/Chromium Embedded Framework.framework/Libraries/$name" ]] || continue
-      [[ -e "$helper_dir/$name" ]] && continue
-      ln -s "../../../Chromium Embedded Framework.framework/Libraries/$name" "$helper_dir/$name"
+      rm -f "$helper_dir/$name"
+      cp -a "$runtime/Chromium Embedded Framework.framework/Libraries/$name" "$helper_dir/$name"
     done
   done
+}
+
+sign_macos_app_bundle() {
+  local app="$1"
+  local identity="${MACOS_CODESIGN_IDENTITY:--}"
+  require_command codesign
+  log "signing macOS app bundle with identity '$identity'"
+  codesign --force --deep --sign "$identity" "$app" >&2
+  codesign --verify --deep --strict --verbose=2 "$app" >&2
+}
+
+verify_macos_app_zip() {
+  local asset="$1"
+  local app_name="$2"
+  require_command codesign
+  require_command ditto
+
+  local verify_dir verify_app
+  verify_dir="$(mktemp -d "${TMPDIR:-/tmp}/puffer-macos-zip.XXXXXX")"
+  if ! ditto -x -k "$asset" "$verify_dir"; then
+    rm -rf "$verify_dir"
+    fail "failed to extract macOS app zip: $asset"
+  fi
+  verify_app="$verify_dir/$app_name"
+  if [[ ! -d "$verify_app" ]]; then
+    rm -rf "$verify_dir"
+    fail "macOS app zip did not contain $app_name"
+  fi
+  log "verifying signed macOS app zip $asset"
+  if ! codesign --verify --deep --strict --verbose=2 "$verify_app" >&2; then
+    rm -rf "$verify_dir"
+    fail "macOS app zip signature verification failed: $asset"
+  fi
+  rm -rf "$verify_dir"
 }
 
 copy_linux_cef_runtime() {
@@ -2611,6 +2683,145 @@ copy_cef_runtime() {
   esac
 }
 
+chrome_app_ok() {
+  local app="$1"
+  [[ -d "$app" ]] || return 1
+  [[ -f "$app/Contents/Info.plist" ]] || return 1
+  [[ -d "$app/Contents/MacOS" ]] || return 1
+}
+
+find_local_chrome_app() {
+  local apps=()
+  local key
+  for key in CHROME_APP_PATH CHROMIUM_APP_PATH; do
+    if [[ -n "${!key:-}" ]]; then
+      apps+=("${!key}")
+    fi
+  done
+  apps+=(
+    "$CHROMIUM_TINTIN_DIR/src/out/Release/Chromium.app"
+    "$CHROMIUM_TINTIN_DIR/src/out/Release_GN_arm64/Chromium.app"
+    "$CHROMIUM_TINTIN_DIR/src/out/Release_GN_x64/Chromium.app"
+  )
+
+  local app
+  for app in "${apps[@]}"; do
+    if chrome_app_ok "$app"; then
+      printf '%s\n' "$app"
+      return 0
+    fi
+  done
+  return 1
+}
+
+linux_chrome_runtime_ok() {
+  local runtime="$1"
+  [[ -x "$runtime/chrome" ]] || return 1
+  [[ -f "$runtime/icudtl.dat" ]] || return 1
+  [[ -f "$runtime/resources.pak" ]] || return 1
+  [[ -d "$runtime/locales" ]] || return 1
+}
+
+find_local_chrome_runtime() {
+  local roots=()
+  local key
+  for key in CHROME_RUNTIME_PATH CHROMIUM_RUNTIME_PATH; do
+    if [[ -n "${!key:-}" ]]; then
+      roots+=("${!key}")
+    fi
+  done
+  roots+=(
+    "$CHROMIUM_TINTIN_DIR/src/out/Linux"
+    "$CHROMIUM_TINTIN_DIR/src/out/LinuxNoOzone"
+    "$CHROMIUM_TINTIN_DIR/src/out/Release_GN_x64"
+    "$CHROMIUM_TINTIN_DIR/src/out/Release"
+  )
+
+  local root candidate
+  for root in "${roots[@]}"; do
+    while IFS= read -r candidate; do
+      if linux_chrome_runtime_ok "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done < <(add_root_candidates "$root")
+  done
+  return 1
+}
+
+copy_linux_chrome_runtime() {
+  local runtime="$1"
+  local dest="$2"
+  mkdir -p "$dest"
+
+  local item
+  for item in \
+    "$runtime"/chrome "$runtime"/chrome-wrapper "$runtime"/chrome_crashpad_handler \
+    "$runtime"/chrome-sandbox "$runtime"/chrome_sandbox \
+    "$runtime"/icudtl.dat "$runtime"/snapshot_blob.bin \
+    "$runtime"/v8_context_snapshot.bin "$runtime"/vk_swiftshader_icd.json \
+    "$runtime"/*.pak "$runtime"/lib*.so "$runtime"/lib*.so.*; do
+    [[ "$item" == *.TOC ]] && continue
+    if [[ -e "$item" ]]; then
+      cp -a "$item" "$dest/"
+    fi
+  done
+
+  for item in \
+    "$runtime"/locales "$runtime"/resources "$runtime"/MEIPreload \
+    "$runtime"/PrivacySandboxAttestationsPreloaded \
+    "$runtime"/IwaKeyDistribution "$runtime"/hyphen-data "$runtime"/angledata; do
+    if [[ -e "$item" ]]; then
+      cp -a "$item" "$dest/"
+    fi
+  done
+}
+
+package_macos_chrome_release() {
+  require_macos build-release-chrome
+  require_command ditto
+  ensure_dirs
+
+  local source_app stage app asset
+  source_app="$(find_local_chrome_app)" || fail "Chromium.app not found; set CHROME_APP_PATH or CHROMIUM_TINTIN_DIR"
+  log "packaging Chromium Chrome app from $source_app"
+  stage="$CACHE_DIR/stage/chromium-tintin-chrome-$(asset_platform)-$(asset_arch)"
+  reset_dir "$stage"
+  ditto "$source_app" "$stage/Chromium.app"
+  app="$stage/Chromium.app"
+  sign_macos_app_bundle "$app"
+
+  asset="$ARTIFACT_DIR/$(chrome_asset_name)"
+  (cd "$stage" && ditto -c -k --sequesterRsrc --keepParent "Chromium.app" "$asset")
+  verify_macos_app_zip "$asset" "Chromium.app"
+  upload_chrome_asset "$asset"
+}
+
+package_linux_chrome_release() {
+  require_linux build-release-chrome
+  ensure_dirs
+
+  local runtime stage asset
+  runtime="$(find_local_chrome_runtime)" || fail "Linux Chromium runtime not found; set CHROME_RUNTIME_PATH or CHROMIUM_TINTIN_DIR"
+  log "packaging Chromium Chrome runtime from $runtime"
+  stage="$CACHE_DIR/stage/chromium-tintin-chrome-$(asset_platform)-$(asset_arch)"
+  asset="$ARTIFACT_DIR/$(chrome_asset_name)"
+  reset_dir "$stage"
+  copy_linux_chrome_runtime "$runtime" "$stage"
+  printf '%s\n' "$runtime" > "$stage/CHROME_RUNTIME_SOURCE.txt"
+  "$stage/chrome" --version >&2 || fail "packaged Chromium Chrome failed --version"
+  tar -C "$(dirname "$stage")" -czf "$asset" "$(basename "$stage")"
+  upload_chrome_asset "$asset"
+}
+
+package_chrome_release() {
+  case "$(asset_platform)" in
+    macos) package_macos_chrome_release ;;
+    linux) package_linux_chrome_release ;;
+    *) fail "unsupported Chrome package platform: $(asset_platform)" ;;
+  esac
+}
+
 package_cef_release() {
   local runtime="$1"
   local cef_root
@@ -2631,7 +2842,7 @@ package_cef_release() {
   cp -a "$cef_root/libcef_dll" "$stage/cef/libcef_dll"
   printf '%s\n' "$runtime" > "$stage/CEF_RUNTIME_SOURCE.txt"
   tar -C "$(dirname "$stage")" -czf "$asset" "$(basename "$stage")"
-  upload_asset "$CEF_RELEASE_TAG" "$asset"
+  upload_cef_asset "$asset"
 }
 
 build_release_cef() {
@@ -2686,10 +2897,12 @@ bundle_macos_app() {
   if [[ -n "$executable" ]]; then
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$executable" 2>/dev/null || true
   fi
+  sign_macos_app_bundle "$app"
 
   ensure_dirs
   asset="$ARTIFACT_DIR/$(desktop_asset_name)"
   (cd "$stage" && ditto -c -k --sequesterRsrc --keepParent "$app_name" "$asset")
+  verify_macos_app_zip "$asset" "$app_name"
   upload_asset "$RELEASE_TAG" "$asset"
 
   tui_stage="$CACHE_DIR/stage/puffer-tui-$(asset_platform)-$(asset_arch)"
@@ -2743,22 +2956,30 @@ pack_linux_remote() {
 set -Eeuo pipefail
 if [ ! -d "$LINUX_REPO_DIR/.git" ]; then
   mkdir -p "$(dirname "$LINUX_REPO_DIR")"
-  git clone "git@github.com:$GITHUB_REPO.git" "$LINUX_REPO_DIR" || git clone "https://github.com/$GITHUB_REPO.git" "$LINUX_REPO_DIR"
+  git clone "git@github.com:$SOURCE_GITHUB_REPO.git" "$LINUX_REPO_DIR" || git clone "https://github.com/$SOURCE_GITHUB_REPO.git" "$LINUX_REPO_DIR"
 fi
 cd "$LINUX_REPO_DIR"
 git fetch origin "$branch"
 git checkout "$branch" || git checkout -b "$branch" "origin/$branch"
 git pull --ff-only origin "$branch"
-CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" GITHUB_REPO="$GITHUB_REPO" NO_UPLOAD=1 make build-release-cef
-CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" GITHUB_REPO="$GITHUB_REPO" NO_UPLOAD=1 make pack-linux-local
+CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" NO_UPLOAD=1 make build-release-cef
+CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" NO_UPLOAD=1 make build-release-chrome
+CHROMIUM_TINTIN_DIR="$LINUX_CHROMIUM_TINTIN_DIR" RELEASE_TAG="$RELEASE_TAG" CEF_RELEASE_TAG="$CEF_RELEASE_TAG" CHROME_RELEASE_TAG="$CHROME_RELEASE_TAG" SOURCE_GITHUB_REPO="$SOURCE_GITHUB_REPO" RELEASE_GITHUB_REPO="$RELEASE_GITHUB_REPO" CEF_GITHUB_REPO="$CEF_GITHUB_REPO" CHROME_GITHUB_REPO="$CHROME_GITHUB_REPO" NO_UPLOAD=1 make pack-linux-local
 EOF
 
   remote_artifacts="$ARTIFACT_DIR/remote-linux"
   reset_dir "$remote_artifacts"
   rsync -av "$LINUX_HOST:$LINUX_REPO_DIR/release/" "$remote_artifacts/"
   local asset
-  for asset in "$remote_artifacts"/puffer-cef-linux-*.tar.gz \
-    "$remote_artifacts"/puffer-desktop-linux-*.tar.gz \
+  for asset in "$remote_artifacts"/puffer-cef-linux-*.tar.gz; do
+    [[ -f "$asset" ]] || continue
+    upload_cef_asset "$asset"
+  done
+  for asset in "$remote_artifacts"/chromium-tintin-chrome-linux-*.tar.gz; do
+    [[ -f "$asset" ]] || continue
+    upload_chrome_asset "$asset"
+  done
+  for asset in "$remote_artifacts"/puffer-desktop-linux-*.tar.gz \
     "$remote_artifacts"/puffer-tui-linux-*.tar.gz; do
     [[ -f "$asset" ]] || continue
     upload_asset "$RELEASE_TAG" "$asset"
@@ -2771,6 +2992,7 @@ case "${1:-help}" in
   build-tauri) build_tauri ;;
   build-macos) build_macos ;;
   build-release-cef) build_release_cef ;;
+  build-release-chrome) package_chrome_release ;;
   pack-macos) bundle_macos_app ;;
   build-linux) build_linux ;;
   pack-linux) pack_linux_remote ;;

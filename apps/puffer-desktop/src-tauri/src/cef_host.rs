@@ -194,12 +194,12 @@ impl CefRuntime {
                 .or_else(runtime_root_from_compiled_env)
                 .ok_or_else(|| anyhow!("CEF runtime root was not found"))?;
             let helper = runtime_helper_from_env()
+                .or_else(|| helper_for_root(&root))
                 .or_else(|| {
                     option_env!("PUFFER_DESKTOP_CEF_HELPER")
                         .map(PathBuf::from)
                         .filter(|path| path.is_file())
                 })
-                .or_else(|| helper_for_root(&root))
                 .ok_or_else(|| anyhow!("CEF helper executable was not found"))?;
             Ok(Self { root, helper })
         }
