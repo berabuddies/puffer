@@ -311,8 +311,10 @@ build_tauri() {
       (cd "$APP_DIR" && PUFFER_CEF_PATH="$staged_runtime" PUFFER_CEF_ROOT="$staged_runtime" npm run tauri -- build --bundles app)
       ;;
     linux)
-      log "building Linux Tauri app"
-      (cd "$APP_DIR" && npm run tauri -- build --bundles deb,appimage)
+      local bundles
+      bundles="${LINUX_TAURI_BUNDLES:-deb}"
+      log "building Linux Tauri app bundle(s): $bundles"
+      (cd "$APP_DIR" && npm run tauri -- build --bundles "$bundles")
       ;;
     *)
       fail "unsupported Tauri build platform: $platform"
