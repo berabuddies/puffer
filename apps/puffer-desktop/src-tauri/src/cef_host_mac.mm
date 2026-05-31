@@ -26,7 +26,7 @@ constexpr int64_t kMaxPumpDelayMs = 1000 / 30;
 constexpr int64_t kPumpDelayPlaceholder = INT_MAX;
 
 static BOOL g_handling_send_event = NO;
-static bool g_send_event_swizzled = false;
+static Class g_swizzled_app_class = Nil;
 static bool g_framework_loaded = false;
 static bool g_initialized = false;
 static int g_remote_debugging_port = 0;
@@ -363,15 +363,28 @@ std::string RunStringOnMain(Fn fn) {
 namespace {
 
 void InstallCefApplicationHooks() {
-  if (g_send_event_swizzled) {
+  NSApplication* app = [NSApplication sharedApplication];
+  Class app_class = [app class];
+  if (!app_class || g_swizzled_app_class == app_class) {
     return;
   }
-  Method original = class_getInstanceMethod([NSApplication class], @selector(sendEvent:));
+
+  class_addProtocol(app_class, @protocol(CefAppProtocol));
+  class_addProtocol([NSApplication class], @protocol(CefAppProtocol));
+
   Method replacement =
       class_getInstanceMethod([NSApplication class], @selector(pufferCefSendEvent:));
+  if (replacement) {
+    class_addMethod(app_class, @selector(pufferCefSendEvent:),
+                    method_getImplementation(replacement),
+                    method_getTypeEncoding(replacement));
+  }
+
+  Method original = class_getInstanceMethod(app_class, @selector(sendEvent:));
+  replacement = class_getInstanceMethod(app_class, @selector(pufferCefSendEvent:));
   if (original && replacement) {
     method_exchangeImplementations(original, replacement);
-    g_send_event_swizzled = true;
+    g_swizzled_app_class = app_class;
   }
 }
 
