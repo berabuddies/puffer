@@ -2590,10 +2590,14 @@ copy_linux_cef_runtime() {
     libcef.so chrome-sandbox icudtl.dat snapshot_blob.bin v8_context_snapshot.bin \
     libEGL.so libGLESv2.so libvk_swiftshader.so vk_swiftshader_icd.json \
     cefsimple cefclient; do
-    [[ -e "$runtime/$item" ]] && cp -a "$runtime/$item" "$dest/"
+    if [[ -e "$runtime/$item" ]]; then
+      cp -a "$runtime/$item" "$dest/"
+    fi
   done
   for item in "$runtime"/*.pak "$runtime"/locales "$runtime"/swiftshader; do
-    [[ -e "$item" ]] && cp -a "$item" "$dest/"
+    if [[ -e "$item" ]]; then
+      cp -a "$item" "$dest/"
+    fi
   done
 }
 
