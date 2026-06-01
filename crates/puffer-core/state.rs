@@ -168,6 +168,30 @@ impl SessionGoal {
     }
 }
 
+/// Tracks which encrypted user secrets may be requested during this session.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SecretAccessState {
+    allow_all: bool,
+    allowed_secret_ids: HashSet<String>,
+}
+
+impl SecretAccessState {
+    /// Returns whether the session has approval for the given secret id.
+    pub(crate) fn allows(&self, secret_id: &str) -> bool {
+        self.allow_all || self.allowed_secret_ids.contains(secret_id)
+    }
+
+    /// Grants session approval for one encrypted secret id.
+    pub(crate) fn allow_secret(&mut self, secret_id: impl Into<String>) {
+        self.allowed_secret_ids.insert(secret_id.into());
+    }
+
+    /// Grants session approval for every encrypted secret.
+    pub(crate) fn allow_all(&mut self) {
+        self.allow_all = true;
+    }
+}
+
 /// Stores the mutable session and UI state for one interactive Puffer run.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -200,6 +224,8 @@ pub struct AppState {
     pub status_line_text: Option<String>,
     pub project_memory: Option<ProjectMemoryContext>,
     pub project_memory_review_turns: usize,
+    pub autodream_review_turns: usize,
+    pub autodream_last_skip_reason: Option<String>,
     pub vim_mode: bool,
     /// Session-scoped reflection policy toggled via `/reflect`; `None` means off.
     pub reflection_config: Option<ReflectionConfig>,
@@ -261,6 +287,10 @@ pub struct AppState {
     pub process_store: Arc<Mutex<crate::runtime::process_store::ProcessStore>>,
     /// Session-scoped secret handles prepared by verified Lambda Skill bridges.
     pub(crate) secret_values: Arc<Mutex<HashMap<String, String>>>,
+    /// Masked `PUFFER_SECRET_...` placeholders resolved before tool execution.
+    pub(crate) masked_secrets: Arc<Mutex<HashMap<String, String>>>,
+    /// Session-scoped approvals for persistent encrypted secrets.
+    pub(crate) secret_access_state: SecretAccessState,
 }
 
 impl AppState {
@@ -323,6 +353,8 @@ impl AppState {
             status_line_text: None,
             project_memory,
             project_memory_review_turns: 0,
+            autodream_review_turns: 0,
+            autodream_last_skip_reason: None,
             vim_mode,
             reflection_config: None,
             lambda_gate: None,
@@ -352,6 +384,8 @@ impl AppState {
                 crate::runtime::process_store::ProcessStore::default(),
             )),
             secret_values: Arc::new(Mutex::new(HashMap::new())),
+            masked_secrets: Arc::new(Mutex::new(HashMap::new())),
+            secret_access_state: SecretAccessState::default(),
         }
     }
 
@@ -586,6 +620,31 @@ impl AppState {
 
     pub fn memory_flush_min_turns(&self) -> usize {
         self.config.memory.flush_min_turns
+    }
+
+    /// Returns whether automatic AutoDream background review is enabled.
+    pub fn autodream_enabled(&self) -> bool {
+        self.config.memory.autodream_enabled
+    }
+
+    /// Returns the number of completed turns between AutoDream reviews.
+    pub fn autodream_interval(&self) -> usize {
+        self.config.memory.autodream_interval
+    }
+
+    /// Returns the number of hours between automatic AutoDream reviews.
+    pub fn autodream_min_hours(&self) -> u64 {
+        self.config.memory.autodream_min_hours
+    }
+
+    /// Returns the number of updated sessions required for automatic AutoDream.
+    pub fn autodream_min_sessions(&self) -> usize {
+        self.config.memory.autodream_min_sessions
+    }
+
+    /// Returns whether AutoDream should suggest `/genskill` for worthy traces.
+    pub fn autodream_genskill_suggestions_enabled(&self) -> bool {
+        self.config.memory.autodream_genskill_suggestions
     }
 
     pub fn refresh_project_memory(&mut self) {

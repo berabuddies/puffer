@@ -6,6 +6,7 @@
   import FilesPane from "./FilesPane.svelte";
   import TerminalPane from "./TerminalPane.svelte";
   import type {
+    BrowserRenderer,
     PermissionTimelineItem,
     DiffSnapshot,
     SessionDetail,
@@ -42,6 +43,7 @@
     turnStatusHint: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
     backendConnected?: boolean;
+    browserRenderer?: BrowserRenderer;
     userDisplayName?: string;
     onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
@@ -76,6 +78,7 @@
     turnStatusHint,
     settingsSnapshot = null,
     backendConnected = true,
+    browserRenderer = "cef",
     userDisplayName = "Otter",
     onSubmitMessage,
     onResolvePermission,
@@ -319,7 +322,7 @@
       openRequestId={fileToOpen?.requestId ?? null}
     />
   {:else if tab === "browser"}
-    <BrowserPane sessionId={session?.id ?? "preview"} />
+    <BrowserPane sessionId={session?.id ?? "preview"} {browserRenderer} />
   {/if}
 </div>
 

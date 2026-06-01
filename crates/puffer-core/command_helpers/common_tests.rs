@@ -1,7 +1,8 @@
 use super::{
     lambda_gate_for_skill_command, render_skills_config_panel, render_skills_panel,
-    skill_allowed_tools_for_side_turn,
+    render_svg_qr_data_uri, skill_allowed_tools_for_side_turn,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use puffer_resources::{
     LoadedItem, LoadedResources, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind,
 };
@@ -64,6 +65,18 @@ fn render_skills_panel_groups_skills_by_source() {
     assert!(rendered.contains("/builtin-review · ~6 description tokens"));
     assert!(rendered
         .contains("Use /skill:<name> as a compatibility alias for any user-invocable skill."));
+}
+
+#[test]
+fn render_svg_qr_data_uri_embeds_svg_image_data() {
+    let uri = render_svg_qr_data_uri("tg://login?token=abc").expect("qr data uri");
+    let encoded = uri
+        .strip_prefix("data:image/svg+xml;base64,")
+        .expect("svg data uri prefix");
+    let decoded = BASE64_STANDARD.decode(encoded).expect("base64 svg");
+    let svg = String::from_utf8(decoded).expect("utf8 svg");
+    assert!(svg.contains("<svg"));
+    assert!(svg.contains("</svg>"));
 }
 
 #[test]

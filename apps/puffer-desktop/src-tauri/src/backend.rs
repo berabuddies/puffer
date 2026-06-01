@@ -2,14 +2,15 @@ use crate::codex_app_server::{self, CapturedTurnEvent, CodexTurnOptions, CodexTu
 use crate::dtos::{
     AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto, DiffSummaryDto,
     DivergenceReportDto, ExternalCredentialDto, FolderGroupDto, ProviderSummaryDto,
-    ResourceCountsDto, SessionDetailDto, SessionListItemDto, SettingsConfigDto,
-    SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
+    ResourceCountsDto, SecretSummaryDto, SecretsSettingsDto, SessionDetailDto, SessionListItemDto,
+    SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
 };
 use crate::events::EventEmitter;
 use crate::repo_actions;
 use crate::{browser, files, fs_watch, local_model, lsp, pty};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::prelude::*;
+use puffer_secrets::{SecretSummary, SecretUpsert, SecretVault};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -37,6 +38,22 @@ const DEFAULT_PTY_ROWS: u16 = 30;
 const MAX_PTY_COLS: u16 = 500;
 const MAX_PTY_ROWS: u16 = 200;
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSecretParams {
+    id: Option<String>,
+    label: String,
+    value: String,
+    username: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteSecretParams {
+    id: String,
+}
+
 pub(crate) struct BackendState {
     ptys: Arc<pty::PtyRegistry>,
     fs_watches: Arc<fs_watch::FsWatchRegistry>,
@@ -46,6 +63,7 @@ pub(crate) struct BackendState {
 }
 
 impl BackendState {
+    /// Creates backend state shared by desktop command handlers.
     pub(crate) fn new() -> Self {
         let ptys = Arc::new(pty::PtyRegistry::new());
         ptys.spawn_idle_pruner();
@@ -61,6 +79,7 @@ impl BackendState {
         }
     }
 
+    /// Dispatches one desktop backend request by method name.
     pub(crate) fn handle(
         &self,
         events: EventEmitter,
@@ -123,6 +142,21 @@ impl BackendState {
             }
             "list_external_credentials" => serde_value(self.list_external_credentials()?),
             "import_external_credential" => serde_value(self.load_settings_snapshot()?),
+            "save_secret" => {
+                self.save_secret(params)?;
+                serde_value(self.load_settings_snapshot()?)
+            }
+            "delete_secret" => {
+                self.delete_secret(params)?;
+                serde_value(self.load_settings_snapshot()?)
+            }
+            "import_chrome_secrets" => {
+                let report = self.secret_vault()?.import_chrome_saved_credentials()?;
+                serde_value(json!({
+                    "settings": self.load_settings_snapshot()?,
+                    "report": report,
+                }))
+            }
             "run_remote_bash" => self.run_remote_bash(params),
             "read_remote_file" => self.read_remote_file(params),
             "write_remote_file" => self.write_remote_file(params),
@@ -527,7 +561,44 @@ impl BackendState {
             },
             auth,
             providers,
+            secrets: self.secret_settings(&home)?,
         })
+    }
+
+    fn save_secret(&self, params: Value) -> Result<()> {
+        let input: SaveSecretParams =
+            serde_json::from_value(params).context("invalid secret save params")?;
+        self.secret_vault()?.put(SecretUpsert {
+            id: input.id,
+            label: input.label,
+            value: input.value,
+            username: input.username,
+            origin: input.origin,
+            source: "manual".to_string(),
+        })?;
+        Ok(())
+    }
+
+    fn delete_secret(&self, params: Value) -> Result<()> {
+        let input: DeleteSecretParams =
+            serde_json::from_value(params).context("invalid secret delete params")?;
+        let _ = self.secret_vault()?.delete(&input.id)?;
+        Ok(())
+    }
+
+    fn secret_settings(&self, home: &Path) -> Result<SecretsSettingsDto> {
+        let store_file = home.join("secrets.json");
+        let vault = SecretVault::open(&store_file)?;
+        Ok(SecretsSettingsDto {
+            store_file: store_file.display().to_string(),
+            key_source: secret_key_source().to_string(),
+            chrome_import_supported: cfg!(target_os = "macos"),
+            items: vault.list()?.into_iter().map(secret_summary).collect(),
+        })
+    }
+
+    fn secret_vault(&self) -> Result<SecretVault> {
+        SecretVault::open(app_home()?.join("secrets.json"))
     }
 
     fn provider_models(&self, provider_id: &str) -> Vec<Value> {
@@ -2260,6 +2331,28 @@ fn normalized_default_model(config: &StoredConfig) -> Option<String> {
         }
     }
     catalog.and_then(|catalog| catalog.default_model)
+}
+
+fn secret_key_source() -> &'static str {
+    if env::var_os("PUFFER_SECRET_STORE_KEY").is_some() {
+        "env"
+    } else if cfg!(target_os = "macos") {
+        "macos-keychain"
+    } else {
+        "local-key-file"
+    }
+}
+
+fn secret_summary(summary: SecretSummary) -> SecretSummaryDto {
+    SecretSummaryDto {
+        id: summary.id,
+        label: summary.label,
+        username: summary.username,
+        origin: summary.origin,
+        source: summary.source,
+        created_at_ms: summary.created_at_ms,
+        updated_at_ms: summary.updated_at_ms,
+    }
 }
 
 fn model(id: &str, display_name: &str, provider: &str, supports_reasoning: bool) -> Value {

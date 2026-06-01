@@ -9,6 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
 
 mod artifacts;
+mod autodream;
 mod basics;
 mod commit;
 mod connectors;
@@ -29,6 +30,7 @@ mod status;
 mod tag;
 mod tasks;
 mod terminal_setup;
+mod ultrareview;
 mod usage_buddy;
 mod workflows;
 

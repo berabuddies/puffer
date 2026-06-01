@@ -44,6 +44,9 @@ pub(super) fn execute_task_create(
         );
     }
     let monitor_task = is_monitor_task_metadata(&metadata);
+    if monitor_task {
+        validate_monitor_task_metadata(&metadata)?;
+    }
     if monitor_task && received_at.is_none() {
         bail!("monitor TaskCreate requires receivedAt in RFC3339 format");
     }
@@ -232,6 +235,14 @@ pub(super) fn execute_task_update(
     }
 
     let task = &mut store.tasks[index];
+    if let Some(metadata) = parsed.metadata.as_ref() {
+        let updating_monitor_task = tp == monitor_tasks_path(&store_cwd)
+            || is_monitor_task_metadata(&task.metadata)
+            || is_monitor_task_metadata(metadata);
+        if updating_monitor_task {
+            validate_monitor_task_metadata(metadata)?;
+        }
+    }
     let mut updated_fields = Vec::new();
     let mut status_change = None;
     if let Some(subject) = parsed.subject.filter(|subject| *subject != task.subject) {
@@ -368,6 +379,24 @@ fn is_monitor_task_metadata(metadata: &Map<String, Value>) -> bool {
         .unwrap_or(false)
         || metadata.contains_key("monitor_connection")
         || metadata.contains_key("monitorConnection")
+}
+
+fn validate_monitor_task_metadata(metadata: &Map<String, Value>) -> Result<()> {
+    for key in [
+        "monitor_ignore_filter",
+        "monitorIgnoreFilter",
+        "event_ignore_filter",
+        "eventIgnoreFilter",
+        "ignore_filter",
+        "ignoreFilter",
+        "ignore_filters",
+        "ignoreFilters",
+    ] {
+        if metadata.contains_key(key) {
+            bail!("monitor task metadata cannot include ignore filter field `{key}`");
+        }
+    }
+    Ok(())
 }
 
 fn load_monitor_task(cwd: &Path, task_id: &str) -> Result<Option<StoredTask>> {
@@ -651,4 +680,34 @@ pub(crate) fn task_output_response(
         "retrieval_status": retrieval_status,
         "task": task,
     }))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_task_metadata_rejects_ignore_filter_fields() {
+        let metadata = serde_json::json!({
+            "_monitor": true,
+            "monitor_connection": "telegram-user",
+            "ignore_filter": {"chat_id": "1", "sender_id": "2"}
+        });
+        let error = validate_monitor_task_metadata(metadata.as_object().unwrap())
+            .expect_err("ignore filter metadata should be rejected");
+        assert!(error
+            .to_string()
+            .contains("monitor task metadata cannot include ignore filter field"));
+    }
+
+    #[test]
+    fn monitor_task_metadata_allows_identity_fields() {
+        let metadata = serde_json::json!({
+            "_monitor": true,
+            "monitor_connection": "telegram-user",
+            "chat_id": "1",
+            "sender_id": "2"
+        });
+        validate_monitor_task_metadata(metadata.as_object().unwrap()).unwrap();
+    }
 }

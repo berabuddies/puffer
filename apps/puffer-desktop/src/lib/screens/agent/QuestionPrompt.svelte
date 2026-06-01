@@ -4,6 +4,9 @@
 
   type Answers = Record<string, string | string[]>;
   type Annotations = Record<string, Record<string, string>>;
+  type MarkdownPart =
+    | { kind: "text"; text: string }
+    | { kind: "image"; alt: string; src: string };
 
   type Props = {
     item: UserQuestionTimelineItem;
@@ -222,6 +225,39 @@
     if (answered || disabled || !canSubmit()) return;
     onResolve(item.id, buildAnswers(), {});
   }
+
+  function markdownImageParts(value: string | null | undefined): MarkdownPart[] {
+    if (!value) return [];
+    const parts: MarkdownPart[] = [];
+    const imagePattern = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g;
+    let cursor = 0;
+    for (const match of value.matchAll(imagePattern)) {
+      const start = match.index ?? 0;
+      if (start > cursor) {
+        parts.push({ kind: "text", text: value.slice(cursor, start) });
+      }
+      const src = safeImageSrc(match[2] ?? "");
+      if (src) {
+        parts.push({ kind: "image", alt: match[1] ?? "", src });
+      } else {
+        parts.push({ kind: "text", text: match[0] });
+      }
+      cursor = start + match[0].length;
+    }
+    if (cursor < value.length) {
+      parts.push({ kind: "text", text: value.slice(cursor) });
+    }
+    return parts.length > 0 ? parts : [{ kind: "text", text: value }];
+  }
+
+  function safeImageSrc(src: string): string | null {
+    const trimmed = src.trim();
+    if (/^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(trimmed)) {
+      return trimmed;
+    }
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    return null;
+  }
 </script>
 
 <form
@@ -252,7 +288,19 @@
     {#each item.questions as question, index (draftKeyFor(index))}
       <div class="pf-question-block">
         <div class="pf-question-kicker">{question.header}</div>
-        <div class="pf-question-title">{question.question}</div>
+        <div class="pf-question-title">
+          {#each markdownImageParts(question.question) as part, partIndex (`question-${index}-${partIndex}`)}
+            {#if part.kind === "image"}
+              <img
+                class="pf-question-markdown-image"
+                src={part.src}
+                alt={part.alt || "Question image"}
+              />
+            {:else}
+              <span class="pf-question-markdown-text">{part.text}</span>
+            {/if}
+          {/each}
+        </div>
         {#if !answered}
           <div class="pf-question-hint">
             {questionHint(question)}
@@ -314,7 +362,19 @@
                   <span>{option.label}</span>
                   <small>{option.description}</small>
                   {#if option.preview}
-                    <pre>{option.preview}</pre>
+                    <div class="pf-question-preview">
+                      {#each markdownImageParts(option.preview) as part, partIndex (`preview-${index}-${option.label}-${partIndex}`)}
+                        {#if part.kind === "image"}
+                          <img
+                            class="pf-question-markdown-image"
+                            src={part.src}
+                            alt={part.alt || `${option.label} preview image`}
+                          />
+                        {:else}
+                          <span class="pf-question-markdown-text">{part.text}</span>
+                        {/if}
+                      {/each}
+                    </div>
                   {/if}
                 </span>
                 {#if answered && checked(question, index, option.label)}
@@ -452,6 +512,23 @@
     font-weight: 600;
   }
 
+  .pf-question-markdown-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .pf-question-markdown-image {
+    display: block;
+    max-width: min(260px, 100%);
+    max-height: 260px;
+    object-fit: contain;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 8px;
+    margin: 6px 0;
+  }
+
   .pf-question-hint {
     color: var(--muted-foreground);
     font-size: 12px;
@@ -565,12 +642,12 @@
   }
 
   .pf-question-option small,
-  .pf-question-option pre {
+  .pf-question-preview {
     color: var(--muted-foreground);
     line-height: 1.35;
   }
 
-  .pf-question-option pre {
+  .pf-question-preview {
     margin: 4px 0 0;
     white-space: pre-wrap;
     font-family: var(--font-mono);
@@ -579,6 +656,12 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 7px;
+  }
+
+  .pf-question-preview .pf-question-markdown-image {
+    max-width: min(220px, 100%);
+    max-height: 220px;
+    margin: 2px 0 6px;
   }
 
   .pf-question-other {

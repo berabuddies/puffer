@@ -11,7 +11,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use grammers_client::{session::Session, types::User, Client, Config};
+use grammers_client::{
+    session::Session,
+    types::{PasswordToken, User},
+    Client, Config, InvocationError,
+};
 use grammers_tl_types as tl;
 use serde_json::json;
 use tokio::time::{timeout_at, Instant};
@@ -19,7 +23,9 @@ use tracing::{info, warn};
 
 use crate::events::emit_control;
 use crate::login;
-use crate::state::{default_init_params, resolve_api_credentials, PersistedCredentials, SkillEnv};
+use crate::state::{
+    default_init_params, resolve_api_credentials, LoginState, PersistedCredentials, SkillEnv,
+};
 
 const DEFAULT_QR_WAIT_SECONDS: u64 = 120;
 const DEFAULT_DC_ID: i32 = 2;
@@ -34,15 +40,32 @@ pub struct QrLoginState {
     dc_id: i32,
 }
 
+/// Result produced by a QR-login command.
+pub enum QrLoginOutcome {
+    /// The QR flow is still pending, failed terminally with an emitted error,
+    /// or refreshed the QR token for another wait attempt.
+    Pending,
+    /// Telegram accepted QR approval but requires the account's 2FA password.
+    AwaitingPassword(Client),
+    /// Telegram accepted QR approval and returned an authorized client.
+    Complete(Client),
+}
+
 /// Starts QR login and emits either `login_qr`, `login_complete`, or
-/// `login_error`. Returns a connected authorized client only if Telegram
-/// completes the login immediately.
+/// `login_error`.
 pub async fn start(
     env: &SkillEnv,
+    login_state: &mut LoginState,
     state: &mut Option<QrLoginState>,
     api_id: Option<i32>,
     api_hash: Option<String>,
-) -> anyhow::Result<Option<Client>> {
+) -> anyhow::Result<QrLoginOutcome> {
+    *state = None;
+    login_state.login_token = None;
+    login_state.password_token = None;
+    login_state.phone = None;
+    login_state.api_id = None;
+    login_state.api_hash = None;
     let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
     let (api_id, api_hash) = match resolve_api_credentials(api_id, api_hash, &persisted) {
         Ok(pair) => pair,
@@ -53,7 +76,7 @@ pub async fn start(
                 "login_error",
                 json!({ "error": error.to_string(), "phase": "qr_credentials" }),
             )?;
-            return Ok(None);
+            return Ok(QrLoginOutcome::Pending);
         }
     };
 
@@ -66,7 +89,7 @@ pub async fn start(
                 "login_error",
                 json!({ "error": format!("connect failed: {error:#}"), "phase": "qr_connect" }),
             )?;
-            return Ok(None);
+            return Ok(QrLoginOutcome::Pending);
         }
     };
 
@@ -79,7 +102,7 @@ pub async fn start(
                 "login_error",
                 json!({ "error": format!("export login token failed: {error:#}"), "phase": "qr_export" }),
             )?;
-            return Ok(None);
+            return Ok(QrLoginOutcome::Pending);
         }
     };
 
@@ -89,16 +112,17 @@ pub async fn start(
         api_hash,
         dc_id: DEFAULT_DC_ID,
     };
-    handle_login_token(env, state, qr, token).await
+    handle_login_token(env, login_state, state, qr, token).await
 }
 
 /// Waits for approval of the active QR login. If the token expires before
 /// approval, this emits a refreshed `login_qr` and keeps the QR state alive.
 pub async fn wait(
     env: &SkillEnv,
+    login_state: &mut LoginState,
     state: &mut Option<QrLoginState>,
     timeout_seconds: Option<u64>,
-) -> anyhow::Result<Option<Client>> {
+) -> anyhow::Result<QrLoginOutcome> {
     let Some(qr) = state.take() else {
         emit_control(
             &env.topic,
@@ -108,7 +132,7 @@ pub async fn wait(
                 "phase": "qr_wait"
             }),
         )?;
-        return Ok(None);
+        return Ok(QrLoginOutcome::Pending);
     };
 
     let seconds = timeout_seconds.unwrap_or(DEFAULT_QR_WAIT_SECONDS).max(1);
@@ -129,10 +153,10 @@ pub async fn wait(
                                 "phase": "qr_export_after_update"
                             }),
                         )?;
-                        return Ok(None);
+                        return Ok(QrLoginOutcome::Pending);
                     }
                 };
-                return handle_login_token(env, state, qr, token).await;
+                return handle_login_token(env, login_state, state, qr, token).await;
             }
             Ok(Ok((_update, _))) => continue,
             Ok(Err(error)) => {
@@ -142,7 +166,7 @@ pub async fn wait(
                     "login_error",
                     json!({ "error": format!("QR login wait failed: {error:#}"), "phase": "qr_wait" }),
                 )?;
-                return Ok(None);
+                return Ok(QrLoginOutcome::Pending);
             }
             Err(_) => {
                 let token = match export_login_token(&qr.client, qr.api_id, &qr.api_hash).await {
@@ -157,10 +181,10 @@ pub async fn wait(
                                 "phase": "qr_timeout"
                             }),
                         )?;
-                        return Ok(None);
+                        return Ok(QrLoginOutcome::Pending);
                     }
                 };
-                return handle_login_token(env, state, qr, token).await;
+                return handle_login_token(env, login_state, state, qr, token).await;
             }
         }
     }
@@ -168,16 +192,17 @@ pub async fn wait(
 
 async fn handle_login_token(
     env: &SkillEnv,
+    login_state: &mut LoginState,
     state: &mut Option<QrLoginState>,
     mut qr: QrLoginState,
     mut token: tl::enums::auth::LoginToken,
-) -> anyhow::Result<Option<Client>> {
+) -> anyhow::Result<QrLoginOutcome> {
     for _ in 0..MAX_QR_MIGRATIONS {
         match token {
             tl::enums::auth::LoginToken::Token(login_token) => {
                 emit_qr_token(env, &login_token)?;
                 *state = Some(qr);
-                return Ok(None);
+                return Ok(QrLoginOutcome::Pending);
             }
             tl::enums::auth::LoginToken::Success(success) => {
                 return complete_qr_login(
@@ -209,7 +234,7 @@ async fn handle_login_token(
                                 "phase": "qr_migrate"
                             }),
                         )?;
-                        return Ok(None);
+                        return Ok(QrLoginOutcome::Pending);
                     }
                 };
                 token = match client
@@ -219,6 +244,16 @@ async fn handle_login_token(
                     .await
                 {
                     Ok(token) => token,
+                    Err(error) if error.is("SESSION_PASSWORD_NEEDED") => {
+                        return prepare_qr_password_challenge(
+                            env,
+                            login_state,
+                            client,
+                            qr.api_id,
+                            qr.api_hash,
+                        )
+                        .await;
+                    }
                     Err(error) => {
                         warn!(%error, dc_id = migration.dc_id, "telegram qr import login token failed");
                         emit_control(
@@ -229,7 +264,7 @@ async fn handle_login_token(
                                 "phase": "qr_import"
                             }),
                         )?;
-                        return Ok(None);
+                        return Ok(QrLoginOutcome::Pending);
                     }
                 };
                 qr = QrLoginState {
@@ -250,7 +285,7 @@ async fn handle_login_token(
             "phase": "qr_migrate"
         }),
     )?;
-    Ok(None)
+    Ok(QrLoginOutcome::Pending)
 }
 
 async fn complete_qr_login(
@@ -260,7 +295,7 @@ async fn complete_qr_login(
     api_hash: String,
     dc_id: i32,
     authorization: tl::enums::auth::Authorization,
-) -> anyhow::Result<Option<Client>> {
+) -> anyhow::Result<QrLoginOutcome> {
     let user = match authorization {
         tl::enums::auth::Authorization::Authorization(auth) => User::from_raw(auth.user),
         tl::enums::auth::Authorization::SignUpRequired(_) => {
@@ -272,7 +307,7 @@ async fn complete_qr_login(
                     "phase": "qr_complete"
                 }),
             )?;
-            return Ok(None);
+            return Ok(QrLoginOutcome::Pending);
         }
     };
 
@@ -292,7 +327,56 @@ async fn complete_qr_login(
         }),
     )?;
     info!(user_id = verified_user.id(), "telegram qr login complete");
-    Ok(Some(verified))
+    Ok(QrLoginOutcome::Complete(verified))
+}
+
+async fn prepare_qr_password_challenge(
+    env: &SkillEnv,
+    login_state: &mut LoginState,
+    client: Client,
+    api_id: i32,
+    api_hash: String,
+) -> anyhow::Result<QrLoginOutcome> {
+    let password_token = match get_password_token(&client).await {
+        Ok(token) => token,
+        Err(error) => {
+            warn!(%error, "telegram qr password token fetch failed");
+            emit_control(
+                &env.topic,
+                "login_error",
+                json!({
+                    "error": format!("Telegram QR login requires 2FA, but password challenge setup failed: {error:#}"),
+                    "phase": "qr_password"
+                }),
+            )?;
+            return Ok(QrLoginOutcome::Pending);
+        }
+    };
+    let hint = password_token.hint().map(str::to_string);
+    login_state.login_token = None;
+    login_state.password_token = Some(password_token);
+    login_state.phone = None;
+    login_state.api_id = Some(api_id);
+    login_state.api_hash = Some(api_hash);
+    if let Err(error) = login::save_session(env, &client) {
+        warn!(error = %error, "failed to persist telegram qr 2FA session");
+    }
+    emit_control(
+        &env.topic,
+        "login_awaiting_password",
+        json!({
+            "qr_login": true,
+            "password_hint": hint,
+        }),
+    )?;
+    info!("telegram qr login requires 2FA password");
+    Ok(QrLoginOutcome::AwaitingPassword(client))
+}
+
+async fn get_password_token(client: &Client) -> Result<PasswordToken, InvocationError> {
+    let request = tl::functions::account::GetPassword {};
+    let password: tl::types::account::Password = client.invoke(&request).await?.into();
+    Ok(PasswordToken::new(password))
 }
 
 async fn connect_qr_client(

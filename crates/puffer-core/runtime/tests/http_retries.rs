@@ -97,6 +97,31 @@ fn retryable_http_error_rejects_invalid_data_io_errors() {
 }
 
 #[test]
+fn raw_http_request_uses_configured_proxy_for_provider_url() {
+    let proxy = puffer_config::ProxyConfig {
+        enabled: true,
+        selected: Some("local".to_string()),
+        bypass: vec![],
+        proxies: vec![puffer_config::ProxyEndpoint {
+            id: "local".to_string(),
+            scheme: puffer_config::ProxyScheme::Http,
+            host: "127.0.0.1".to_string(),
+            port: 9,
+            username: None,
+            password: None,
+        }],
+    };
+    let result = super::super::send_http_request_raw_with_proxy(
+        "https://api.openai.com/v1/responses",
+        &[],
+        "{}",
+        false,
+        &proxy,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn http_5xx_max_attempts_defaults_to_three() {
     let _lock = super::refresh_env_lock()
         .lock()

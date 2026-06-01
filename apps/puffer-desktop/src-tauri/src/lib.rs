@@ -1,5 +1,6 @@
 mod backend;
 mod browser;
+mod cef_host;
 mod codex_app_server;
 mod daemon_launcher;
 mod dtos;
@@ -8,6 +9,7 @@ mod files;
 mod fs_watch;
 mod local_model;
 mod lsp;
+mod mini_window;
 mod minicpm5;
 mod pty;
 mod remote_client;
@@ -50,8 +52,16 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "resolve_permission",
     "resolve_user_question",
     "cancel_turn",
+    "summon_mini_window",
     "minicpm5_recommend",
     "minicpm5_install",
+    "browser_cef_native_status",
+    "browser_cef_native_open",
+    "browser_cef_native_resize",
+    "browser_cef_native_navigate",
+    "browser_cef_native_reload",
+    "browser_cef_native_history",
+    "browser_cef_native_close",
 ];
 
 fn backend_call(
@@ -390,8 +400,42 @@ pub fn run() {
     let launcher = Arc::new(DaemonLauncher::new());
     websocket::start_backend_ws(backend.clone());
 
+    // Cmd+Shift+Space (macOS) / Ctrl+Shift+Space (Windows/Linux) summons the
+    // mini floating window. Avoids Cmd+Space (Spotlight). Same chord hides it.
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+    #[cfg(target_os = "macos")]
+    let primary_modifier = Modifiers::SUPER;
+    #[cfg(not(target_os = "macos"))]
+    let primary_modifier = Modifiers::CONTROL;
+    let mini_shortcut = Shortcut::new(Some(primary_modifier | Modifiers::SHIFT), Code::Space);
+
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            // Register the shortcut in setup() (below) instead of here so an OS
+            // registration failure (e.g. another app owns the chord) doesn't
+            // abort startup — the handler is harmless until something registers.
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, shortcut, event| {
+                    if shortcut == &mini_shortcut && event.state() == ShortcutState::Pressed {
+                        mini_window::toggle_mini_window(app);
+                    }
+                })
+                .build(),
+        )
+        .setup(move |app| {
+            use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            #[cfg(target_os = "macos")]
+            if let Err(err) = cef_host::warm_up_native() {
+                eprintln!("native CEF unavailable; using screencast fallback: {err}");
+            }
+            if let Err(err) = app.global_shortcut().register(mini_shortcut) {
+                eprintln!(
+                    "mini-window shortcut unavailable (continuing without it): {err}"
+                );
+            }
+            Ok(())
+        })
         .manage(backend)
         .manage(launcher)
         .invoke_handler(tauri::generate_handler![
@@ -417,8 +461,16 @@ pub fn run() {
             resolve_permission,
             resolve_user_question,
             cancel_turn,
+            mini_window::summon_mini_window,
             minicpm5::minicpm5_recommend,
             minicpm5::minicpm5_install,
+            cef_host::browser_cef_native_status,
+            cef_host::browser_cef_native_open,
+            cef_host::browser_cef_native_resize,
+            cef_host::browser_cef_native_navigate,
+            cef_host::browser_cef_native_reload,
+            cef_host::browser_cef_native_history,
+            cef_host::browser_cef_native_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Corbina desktop");

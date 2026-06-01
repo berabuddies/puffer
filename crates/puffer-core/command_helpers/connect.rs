@@ -4,9 +4,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_resources::LoadedResources;
 use serde_json::{json, Value};
 
+use super::common::render_svg_qr_data_uri;
+
 mod catalog;
+mod gcal_browser;
 mod gmail_browser;
 mod serve_config;
+
+const TELEGRAM_QR_APPROVAL_ATTEMPTS: usize = 3;
+const TELEGRAM_QR_APPROVAL_CHECK_SECONDS: u64 = 10;
 
 /// Runs the deterministic `/connect` connector-auth flow without a provider turn.
 pub fn execute_connect_flow(
@@ -23,6 +29,9 @@ pub fn execute_connect_flow(
         "lark-login" => connect_lark_login(state, resources, &target.connection_name)?,
         "gmail-browser" => {
             gmail_browser::connect_gmail_browser(state, resources, &target.connection_name)?
+        }
+        "gcal-browser" => {
+            gcal_browser::connect_gcal_browser(state, resources, &target.connection_name)?
         }
         "email" => connect_email(state, resources, &target.connection_name)?,
         "telegram-bot" => {
@@ -136,22 +145,23 @@ fn telegram_qr_login(
             "connection_slug": connection
         }),
     )?;
-    for _ in 0..3 {
+    for _ in 0..TELEGRAM_QR_APPROVAL_ATTEMPTS {
         if status(&output) != Some("qr_pending") {
-            return Ok(output);
+            return submit_telegram_password_if_needed(state, resources, connection, output);
         }
         let url = output
             .pointer("/payload/url")
             .and_then(Value::as_str)
             .unwrap_or("<missing QR URL>");
-        let answer = ask_choice_with_preview(
+        let question = telegram_qr_approval_question(url);
+        let answer = ask_choice(
             state,
             resources,
             "Approve",
-            "Approve this Telegram QR login URL from a logged-in Telegram app.",
+            &question,
             &[
-                ("Approved", "I approved the login request.", Some(url)),
-                ("Cancel", "Stop this login attempt.", None),
+                ("Approved", "I approved the login request."),
+                ("Cancel", "Stop this login attempt."),
             ],
         )?;
         if answer != "Approved" {
@@ -161,13 +171,28 @@ fn telegram_qr_login(
             state,
             resources,
             "Telegram",
-            json!({
-                "action": "login_qr_wait",
-                "connection_slug": connection
-            }),
+            telegram_qr_wait_input(connection),
         )?;
     }
-    Ok(output)
+    bail!(
+        "Telegram QR login was not approved after {TELEGRAM_QR_APPROVAL_ATTEMPTS} checks; restart setup to try again"
+    )
+}
+
+fn telegram_qr_approval_question(url: &str) -> String {
+    let qr_body = match render_svg_qr_data_uri(url) {
+        Some(data_uri) => format!("![Telegram QR code]({data_uri})\n\n{url}"),
+        None => url.to_string(),
+    };
+    format!("Approve this Telegram QR login URL from a logged-in Telegram app.\n\n{qr_body}")
+}
+
+fn telegram_qr_wait_input(connection: &str) -> Value {
+    json!({
+        "action": "login_qr_wait",
+        "connection_slug": connection,
+        "timeout_seconds": TELEGRAM_QR_APPROVAL_CHECK_SECONDS
+    })
 }
 
 fn telegram_phone_login(
@@ -209,6 +234,18 @@ fn telegram_phone_login(
             }),
         )?;
     }
+    if status(&output) == Some("awaiting_password") {
+        output = submit_telegram_password_if_needed(state, resources, connection, output)?;
+    }
+    Ok(output)
+}
+
+fn submit_telegram_password_if_needed(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+    mut output: Value,
+) -> Result<Value> {
     if status(&output) == Some("awaiting_password") {
         let password = ask_input(
             state,
@@ -804,6 +841,25 @@ mod tests {
 
         assert_eq!(target.connector_slug, "telegram-login");
         assert_eq!(target.connection_name, "telegram-user");
+    }
+
+    #[test]
+    fn telegram_qr_approval_question_embeds_qr_markdown_in_question_body() {
+        let question = telegram_qr_approval_question("tg://login?token=abc");
+
+        assert!(question
+            .starts_with("Approve this Telegram QR login URL from a logged-in Telegram app."));
+        assert!(question.contains("![Telegram QR code](data:image/svg+xml;base64,"));
+        assert!(question.contains("tg://login?token=abc"));
+    }
+
+    #[test]
+    fn telegram_qr_wait_input_uses_short_retry_timeout() {
+        let input = telegram_qr_wait_input("telegram-user");
+
+        assert_eq!(input["action"], "login_qr_wait");
+        assert_eq!(input["connection_slug"], "telegram-user");
+        assert_eq!(input["timeout_seconds"], TELEGRAM_QR_APPROVAL_CHECK_SECONDS);
     }
 
     #[test]

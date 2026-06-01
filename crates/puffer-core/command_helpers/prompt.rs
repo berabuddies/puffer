@@ -48,6 +48,7 @@ pub(crate) fn prepare_prompt_command_specialization(
             args,
         )?)),
         "commit" => Ok(Some(prepare_commit_prompt_command(state)?)),
+        "init" => Ok(Some(prepare_init_prompt_command(state, session_store)?)),
         "pr-comments" => Ok(Some(prepare_pr_comments_prompt_command(args))),
         "security-review" => Ok(Some(prepare_security_review_prompt_command(state)?)),
         "statusline" => Ok(Some(prepare_statusline_prompt_command(args)?)),
@@ -97,6 +98,26 @@ pub(crate) fn prepare_commit_prompt_command(state: &AppState) -> Result<PromptCo
     Ok(PromptCommandPreparation::VariableOverrides(
         build_commit_prompt_variables(&state.cwd)?,
     ))
+}
+
+/// Prepares `/init` by ensuring project memory exists before provider execution.
+pub(crate) fn prepare_init_prompt_command(
+    state: &mut AppState,
+    session_store: &SessionStore,
+) -> Result<PromptCommandPreparation> {
+    if state.memory_enabled() && state.project_memory.is_none() {
+        if let Some(context) = crate::memory::activate_project_memory(state)? {
+            emit_system(
+                state,
+                session_store,
+                format!(
+                    "Initialized project memory at {}.",
+                    context.memory_file.display()
+                ),
+            )?;
+        }
+    }
+    Ok(PromptCommandPreparation::VariableOverrides(BTreeMap::new()))
 }
 
 /// Handles `/plan` local behaviors using Claude-style plan-mode semantics.

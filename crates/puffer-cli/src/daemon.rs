@@ -32,10 +32,11 @@ use axum::{
 use futures::{sink::SinkExt, stream::StreamExt};
 use indexmap::IndexMap;
 use puffer_config::{
-    ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
+    ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, ProxyConfig, ProxyEndpoint,
+    ProxyScheme, PufferConfig,
 };
 use puffer_core::{
-    command_surface, default_effort_level, dispatch_command, enter_plan_mode,
+    command_surface, default_effort_level, dispatch_command, enter_plan_mode, execute_connect_flow,
     execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
     supported_effort_levels, with_user_question_prompt_handler, AppState,
     BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
@@ -44,16 +45,16 @@ use puffer_core::{
     TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
-    exchange_authorization_code as exchange_openai_authorization_code,
-    parse_authorization_input as parse_openai_authorization_input,
+    build_realtime_client_secret_request,
+    parse_authorization_input as parse_openai_authorization_input, BuiltOpenAIRequest, OpenAIAuth,
+    OpenAIRealtimeClientSecretRequest, OpenAIRequestConfig,
 };
 use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
-use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
+use puffer_session_store::{MessageActor, SessionMetadata, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
-    exchange_authorization_code as exchange_anthropic_authorization_code,
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
     ANTHROPIC_MANUAL_REDIRECT_URL,
 };
@@ -94,8 +95,9 @@ use crate::daemon_ui_state::{
 };
 use crate::desktop_api;
 use crate::desktop_api_types::{
-    ExternalCredentialDto, FolderGroupDto, McpServerDto, ModelDescriptorDto, RepoActionResultDto,
-    RepoStatusDto, SessionDetailDto, SettingsSnapshotDto, ThinkingOptionDto,
+    ExternalCredentialDto, FolderGroupDto, McpServerDto, ModelDescriptorDto, ProxyEndpointInputDto,
+    ProxyTestResultDto, RepoActionResultDto, RepoStatusDto, SaveProxySettingsParams,
+    SessionDetailDto, SettingsSnapshotDto, ThinkingOptionDto,
 };
 
 const PROTOCOL_VERSION: &str = "1";
@@ -310,8 +312,8 @@ impl DaemonState {
 
 #[derive(Clone)]
 struct TurnHandle {
-    session_id: String,
-    session_uuid: Uuid,
+    session_id: Option<String>,
+    session_uuid: Option<Uuid>,
     channel: String,
     message: String,
     cancel: CancelToken,
@@ -341,7 +343,6 @@ impl DaemonState {
         yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
-        let browser_chrome_profile = config.browser.chrome_profile.clone();
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
         let ptys = Arc::new(PtyRegistry::new());
@@ -356,11 +357,7 @@ impl DaemonState {
             next_request_id: Arc::new(AtomicU64::new(0)),
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
-            browsers: Arc::new(BrowserRegistry::new(
-                browser_profile_root,
-                !no_browser,
-                browser_chrome_profile,
-            )),
+            browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
             local_models: crate::daemon_local_model::LocalModelInstaller::new(),
             disable_auto_title,
             yolo,
@@ -406,6 +403,7 @@ fn is_replay_channel(event: &str) -> bool {
         || event.starts_with("workspace:")
         || event.starts_with("clone:")
         || event.starts_with("workflow:")
+        || event.starts_with("connector-setup:")
 }
 
 impl DaemonState {
@@ -449,7 +447,12 @@ impl DaemonState {
             );
         }
         if discover_all {
-            let _ = providers.discover_and_merge_all(&auth_store);
+            if let Ok(client) = proxy_discovery_client(&config) {
+                let _ =
+                    providers.discover_and_merge_all_with_discovery_client(&auth_store, &client);
+            } else {
+                let _ = providers.discover_and_merge_all(&auth_store);
+            }
         } else {
             // Even on the fast path we apply the on-disk discovery cache
             // — that's a synchronous file read, no network — so callers
@@ -472,6 +475,110 @@ struct RuntimeInputs {
     providers: ProviderRegistry,
     auth_store: AuthStore,
     session_store: SessionStore,
+}
+
+fn proxy_discovery_client(
+    config: &PufferConfig,
+) -> Result<puffer_provider_registry::ModelDiscoveryClient> {
+    let client = puffer_core::blocking_client_for_url(
+        &config.network.proxy,
+        puffer_core::HttpPurpose::Discovery,
+        "https://api.openai.com/v1/models",
+        Duration::from_secs(8),
+    )?;
+    Ok(puffer_provider_registry::ModelDiscoveryClient::with_client(
+        client,
+    ))
+}
+
+fn proxy_connectivity_test_urls() -> &'static [&'static str] {
+    &[
+        "https://www.gstatic.com/generate_204",
+        "https://cp.cloudflare.com/generate_204",
+        "https://www.cloudflare.com/cdn-cgi/trace",
+    ]
+}
+
+fn test_proxy_connectivity(
+    endpoint: &ProxyEndpoint,
+    timeout: Duration,
+) -> Result<(&'static str, puffer_core::ProxyTestOutcome)> {
+    let mut last_error = None;
+    for target_url in proxy_connectivity_test_urls() {
+        match puffer_core::test_proxy_endpoint(endpoint, target_url, timeout) {
+            Ok(outcome) => return Ok((target_url, outcome)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no proxy connectivity test URLs configured")))
+}
+
+fn parse_proxy_scheme(value: &str) -> Result<ProxyScheme> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "http" => Ok(ProxyScheme::Http),
+        "https" => Ok(ProxyScheme::Https),
+        "socks5" => Ok(ProxyScheme::Socks5),
+        "socks5h" => Ok(ProxyScheme::Socks5h),
+        other => anyhow::bail!("unknown proxy scheme `{other}`"),
+    }
+}
+
+fn proxy_endpoint_from_input(
+    input: ProxyEndpointInputDto,
+    current_config: &PufferConfig,
+) -> Result<ProxyEndpoint> {
+    let existing_password = current_config
+        .network
+        .proxy
+        .proxies
+        .iter()
+        .find(|endpoint| endpoint.id == input.id)
+        .and_then(|endpoint| endpoint.password.clone());
+    let password = input
+        .password
+        .or_else(|| input.keep_password.then_some(existing_password).flatten());
+    Ok(ProxyEndpoint {
+        id: input.id,
+        scheme: parse_proxy_scheme(&input.scheme)?,
+        host: input.host,
+        port: input.port,
+        username: input.username,
+        password,
+    })
+}
+
+fn proxy_test_error_message(endpoint: &ProxyEndpoint, error: &anyhow::Error) -> String {
+    let mut message = error.to_string();
+    if let Some(password) = endpoint
+        .password
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        message = message.replace(password, "******");
+    }
+    let mut chars = message.chars();
+    let truncated = chars.by_ref().take(240).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestProxyParams {
+    proxy_id: Option<String>,
+    endpoint: Option<ProxyEndpointInputDto>,
+}
+
+fn proxy_oauth_client(config: &PufferConfig, url: &str) -> Result<reqwest::blocking::Client> {
+    puffer_core::blocking_client_for_url(
+        &config.network.proxy,
+        puffer_core::HttpPurpose::OAuth,
+        url,
+        Duration::from_secs(60),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -849,6 +956,18 @@ async fn dispatch_request(
         "list_provider_models" => {
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
         }
+        "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
+        "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
+        "delete_secret" => respond!(detached!(|s, p| handle_delete_secret(&s, &p))),
+        "import_chrome_secrets" => {
+            respond!(detached!(|s| handle_import_chrome_secrets(&s)))
+        }
+        "test_proxy" => respond!(detached!(|s, p| handle_test_proxy(&s, &p))),
+        "create_openai_realtime_client_secret" => {
+            respond!(detached!(|s, p| {
+                handle_create_openai_realtime_client_secret(&s, &p)
+            }))
+        }
         "list_permissions" => respond!(handle_list_permissions(&state)),
         "save_permissions" => respond!(handle_save_permissions(&state, &params)),
         "update_config" => respond!(detached!(|s, p| handle_update_config(&s, &p))),
@@ -880,6 +999,9 @@ async fn dispatch_request(
         "browser_open" => respond!(detached!(
             |s, p| crate::daemon_browser::handle_browser_open(&s, &p)
         )),
+        "browser_backend_status" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_backend_status(&s, &p)
+        })),
         "browser_navigate" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_navigate(&s, &p)
         })),
@@ -935,6 +1057,9 @@ async fn dispatch_request(
         ),
         "monitor_memory_save" | "task_monitor_memory_save" => respond!(
             crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
+        ),
+        "monitor_history_list" | "task_monitor_history_list" => respond!(
+            crate::daemon_workflows::handle_monitor_history_list(&state.paths, &params)
         ),
         "workflow_binding_delete" => respond!(
             crate::daemon_workflows::handle_workflow_binding_delete(&state.paths, &params)
@@ -997,6 +1122,31 @@ async fn dispatch_request(
                         result: None,
                         error: Some(RpcError {
                             code: "slash-dispatch-error".to_string(),
+                            message: format!("{e:#}"),
+                        }),
+                    },
+                };
+                let _ = send_envelope(&tx_clone, &env).await;
+            });
+        }
+
+        "start_connector_setup" => {
+            let tx_clone = tx.clone();
+            let state_clone = state.clone();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                let result = start_connector_setup_turn(state_clone, params).await;
+                let env = match result {
+                    Ok(v) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: Some(v),
+                        error: None,
+                    },
+                    Err(e) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "connector-setup-error".to_string(),
                             message: format!("{e:#}"),
                         }),
                     },
@@ -1373,6 +1523,103 @@ fn handle_load_settings_snapshot(state: &DaemonState) -> Result<Value> {
     Ok(serde_json::to_value(snapshot)?)
 }
 
+fn handle_save_secret(state: &DaemonState, params: &Value) -> Result<Value> {
+    crate::daemon_secrets::save_secret(state.config_paths(), params)?;
+    handle_load_settings_snapshot(state)
+}
+
+fn handle_delete_secret(state: &DaemonState, params: &Value) -> Result<Value> {
+    let _ = crate::daemon_secrets::delete_secret(state.config_paths(), params)?;
+    handle_load_settings_snapshot(state)
+}
+
+fn handle_import_chrome_secrets(state: &DaemonState) -> Result<Value> {
+    let report = crate::daemon_secrets::import_chrome_secrets(state.config_paths())?;
+    let settings = handle_load_settings_snapshot(state)?;
+    Ok(json!({
+        "settings": settings,
+        "report": report,
+    }))
+}
+
+fn handle_save_proxy_settings(state: &DaemonState, params: &Value) -> Result<Value> {
+    let input: SaveProxySettingsParams =
+        serde_json::from_value(params.clone()).context("invalid proxy settings")?;
+    let current_config = state.config.lock().unwrap().clone();
+    let proxies = input
+        .proxies
+        .into_iter()
+        .map(|endpoint| proxy_endpoint_from_input(endpoint, &current_config))
+        .collect::<Result<Vec<_>>>()?;
+    let mut config = current_config;
+    config.network.proxy = ProxyConfig {
+        enabled: input.enabled,
+        selected: input.selected.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }),
+        bypass: input.bypass,
+        proxies,
+    };
+    config.network.proxy.normalize_selection();
+    config.network.proxy.validate()?;
+    save_user_config(&state.paths, &config).context("save user config")?;
+    reload_daemon_config(state)?;
+    let fresh = state.build_runtime_inputs()?;
+    let config = state.config.lock().unwrap().clone();
+    let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
+        &state.paths,
+        &config,
+        &fresh.resources,
+        &fresh.providers,
+        &fresh.auth_store,
+        &fresh.session_store,
+    )?;
+    Ok(serde_json::to_value(snapshot)?)
+}
+
+fn handle_test_proxy(state: &DaemonState, params: &Value) -> Result<Value> {
+    let input: TestProxyParams =
+        serde_json::from_value(params.clone()).context("invalid proxy test params")?;
+    let current_config = state.config.lock().unwrap().clone();
+    let endpoint = if let Some(endpoint) = input.endpoint {
+        proxy_endpoint_from_input(endpoint, &current_config)?
+    } else {
+        let proxy_id = input
+            .proxy_id
+            .or_else(|| current_config.network.proxy.selected.clone())
+            .context("missing proxyId or endpoint")?;
+        current_config
+            .network
+            .proxy
+            .proxies
+            .iter()
+            .find(|endpoint| endpoint.id == proxy_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown proxy `{proxy_id}`"))?
+    };
+    let result = match test_proxy_connectivity(&endpoint, Duration::from_secs(8)) {
+        Ok((target_url, outcome)) => ProxyTestResultDto {
+            proxy_id: Some(endpoint.id.clone()),
+            ok: true,
+            message: format!(
+                "Connected to {target_url} with HTTP {}",
+                outcome.status_code
+            ),
+            latency_ms: Some(outcome.latency_ms),
+            status_code: Some(outcome.status_code),
+        },
+        Err(error) => ProxyTestResultDto {
+            proxy_id: Some(endpoint.id.clone()),
+            ok: false,
+            message: proxy_test_error_message(&endpoint, &error),
+            latency_ms: None,
+            status_code: None,
+        },
+    };
+    Ok(serde_json::to_value(result)?)
+}
+
 /// Stores an API key credential in the workspace auth store and returns
 /// the refreshed settings snapshot so the UI can re-render without a
 /// second round-trip.
@@ -1454,7 +1701,16 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
                     anyhow::bail!("oauth state mismatch for openai");
                 }
             }
-            let credential = exchange_openai_authorization_code(&code, &bundle.verifier, None)?;
+            let oauth_client = proxy_oauth_client(
+                &state.config.lock().unwrap().clone(),
+                puffer_provider_openai::OPENAI_TOKEN_URL,
+            )?;
+            let credential = puffer_provider_openai::exchange_authorization_code_with_client(
+                &oauth_client,
+                &code,
+                &bundle.verifier,
+                None,
+            )?;
             set_stored_credential(
                 &mut inputs.auth_store,
                 provider_id.to_string(),
@@ -1473,7 +1729,12 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
             let redirect_uri = inferred_anthropic_redirect_uri(&callback)
                 .or_else(|| bundle.manual_redirect_uri.clone())
                 .unwrap_or_else(|| ANTHROPIC_MANUAL_REDIRECT_URL.to_string());
-            let credential = exchange_anthropic_authorization_code(
+            let oauth_client = proxy_oauth_client(
+                &state.config.lock().unwrap().clone(),
+                ANTHROPIC_API_BASE_URL,
+            )?;
+            let credential = puffer_transport_anthropic::exchange_authorization_code_with_client(
+                &oauth_client,
                 &code,
                 &bundle.verifier,
                 &bundle.state,
@@ -1715,9 +1976,20 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
         .context("missing providerId")?;
     let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let mut inputs = state.build_runtime_inputs_without_discovery()?;
-    inputs
-        .providers
-        .discover_and_merge_provider(&provider_id, &inputs.auth_store)?;
+    let config = state.config.lock().unwrap().clone();
+    if let Ok(client) = proxy_discovery_client(&config) {
+        inputs
+            .providers
+            .discover_and_merge_provider_with_discovery_client(
+                &provider_id,
+                &inputs.auth_store,
+                &client,
+            )?;
+    } else {
+        inputs
+            .providers
+            .discover_and_merge_provider(&provider_id, &inputs.auth_store)?;
+    }
     let entry = inputs
         .providers
         .provider_entries()
@@ -1731,6 +2003,192 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
         .map(|model| model_descriptor_dto(family, model))
         .collect();
     Ok(json!({ "providerId": provider_id, "models": models }))
+}
+
+const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-2";
+const DEFAULT_REALTIME_VOICE: &str = "marin";
+
+fn handle_create_openai_realtime_client_secret(
+    state: &DaemonState,
+    params: &Value,
+) -> Result<Value> {
+    let requested_provider_id = optional_trimmed_value(params, &["providerId", "provider_id"])
+        .unwrap_or_else(|| "openai".to_string());
+    let provider_id = canonical_desktop_provider_id(&requested_provider_id);
+    let inputs = state.build_runtime_inputs_without_discovery()?;
+    let provider = inputs
+        .providers
+        .provider(&provider_id)
+        .with_context(|| format!("unknown provider `{provider_id}`"))?;
+    let request_config = openai_realtime_request_config(provider, &inputs.auth_store)?;
+    let (session, model, voice) = realtime_session_config_from_params(params)?;
+    let request = build_realtime_client_secret_request(
+        &request_config,
+        &OpenAIRealtimeClientSecretRequest { session },
+    )?;
+    let response = send_openai_realtime_request(&request)?;
+    let client_secret = response
+        .get("value")
+        .and_then(Value::as_str)
+        .context("malformed Realtime client-secret response: missing value")?;
+    let expires_at = response.get("expires_at").and_then(Value::as_i64);
+
+    Ok(json!({
+        "providerId": provider_id,
+        "model": model,
+        "voice": voice,
+        "clientSecret": client_secret,
+        "expiresAt": expires_at,
+    }))
+}
+
+fn openai_realtime_request_config(
+    provider: &ProviderDescriptor,
+    auth_store: &AuthStore,
+) -> Result<OpenAIRequestConfig> {
+    let key = match auth_store.get(provider.id.as_str()) {
+        Some(StoredCredential::ApiKey { key }) => key.clone(),
+        Some(StoredCredential::OAuth(_)) => {
+            anyhow::bail!("OpenAI Realtime client-secret minting requires an API key credential")
+        }
+        None => anyhow::bail!("missing OpenAI API key credential for `{}`", provider.id),
+    };
+
+    Ok(OpenAIRequestConfig {
+        base_url: provider.base_url.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        auth: OpenAIAuth::ApiKey(key),
+        originator: "puffer_desktop".to_string(),
+        session_id: None,
+        account_id: None,
+        custom_headers: provider
+            .headers
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        query_params: provider
+            .query_params
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        chat_completions_path: None,
+        responses_path: None,
+    })
+}
+
+fn realtime_session_config_from_params(params: &Value) -> Result<(Value, String, String)> {
+    let mut session = params.get("session").cloned().unwrap_or_else(|| json!({}));
+    let model = optional_trimmed_value(params, &["model", "modelId", "model_id"])
+        .or_else(|| nested_trimmed_string(&session, &["model"]))
+        .unwrap_or_else(|| DEFAULT_REALTIME_MODEL.to_string());
+    let explicit_voice = optional_trimmed_value(params, &["voice"]);
+    let voice = explicit_voice
+        .clone()
+        .or_else(|| nested_trimmed_string(&session, &["audio", "output", "voice"]))
+        .unwrap_or_else(|| DEFAULT_REALTIME_VOICE.to_string());
+    let reasoning_effort = optional_trimmed_value(params, &["reasoningEffort", "reasoning_effort"]);
+
+    let session_object = session
+        .as_object_mut()
+        .context("Realtime session config must be a JSON object")?;
+    session_object
+        .entry("type".to_string())
+        .or_insert_with(|| json!("realtime"));
+    if session_object.get("type").and_then(Value::as_str) != Some("realtime") {
+        anyhow::bail!("Realtime session type must be `realtime`");
+    }
+    session_object.insert("model".to_string(), json!(model));
+    if let Some(reasoning_effort) = reasoning_effort {
+        session_object.insert(
+            "reasoning".to_string(),
+            json!({ "effort": reasoning_effort }),
+        );
+    }
+    ensure_realtime_audio_defaults(session_object, &voice, explicit_voice.is_some());
+
+    Ok((session, model, voice))
+}
+
+fn nested_trimmed_string(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn ensure_realtime_audio_defaults(
+    session: &mut serde_json::Map<String, Value>,
+    voice: &str,
+    override_voice: bool,
+) {
+    let audio = session
+        .entry("audio".to_string())
+        .or_insert_with(|| json!({}));
+    if !audio.is_object() {
+        *audio = json!({});
+    }
+    let Some(audio) = audio.as_object_mut() else {
+        return;
+    };
+
+    let input = audio
+        .entry("input".to_string())
+        .or_insert_with(|| json!({}));
+    if !input.is_object() {
+        *input = json!({});
+    }
+    if let Some(input) = input.as_object_mut() {
+        input
+            .entry("transcription".to_string())
+            .or_insert(Value::Null);
+    }
+
+    let output = audio
+        .entry("output".to_string())
+        .or_insert_with(|| json!({}));
+    if !output.is_object() {
+        *output = json!({});
+    }
+    if let Some(output) = output.as_object_mut() {
+        if override_voice {
+            output.insert("voice".to_string(), json!(voice));
+        } else {
+            output
+                .entry("voice".to_string())
+                .or_insert_with(|| json!(voice));
+        }
+    }
+}
+
+fn send_openai_realtime_request(request: &BuiltOpenAIRequest) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let mut builder = client.post(&request.url);
+    for (key, value) in &request.headers {
+        builder = builder.header(key, value);
+    }
+    let response = builder
+        .body(request.body.clone())
+        .send()
+        .with_context(|| format!("request to {} failed", request.url))?;
+    let status = response.status();
+    let body = response.text().context("read Realtime response body")?;
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({ "text": body }));
+    if !status.is_success() {
+        let message = parsed
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("OpenAI Realtime request failed");
+        anyhow::bail!("OpenAI Realtime request failed with status {status}: {message}");
+    }
+    Ok(parsed)
 }
 
 fn model_descriptor_dto(
@@ -1926,23 +2384,12 @@ fn handle_update_config(state: &DaemonState, params: &Value) -> Result<Value> {
                     _ => anyhow::bail!("openaiBaseUrl must be string or null"),
                 };
             }
-            "browserChromeProfile" | "browser_chrome_profile" => {
-                guard.browser.chrome_profile = match value {
-                    Value::Null => None,
-                    Value::String(s) if s.trim().is_empty() => None,
-                    Value::String(s) => Some(s.clone()),
-                    _ => anyhow::bail!("browserChromeProfile must be string or null"),
-                };
-            }
             other => anyhow::bail!("update_config: unknown key `{other}`"),
         }
     }
     let snapshot_cfg = guard.clone();
     drop(guard);
     save_user_config(&state.paths, &snapshot_cfg).context("save user config")?;
-    state
-        .browsers
-        .set_chrome_profile(snapshot_cfg.browser.chrome_profile.clone());
     // Return the refreshed settings snapshot so the UI re-renders without
     // a second round-trip.
     let inputs = state.build_runtime_inputs()?;
@@ -2651,17 +3098,28 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 annotations: serde_json::Map::new(),
             });
         }
-        report_cancelled_turn(
-            state,
-            handle.session_uuid,
-            &handle.session_id,
-            &handle.channel,
-            turn_id,
-            &handle.message,
-            &handle.cancel_reported,
-            &handle.user_prompt_persisted,
-            &handle.progress,
-        )?;
+        if let (Some(session_uuid), Some(session_id)) =
+            (handle.session_uuid, handle.session_id.as_deref())
+        {
+            report_cancelled_turn(
+                state,
+                session_uuid,
+                session_id,
+                &handle.channel,
+                turn_id,
+                &handle.message,
+                &handle.cancel_reported,
+                &handle.user_prompt_persisted,
+                &handle.progress,
+            )?;
+        } else {
+            report_cancelled_sessionless_turn(
+                state,
+                &handle.channel,
+                turn_id,
+                &handle.cancel_reported,
+            );
+        }
         state.turns.lock().unwrap().remove(turn_id);
         Ok(json!({"ok": true}))
     } else {
@@ -2713,6 +3171,24 @@ fn report_cancelled_turn(
         Some("cancelled"),
     );
     Ok(true)
+}
+
+fn report_cancelled_sessionless_turn(
+    state: &DaemonState,
+    channel: &str,
+    turn_id: &str,
+    cancel_reported: &AtomicBool,
+) {
+    if cancel_reported.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    publish_sessionless_turn_error_event(
+        state,
+        channel,
+        turn_id,
+        CANCELLED_TURN_MESSAGE.to_string(),
+        Some("cancelled"),
+    );
 }
 
 fn persist_cancelled_turn_progress(
@@ -2847,15 +3323,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let mut turns = state.turns.lock().unwrap();
         if let Some((existing_turn_id, _)) = turns
             .iter()
-            .find(|(_, handle)| handle.session_uuid == session_uuid)
+            .find(|(_, handle)| handle.session_uuid == Some(session_uuid))
         {
             anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
         }
         turns.insert(
             turn_id.clone(),
             TurnHandle {
-                session_id: session_id.clone(),
-                session_uuid,
+                session_id: Some(session_id.clone()),
+                session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
                 cancel: cancel.clone(),
@@ -2891,7 +3367,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
-            payload: json!({"type": "turn-start", "turnId": turn_id_thread}),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
         });
 
         // Load provider registry + auth + resources + session record on
@@ -3368,7 +3844,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     payload: event_payload_with_actor(
                         json!({
                             "type": "turn-complete",
-                            "turnId": turn_id_thread,
+                            "turnId": turn_id_thread.clone(),
                             "assistantText": turn.assistant_text,
                         }),
                         &stream_actor,
@@ -3464,15 +3940,15 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
         let mut turns = state.turns.lock().unwrap();
         if let Some((existing_turn_id, _)) = turns
             .iter()
-            .find(|(_, handle)| handle.session_uuid == session_uuid)
+            .find(|(_, handle)| handle.session_uuid == Some(session_uuid))
         {
             anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
         }
         turns.insert(
             turn_id.clone(),
             TurnHandle {
-                session_id: session_id.clone(),
-                session_uuid,
+                session_id: Some(session_id.clone()),
+                session_uuid: Some(session_uuid),
                 channel: channel.clone(),
                 message: message.clone(),
                 cancel: cancel.clone(),
@@ -3496,7 +3972,7 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
-            payload: json!({"type": "turn-start", "turnId": turn_id_thread}),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
         });
 
         let mut inputs = match setup_state.build_runtime_inputs_without_discovery() {
@@ -3643,6 +4119,280 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
     Ok(json!({"turnId": turn_id_resp}))
 }
 
+async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
+    let turn_id = connector_setup_id(&params)?;
+    let message = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .context("missing message")?
+        .to_string();
+    let connect_args = connector_setup_connect_args(&message)?;
+    let channel = format!("connector-setup:{turn_id}:event");
+    let pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: Arc<
+        Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let cancel = CancelToken::new();
+    let cancel_reported = Arc::new(AtomicBool::new(false));
+    let user_prompt_persisted = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(TurnProgress::default()));
+
+    {
+        let mut turns = state.turns.lock().unwrap();
+        if turns.contains_key(&turn_id) {
+            anyhow::bail!("connector setup `{turn_id}` is already in flight");
+        }
+        turns.insert(
+            turn_id.clone(),
+            TurnHandle {
+                session_id: None,
+                session_uuid: None,
+                channel: channel.clone(),
+                message: message.clone(),
+                cancel: cancel.clone(),
+                cancel_reported: cancel_reported.clone(),
+                user_prompt_persisted,
+                pending,
+                pending_questions: pending_questions.clone(),
+                progress,
+            },
+        );
+    }
+
+    let setup_state = state.clone();
+    let turn_id_thread = turn_id.clone();
+    let turn_id_resp = turn_id.clone();
+    let channel_thread = channel.clone();
+    let next_req_id = state.next_request_id.clone();
+    let cancel_thread = cancel.clone();
+    let cancel_reported_thread = cancel_reported.clone();
+    std::thread::spawn(move || {
+        setup_state.publish_event(ServerEnvelope::Event {
+            event: channel_thread.clone(),
+            payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
+        });
+
+        if crate::daemon_gcal_browser_setup::connect_args_are_gcal_browser(&connect_args) {
+            let outcome = crate::daemon_gcal_browser_setup::execute_gcal_browser_setup(
+                setup_state.clone(),
+                channel_thread.clone(),
+                turn_id_thread.clone(),
+                connect_args.clone(),
+                next_req_id.clone(),
+                pending_questions.clone(),
+                cancel_thread.clone(),
+            );
+            match outcome {
+                Ok(assistant_text) => {
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread.clone(),
+                            "assistantText": assistant_text,
+                        }),
+                    });
+                }
+                Err(error) => {
+                    if !(cancel_thread.is_cancelled()
+                        && cancel_reported_thread.load(Ordering::SeqCst))
+                    {
+                        publish_sessionless_turn_error_event(
+                            &setup_state,
+                            &channel_thread,
+                            &turn_id_thread,
+                            format!("{error:#}"),
+                            None,
+                        );
+                    }
+                }
+            }
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
+
+        if crate::daemon_gmail_browser_setup::connect_args_are_gmail_browser(&connect_args) {
+            let outcome = crate::daemon_gmail_browser_setup::execute_gmail_browser_setup(
+                setup_state.clone(),
+                channel_thread.clone(),
+                turn_id_thread.clone(),
+                connect_args.clone(),
+                next_req_id.clone(),
+                pending_questions.clone(),
+                cancel_thread.clone(),
+            );
+            match outcome {
+                Ok(assistant_text) => {
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread.clone(),
+                            "assistantText": assistant_text,
+                        }),
+                    });
+                }
+                Err(error) => {
+                    if !(cancel_thread.is_cancelled()
+                        && cancel_reported_thread.load(Ordering::SeqCst))
+                    {
+                        publish_sessionless_turn_error_event(
+                            &setup_state,
+                            &channel_thread,
+                            &turn_id_thread,
+                            format!("{error:#}"),
+                            None,
+                        );
+                    }
+                }
+            }
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
+
+        let inputs = match setup_state.build_runtime_inputs_without_discovery() {
+            Ok(v) => v,
+            Err(err) => {
+                publish_sessionless_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &turn_id_thread,
+                    format!("build_runtime_inputs: {err:#}"),
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        };
+        let cfg_for_turn = setup_state.config.lock().unwrap().clone();
+        let metadata = connector_setup_session_metadata(setup_state.cwd.clone(), Uuid::new_v4());
+        let mut app_state = AppState::new(cfg_for_turn, setup_state.cwd.clone(), metadata);
+        let stream_actor = app_state.system_actor();
+
+        let question_state = setup_state.clone();
+        let question_channel = channel_thread.clone();
+        let question_turn = turn_id_thread.clone();
+        let question_pending = pending_questions.clone();
+        let question_next_id = next_req_id.clone();
+        let question_actor = stream_actor.clone();
+        let on_user_question = move |req: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
+            let request_id = question_next_id.fetch_add(1, Ordering::SeqCst).to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            question_pending
+                .lock()
+                .unwrap()
+                .insert(request_id.clone(), tx);
+
+            question_state.publish_event(ServerEnvelope::Event {
+                event: question_channel.clone(),
+                payload: event_payload_with_actor(
+                    json!({
+                        "type": "user-question-request",
+                        "turnId": question_turn.clone(),
+                        "requestId": request_id,
+                        "questions": req.questions,
+                    }),
+                    &question_actor,
+                ),
+            });
+
+            rx.recv().unwrap_or(UserQuestionPromptResponse {
+                answers: serde_json::Map::new(),
+                annotations: serde_json::Map::new(),
+            })
+        };
+
+        let outcome = with_user_question_prompt_handler(on_user_question, || {
+            cancel_thread.check()?;
+            let turn = execute_connect_flow(&mut app_state, &inputs.resources, &connect_args)?;
+            cancel_thread.check()?;
+            Ok::<_, anyhow::Error>(turn)
+        });
+
+        match outcome {
+            Ok(turn) => {
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: channel_thread.clone(),
+                    payload: event_payload_with_actor(
+                        json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread.clone(),
+                            "assistantText": turn.assistant_text,
+                        }),
+                        &stream_actor,
+                    ),
+                });
+            }
+            Err(error) => {
+                if !(cancel_thread.is_cancelled() && cancel_reported_thread.load(Ordering::SeqCst))
+                {
+                    publish_sessionless_turn_error_event(
+                        &setup_state,
+                        &channel_thread,
+                        &turn_id_thread,
+                        format!("{error:#}"),
+                        None,
+                    );
+                }
+            }
+        }
+        setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+    });
+
+    Ok(json!({"turnId": turn_id_resp, "setupId": turn_id_resp}))
+}
+
+fn connector_setup_id(params: &Value) -> Result<String> {
+    let setup_id = params
+        .get("setupId")
+        .or_else(|| params.get("setup_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    if !setup_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        anyhow::bail!("connector setup id must be ASCII alphanumeric, '-' or '_'");
+    }
+    Ok(setup_id)
+}
+
+fn connector_setup_connect_args(message: &str) -> Result<String> {
+    let trimmed = message.trim();
+    let without_slash = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    let (name, args) = without_slash
+        .split_once(' ')
+        .map(|(name, args)| (name, args.trim()))
+        .unwrap_or((without_slash, ""));
+    if name != "connect" {
+        anyhow::bail!("start_connector_setup expects a /connect command");
+    }
+    Ok(args.to_string())
+}
+
+fn connector_setup_session_metadata(cwd: std::path::PathBuf, id: Uuid) -> SessionMetadata {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    SessionMetadata {
+        id,
+        display_name: Some("Connector Setup".to_string()),
+        generated_title: None,
+        cwd,
+        created_at_ms: now,
+        updated_at_ms: now,
+        parent_session_id: None,
+        slug: Some(format!("connector-setup-{}", id.simple())),
+        tags: Vec::new(),
+        note: None,
+    }
+}
+
 fn publish_turn_error_event(
     state: &DaemonState,
     channel: &str,
@@ -3673,6 +4423,27 @@ fn publish_turn_error_event(
             "reason": "turn_error",
             "sessionId": session_id,
         }),
+    });
+}
+
+fn publish_sessionless_turn_error_event(
+    state: &DaemonState,
+    channel: &str,
+    turn_id: &str,
+    error: String,
+    category: Option<&str>,
+) {
+    let mut payload = json!({
+        "type": "turn-error",
+        "turnId": turn_id,
+        "error": error,
+    });
+    if let Some(category) = category {
+        payload["category"] = json!(category);
+    }
+    state.publish_event(ServerEnvelope::Event {
+        event: channel.to_string(),
+        payload,
     });
 }
 
@@ -3972,17 +4743,22 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        browser_permission_payload_json, handle_create_session, handle_import_external_credential,
-        handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
-        handle_local_model_status, handle_login_with_api_key, handle_logout_provider,
-        handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
-        handle_save_permissions, handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled,
-        model_descriptor_dto, permission_review_payload_json, report_cancelled_turn,
+        browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
+        handle_create_openai_realtime_client_secret, handle_create_session,
+        handle_import_external_credential, handle_list_lambda_skill_libraries,
+        handle_list_permissions, handle_list_provider_models, handle_local_model_status,
+        handle_login_with_api_key, handle_logout_provider, handle_remove_lambda_skill_library,
+        handle_save_lambda_skill_library, handle_save_permissions, handle_save_proxy_settings,
+        handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled, model_descriptor_dto,
+        permission_review_payload_json, realtime_session_config_from_params, report_cancelled_turn,
         requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
-        DaemonState, TurnProgress, TurnRequestOptions,
+        start_connector_setup_turn, DaemonState, ServerEnvelope, TurnProgress, TurnRequestOptions,
     };
     use indexmap::IndexMap;
-    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+    use puffer_config::{
+        ensure_workspace_dirs, load_config, ConfigPaths, ProxyConfig, ProxyEndpoint, ProxyScheme,
+        PufferConfig,
+    };
     use puffer_core::{AppState, ModelPreferenceFamily, ToolCallRequest, ToolInvocation};
     use puffer_provider_registry::{
         AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
@@ -3999,6 +4775,18 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn proxy_test_uses_public_connectivity_endpoint() {
+        assert_eq!(
+            super::proxy_connectivity_test_urls(),
+            &[
+                "https://www.gstatic.com/generate_204",
+                "https://cp.cloudflare.com/generate_204",
+                "https://www.cloudflare.com/cdn-cgi/trace",
+            ]
+        );
     }
 
     struct DiscoveryCacheEnvGuard {
@@ -4177,6 +4965,93 @@ mod tests {
             .is_some_and(|checks| !checks.is_empty()));
     }
 
+    #[test]
+    fn connector_setup_connect_args_accepts_connect_slash_command() {
+        assert_eq!(
+            connector_setup_connect_args("  /connect gmail-browser gmail-browser  ")
+                .expect("connect args"),
+            "gmail-browser gmail-browser"
+        );
+    }
+
+    #[test]
+    fn connector_setup_connect_args_rejects_other_commands() {
+        let err = connector_setup_connect_args("/session list").expect_err("reject command");
+        assert!(format!("{err:#}").contains("expects a /connect command"));
+    }
+
+    #[test]
+    fn connector_setup_id_rejects_path_like_values() {
+        let err =
+            connector_setup_id(&json!({"setupId": "../sessions"})).expect_err("reject setup id");
+        assert!(format!("{err:#}").contains("ASCII alphanumeric"));
+    }
+
+    #[test]
+    fn connector_setup_turn_does_not_create_visible_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = Arc::new(
+            DaemonState::load(
+                workspace_root.clone(),
+                paths.clone(),
+                "token".into(),
+                true,
+                false,
+                false,
+            )
+            .expect("daemon state"),
+        );
+        let mut events = state.event_sender().subscribe();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let response = runtime
+            .block_on(start_connector_setup_turn(
+                state.clone(),
+                json!({
+                    "setupId": "setup-test",
+                    "message": "/connect not-a-real-connector demo"
+                }),
+            ))
+            .expect("start connector setup");
+
+        assert_eq!(response["turnId"], "setup-test");
+
+        let payload = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let env = events.recv().await.expect("connector setup event");
+                        let ServerEnvelope::Event { event, payload } = env else {
+                            continue;
+                        };
+                        if event == "connector-setup:setup-test:event"
+                            && payload["type"] == "turn-error"
+                        {
+                            break payload;
+                        }
+                    }
+                })
+                .await
+            })
+            .expect("connector setup error event");
+        assert_eq!(payload["turnId"], "setup-test");
+
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let page = store.list_sessions_page(0, 10).expect("sessions page");
+        assert_eq!(page.total_sessions, 0);
+    }
+
     fn spawn_openai_discovery_server() -> (String, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind discovery server");
         listener
@@ -4205,6 +5080,44 @@ mod tests {
                 }
             }
             panic!("discovery server was not contacted");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn spawn_realtime_client_secret_server(
+        captured: Arc<Mutex<String>>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind realtime server");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking realtime server");
+        let address = listener.local_addr().expect("realtime server address");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..100 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_discovery_http_request(&mut stream)
+                            .expect("read realtime request");
+                        *captured.lock().expect("captured request") =
+                            String::from_utf8_lossy(&request).to_string();
+                        let body =
+                            r#"{"value":"ephemeral-test-client-secret","expires_at":1234567890}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        std::io::Write::write_all(&mut stream, response.as_bytes())
+                            .expect("write realtime response");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept realtime request: {error}"),
+                }
+            }
+            panic!("realtime server was not contacted");
         });
         (format!("http://{address}"), handle)
     }
@@ -4773,6 +5686,248 @@ mod tests {
             !model_ids.contains(&"gpt-5"),
             "fresh discovery should remove stale static models: {response}"
         );
+    }
+
+    #[test]
+    fn daemon_proxy_clients_accept_configured_proxy() {
+        let config = PufferConfig {
+            network: puffer_config::NetworkConfig {
+                proxy: puffer_config::ProxyConfig {
+                    enabled: false,
+                    selected: None,
+                    bypass: vec![],
+                    proxies: vec![],
+                },
+            },
+            ..PufferConfig::default()
+        };
+
+        let discovery = super::proxy_discovery_client(&config).expect("discovery client");
+        let oauth = super::proxy_oauth_client(&config, puffer_provider_openai::OPENAI_TOKEN_URL)
+            .expect("oauth client");
+        let _ = (discovery, oauth);
+    }
+
+    #[test]
+    fn realtime_session_config_defaults_to_only_realtime() {
+        let (session, model, voice) =
+            realtime_session_config_from_params(&json!({})).expect("session config");
+
+        assert_eq!(model, "gpt-realtime-2");
+        assert_eq!(voice, "marin");
+        assert_eq!(session["type"], "realtime");
+        assert_eq!(session["model"], "gpt-realtime-2");
+        assert!(session["audio"]["input"]["transcription"].is_null());
+        assert_eq!(session["audio"]["output"]["voice"], "marin");
+    }
+
+    #[test]
+    fn realtime_client_secret_rpc_mints_without_returning_api_key() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let (openai_base_url, server) = spawn_realtime_client_secret_server(captured.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let mut auth = AuthStore::default();
+        auth.set_api_key("openai", "test-api-key");
+        auth.save(&auth_path).expect("save auth");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let response = handle_create_openai_realtime_client_secret(
+            &state,
+            &json!({
+                "model": "gpt-realtime-2",
+                "voice": "marin",
+                "reasoningEffort": "low"
+            }),
+        )
+        .expect("create realtime client secret");
+
+        server.join().expect("realtime server");
+        let request = captured.lock().expect("captured request").clone();
+        assert!(request.starts_with("POST /v1/realtime/client_secrets "));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-api-key"));
+        assert!(request.contains("\"transcription\":null"));
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["model"], "gpt-realtime-2");
+        assert_eq!(response["voice"], "marin");
+        assert_eq!(response["clientSecret"], "ephemeral-test-client-secret");
+        assert_eq!(response["expiresAt"], 1234567890);
+        assert!(!response.to_string().contains("test-api-key"));
+    }
+
+    #[test]
+    fn save_proxy_settings_preserves_password_and_redacts_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        state.config.lock().unwrap().network.proxy = ProxyConfig {
+            enabled: true,
+            selected: Some("corp".to_string()),
+            bypass: vec!["localhost".to_string()],
+            proxies: vec![ProxyEndpoint {
+                id: "corp".to_string(),
+                scheme: ProxyScheme::Http,
+                host: "old-proxy.example.com".to_string(),
+                port: 8080,
+                username: Some("alice".to_string()),
+                password: Some("old-secret".to_string()),
+            }],
+        };
+
+        let response = handle_save_proxy_settings(
+            &state,
+            &json!({
+                "enabled": true,
+                "selected": "corp",
+                "bypass": ["localhost"],
+                "proxies": [{
+                    "id": "corp",
+                    "scheme": "https",
+                    "host": "proxy.example.com",
+                    "port": 8443,
+                    "username": "alice",
+                    "password": null,
+                    "keepPassword": true
+                }]
+            }),
+        )
+        .expect("save proxy settings");
+
+        let snapshot = &response["networkProxy"];
+        assert_eq!(snapshot["enabled"], true);
+        assert_eq!(snapshot["selected"], "corp");
+        assert_eq!(snapshot["proxies"][0]["hasPassword"], true);
+        assert_eq!(
+            snapshot["proxies"][0]["uri"],
+            "https://proxy.example.com:8443"
+        );
+        assert!(snapshot["proxies"][0].get("password").is_none());
+        let saved = load_config(&paths).expect("saved config");
+        let endpoint = saved
+            .network
+            .proxy
+            .proxies
+            .iter()
+            .find(|endpoint| endpoint.id == "corp")
+            .expect("saved proxy");
+        assert_eq!(endpoint.scheme, ProxyScheme::Https);
+        assert_eq!(endpoint.password.as_deref(), Some("old-secret"));
+    }
+
+    #[test]
+    fn save_proxy_settings_disables_empty_enabled_proxy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_save_proxy_settings(
+            &state,
+            &json!({
+                "enabled": true,
+                "selected": null,
+                "bypass": ["localhost"],
+                "proxies": []
+            }),
+        )
+        .expect("save proxy settings");
+
+        let snapshot = &response["networkProxy"];
+        assert_eq!(snapshot["enabled"], false);
+        assert!(snapshot["selected"].is_null());
+        assert_eq!(snapshot["proxies"].as_array().expect("proxies").len(), 0);
+        let saved = load_config(&paths).expect("saved config");
+        assert!(!saved.network.proxy.enabled);
+        assert_eq!(saved.network.proxy.selected, None);
+    }
+
+    #[test]
+    fn save_proxy_settings_selects_first_proxy_when_enabling_without_selection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_save_proxy_settings(
+            &state,
+            &json!({
+                "enabled": true,
+                "selected": null,
+                "bypass": ["localhost"],
+                "proxies": [{
+                    "id": "local",
+                    "scheme": "socks5",
+                    "host": "127.0.0.1",
+                    "port": 7890,
+                    "username": null,
+                    "password": null,
+                    "keepPassword": false
+                }]
+            }),
+        )
+        .expect("save proxy settings");
+
+        let snapshot = &response["networkProxy"];
+        assert_eq!(snapshot["enabled"], true);
+        assert_eq!(snapshot["selected"], "local");
+        let saved = load_config(&paths).expect("saved config");
+        assert!(saved.network.proxy.enabled);
+        assert_eq!(saved.network.proxy.selected.as_deref(), Some("local"));
     }
 
     #[test]

@@ -122,20 +122,42 @@ fn truncate_rewind_label(text: &str) -> String {
 
 pub(crate) fn memory_picker_entries(state: &AppState) -> Vec<crate::ModelPickerEntry> {
     let paths = ConfigPaths::discover(&state.cwd);
-    [
-        ("project", state.cwd.join("CLAUDE.md")),
+    let project_description = state
+        .project_memory
+        .as_ref()
+        .map(|context| {
+            format!(
+                "{} ({})",
+                context.memory_file.display(),
+                if context.memory_file.exists() {
+                    "present"
+                } else {
+                    "new"
+                }
+            )
+        })
+        .unwrap_or_else(|| "project MEMORY.md (will initialize for current directory)".to_string());
+    let fixed_entries = [
         ("workspace", paths.workspace_config_dir.join("memory.md")),
         ("user", paths.user_config_dir.join("memory.md")),
-    ]
-    .into_iter()
-    .map(|(scope, path)| crate::ModelPickerEntry {
-        selector: format!("/memory open {scope}"),
-        description: format!(
-            "{} ({})",
-            path.display(),
-            if path.exists() { "present" } else { "new" }
-        ),
+    ];
+    let mut entries = vec![crate::ModelPickerEntry {
+        selector: "/memory open project".to_string(),
+        description: project_description,
         command: None,
-    })
-    .collect()
+    }];
+    entries.extend(
+        fixed_entries
+            .into_iter()
+            .map(|(scope, path)| crate::ModelPickerEntry {
+                selector: format!("/memory open {scope}"),
+                description: format!(
+                    "{} ({})",
+                    path.display(),
+                    if path.exists() { "present" } else { "new" }
+                ),
+                command: None,
+            }),
+    );
+    entries
 }

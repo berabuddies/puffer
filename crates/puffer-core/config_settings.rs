@@ -101,6 +101,7 @@ pub(crate) fn get_config_value(state: &AppState, setting: &str) -> Result<Value>
             .map(|status_line| status_line.padding))),
         "fastMode" => Ok(json!(state.fast_mode)),
         "copy_full_response" => Ok(json!(state.config.copy_full_response)),
+        "autodreamEnabled" => Ok(json!(state.config.memory.autodream_enabled)),
         "effortLevel" => Ok(json!(state
             .config
             .effort_level
@@ -252,6 +253,11 @@ pub(crate) fn set_config_value(state: &mut AppState, setting: &str, value: Value
                 .as_bool()
                 .ok_or_else(|| anyhow!("copy_full_response must be a boolean"))?;
         }
+        "autodreamEnabled" => {
+            state.config.memory.autodream_enabled = value
+                .as_bool()
+                .ok_or_else(|| anyhow!("autodreamEnabled must be a boolean"))?;
+        }
         "effortLevel" => {
             let parsed = value
                 .as_str()
@@ -373,6 +379,9 @@ fn copy_setting_into_config(
         "editorMode" => target.editor_mode = state.config.editor_mode.clone(),
         "fastMode" => target.fast_mode = state.config.fast_mode,
         "copy_full_response" => target.copy_full_response = state.config.copy_full_response,
+        "autodreamEnabled" => {
+            target.memory.autodream_enabled = state.config.memory.autodream_enabled;
+        }
         "effortLevel" => target.effort_level = state.config.effort_level.clone(),
         "default_provider" => target.default_provider = state.config.default_provider.clone(),
         "default_model" => target.default_model = state.config.default_model.clone(),

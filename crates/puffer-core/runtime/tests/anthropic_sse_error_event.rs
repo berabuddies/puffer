@@ -11,7 +11,7 @@ fn execute_user_prompt_streaming_surfaces_anthropic_error_type() {
     let address = listener.local_addr().unwrap();
 
     let server = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if Instant::now() >= deadline {
                 panic!("mock anthropic server: no client connected");

@@ -3,17 +3,21 @@
 
 use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::classify::{Classifier, ClassifyDecision, NullClassifier};
-use crate::history::{now_ms, WorkflowHistoryStore};
+use crate::history::{now_ms, WorkflowActionLog, WorkflowBindingRunStatus, WorkflowHistoryStore};
 use crate::spec::{
     filter_matches, ActionSpec, FilterSpec, WorkflowBindingSpec, WorkflowBindingStatus,
 };
 use crate::store::WorkflowBindingStore;
 use puffer_subscriber_runtime::{EventBus, EventEnvelope, EventReceiver};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
+use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle};
+
+const MAX_CONCURRENT_EVENT_PROCESSORS: usize = 32;
 
 /// Aggregate counters surfaced by workflow and connection status views.
 #[derive(Debug, Default)]
@@ -121,6 +125,7 @@ async fn run(
     mut shutdown_rx: watch::Receiver<bool>,
     stats: Arc<RouterStats>,
 ) {
+    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_EVENT_PROCESSORS));
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => break,
@@ -130,21 +135,51 @@ async fn run(
                     continue;
                 }
                 stats.events_seen.fetch_add(1, Ordering::Relaxed);
-                let result = process_envelope_blocking(
+                spawn_envelope_processor(
                     envelope,
                     store.clone(),
                     history_store.clone(),
                     dispatcher.clone(),
                     classifier.clone(),
                     stats.clone(),
-                )
-                .await;
-                if result.matched {
-                    stats.events_matched.fetch_add(1, Ordering::Relaxed);
-                }
+                    permits.clone(),
+                );
             }
         }
     }
+}
+
+fn spawn_envelope_processor(
+    envelope: EventEnvelope,
+    store: Arc<WorkflowBindingStore>,
+    history_store: Option<Arc<WorkflowHistoryStore>>,
+    dispatcher: Arc<dyn ActionDispatcher>,
+    classifier: Arc<dyn Classifier>,
+    stats: Arc<RouterStats>,
+    permits: Arc<Semaphore>,
+) {
+    task::spawn(async move {
+        let _permit = match permits.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                stats.events_failed.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(%error, "workflow binding processor semaphore closed");
+                return;
+            }
+        };
+        let result = process_envelope_blocking(
+            envelope,
+            store,
+            history_store,
+            dispatcher,
+            classifier,
+            stats.clone(),
+        )
+        .await;
+        if result.matched {
+            stats.events_matched.fetch_add(1, Ordering::Relaxed);
+        }
+    });
 }
 
 async fn process_envelope_blocking(
@@ -236,10 +271,27 @@ pub fn process_envelope_result(
         if !topic_matches {
             continue;
         }
+        if event_dedup_key_seen(history_store, &spec, envelope) {
+            continue;
+        }
         if monitor_binding_should_skip_event(&spec, &envelope.event.payload) {
+            record_monitor_router_outcome(
+                history_store,
+                &spec,
+                envelope,
+                "monitor_muted_skip",
+                "Muted or silent notification skipped before monitor triage.",
+            );
             continue;
         }
         if ignore_filter_matches(&spec, &envelope.event.text, &envelope.event.payload) {
+            record_monitor_router_outcome(
+                history_store,
+                &spec,
+                envelope,
+                "monitor_ignore_filter",
+                "Matched an installed monitor ignore filter before triage.",
+            );
             continue;
         }
         if !filter_matches(
@@ -247,27 +299,83 @@ pub fn process_envelope_result(
             &envelope.event.text,
             &envelope.event.payload,
         ) {
+            record_monitor_router_outcome(
+                history_store,
+                &spec,
+                envelope,
+                "monitor_filter_skip",
+                "Did not match the monitor trigger filter.",
+            );
             continue;
         }
         if spec.classify_prompt.is_some() {
             match classifier.classify(&spec, &envelope.event) {
                 ClassifyDecision::Pass => {}
-                ClassifyDecision::Reject | ClassifyDecision::Inconclusive => continue,
+                ClassifyDecision::Reject | ClassifyDecision::Inconclusive => {
+                    record_monitor_router_outcome(
+                        history_store,
+                        &spec,
+                        envelope,
+                        "monitor_classifier_skip",
+                        "Classifier rejected the event before monitor triage.",
+                    );
+                    continue;
+                }
             }
         }
         result.matched = true;
         let started_at_ms = now_ms();
+        let started_history_idx = history_store.and_then(|history_store| {
+            match history_store.append_action_started(&spec, envelope, &spec.action, started_at_ms)
+            {
+                Ok(run) => Some(run.idx),
+                Err(error) => {
+                    tracing::warn!(
+                        workflow_binding = %spec.slug,
+                        envelope = %envelope.envelope_id,
+                        %error,
+                        "failed to persist started workflow binding run history"
+                    );
+                    None
+                }
+            }
+        });
         let action_result = dispatcher.dispatch(&spec.action, envelope);
         let ended_at_ms = now_ms();
         if let Some(history_store) = history_store {
-            if let Err(error) = history_store.append_action_result(
-                &spec,
-                envelope,
-                &spec.action,
-                &action_result,
-                started_at_ms,
-                ended_at_ms,
-            ) {
+            let persist_result = match started_history_idx {
+                Some(idx) => match history_store.complete_action_result(
+                    idx,
+                    &spec.action,
+                    &action_result,
+                    started_at_ms,
+                    ended_at_ms,
+                ) {
+                    Ok(Some(_)) => Ok(()),
+                    Ok(None) => history_store
+                        .append_action_result(
+                            &spec,
+                            envelope,
+                            &spec.action,
+                            &action_result,
+                            started_at_ms,
+                            ended_at_ms,
+                        )
+                        .map(|_| ()),
+                    Err(error) => Err(error),
+                },
+                None => history_store
+                    .append_action_result(
+                        &spec,
+                        envelope,
+                        &spec.action,
+                        &action_result,
+                        started_at_ms,
+                        ended_at_ms,
+                    )
+                    .map(|_| ()),
+            };
+            if let Err(error) = persist_result {
                 tracing::warn!(
                     workflow_binding = %spec.slug,
                     envelope = %envelope.envelope_id,
@@ -303,11 +411,360 @@ pub fn process_envelope_result(
     result
 }
 
+/// Processes a same-connection envelope batch and batches triage-agent
+/// actions per matching binding.
+pub fn process_envelope_batch_result(
+    envelopes: &[EventEnvelope],
+    store: &WorkflowBindingStore,
+    history_store: Option<&WorkflowHistoryStore>,
+    dispatcher: &Arc<dyn ActionDispatcher>,
+    classifier: &Arc<dyn Classifier>,
+    stats: Option<&RouterStats>,
+) -> EnvelopeProcessResult {
+    let mut result = EnvelopeProcessResult::default();
+    let envelopes: Vec<&EventEnvelope> = envelopes
+        .iter()
+        .filter(|envelope| !envelope.event.control)
+        .collect();
+    if envelopes.is_empty() {
+        return result;
+    }
+    for spec in store.list() {
+        if spec.status == WorkflowBindingStatus::Paused {
+            continue;
+        }
+        let mut triage_batch = Vec::new();
+        for envelope in &envelopes {
+            let Some(prefiltered) =
+                prefilter_envelope_for_spec(&spec, envelope, history_store, classifier)
+            else {
+                continue;
+            };
+            result.matched = true;
+            if matches!(spec.action, ActionSpec::TriageAgent { .. }) {
+                triage_batch.push(prefiltered);
+                continue;
+            }
+            dispatch_one_matched_envelope(
+                &spec,
+                prefiltered,
+                history_store,
+                dispatcher,
+                stats,
+                &mut result,
+            );
+        }
+        if !triage_batch.is_empty() {
+            dispatch_matched_batch(
+                &spec,
+                &triage_batch,
+                history_store,
+                dispatcher,
+                stats,
+                &mut result,
+            );
+        }
+    }
+    result
+}
+
+fn prefilter_envelope_for_spec<'a>(
+    spec: &WorkflowBindingSpec,
+    envelope: &'a EventEnvelope,
+    history_store: Option<&WorkflowHistoryStore>,
+    classifier: &Arc<dyn Classifier>,
+) -> Option<&'a EventEnvelope> {
+    let topic_matches = spec.connection_slug == envelope.event.topic
+        || spec
+            .connector_slug
+            .as_deref()
+            .is_some_and(|connector_slug| connector_slug == envelope.event.topic);
+    if !topic_matches {
+        return None;
+    }
+    if event_dedup_key_seen(history_store, spec, envelope) {
+        return None;
+    }
+    if monitor_binding_should_skip_event(spec, &envelope.event.payload) {
+        record_monitor_router_outcome(
+            history_store,
+            spec,
+            envelope,
+            "monitor_muted_skip",
+            "Muted or silent notification skipped before monitor triage.",
+        );
+        return None;
+    }
+    if ignore_filter_matches(spec, &envelope.event.text, &envelope.event.payload) {
+        record_monitor_router_outcome(
+            history_store,
+            spec,
+            envelope,
+            "monitor_ignore_filter",
+            "Matched an installed monitor ignore filter before triage.",
+        );
+        return None;
+    }
+    if !filter_matches(
+        spec.filter.as_ref(),
+        &envelope.event.text,
+        &envelope.event.payload,
+    ) {
+        record_monitor_router_outcome(
+            history_store,
+            spec,
+            envelope,
+            "monitor_filter_skip",
+            "Did not match the monitor trigger filter.",
+        );
+        return None;
+    }
+    if spec.classify_prompt.is_some() {
+        match classifier.classify(spec, &envelope.event) {
+            ClassifyDecision::Pass => {}
+            ClassifyDecision::Reject | ClassifyDecision::Inconclusive => {
+                record_monitor_router_outcome(
+                    history_store,
+                    spec,
+                    envelope,
+                    "monitor_classifier_skip",
+                    "Classifier rejected the event before monitor triage.",
+                );
+                return None;
+            }
+        }
+    }
+    Some(envelope)
+}
+
+fn dispatch_one_matched_envelope(
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+    history_store: Option<&WorkflowHistoryStore>,
+    dispatcher: &Arc<dyn ActionDispatcher>,
+    stats: Option<&RouterStats>,
+    result: &mut EnvelopeProcessResult,
+) {
+    let started_at_ms = now_ms();
+    let started_history_idx = history_store.and_then(|history_store| {
+        match history_store.append_action_started(spec, envelope, &spec.action, started_at_ms) {
+            Ok(run) => Some(run.idx),
+            Err(error) => {
+                tracing::warn!(
+                    workflow_binding = %spec.slug,
+                    envelope = %envelope.envelope_id,
+                    %error,
+                    "failed to persist started workflow binding run history"
+                );
+                None
+            }
+        }
+    });
+    let action_result = dispatcher.dispatch(&spec.action, envelope);
+    let ended_at_ms = now_ms();
+    persist_action_result(
+        spec,
+        envelope,
+        &action_result,
+        started_at_ms,
+        ended_at_ms,
+        started_history_idx,
+        history_store,
+    );
+    account_action_result(spec, envelope, &action_result, stats, result);
+}
+
+fn dispatch_matched_batch(
+    spec: &WorkflowBindingSpec,
+    envelopes: &[&EventEnvelope],
+    history_store: Option<&WorkflowHistoryStore>,
+    dispatcher: &Arc<dyn ActionDispatcher>,
+    stats: Option<&RouterStats>,
+    result: &mut EnvelopeProcessResult,
+) {
+    let started_at_ms = now_ms();
+    let mut started_history = HashMap::new();
+    if let Some(history_store) = history_store {
+        for envelope in envelopes {
+            match history_store.append_action_started(spec, envelope, &spec.action, started_at_ms) {
+                Ok(run) => {
+                    started_history.insert(envelope.envelope_id.clone(), run.idx);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        workflow_binding = %spec.slug,
+                        envelope = %envelope.envelope_id,
+                        %error,
+                        "failed to persist started workflow binding run history"
+                    );
+                }
+            }
+        }
+    }
+    let batch: Vec<EventEnvelope> = envelopes
+        .iter()
+        .map(|envelope| (*envelope).clone())
+        .collect();
+    let action_result = dispatcher.dispatch_batch(&spec.action, &batch);
+    let ended_at_ms = now_ms();
+    for envelope in envelopes {
+        let started_history_idx = started_history.get(&envelope.envelope_id).copied();
+        persist_action_result(
+            spec,
+            envelope,
+            &action_result,
+            started_at_ms,
+            ended_at_ms,
+            started_history_idx,
+            history_store,
+        );
+        account_action_result(spec, envelope, &action_result, stats, result);
+    }
+}
+
+fn persist_action_result(
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+    action_result: &crate::action::ActionResult,
+    started_at_ms: i128,
+    ended_at_ms: i128,
+    started_history_idx: Option<u64>,
+    history_store: Option<&WorkflowHistoryStore>,
+) {
+    if let Some(history_store) = history_store {
+        let persist_result = match started_history_idx {
+            Some(idx) => match history_store.complete_action_result(
+                idx,
+                &spec.action,
+                action_result,
+                started_at_ms,
+                ended_at_ms,
+            ) {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => history_store
+                    .append_action_result(
+                        spec,
+                        envelope,
+                        &spec.action,
+                        action_result,
+                        started_at_ms,
+                        ended_at_ms,
+                    )
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            },
+            None => history_store
+                .append_action_result(
+                    spec,
+                    envelope,
+                    &spec.action,
+                    action_result,
+                    started_at_ms,
+                    ended_at_ms,
+                )
+                .map(|_| ()),
+        };
+        if let Err(error) = persist_result {
+            tracing::warn!(
+                workflow_binding = %spec.slug,
+                envelope = %envelope.envelope_id,
+                %error,
+                "failed to persist workflow binding run history"
+            );
+        }
+    }
+}
+
+fn account_action_result(
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+    action_result: &crate::action::ActionResult,
+    stats: Option<&RouterStats>,
+    result: &mut EnvelopeProcessResult,
+) {
+    if action_result.success {
+        result.acted += 1;
+        if let Some(stats) = stats {
+            stats.events_acted.fetch_add(1, Ordering::Relaxed);
+        }
+        tracing::info!(
+            workflow_binding = %spec.slug,
+            envelope = %envelope.envelope_id,
+            "{}",
+            action_result.summary
+        );
+    } else {
+        result.failed += 1;
+        if let Some(stats) = stats {
+            stats.events_failed.fetch_add(1, Ordering::Relaxed);
+        }
+        tracing::warn!(
+            workflow_binding = %spec.slug,
+            envelope = %envelope.envelope_id,
+            "{}",
+            action_result.summary
+        );
+    }
+}
+
+fn event_dedup_key_seen(
+    history_store: Option<&WorkflowHistoryStore>,
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+) -> bool {
+    let Some(history_store) = history_store else {
+        return false;
+    };
+    let Some(dedup_key) = envelope.event.dedup_key.as_deref() else {
+        return false;
+    };
+    history_store.contains_dedup_key(&spec.slug, dedup_key)
+}
+
 fn monitor_binding_should_skip_event(spec: &WorkflowBindingSpec, payload: &Value) -> bool {
     if !is_monitor_binding(spec) {
         return false;
     }
     payload_bool(payload, "notification_muted") || payload_bool(payload, "notification_silent")
+}
+
+fn record_monitor_router_outcome(
+    history_store: Option<&WorkflowHistoryStore>,
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+    action: &str,
+    summary: &str,
+) {
+    if !is_monitor_binding(spec) {
+        return;
+    }
+    let Some(history_store) = history_store else {
+        return;
+    };
+    let timestamp = now_ms();
+    let log = WorkflowActionLog {
+        action: action.to_string(),
+        status: WorkflowBindingRunStatus::Completed,
+        summary: summary.to_string(),
+        started_at_ms: timestamp,
+        ended_at_ms: timestamp,
+        usage: None,
+    };
+    if let Err(error) = history_store.append_event_outcome(
+        spec,
+        envelope,
+        log,
+        WorkflowBindingRunStatus::Completed,
+        timestamp,
+        timestamp,
+    ) {
+        tracing::warn!(
+            workflow_binding = %spec.slug,
+            envelope = %envelope.envelope_id,
+            %error,
+            "failed to persist monitor router history"
+        );
+    }
 }
 
 fn ignore_filter_matches(spec: &WorkflowBindingSpec, text: &str, payload: &Value) -> bool {
@@ -333,434 +790,4 @@ pub fn prefilter_passes(filter: Option<&FilterSpec>, text: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::action::{ActionResult, BuiltinActionDispatcher};
-    use crate::classify::NullClassifier;
-    use crate::spec::{ActionSpec, FileAppendFormat, TaggedFilterSpec, WorkflowBindingSpec};
-    use puffer_subscriber_runtime::{Event, EventBus, EventEnvelope};
-    use std::sync::Arc;
-    use tempfile::tempdir;
-
-    #[test]
-    fn case_insensitive_regex_matches() {
-        let filter = FilterSpec::Tagged(TaggedFilterSpec::Regex {
-            pattern: r"\bIoC\b".into(),
-            case_insensitive: true,
-        });
-        assert!(prefilter_passes(Some(&filter), "We saw an IOC today"));
-        assert!(!prefilter_passes(
-            Some(&filter),
-            "We saw an Indicator today"
-        ));
-    }
-
-    #[test]
-    fn missing_filter_passes() {
-        assert!(prefilter_passes(None, "anything"));
-    }
-
-    #[test]
-    fn control_events_do_not_match_workflows() {
-        let dir = tempdir().unwrap();
-        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(WorkflowBindingSpec {
-                slug: "all-telegram".into(),
-                description: "all telegram".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: None,
-                status: WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: ActionSpec::RunWorkflow {
-                    slug: "downstream".into(),
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
-        let envelope = EventEnvelope {
-            envelope_id: "env-control".into(),
-            subscriber_id: "telegram-user".into(),
-            received_at_ms: 0,
-            event: Event {
-                topic: "telegram-user".into(),
-                kind: "send_complete".into(),
-                control: true,
-                dedup_key: None,
-                text: String::new(),
-                payload: serde_json::json!({"peer":"@alice"}),
-            },
-        };
-        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
-        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
-
-        let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
-
-        assert!(!result.matched);
-        assert_eq!(result.acted, 0);
-        assert_eq!(result.failed, 0);
-
-        let mut silent_envelope = envelope.clone();
-        silent_envelope.envelope_id = "env-silent".into();
-        silent_envelope.event.payload = serde_json::json!({
-            "message": "quiet",
-            "notification_silent": true
-        });
-        let result = process_envelope_result(
-            &silent_envelope,
-            &store,
-            None,
-            &dispatcher,
-            &classifier,
-            None,
-        );
-
-        assert!(!result.matched);
-        assert_eq!(result.acted, 0);
-        assert_eq!(result.failed, 0);
-    }
-
-    #[test]
-    fn process_result_reports_action_failures() {
-        let dir = tempdir().unwrap();
-        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(WorkflowBindingSpec {
-                slug: "notify".into(),
-                description: "notify".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: None,
-                status: WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: ActionSpec::ForwardMessage {
-                    platform: "telegram".into(),
-                    target: "@alice".into(),
-                    template: None,
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
-        let envelope = EventEnvelope {
-            envelope_id: "env-1".into(),
-            subscriber_id: "telegram-user".into(),
-            received_at_ms: 0,
-            event: Event {
-                topic: "telegram-user".into(),
-                kind: "message".into(),
-                control: false,
-                dedup_key: None,
-                text: "hello".into(),
-                payload: serde_json::json!({"message":"hello"}),
-            },
-        };
-        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
-        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
-
-        let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
-
-        assert!(result.matched);
-        assert_eq!(result.acted, 0);
-        assert_eq!(result.failed, 1);
-    }
-
-    #[test]
-    fn monitor_bindings_skip_muted_notification_events() {
-        let dir = tempdir().unwrap();
-        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(WorkflowBindingSpec {
-                slug: "monitor-telegram-user".into(),
-                description: "Monitor telegram-user for actionable tasks".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: Some("telegram-login".into()),
-                status: WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: ActionSpec::TriageAgent {
-                    prompt: "triage".into(),
-                    model: None,
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
-        let envelope = EventEnvelope {
-            envelope_id: "env-muted".into(),
-            subscriber_id: "telegram-user".into(),
-            received_at_ms: 0,
-            event: Event {
-                topic: "telegram-user".into(),
-                kind: "message".into(),
-                control: false,
-                dedup_key: None,
-                text: "quiet".into(),
-                payload: serde_json::json!({
-                    "message": "quiet",
-                    "notification_muted": true
-                }),
-            },
-        };
-        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
-        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
-
-        let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
-
-        assert!(!result.matched);
-        assert_eq!(result.acted, 0);
-        assert_eq!(result.failed, 0);
-    }
-
-    #[test]
-    fn non_monitor_bindings_still_receive_muted_notification_events() {
-        let dir = tempdir().unwrap();
-        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(WorkflowBindingSpec {
-                slug: "append-telegram".into(),
-                description: "append telegram".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: Some("telegram-login".into()),
-                status: WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: ActionSpec::FileAppend {
-                    path: "out.jsonl".into(),
-                    format: FileAppendFormat::Jsonl,
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
-        let envelope = EventEnvelope {
-            envelope_id: "env-muted".into(),
-            subscriber_id: "telegram-user".into(),
-            received_at_ms: 0,
-            event: Event {
-                topic: "telegram-user".into(),
-                kind: "message".into(),
-                control: false,
-                dedup_key: None,
-                text: "quiet".into(),
-                payload: serde_json::json!({
-                    "message": "quiet",
-                    "notification_muted": true
-                }),
-            },
-        };
-        let dispatcher: Arc<dyn ActionDispatcher> =
-            Arc::new(BuiltinActionDispatcher::with_storage_root(dir.path()));
-        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
-
-        let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
-
-        assert!(result.matched);
-        assert_eq!(result.acted, 1);
-        assert_eq!(result.failed, 0);
-    }
-
-    #[test]
-    fn ignore_filters_suppress_matching_events_before_action() {
-        let dir = tempdir().unwrap();
-        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(WorkflowBindingSpec {
-                slug: "monitor-telegram-user".into(),
-                description: "Monitor telegram-user for actionable tasks".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: Some("telegram-login".into()),
-                status: WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: vec![FilterSpec::Json(serde_json::json!({
-                    "chat_id": 2041550535_i64,
-                    "sender_username": "FuzzlandInternalBot"
-                }))],
-                classify_prompt: None,
-                classify_model: None,
-                action: ActionSpec::TriageAgent {
-                    prompt: "triage".into(),
-                    model: None,
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
-        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
-        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
-        let mut envelope = EventEnvelope {
-            envelope_id: "env-ignored".into(),
-            subscriber_id: "telegram-user".into(),
-            received_at_ms: 0,
-            event: Event {
-                topic: "telegram-user".into(),
-                kind: "message".into(),
-                control: false,
-                dedup_key: None,
-                text: "alert".into(),
-                payload: serde_json::json!({
-                    "chat_id": 2041550535_i64,
-                    "sender_username": "FuzzlandInternalBot",
-                    "message": "alert"
-                }),
-            },
-        };
-
-        let ignored =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
-        assert!(!ignored.matched);
-        assert_eq!(ignored.acted, 0);
-
-        envelope.envelope_id = "env-other-sender".into();
-        envelope.event.payload = serde_json::json!({
-            "chat_id": 2041550535_i64,
-            "sender_username": "Alice",
-            "message": "alert"
-        });
-        let passed =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
-        assert!(passed.matched);
-        assert_eq!(passed.failed, 1);
-    }
-
-    #[tokio::test]
-    async fn router_receives_event_published_immediately_after_spawn() {
-        let dir = tempdir().unwrap();
-        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(WorkflowBindingSpec {
-                slug: "append".into(),
-                description: "append".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: None,
-                status: WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: ActionSpec::FileAppend {
-                    path: "out.jsonl".into(),
-                    format: FileAppendFormat::Jsonl,
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
-        let bus = EventBus::new();
-        let dispatcher: Arc<dyn ActionDispatcher> =
-            Arc::new(BuiltinActionDispatcher::with_storage_root(dir.path()));
-        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
-        let router =
-            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier);
-
-        bus.publish(EventEnvelope {
-            envelope_id: "env-race".into(),
-            subscriber_id: "telegram-user".into(),
-            received_at_ms: 0,
-            event: Event {
-                topic: "telegram-user".into(),
-                kind: "message".into(),
-                control: false,
-                dedup_key: None,
-                text: "hello".into(),
-                payload: serde_json::json!({"message":"hello"}),
-            },
-        });
-
-        let path = dir.path().join("out.jsonl");
-        for _ in 0..50 {
-            if path.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("hello"));
-        router.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn router_runs_actions_on_blocking_thread() {
-        struct RuntimeDroppingDispatcher;
-
-        impl ActionDispatcher for RuntimeDroppingDispatcher {
-            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                drop(runtime);
-                ActionResult {
-                    success: true,
-                    summary: "runtime dropped".into(),
-                }
-            }
-        }
-
-        let dir = tempdir().unwrap();
-        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(WorkflowBindingSpec {
-                slug: "triage".into(),
-                description: "triage".into(),
-                connection_slug: "email-live".into(),
-                connector_slug: Some("email".into()),
-                status: WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: ActionSpec::ForwardMessage {
-                    platform: "email".into(),
-                    target: "ops@example.com".into(),
-                    template: None,
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
-        let history =
-            Arc::new(WorkflowHistoryStore::load(dir.path().join("history.json")).unwrap());
-        let bus = EventBus::new();
-        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(RuntimeDroppingDispatcher);
-        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
-        let router = SubscriptionRouter::spawn(
-            bus.clone(),
-            Arc::new(store),
-            Some(history.clone()),
-            dispatcher,
-            classifier,
-        );
-
-        bus.publish(EventEnvelope {
-            envelope_id: "env-runtime".into(),
-            subscriber_id: "email".into(),
-            received_at_ms: 0,
-            event: Event {
-                topic: "email".into(),
-                kind: "message".into(),
-                control: false,
-                dedup_key: None,
-                text: "hello".into(),
-                payload: serde_json::json!({"message":"hello"}),
-            },
-        });
-
-        for _ in 0..50 {
-            if router.stats().snapshot_tuple() == (1, 1, 1, 0) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(router.stats().snapshot_tuple(), (1, 1, 1, 0));
-        assert_eq!(history.list_for("triage").len(), 1);
-        router.shutdown().await;
-    }
-}
+include!("router_tests.rs");

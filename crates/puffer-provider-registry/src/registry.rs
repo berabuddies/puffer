@@ -162,7 +162,36 @@ impl ProviderRegistry {
         }
 
         let results = run_parallel_discovery(&eligible, auth_store);
+        self.apply_discovery_results(results)
+    }
 
+    /// Discovers stale providers with one externally configured client.
+    pub fn discover_and_merge_all_with_discovery_client(
+        &mut self,
+        auth_store: &AuthStore,
+        client: &ModelDiscoveryClient,
+    ) -> Result<()> {
+        let stale_ids = self.apply_discovery_cache();
+        let eligible = self.discovery_eligible(&stale_ids, auth_store);
+        if eligible.is_empty() {
+            return Ok(());
+        }
+        let results = eligible
+            .iter()
+            .map(|provider| {
+                (
+                    provider.id.clone(),
+                    client.discover_models(provider, auth_store),
+                )
+            })
+            .collect();
+        self.apply_discovery_results(results)
+    }
+
+    fn apply_discovery_results(
+        &mut self,
+        results: Vec<(String, Result<Vec<ModelDescriptor>>)>,
+    ) -> Result<()> {
         let mut failures = Vec::new();
         let mut cache_updates: HashMap<String, DiscoveryCacheEntry> = HashMap::new();
         let now_ms = current_time_ms();
@@ -267,6 +296,38 @@ impl ProviderRegistry {
         }))
     }
 
+    /// Spawns background discovery using an externally configured discovery client.
+    pub fn start_background_discovery_with_discovery_client(
+        &self,
+        provider_ids: Vec<String>,
+        auth_store: &AuthStore,
+        client: ModelDiscoveryClient,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        let eligible = self.discovery_eligible(&provider_ids, auth_store);
+        if eligible.is_empty() {
+            return None;
+        }
+        let auth = auth_store.clone();
+        Some(std::thread::spawn(move || {
+            let now_ms = current_time_ms();
+            let mut cache_updates: HashMap<String, DiscoveryCacheEntry> = HashMap::new();
+            for provider in eligible {
+                if let Ok(models) = client.discover_models(&provider, &auth) {
+                    cache_updates.insert(
+                        provider.id.clone(),
+                        DiscoveryCacheEntry {
+                            models,
+                            cached_at_ms: now_ms,
+                        },
+                    );
+                }
+            }
+            if !cache_updates.is_empty() {
+                persist_cache_updates(&cache_updates);
+            }
+        }))
+    }
+
     /// Filters `provider_ids` down to those that have discovery configured
     /// and either credentials available or a localhost base URL.
     fn discovery_eligible(
@@ -294,6 +355,16 @@ impl ProviderRegistry {
     ) -> Result<()> {
         let client = ModelDiscoveryClient::new();
         self.discover_and_merge_provider_with_client(provider_id, auth_store, &client)
+    }
+
+    /// Discovers and merges runtime models using an externally configured discovery client.
+    pub fn discover_and_merge_provider_with_discovery_client(
+        &mut self,
+        provider_id: &str,
+        auth_store: &AuthStore,
+        client: &ModelDiscoveryClient,
+    ) -> Result<()> {
+        self.discover_and_merge_provider_with_client(provider_id, auth_store, client)
     }
 }
 

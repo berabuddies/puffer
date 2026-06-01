@@ -35,6 +35,11 @@ impl ModelDiscoveryClient {
         Self { client }
     }
 
+    /// Creates a discovery client from an externally configured blocking client.
+    pub fn with_client(client: Client) -> Self {
+        Self { client }
+    }
+
     /// Fetches and parses discovery results for a provider descriptor.
     pub fn discover_models(
         &self,
@@ -491,6 +496,16 @@ mod tests {
         assert!(models.iter().any(|model| model.id == "claude-sonnet-4-5"));
         assert!(models.iter().any(|model| model.id == "claude-opus-4-1"));
         assert!(!models.iter().any(|model| model.id == "claude-stale"));
+    }
+
+    #[test]
+    fn discovery_client_accepts_injected_reqwest_client() {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("client");
+        let discovery = ModelDiscoveryClient::with_client(client);
+        let _ = discovery;
     }
 
     #[test]

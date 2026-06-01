@@ -529,6 +529,22 @@ fn dispatcher_helper_routes_known_prompt_specializations() {
         _ => panic!("expected commit prompt variable overrides"),
     }
 
+    state.project_memory = None;
+    let init =
+        prepare_prompt_command_specialization(&mut state, &session_store, "init", "").unwrap();
+    match init {
+        Some(PromptCommandPreparation::VariableOverrides(variables)) => {
+            assert!(variables.is_empty());
+            let context = state
+                .project_memory
+                .as_ref()
+                .expect("/init should initialize project memory");
+            assert!(context.memory_file.ends_with("MEMORY.md"));
+            assert!(context.memory_file.exists());
+        }
+        _ => panic!("expected /init prompt variable overrides"),
+    }
+
     let plan =
         prepare_prompt_command_specialization(&mut state, &session_store, "plan", "").unwrap();
     assert!(plan.is_none());

@@ -23,8 +23,9 @@ description: |-
   - Code snippets showing different implementations
   - Diagram variations
   - Configuration examples
+  - Markdown images, for example generated QR codes as `![label](data:image/svg+xml;base64,...)`
 
-  Preview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported. When any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and preview on the right. Do not use previews for simple preference questions where labels and descriptions suffice. Note: previews are only supported for single-select questions (not multiSelect).
+  Preview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported, and markdown image syntax is rendered as an image for safe image URLs (`data:image/*`, `https`, or `http`). Question text may also include markdown image syntax when the user must inspect an image before answering. When any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and preview on the right. Do not use previews for simple preference questions where labels and descriptions suffice. Note: previews are only supported for single-select questions (not multiSelect).
 handler: runtime:workflow:ask_user_question
 approval_policy: auto
 sandbox_policy: read-only

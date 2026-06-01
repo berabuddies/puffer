@@ -30,7 +30,9 @@ mod peers;
 mod polls;
 mod qr_login;
 mod reply;
+mod startup;
 mod state;
+mod updates;
 
 pub use crate::client::run;
 

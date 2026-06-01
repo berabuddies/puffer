@@ -602,4 +602,28 @@ mod tests {
             "fallback list should include the current nano model"
         );
     }
+
+    /// Confirms the bundled provider catalog includes WorldRouter so desktop
+    /// provider selection does not depend on workspace-local resource files.
+    #[test]
+    fn worldrouter_yaml_parses_as_builtin_agent_provider() {
+        let yaml = include_str!("../../../resources/providers/worldrouter.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("worldrouter.yaml parses");
+        assert_eq!(pack.id, "worldrouter");
+        assert_eq!(pack.base_url, "https://inference-api.worldrouter.ai/v1");
+        assert_eq!(pack.default_api, "openai-completions");
+        assert_eq!(
+            pack.chat_completions_path.as_deref(),
+            Some("/chat/completions")
+        );
+        assert!(pack
+            .auth_modes
+            .iter()
+            .any(|mode| matches!(mode, puffer_provider_registry::AuthMode::ApiKey)));
+        let descriptor = pack.into_descriptor();
+        assert!(
+            descriptor.models.iter().any(|model| model.id == "auto"),
+            "WorldRouter should expose the auto routing fallback model"
+        );
+    }
 }

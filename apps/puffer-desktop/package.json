@@ -16,6 +16,8 @@
     "test:desktop-ui:webkit": "playwright test tests/*ui.spec.ts tests/plus-*.spec.ts --browser=webkit",
     "test:desktop": "playwright test",
     "test:codex-playwright": "playwright test tests/codex-playwright-mcp.spec.ts",
+    "test:sidebar-css": "node tests/sidebar-accent-css.test.mjs",
+    "test:provider-visuals": "node tests/provider-visuals.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

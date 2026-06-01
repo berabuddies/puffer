@@ -62,53 +62,56 @@ pub async fn start(
             return Ok(None);
         }
     };
-    let session = Session::load_file_or_create(&env.session_path)
-        .with_context(|| format!("load session file {}", env.session_path.display()))?;
 
-    let config = Config {
-        session,
-        api_id,
-        api_hash: api_hash.clone(),
-        params: default_init_params(),
-    };
-
-    let client = match Client::connect(config).await {
-        Ok(c) => c,
-        Err(err) => {
-            warn!(error = %err, "telegram connect failed");
-            emit_control(
-                &env.topic,
-                "login_error",
-                json!({ "error": format!("connect failed: {err}"), "phase": "connect" }),
-            )?;
-            return Ok(None);
-        }
-    };
-
-    match client.request_login_code(&phone).await {
-        Ok(token) => {
-            state.login_token = Some(token);
-            state.password_token = None;
-            state.phone = Some(phone.clone());
-            state.api_id = Some(api_id);
-            state.api_hash = Some(api_hash);
-            if let Err(error) = save_session(env, &client) {
-                warn!(error = %error, "failed to persist telegram pre-auth session");
+    for attempt in 0..2 {
+        let client = match connect_fresh_login_client(api_id, api_hash.clone()).await {
+            Ok(c) => c,
+            Err(err) => {
+                warn!(error = %err, "telegram connect failed");
+                emit_control(
+                    &env.topic,
+                    "login_error",
+                    json!({ "error": format!("connect failed: {err}"), "phase": "connect" }),
+                )?;
+                return Ok(None);
             }
-            emit_control(&env.topic, "login_awaiting_code", json!({ "phone": phone }))?;
-            info!(phone = %phone, "login code requested");
-            Ok(Some(client))
-        }
-        Err(err) => {
-            warn!(error = %err, "request_login_code failed");
-            emit_control(
-                &env.topic,
-                "login_error",
-                json!({ "error": format!("request_login_code failed: {err}"), "phase": "request_code" }),
-            )?;
-            Ok(None)
+        };
+
+        match client.request_login_code(&phone).await {
+            Ok(token) => {
+                state.login_token = Some(token);
+                state.password_token = None;
+                state.phone = Some(phone.clone());
+                state.api_id = Some(api_id);
+                state.api_hash = Some(api_hash);
+                if let Err(error) = save_session(env, &client) {
+                    warn!(error = %error, "failed to persist telegram pre-auth session");
+                }
+                emit_control(&env.topic, "login_awaiting_code", json!({ "phone": phone }))?;
+                info!(phone = %phone, "login code requested");
+                return Ok(Some(client));
+            }
+            Err(err) => {
+                let error = err.to_string();
+                if attempt == 0 && is_auth_restart_error_text(&error) {
+                    warn!(
+                        %error,
+                        "telegram requested auth restart while sending login code; retrying with a fresh session"
+                    );
+                    continue;
+                }
+                warn!(%error, "request_login_code failed");
+                emit_control(
+                    &env.topic,
+                    "login_error",
+                    json!({ "error": format!("request_login_code failed: {error}"), "phase": "request_code" }),
+                )?;
+                return Ok(None);
+            }
         }
     }
+
+    Ok(None)
 }
 
 /// Handles `TelegramLoginSubmitCode`: completes sign-in with the cached
@@ -247,6 +250,17 @@ pub fn save_session(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
         .with_context(|| format!("save session to {}", env.session_path.display()))
 }
 
+async fn connect_fresh_login_client(api_id: i32, api_hash: String) -> anyhow::Result<Client> {
+    Client::connect(Config {
+        session: Session::new(),
+        api_id,
+        api_hash,
+        params: default_init_params(),
+    })
+    .await
+    .context("connect telegram login client")
+}
+
 /// Best-effort: writes the api_id/api_hash/phone the active login used
 /// to the credentials file so future reconnects can skip prompting the
 /// agent. Errors are logged and ignored — the login itself already
@@ -271,6 +285,10 @@ fn is_retryable_sign_in_error_text(error: &str) -> bool {
         || lower.contains("unexpected eof")
 }
 
+fn is_auth_restart_error_text(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("auth_restart")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +307,14 @@ mod tests {
     fn retryable_sign_in_error_text_rejects_auth_errors() {
         assert!(!is_retryable_sign_in_error_text("invalid code"));
         assert!(!is_retryable_sign_in_error_text("PHONE_CODE_INVALID"));
+    }
+
+    #[test]
+    fn auth_restart_error_text_matches_telegram_restart() {
+        assert!(is_auth_restart_error_text(
+            "request error: rpc error 500: AUTH_RESTART caused by auth.sendCode"
+        ));
+        assert!(is_auth_restart_error_text("auth_restart"));
+        assert!(!is_auth_restart_error_text("PHONE_NUMBER_INVALID"));
     }
 }

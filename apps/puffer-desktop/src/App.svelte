@@ -69,6 +69,9 @@
   import { providerIdCanRunAgent, providerIdInSet, providerIsAvailableForAgent } from "./lib/providerIds";
   import { providerCatalogForSetup } from "./lib/providerFallbacks";
   import type { UnlistenFn } from "@tauri-apps/api/event";
+  import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { detectPlatform } from "./lib/shell/platform";
   import type {
     DesktopPreferences,
     DesktopPinState,
@@ -236,6 +239,7 @@
     launchInspectorOpen: true,
     defaultInspectorTab: "latest-diff",
     defaultInspectorWidth: 50,
+    browserRenderer: "cef",
     remoteEnabled: false,
     remoteTarget: "",
     remoteCwd: ""
@@ -747,7 +751,7 @@
   // Init
   // ─────────────────────────────────────────────────────────────
   // Auto-recap: when the window loses focus for `RECAP_IDLE_MS`, submit
-  // `/recap` so the session shows a 1-2 sentence summary by the time the
+  // `/recap` so the session shows a compact summary by the time the
   // user comes back. Matches the TUI's idle-timer auto-trigger; mirrors
   // claude-code's `tengu_sedge_lantern` blur path. The slash command
   // dispatcher inside puffer-core decides whether to actually run (gates
@@ -831,6 +835,10 @@
           typeof parsed.defaultInspectorWidth === "number"
             ? parsed.defaultInspectorWidth
             : defaultDesktopPreferences.defaultInspectorWidth,
+        browserRenderer:
+          parsed.browserRenderer === "screencast"
+            ? "screencast"
+            : defaultDesktopPreferences.browserRenderer,
         remoteEnabled: parsed.remoteEnabled === true,
         remoteTarget: typeof parsed.remoteTarget === "string" ? parsed.remoteTarget : "",
         remoteCwd: typeof parsed.remoteCwd === "string" ? parsed.remoteCwd : ""
@@ -1086,7 +1094,41 @@
     window.addEventListener("focus", cancelRecapBlurTimer);
     window.addEventListener("keydown", handleShellKeydown, true);
     void init();
+
+    // Mini floating window hands off its prompt here: focus the main window
+    // and run it through the normal create-session-if-needed + submit path.
+    let miniUnlisten: UnlistenFn | null = null;
+    let miniDisposed = false;
+    let miniSubmitBusy = false;
+    if (detectPlatform() !== "web") {
+      void listen<string>("puffer://mini-submit", async (event) => {
+        const text = (event.payload ?? "").trim();
+        if (!text) return;
+        // Serialize handoffs: two rapid submits before a session exists would
+        // each create one and race on the shared selectedSession.
+        if (miniSubmitBusy) return;
+        miniSubmitBusy = true;
+        try {
+          try {
+            await getCurrentWindow().show();
+            await getCurrentWindow().setFocus();
+          } catch {
+            // best-effort focus; the handoff still runs
+          }
+          await runWorkflowCommand(text);
+        } finally {
+          miniSubmitBusy = false;
+        }
+      }).then((un) => {
+        // If we already unmounted before listen() resolved, unsubscribe now.
+        if (miniDisposed) un();
+        else miniUnlisten = un;
+      });
+    }
+
     return () => {
+      miniDisposed = true;
+      miniUnlisten?.();
       cancelRecapBlurTimer();
       clearDaemonClientListeners();
       sessionSubscriptionGeneration += 1;
@@ -3753,6 +3795,7 @@
                 turnStatusHint={turnStatusHint}
                 settingsSnapshot={settingsSnapshot}
                 backendConnected={connectionState === "open"}
+                browserRenderer={desktopPreferences.browserRenderer}
                 userDisplayName={tweaks.userName}
                 onBack={onCloseAgent}
                 onSubmitMessage={submitMessage}

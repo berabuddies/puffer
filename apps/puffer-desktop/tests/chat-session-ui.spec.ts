@@ -3380,6 +3380,41 @@ test("input user questions render a direct answer field", async ({ page }) => {
   });
 });
 
+test("user questions render markdown images in question text and previews", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const image =
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCI+PHJlY3Qgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSJ3aGl0ZSIvPjxyZWN0IHg9IjQiIHk9IjQiIHdpZHRoPSIxMiIgaGVpZ2h0PSIxMiIgZmlsbD0iYmxhY2siLz48L3N2Zz4=";
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-image",
+    requestId: "question-image",
+    questions: [
+      {
+        header: "Approve",
+        question: `Scan this code.\n![Telegram QR](${image})`,
+        options: [
+          {
+            label: "Approved",
+            description: "I approved the login request.",
+            preview: `![Preview QR](${image})\n\ntg://login?token=abc`
+          },
+          { label: "Cancel", description: "Stop setup." }
+        ]
+      }
+    ]
+  });
+
+  const block = page.locator(".pf-question-block").filter({ hasText: "Scan this code." });
+  await expect(block.getByRole("img", { name: "Telegram QR" })).toBeVisible();
+  await expect(block.getByRole("img", { name: "Preview QR" })).toBeVisible();
+  await expect(block.getByText("tg://login?token=abc")).toBeVisible();
+});
+
 test("searchable user question choices filter connector options", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -7943,6 +7978,61 @@ test("auto recap does not start a second turn while one is running", async ({ pa
       (request) => request.method === "run_agent_turn" && request.params.message === "/recap"
     )
   ).toHaveLength(0);
+});
+
+test("recap renders as an expandable card without the slash command row", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-recap-card",
+        displayName: "Recap card",
+        title: "Recap card",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 3,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "recap-user",
+            text: "Tighten auth refresh.",
+            createdAtMs: baseTime - 30_000
+          },
+          {
+            kind: "command",
+            id: "recap-command",
+            commandName: "recap",
+            commandArgs: "",
+            createdAtMs: baseTime - 20_000
+          },
+          {
+            kind: "system_message",
+            id: "recap-system",
+            text:
+              "\u203B recap: Auth refresh is ready for the next test run.\n\n" +
+              "OAuth refresh remains the active blocker.\n\n" +
+              "Run cargo test after the status branch lands.",
+            createdAtMs: baseTime - 10_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Recap card/);
+
+  const recapCard = page.locator(".recap-card");
+  await expect(recapCard).toBeVisible();
+  await expect(recapCard).toContainText("Auth refresh is ready for the next test run.");
+  await expect(page.getByText(/^recap$/)).toHaveCount(0);
+  await expect(page.getByText("OAuth refresh remains the active blocker.")).toHaveCount(0);
+
+  await recapCard.getByRole("button", { name: "Expand recap details" }).click();
+  await expect(page.getByText("OAuth refresh remains the active blocker.")).toBeVisible();
+  await expect(page.getByText("Run cargo test after the status branch lands.")).toBeVisible();
 });
 
 test("auto recap waits while the composer has an unsent draft", async ({ page }) => {

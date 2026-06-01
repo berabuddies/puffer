@@ -85,6 +85,7 @@ pub(crate) fn handle_monitor_task_ignore(paths: &ConfigPaths, params: &Value) ->
         description,
         reason,
         metadata_snapshot,
+        path,
         memory_path,
         memory_content,
         ignore_filter,
@@ -643,6 +644,7 @@ fn start_ignore_analysis_agent(
     description: String,
     reason: String,
     metadata: Map<String, Value>,
+    task_store_path: PathBuf,
     memory_path: PathBuf,
     memory_content: String,
     ignore_filter: Option<Value>,
@@ -662,7 +664,7 @@ fn start_ignore_analysis_agent(
     );
     let trigger = json!({
         "type": "monitor_task_ignore",
-        "task_id": task_id,
+        "task_id": task_id.clone(),
         "subject": subject,
         "description": description,
         "reason": reason,
@@ -673,8 +675,32 @@ fn start_ignore_analysis_agent(
     let _ = thread::Builder::new()
         .name("puffer-ignore-analysis".to_string())
         .spawn(move || {
-            if let Err(error) = runner.ignore_analysis_agent(&prompt, None, trigger) {
-                eprintln!("monitor ignore analysis failed: {error:#}");
+            let started_at_ms = now_ms();
+            match runner.ignore_analysis_agent(&prompt, None, trigger) {
+                Ok(output) => {
+                    let _ = super::monitor_ignore_result::write_ignore_analysis_result(
+                        &task_store_path,
+                        &task_id,
+                        "completed",
+                        Some(&output.summary),
+                        None,
+                        output.usage,
+                        started_at_ms,
+                    );
+                }
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    let _ = super::monitor_ignore_result::write_ignore_analysis_result(
+                        &task_store_path,
+                        &task_id,
+                        "failed",
+                        None,
+                        Some(&error),
+                        None,
+                        started_at_ms,
+                    );
+                    eprintln!("monitor ignore analysis failed: {error}");
+                }
             }
         });
 }

@@ -40,6 +40,7 @@ pub(super) fn overlay_title(overlay: &OverlayState) -> Cow<'_, str> {
         OverlayState::OnboardingModel { .. } => Cow::Borrowed("Select Model"),
         OverlayState::OnboardingApiKey { .. } => Cow::Borrowed("Enter API Key"),
         OverlayState::Usage(..) => Cow::Borrowed("Usage"),
+        OverlayState::AutoDreamSuggestion { .. } => Cow::Borrowed("AutoDream Suggestion"),
     }
 }
 
@@ -100,6 +101,20 @@ pub(super) fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
                 text: render_auth_entry(entry),
             })
             .collect(),
+        OverlayState::AutoDreamSuggestion {
+            skill_name,
+            purpose: _,
+            selection,
+        } => vec![
+            OverlayRow {
+                selected: *selection == 0,
+                text: format!("Create skill draft: {skill_name}"),
+            },
+            OverlayRow {
+                selected: *selection == 1,
+                text: "Dismiss".to_string(),
+            },
+        ],
         OverlayState::ApiKeyPrompt { value, .. } => vec![
             OverlayRow {
                 selected: false,

@@ -12,7 +12,9 @@ use puffer_subscriber_runtime::TelegramPeerKind;
 use serde_json::json;
 
 use crate::events::emit_control;
-use crate::notifications::{dialog_notifications_suppressed, fetch_chat_notification_suppressed};
+use crate::notifications::{
+    dialog_archived, dialog_delivery_suppressed, fetch_chat_notification_suppressed,
+};
 use crate::polls::{poll_payload, poll_text};
 use crate::reply::{reply_header_payload, reply_to_label};
 use crate::state::SkillEnv;
@@ -83,7 +85,10 @@ pub(crate) async fn handle_list_peers(
 }
 
 async fn resolve_peer_notification_suppressed(client: &Client, dialog: &Dialog) -> bool {
-    let fallback = dialog_notifications_suppressed(dialog);
+    let fallback = dialog_delivery_suppressed(dialog);
+    if dialog_archived(dialog) {
+        return true;
+    }
     match fetch_chat_notification_suppressed(client, dialog.chat()).await {
         Ok(suppressed) => suppressed,
         Err(error) => {

@@ -15,7 +15,7 @@ use crate::proxy::{
     builtin_agent_proxy, handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision,
     AgentProxyStore,
 };
-use crate::router::{process_envelope_result, SubscriptionRouter};
+use crate::router::{process_envelope_batch_result, process_envelope_result, SubscriptionRouter};
 use crate::spec::ActionSpec;
 use crate::store::SubscriptionStore;
 use anyhow::Result;
@@ -704,6 +704,32 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
         if result.failed > 0 {
             anyhow::bail!(
                 "{} workflow action(s) failed while processing connector event",
+                result.failed
+            );
+        }
+        Ok(())
+    }
+
+    fn process_connector_events(
+        &self,
+        connector_slug: &str,
+        connection_slug: &str,
+        envelopes: &[EventEnvelope],
+    ) -> Result<()> {
+        for envelope in envelopes {
+            self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
+        }
+        let result = process_envelope_batch_result(
+            envelopes,
+            &self.store,
+            Some(&self.history_store),
+            &self.dispatcher,
+            &self.classifier,
+            None,
+        );
+        if result.failed > 0 {
+            anyhow::bail!(
+                "{} workflow action(s) failed while processing connector event batch",
                 result.failed
             );
         }

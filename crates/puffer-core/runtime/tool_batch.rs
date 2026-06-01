@@ -74,8 +74,11 @@ pub(super) fn execute_tool_batch(
     }
 
     let session_id = inputs.state.session.id;
-    let provider_context =
-        backend_to_provider_context(session.tool_execution_backend(), inputs.model_id);
+    let provider_context = backend_to_provider_context(
+        session.tool_execution_backend(),
+        inputs.model_id,
+        &inputs.state.config.network.proxy,
+    );
     // Cloned once before `thread::scope` because the worker closures cannot
     // touch `inputs.state` (no `&mut AppState` across spawn boundaries).
     // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
@@ -123,6 +126,18 @@ pub(super) fn execute_tool_batch(
                 }
             };
             let args: Value = serde_json::from_str(&tc.input).unwrap_or(Value::Null);
+            let args = match super::secrets::expand_secret_placeholders(inputs.state, &args) {
+                Ok(args) => args,
+                Err(error) => {
+                    results[i] = Some((
+                        format!("Tool execution failed: {error}"),
+                        false,
+                        false,
+                        Value::Null,
+                    ));
+                    continue;
+                }
+            };
             let resources = inputs.resources;
             let registry = inputs.registry;
             let provider_context_ref = &provider_context;
@@ -340,6 +355,8 @@ pub(super) fn execute_tool_batch(
                 Value::Null,
             )
         });
+        let raw_output = super::secrets::redact_known_secrets(inputs.state, &raw_output);
+        let metadata = super::secrets::redact_json_value(inputs.state, &metadata);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
         invocations.push(ToolInvocation {
@@ -403,8 +420,12 @@ fn execute_tool_batch_serial(
         ) {
             Ok(exec) => exec,
             Err(error) => {
-                let output_text = process_tool_result(
+                let raw_error = super::secrets::redact_known_secrets(
+                    inputs.state,
                     &format!("Tool execution failed: {error}"),
+                );
+                let output_text = process_tool_result(
+                    &raw_error,
                     MAX_TOOL_RESULT_CHARS,
                     &inputs.state.session.id,
                 );
@@ -440,8 +461,10 @@ fn execute_tool_batch_serial(
         } else {
             format!("{}\n{}", execution.output.stdout, execution.output.stderr)
         };
+        let raw_output = super::secrets::redact_known_secrets(inputs.state, &raw_output);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
+        let metadata = super::secrets::redact_json_value(inputs.state, &execution.output.metadata);
         if inputs.observability.is_some() {
             tool_span.set_content(
                 puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
@@ -462,7 +485,7 @@ fn execute_tool_batch_serial(
             input: call.input.clone(),
             output: output_text,
             success: execution.success,
-            metadata: execution.output.metadata,
+            metadata,
             terminate,
         });
     }
@@ -491,6 +514,7 @@ fn enforce_tool_result_budget_in_place(invocations: &mut [ToolInvocation], sessi
 fn backend_to_provider_context<'a>(
     backend: ToolExecutionBackend<'a>,
     model_id: &'a str,
+    proxy: &'a puffer_config::ProxyConfig,
 ) -> ProviderToolContext<'a> {
     match backend {
         ToolExecutionBackend::OpenAi {
@@ -499,6 +523,7 @@ fn backend_to_provider_context<'a>(
         } => ProviderToolContext::OpenAI {
             request_config,
             model_id,
+            proxy,
             structured_output,
         },
         ToolExecutionBackend::Anthropic {
@@ -507,6 +532,7 @@ fn backend_to_provider_context<'a>(
         } => ProviderToolContext::Anthropic {
             request_config,
             model_id,
+            proxy,
             structured_output,
         },
     }

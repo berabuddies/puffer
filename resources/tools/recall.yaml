@@ -3,8 +3,9 @@ name: Recall
 description: |-
   Recall relevant earlier context from THIS session that may have scrolled out of
   the live window or been compacted/summarized away. Auxiliary memory with replay:
-  you give a query, and the exact most-relevant past messages (user asks, tool
-  outputs, diffs, decisions) are retrieved and replayed back verbatim.
+  you give a query, and the most-relevant past messages (user asks, tool
+  outputs, diffs, decisions) are retrieved and replayed back (verbatim; very long
+  messages are truncated).
 
   Use when you need a detail from earlier in the session that you no longer have
   in front of you — e.g. "what did the failing test output say", "the path the

@@ -1,5 +1,6 @@
 use super::retry_http_send;
 use anyhow::{anyhow, bail, Context, Result};
+use puffer_config::ProxyConfig;
 use puffer_provider_openai::{
     build_tool_responses_request, extract_responses_text, parse_responses_response,
     OpenAIRequestConfig, OpenAIResponsesTool, OpenAIResponsesToolChoice,
@@ -55,6 +56,7 @@ pub fn execute_claude_openai_web_search(
     request_config: &OpenAIRequestConfig,
     model_id: &str,
     raw_input: Value,
+    proxy: &ProxyConfig,
 ) -> Result<String> {
     let input = parse_input(raw_input)?;
 
@@ -82,7 +84,20 @@ pub fn execute_claude_openai_web_search(
         },
     )?;
 
-    let response = send_json_request(&request.url, &request.headers, &request.body, false)?;
+    let client = crate::network::blocking_client_for_url(
+        proxy,
+        crate::network::HttpPurpose::Model,
+        &request.url,
+        std::time::Duration::from_secs(300),
+    )
+    .unwrap_or_else(|_| Client::new());
+    let response = send_json_request_with_client(
+        &client,
+        &request.url,
+        &request.headers,
+        &request.body,
+        false,
+    )?;
     let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
     let text = extract_responses_text(&parsed);
     if text.trim().is_empty() {
@@ -100,6 +115,7 @@ pub fn execute_claude_anthropic_web_search(
     request_config: &AnthropicRequestConfig,
     model_id: &str,
     raw_input: Value,
+    proxy: &ProxyConfig,
 ) -> Result<String> {
     let input = parse_input(raw_input)?;
 
@@ -133,7 +149,20 @@ pub fn execute_claude_anthropic_web_search(
     })]);
     body["tool_choice"] = json!({ "type": "auto" });
 
-    let response = send_json_request(&request.url, &request.headers, &body.to_string(), true)?;
+    let client = crate::network::blocking_client_for_url(
+        proxy,
+        crate::network::HttpPurpose::Model,
+        &request.url,
+        std::time::Duration::from_secs(300),
+    )
+    .unwrap_or_else(|_| Client::new());
+    let response = send_json_request_with_client(
+        &client,
+        &request.url,
+        &request.headers,
+        &body.to_string(),
+        true,
+    )?;
     let text = extract_anthropic_text(&response)?;
     Ok(format_search_output(
         text,
@@ -164,13 +193,13 @@ fn build_openai_filters(input: &ClaudeWebSearchInput) -> Option<Value> {
     (!filters.is_empty()).then(|| Value::Object(filters))
 }
 
-fn send_json_request(
+fn send_json_request_with_client(
+    client: &Client,
     url: &str,
     headers: &[(String, String)],
     body: &str,
     anthropic: bool,
 ) -> Result<Value> {
-    let client = Client::new();
     let response = retry_http_send(3, || {
         let mut request = client.post(url);
         for (key, value) in headers {

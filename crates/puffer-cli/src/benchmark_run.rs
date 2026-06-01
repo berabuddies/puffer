@@ -296,13 +296,11 @@ pub(crate) fn run_benchmark_command(
                         "event": trace,
                         "timestamp": unix_time_ms(),
                     });
-                    if let Err(error) = session_store.append_trace_event(
-                        session_id,
-                        puffer_session_store::TRACE_RUNTIME,
-                        &line,
-                    ) {
-                        eprintln!("reflection trace persist failed: {error}");
-                    }
+                    // Benchmark runs persist their executable trajectory through the
+                    // explicit `--trajectory-json` artifact below. The session store
+                    // here is intentionally lightweight and does not create a full
+                    // metadata sidecar, so runtime trace writes can fail noisily and
+                    // slow down long E2E tasks without adding useful benchmark data.
                     if let Some(lock) = incremental_ref {
                         if let Ok(mut f) = lock.lock() {
                             let _ = writeln!(f, "{}", line);

@@ -1,0 +1,12 @@
+html:has(#storybook-docs),
+html:has(#storybook-docs) body {
+  height: auto;
+  min-height: 100%;
+  overflow: auto;
+}
+
+html:has(#storybook-docs) #storybook-root {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}

@@ -7,6 +7,7 @@
     deleteMonitor,
     ignoreMonitorTask,
     listProviderModels,
+    loadMonitorHistory,
     loadSettingsSnapshot,
     loadWorkflowSnapshot,
     saveMonitorMemory,
@@ -17,9 +18,12 @@
   import type {
     ProviderSummary,
     SettingsSnapshot,
+    WorkflowActionUsage,
     WorkflowBinding,
     WorkflowConnection,
     WorkflowFilterRule,
+    WorkflowMonitorHistoryAction,
+    WorkflowMonitorHistoryMessage,
     WorkflowMonitorMemory,
     WorkflowMonitorTask,
     WorkflowMonitorTaskAction,
@@ -57,9 +61,15 @@
   let query = $state("");
   let sourceFilter = $state<SourceFilter>("all");
   let statusFilter = $state("all");
+  let selectedTaskKey = $state<string | null>(null);
   let commandRunningFor = $state<string | null>(null);
   let ignoreMenuTaskId = $state<string | null>(null);
   let showTaskConfig = $state(false);
+  let showTaskHistory = $state(false);
+  let historyLoading = $state(false);
+  let historyError = $state<string | null>(null);
+  let historyMessages = $state<WorkflowMonitorHistoryMessage[]>([]);
+  let selectedHistoryIdx = $state<number | null>(null);
   let selectedMonitorConnection = $state("");
   let selectedMonitorModel = $state("");
   let creatingMonitor = $state(false);
@@ -89,6 +99,7 @@
     ).sort()
   ]);
   let visibleTasks = $derived(filteredTasks());
+  let selectedTask = $derived(selectedTaskValue());
   let nonIgnoredCount = $derived(tasks.filter((task) => !taskIgnored(task)).length);
   let agentCount = $derived(tasks.filter((task) => task.source === "agent" && !taskIgnored(task)).length);
   let monitorCount = $derived(tasks.filter((task) => task.source === "monitor" && !taskIgnored(task)).length);
@@ -117,9 +128,26 @@
   let selectedMonitorNeedsRepair = $derived(
     selectedMonitorConnectionRecord ? connectionNeedsRepair(selectedMonitorConnectionRecord) : false
   );
+  let selectedHistoryMessage = $derived(
+    historyMessages.find((message) => message.idx === selectedHistoryIdx) ?? historyMessages[0] ?? null
+  );
+  let selectedHistoryTriageActions = $derived(
+    selectedHistoryMessage ? historyTriageActions(selectedHistoryMessage) : []
+  );
+  let selectedHistoryIgnoreTasks = $derived(
+    selectedHistoryMessage ? ignoreTasksForHistory(selectedHistoryMessage) : []
+  );
 
   onMount(() => {
     void refresh();
+  });
+
+  $effect(() => {
+    if (!showTaskHistory) return;
+    const timer = window.setInterval(() => {
+      void refreshHistory();
+    }, 3_000);
+    return () => window.clearInterval(timer);
   });
 
   $effect(() => {
@@ -156,6 +184,16 @@
     }
   });
 
+  $effect(() => {
+    if (visibleTasks.length === 0) {
+      selectedTaskKey = null;
+      return;
+    }
+    if (selectedTaskKey && !visibleTasks.some((task) => taskKey(task) === selectedTaskKey)) {
+      selectedTaskKey = null;
+    }
+  });
+
   async function refresh() {
     if (loading) return;
     const generation = ++refreshGeneration;
@@ -174,6 +212,37 @@
     } finally {
       if (generation === refreshGeneration) loading = false;
     }
+  }
+
+  async function openTaskHistory() {
+    showTaskHistory = true;
+    await refreshHistory();
+  }
+
+  async function refreshHistory() {
+    if (historyLoading) return;
+    historyLoading = true;
+    historyError = null;
+    try {
+      historyMessages = await loadMonitorHistory();
+      if (
+        selectedHistoryIdx === null ||
+        !historyMessages.some((message) => message.idx === selectedHistoryIdx)
+      ) {
+        selectedHistoryIdx = historyMessages[0]?.idx ?? null;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      historyError = message;
+      notice = `Could not load task history: ${message}`;
+    } finally {
+      historyLoading = false;
+    }
+  }
+
+  function closeTaskHistory() {
+    if (historyLoading) return;
+    showTaskHistory = false;
   }
 
   function applySnapshot(next: WorkflowSnapshot) {
@@ -244,6 +313,25 @@
         .toLowerCase();
       return searchTerms.every((term) => haystack.includes(term));
     });
+  }
+
+  function taskKey(task: WorkflowTask): string {
+    return `${task.task_scope ?? task.source}:${task.task_id}`;
+  }
+
+  function selectTask(task: WorkflowTask) {
+    selectedTaskKey = taskKey(task);
+    ignoreMenuTaskId = null;
+  }
+
+  function closeSelectedTask() {
+    selectedTaskKey = null;
+    ignoreMenuTaskId = null;
+  }
+
+  function selectedTaskValue(): WorkflowTask | null {
+    if (!selectedTaskKey) return null;
+    return visibleTasks.find((task) => taskKey(task) === selectedTaskKey) ?? null;
   }
 
   function canCreateMonitor(connection: WorkflowConnection): boolean {
@@ -442,6 +530,97 @@
       hour: "2-digit",
       minute: "2-digit"
     }).format(new Date(ms));
+  }
+
+  function historyWhen(message: WorkflowMonitorHistoryMessage): string {
+    const ms = message.received_at_ms ?? message.started_at_ms;
+    if (!ms) return "no timestamp";
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(new Date(ms));
+  }
+
+  function historySourceLabel(message: WorkflowMonitorHistoryMessage): string {
+    return message.connection_slug || message.connector_slug || message.topic || "monitor";
+  }
+
+  function historyDeliveryLabel(message: WorkflowMonitorHistoryMessage): string | null {
+    const source = message.payload?.delivery_source;
+    if (source === "catch_up") return "catch-up";
+    if (source === "live") return "live";
+    return null;
+  }
+
+  function historyLagLabel(message: WorkflowMonitorHistoryMessage): string | null {
+    const dateMs = numericPayloadValue(message.payload, "date_ms");
+    const receivedMs = message.received_at_ms;
+    if (!dateMs || !receivedMs) return null;
+    const lagSeconds = Math.max(0, Math.round((receivedMs - dateMs) / 1000));
+    if (lagSeconds < 2) return "lag <2s";
+    if (lagSeconds < 60) return `lag ${lagSeconds}s`;
+    const minutes = Math.floor(lagSeconds / 60);
+    const seconds = lagSeconds % 60;
+    return seconds > 0 ? `lag ${minutes}m ${seconds}s` : `lag ${minutes}m`;
+  }
+
+  function historyMetaLabel(message: WorkflowMonitorHistoryMessage): string {
+    return [
+      message.kind ?? "message",
+      historyDeliveryLabel(message),
+      historyLagLabel(message),
+      `#${message.idx}`
+    ].filter(Boolean).join(" · ");
+  }
+
+  function numericPayloadValue(payload: Record<string, unknown> | null | undefined, key: string): number | null {
+    const value = payload?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  function historyTriageActions(message: WorkflowMonitorHistoryMessage): WorkflowMonitorHistoryAction[] {
+    return (message.action_log ?? []).filter((action) =>
+      action.action === "triage_agent" || action.action.startsWith("monitor_")
+    );
+  }
+
+  function historyActionLabel(action: WorkflowMonitorHistoryAction): string {
+    if (action.action === "triage_agent") return "Triage agent";
+    if (action.action === "monitor_ignore_filter") return "Ignore filter";
+    if (action.action === "monitor_muted_skip") return "Muted notification";
+    if (action.action === "monitor_filter_skip") return "Trigger filter";
+    if (action.action === "monitor_classifier_skip") return "Classifier";
+    return action.action.replaceAll("_", " ");
+  }
+
+  function historyActionStatusLabel(action: WorkflowMonitorHistoryAction): string {
+    return action.status === "running" ? "processing" : action.status;
+  }
+
+  function ignoreTasksForHistory(message: WorkflowMonitorHistoryMessage): WorkflowTask[] {
+    if (!message.envelope_id) return [];
+    return tasks.filter(
+      (task) => task.monitor_envelope_id && task.monitor_envelope_id === message.envelope_id
+        && task.source === "monitor"
+        && taskIgnored(task)
+    );
+  }
+
+  function ignoreAnalysisText(task: WorkflowTask): string {
+    if (task.ignore_analysis_result?.trim()) return task.ignore_analysis_result;
+    if (task.ignore_analysis_error?.trim()) return task.ignore_analysis_error;
+    if (task.ignore_analysis_started) return "Ignore analysis is running.";
+    return "No ignore analysis recorded.";
+  }
+
+  function tokenUsageLabel(usage: WorkflowActionUsage | null | undefined): string {
+    if (!usage) return "tokens n/a";
+    const spent = usage.spent_tokens
+      ?? Math.max(0, (usage.input_tokens ?? 0) - (usage.cache_read_tokens ?? 0))
+        + (usage.output_tokens ?? 0);
+    return `${spent.toLocaleString()} tokens`;
   }
 
   function memorySummary(memory: WorkflowMonitorMemory): string {
@@ -658,6 +837,17 @@
       >
         <Icon name="settings" size={12} />Configure
       </button>
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="outline"
+        data-size="sm"
+        aria-haspopup="dialog"
+        aria-expanded={showTaskHistory}
+        onclick={() => void openTaskHistory()}
+      >
+        <Icon name="clock" size={12} />History
+      </button>
       <label class="pf-tasks-search">
         <Icon name="search" size={12} />
         <input
@@ -736,94 +926,323 @@
     </div>
   {/if}
 
-  <div class="pf-tasks-list" aria-label="Task list">
-    {#if loading && tasks.length === 0}
-      <div class="pf-tasks-empty">Loading tasks...</div>
-    {:else if visibleTasks.length === 0}
-      <div class="pf-tasks-empty">
-        {tasks.length === 0 ? "No agent or monitor tasks yet." : sourceFilter === "ignored" ? "No ignored tasks." : "No tasks match the current filters."}
+  <div class="pf-tasks-workspace" data-inspector={selectedTask !== null}>
+    <section class="pf-tasks-list-panel">
+      <div class="pf-tasks-list-head">
+        <strong>{visibleTasks.length} shown</strong>
+        <span>{sourceFilter === "ignored" ? "ignored tasks" : statusFilter === "all" ? "latest first" : statusFilter}</span>
       </div>
-    {:else}
-      {#each visibleTasks as task ((task.task_scope ?? task.source) + ":" + task.task_id)}
-        <article class="pf-task-row" data-source={task.source} data-terminal={taskTerminal(task)}>
-          <div class="pf-task-row-main">
-            <div class="pf-task-row-title">
-              <span class="pf-task-source">{taskSourceLabel(task)}</span>
-              <strong>{task.subject || task.task_id}</strong>
-              <span class="pf-task-status" data-status={taskStatusValue(task)}>{taskStatusValue(task)}</span>
-            </div>
-            <p>{taskDescription(task)}</p>
-            <div class="pf-task-meta">
-              <code>{task.task_id}</code>
-              <span>{taskKindLabel(task)}</span>
-              <span>{taskOwnerLabel(task)}</span>
-              {#if taskScopeLabel(task)}
-                <span>{taskScopeLabel(task)}</span>
-              {/if}
-              <span>{taskWhen(task)}</span>
-            </div>
+      <div class="pf-tasks-list" aria-label="Task list">
+        {#if loading && tasks.length === 0}
+          <div class="pf-tasks-empty">Loading tasks...</div>
+        {:else if visibleTasks.length === 0}
+          <div class="pf-tasks-empty">
+            {tasks.length === 0 ? "No agent or monitor tasks yet." : sourceFilter === "ignored" ? "No ignored tasks." : "No tasks match the current filters."}
           </div>
-          <div class="pf-task-actions">
-            {#if task.actions?.length}
-              {#each (task.actions ?? []).slice(0, 2) as action (action.name)}
+        {:else}
+          {#each visibleTasks as task (taskKey(task))}
+            <article
+              class="pf-task-row"
+              data-source={task.source}
+              data-terminal={taskTerminal(task)}
+              data-selected={selectedTaskKey === taskKey(task)}
+            >
+              <button
+                type="button"
+                class="pf-task-row-main"
+                aria-pressed={selectedTaskKey === taskKey(task)}
+                onclick={() => selectTask(task)}
+              >
+                <span class="pf-task-row-title">
+                  <span class="pf-task-source">{taskSourceLabel(task)}</span>
+                  <strong>{task.subject || task.task_id}</strong>
+                  <span class="pf-task-status" data-status={taskStatusValue(task)}>{taskStatusValue(task)}</span>
+                </span>
+                <span class="pf-task-row-summary">{taskDescription(task)}</span>
+                <span class="pf-task-meta">
+                  <code>{task.task_id}</code>
+                  <span>{taskKindLabel(task)}</span>
+                  <span>{taskOwnerLabel(task)}</span>
+                  {#if taskScopeLabel(task)}
+                    <span>{taskScopeLabel(task)}</span>
+                  {/if}
+                  <span>{taskWhen(task)}</span>
+                </span>
+              </button>
+              <div class="pf-task-actions">
+                {#if task.actions?.length}
+                  {#each (task.actions ?? []).slice(0, 2) as action (action.name)}
+                    <button
+                      type="button"
+                      class="sc-btn"
+                      data-variant="outline"
+                      data-size="sm"
+                      disabled={commandRunningFor !== null}
+                      onclick={() => void runTaskAction(task, action)}
+                    >
+                      {action.name}
+                    </button>
+                  {/each}
+                {/if}
+                {#if task.source === "monitor" && !task.ignored}
+                  <div class="pf-task-ignore-menu">
+                    <button
+                      type="button"
+                      class="sc-btn pf-task-ignore"
+                      data-variant="ghost"
+                      data-size="sm"
+                      aria-haspopup={ignoreReasons(task).length > 0 ? "menu" : undefined}
+                      aria-expanded={ignoreMenuTaskId === task.task_id}
+                      disabled={commandRunningFor !== null}
+                      onclick={() => toggleIgnoreMenu(task)}
+                    >
+                      <Icon name="x" size={12} />Ignore
+                      {#if ignoreReasons(task).length > 0}
+                        <Icon name="chevD" size={12} />
+                      {/if}
+                    </button>
+                    {#if ignoreReasons(task).length > 0 && ignoreMenuTaskId === task.task_id}
+                      <div class="pf-task-ignore-options" role="menu" aria-label={`Ignore ${task.task_id}`}>
+                        <button type="button" role="menuitem" onclick={() => void ignoreTask(task)}>
+                          Ignore task
+                        </button>
+                        {#each ignoreReasons(task) as reason (reason)}
+                          <button type="button" role="menuitem" onclick={() => void ignoreTask(task, reason)}>
+                            {reason}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
                 <button
                   type="button"
                   class="sc-btn"
-                  data-variant="outline"
-                  data-size="sm"
-                  disabled={commandRunningFor !== null}
-                  onclick={() => void runTaskAction(task, action)}
-                >
-                  {action.name}
-                </button>
-              {/each}
-            {/if}
-            {#if task.source === "monitor" && !task.ignored}
-              <div class="pf-task-ignore-menu">
-                <button
-                  type="button"
-                  class="sc-btn pf-task-ignore"
                   data-variant="ghost"
                   data-size="sm"
-                  aria-haspopup={ignoreReasons(task).length > 0 ? "menu" : undefined}
-                  aria-expanded={ignoreMenuTaskId === task.task_id}
-                  disabled={commandRunningFor !== null}
-                  onclick={() => toggleIgnoreMenu(task)}
+                  disabled={commandRunningFor !== null || !onRunTaskCommand}
+                  onclick={() => void openTask(task)}
                 >
-                  <Icon name="x" size={12} />Ignore
-                  {#if ignoreReasons(task).length > 0}
-                    <Icon name="chevD" size={12} />
-                  {/if}
+                  <Icon name="external" size={12} />Open
                 </button>
-                {#if ignoreReasons(task).length > 0 && ignoreMenuTaskId === task.task_id}
-                  <div class="pf-task-ignore-options" role="menu" aria-label={`Ignore ${task.task_id}`}>
-                    <button type="button" role="menuitem" onclick={() => void ignoreTask(task)}>
-                      Ignore task
-                    </button>
-                    {#each ignoreReasons(task) as reason (reason)}
-                      <button type="button" role="menuitem" onclick={() => void ignoreTask(task, reason)}>
-                        {reason}
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
               </div>
-            {/if}
+            </article>
+          {/each}
+        {/if}
+      </div>
+    </section>
+
+    {#if selectedTask}
+      {@const detailTask = selectedTask}
+      <aside class="pf-task-detail" aria-label="Selected task">
+        <header class="pf-task-detail-head">
+          <div class="pf-task-detail-titlebar">
+            <div class="pf-task-detail-kicker">
+              <span class="pf-task-source">{taskSourceLabel(detailTask)}</span>
+              <span class="pf-task-status" data-status={taskStatusValue(detailTask)}>{taskStatusValue(detailTask)}</span>
+            </div>
             <button
               type="button"
               class="sc-btn"
               data-variant="ghost"
               data-size="sm"
-              disabled={commandRunningFor !== null || !onRunTaskCommand}
-              onclick={() => void openTask(task)}
+              aria-label="Close selected task"
+              onclick={closeSelectedTask}
             >
-              <Icon name="external" size={12} />Open
+              <Icon name="x" size={12} />
             </button>
           </div>
-        </article>
-      {/each}
+          <h2>{detailTask.subject || detailTask.task_id}</h2>
+          <p>{taskDescription(detailTask)}</p>
+        </header>
+
+        <section class="pf-task-detail-section">
+          <div class="pf-task-detail-section-head">
+            <strong>Context</strong>
+            <span>{taskWhen(detailTask)}</span>
+          </div>
+          <dl class="pf-task-detail-meta">
+            <div>
+              <dt>ID</dt>
+              <dd><code>{detailTask.task_id}</code></dd>
+            </div>
+            <div>
+              <dt>Owner</dt>
+              <dd>{taskOwnerLabel(detailTask)}</dd>
+            </div>
+            <div>
+              <dt>Kind</dt>
+              <dd>{taskKindLabel(detailTask)}</dd>
+            </div>
+            {#if taskScopeLabel(detailTask)}
+              <div>
+                <dt>Scope</dt>
+                <dd>{taskScopeLabel(detailTask)}</dd>
+              </div>
+            {/if}
+            {#if detailTask.monitor_memory_path}
+              <div>
+                <dt>Memory</dt>
+                <dd><code>{detailTask.monitor_memory_path}</code></dd>
+              </div>
+            {/if}
+          </dl>
+        </section>
+
+        {#if detailTask.ignored}
+          <section class="pf-task-detail-section">
+            <div class="pf-task-detail-section-head">
+              <strong>Ignore analysis</strong>
+              <span>{detailTask.ignore_analysis_status ?? (detailTask.ignore_analysis_started ? "running" : "not started")}</span>
+            </div>
+            {#if detailTask.ignore_reason}
+              <p class="pf-task-detail-copy">Reason: {detailTask.ignore_reason}</p>
+            {/if}
+            <p class="pf-task-detail-copy">{ignoreAnalysisText(detailTask)}</p>
+            <span class="pf-task-detail-usage">{tokenUsageLabel(detailTask.ignore_analysis_usage)}</span>
+          </section>
+        {/if}
+
+      </aside>
     {/if}
   </div>
+
+  {#if showTaskHistory}
+    <div class="pf-task-config-backdrop" role="presentation">
+      <div
+        class="pf-task-history"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pf-task-history-title"
+      >
+        <header class="pf-task-config-head">
+          <div>
+            <h2 id="pf-task-history-title">Task history</h2>
+            <span>Received messages, triage results, and ignore analysis</span>
+          </div>
+          <div class="pf-task-history-head-actions">
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="ghost"
+              data-size="sm"
+              aria-busy={historyLoading}
+              disabled={historyLoading}
+              onclick={() => void refreshHistory()}
+            >
+              <Icon name="refresh" size={12} />Refresh
+            </button>
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="ghost"
+              data-size="sm"
+              aria-label="Close task history"
+              disabled={historyLoading}
+              onclick={closeTaskHistory}
+            >
+              <Icon name="x" size={12} />
+            </button>
+          </div>
+        </header>
+        <div class="pf-task-history-body">
+          <aside class="pf-task-history-sidebar" aria-label="Received messages">
+            {#if historyLoading && historyMessages.length === 0}
+              <div class="pf-tasks-empty">Loading history...</div>
+            {:else if historyError}
+              <div class="pf-tasks-error">{historyError}</div>
+            {:else if historyMessages.length === 0}
+              <div class="pf-tasks-empty">No received monitor messages yet.</div>
+            {:else}
+              {#each historyMessages as message (message.idx)}
+                <button
+                  type="button"
+                  class="pf-task-history-message"
+                  data-selected={selectedHistoryMessage?.idx === message.idx}
+                  onclick={() => (selectedHistoryIdx = message.idx)}
+                >
+                  <span class="pf-task-history-message-top">
+                    <strong>{historySourceLabel(message)}</strong>
+                    <small>{historyWhen(message)}</small>
+                  </span>
+                  <span>{message.summary || message.text || "Received message"}</span>
+                  <small>{historyMetaLabel(message)}</small>
+                </button>
+              {/each}
+            {/if}
+          </aside>
+
+          <section class="pf-task-history-detail" aria-label="Agent history">
+            {#if selectedHistoryMessage}
+              <div class="pf-task-history-selected">
+                <div>
+                  <span>{historySourceLabel(selectedHistoryMessage)} · {historyMetaLabel(selectedHistoryMessage)}</span>
+                  <strong>{selectedHistoryMessage.summary || "Received message"}</strong>
+                </div>
+                <code>{selectedHistoryMessage.envelope_id ?? selectedHistoryMessage.run_id}</code>
+              </div>
+
+              <section class="pf-task-history-agent-card">
+                <div class="pf-task-config-section-head">
+                  <strong>Triage agent</strong>
+                  <span>{selectedHistoryTriageActions.length} outcome{selectedHistoryTriageActions.length === 1 ? "" : "s"}</span>
+                </div>
+                {#if selectedHistoryTriageActions.length === 0}
+                  <p>No triage outcome recorded for this message.</p>
+                {:else}
+                  {#each selectedHistoryTriageActions as action, index (`${selectedHistoryMessage.idx}:${action.action}:${index}`)}
+                    <article class="pf-task-history-agent-result" data-status={action.status}>
+                      <div>
+                        <strong>{historyActionLabel(action)}</strong>
+                        <span>{historyActionStatusLabel(action)} · {tokenUsageLabel(action.usage)}</span>
+                      </div>
+                      <p>{action.summary}</p>
+                    </article>
+                  {/each}
+                {/if}
+              </section>
+
+              <section class="pf-task-history-agent-card">
+                <div class="pf-task-config-section-head">
+                  <strong>Ignore agents</strong>
+                  <span>{selectedHistoryIgnoreTasks.length} task{selectedHistoryIgnoreTasks.length === 1 ? "" : "s"}</span>
+                </div>
+                {#if selectedHistoryIgnoreTasks.length === 0}
+                  <p>No ignored task or ignore analysis is linked to this message.</p>
+                {:else}
+                  {#each selectedHistoryIgnoreTasks as task ((task.task_scope ?? task.source) + ":history:" + task.task_id)}
+                    <article class="pf-task-history-agent-result" data-status={task.ignore_analysis_status ?? "pending"}>
+                      <div>
+                        <strong>{task.subject || task.task_id}</strong>
+                        <span>{task.ignore_analysis_status ?? (task.ignore_analysis_started ? "running" : "not started")} · {tokenUsageLabel(task.ignore_analysis_usage)}</span>
+                      </div>
+                      {#if task.ignore_reason}
+                        <small>Reason: {task.ignore_reason}</small>
+                      {/if}
+                      <p>{ignoreAnalysisText(task)}</p>
+                    </article>
+                  {/each}
+                {/if}
+              </section>
+
+              <section class="pf-task-history-agent-card">
+                <div class="pf-task-config-section-head">
+                  <strong>Message payload</strong>
+                  <span>{selectedHistoryMessage.kind ?? "event"}</span>
+                </div>
+                {#if selectedHistoryMessage.text}
+                  <p>{selectedHistoryMessage.text}</p>
+                {/if}
+                <pre>{JSON.stringify(selectedHistoryMessage.payload ?? {}, null, 2)}</pre>
+              </section>
+            {:else}
+              <div class="pf-tasks-empty">Select a received message.</div>
+            {/if}
+          </section>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if showTaskConfig}
     <div class="pf-task-config-backdrop" role="presentation">

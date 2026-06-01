@@ -6,18 +6,22 @@
 //! Telegram's live update delta alone.
 
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use grammers_client::{types::Message, Client};
+use grammers_client::types::{Chat, Message};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use serde_json::json;
+use tracing::info;
 
 use crate::events::{build_message_event, emit};
 use crate::notifications::NotificationMuteCache;
 use crate::state::SkillEnv;
 
-const MAX_CATCH_UP_DIALOGS: usize = 500;
-const MAX_CATCH_UP_MESSAGES_PER_CHAT: usize = 5_000;
+const DELIVERY_SOURCE_LIVE: &str = "live";
+static MESSAGE_DIAGNOSTIC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct DeliveryCursor {
@@ -28,6 +32,7 @@ pub(crate) struct DeliveryCursor {
 }
 
 impl DeliveryCursor {
+    /// Loads the durable delivery cursor for this subscriber.
     pub(crate) fn load(env: &SkillEnv) -> anyhow::Result<Self> {
         let path = env.delivery_cursor_path();
         if !path.exists() {
@@ -41,6 +46,7 @@ impl DeliveryCursor {
         serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
     }
 
+    /// Saves the durable delivery cursor atomically.
     pub(crate) fn save(&self, env: &SkillEnv) -> anyhow::Result<()> {
         let path = env.delivery_cursor_path();
         if let Some(parent) = path.parent() {
@@ -54,123 +60,78 @@ impl DeliveryCursor {
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
     }
 
-    fn is_initialized(&self) -> bool {
+    /// Returns whether the cursor has completed its initial dialog scan.
+    pub(crate) fn is_initialized(&self) -> bool {
         self.initialized
     }
 
-    fn mark_initialized(&mut self) {
+    /// Marks the cursor as initialized after the startup dialog scan completes.
+    pub(crate) fn mark_initialized(&mut self) {
         self.initialized = true;
     }
 
-    fn last_id(&self, message: &Message) -> i32 {
-        self.chats
-            .get(&message_chat_key(message))
-            .copied()
-            .unwrap_or_default()
+    /// Returns whether this message's chat has an existing cursor entry.
+    pub(crate) fn has_chat(&self, message: &Message) -> bool {
+        self.chats.contains_key(&message_chat_key(message))
     }
 
-    fn is_new(&self, message: &Message) -> bool {
-        message.id() > self.last_id(message)
+    /// Returns whether this message has not been delivered according to the cursor.
+    pub(crate) fn is_new(&self, message: &Message) -> bool {
+        message.id()
+            > self
+                .chats
+                .get(&message_chat_key(message))
+                .copied()
+                .unwrap_or_default()
     }
 
-    fn record_seen(&mut self, message: &Message) {
+    /// Records the message as seen without emitting it.
+    pub(crate) fn record_seen(&mut self, message: &Message) {
         let key = message_chat_key(message);
+        self.record_chat_id(key, message.id());
+    }
+
+    fn record_chat_id(&mut self, key: String, message_id: i32) {
         let current = self.chats.entry(key).or_default();
-        *current = (*current).max(message.id());
+        *current = (*current).max(message_id);
     }
 }
 
-pub(crate) async fn catch_up_recent_messages(
-    env: &SkillEnv,
-    client: &Client,
-    cursor: &mut DeliveryCursor,
-    notification_mutes: &mut NotificationMuteCache,
-) -> anyhow::Result<()> {
-    let was_initialized = cursor.is_initialized();
-    let mut dialogs = client.iter_dialogs();
-    let mut scanned = 0usize;
-    let mut emitted = 0usize;
-
-    while scanned < MAX_CATCH_UP_DIALOGS {
-        let dialog = match dialogs.next().await {
-            Ok(Some(dialog)) => dialog,
-            Ok(None) => break,
-            Err(error) => {
-                warn!(%error, "Telegram catch-up stopped while scanning dialogs");
-                break;
-            }
-        };
-        scanned += 1;
-        notification_mutes.observe_dialog(&dialog);
-
-        let Some(last_message) = dialog.last_message.as_ref() else {
-            continue;
-        };
-        if !was_initialized {
-            cursor.record_seen(last_message);
-            continue;
-        }
-        if !cursor.is_new(last_message) {
-            continue;
-        }
-
-        let mut pending = Vec::new();
-        let mut messages = client
-            .iter_messages(dialog.chat().pack())
-            .limit(MAX_CATCH_UP_MESSAGES_PER_CHAT);
-        loop {
-            let message = match messages.next().await {
-                Ok(Some(message)) => message,
-                Ok(None) => break,
-                Err(error) => {
-                    warn!(
-                        chat = %dialog.chat().id(),
-                        %error,
-                        "Telegram catch-up skipped chat after message history error",
-                    );
-                    break;
-                }
-            };
-            if !cursor.is_new(&message) {
-                break;
-            }
-            pending.push(message);
-        }
-        pending.sort_by_key(Message::id);
-        for message in pending {
-            if emit_message_if_new(env, client, cursor, notification_mutes, &message).await? {
-                emitted += 1;
-            }
-        }
-    }
-
-    if !was_initialized {
-        cursor.mark_initialized();
-        cursor.save(env)?;
-        info!(dialogs = scanned, "initialized Telegram delivery cursor");
-    } else if emitted > 0 {
-        info!(
-            dialogs = scanned,
-            messages = emitted,
-            "caught up Telegram messages"
-        );
-    }
-    Ok(())
-}
-
+/// Emits a Telegram message if the delivery cursor has not seen it yet.
 pub(crate) async fn emit_message_if_new(
     env: &SkillEnv,
-    client: &Client,
     cursor: &mut DeliveryCursor,
     notification_mutes: &mut NotificationMuteCache,
     message: &Message,
+    delivery_source: &str,
+    source_received_at_ms: Option<i128>,
 ) -> anyhow::Result<bool> {
     if !cursor.is_new(message) {
+        let notification_muted = notification_mutes.message_chat_muted(message);
+        let notification_silent = message.silent();
+        append_message_diagnostic(
+            env,
+            "duplicate",
+            message,
+            delivery_source,
+            source_received_at_ms,
+            notification_muted,
+            notification_silent,
+        );
         return Ok(false);
     }
-    let notification_muted = notification_mutes.message_chat_muted(client, message).await;
+    let notification_muted = notification_mutes.message_chat_muted(message);
     let notification_silent = message.silent();
     if message_notifications_suppressed(notification_muted, notification_silent) {
+        append_message_diagnostic(
+            env,
+            "suppressed",
+            message,
+            delivery_source,
+            source_received_at_ms,
+            notification_muted,
+            notification_silent,
+        );
         cursor.record_seen(message);
         cursor.save(env)?;
         info!(
@@ -182,11 +143,45 @@ pub(crate) async fn emit_message_if_new(
         );
         return Ok(false);
     }
-    let event = build_message_event(&env.topic, message, notification_muted);
+    let event = build_message_event(
+        &env.topic,
+        message,
+        notification_muted,
+        delivery_source,
+        source_received_at_ms,
+    );
     emit(&event)?;
+    append_message_diagnostic(
+        env,
+        "emitted",
+        message,
+        delivery_source,
+        source_received_at_ms,
+        notification_muted,
+        notification_silent,
+    );
     cursor.record_seen(message);
     cursor.save(env)?;
     Ok(true)
+}
+
+/// Emits a live Telegram update if the delivery cursor has not seen it yet.
+pub(crate) async fn emit_live_message_if_new(
+    env: &SkillEnv,
+    cursor: &mut DeliveryCursor,
+    notification_mutes: &mut NotificationMuteCache,
+    message: &Message,
+    source_received_at_ms: Option<i128>,
+) -> anyhow::Result<bool> {
+    emit_message_if_new(
+        env,
+        cursor,
+        notification_mutes,
+        message,
+        DELIVERY_SOURCE_LIVE,
+        source_received_at_ms,
+    )
+    .await
 }
 
 fn message_notifications_suppressed(notification_muted: bool, notification_silent: bool) -> bool {
@@ -197,6 +192,100 @@ fn message_chat_key(message: &Message) -> String {
     message.chat().id().to_string()
 }
 
+fn append_message_diagnostic(
+    env: &SkillEnv,
+    stage: &str,
+    message: &Message,
+    delivery_source: &str,
+    source_received_at_ms: Option<i128>,
+    notification_muted: bool,
+    notification_silent: bool,
+) {
+    let path = env.state_dir.join("message-diagnostics.ndjson");
+    let now_ms = now_unix_millis();
+    let chat = message.chat();
+    let (chat_kind, chat_title, chat_username) = describe_chat(&chat);
+    let date_ms = i128::from(message.date().timestamp_millis());
+    let (sender_id, sender_username, sender_name) = match message.sender() {
+        Some(sender) => (
+            Some(sender.id()),
+            sender.username().map(|value| value.to_string()),
+            Some(sender.name().to_string()),
+        ),
+        None => (None, None, None),
+    };
+    let record = json!({
+        "at_ms": now_ms,
+        "stage": stage,
+        "delivery_source": delivery_source,
+        "chat_id": chat.id(),
+        "chat_kind": chat_kind,
+        "chat_title": chat_title,
+        "chat_username": chat_username,
+        "sender_id": sender_id,
+        "sender_username": sender_username,
+        "sender_name": sender_name,
+        "message_id": message.id(),
+        "date_ms": date_ms,
+        "source_received_at_ms": source_received_at_ms,
+        "subscriber_receive_lag_ms": source_received_at_ms.map(|received_at_ms| received_at_ms - date_ms),
+        "subscriber_emit_lag_ms": now_ms - date_ms,
+        "notification_muted": notification_muted,
+        "notification_silent": notification_silent,
+        "suppressed": message_notifications_suppressed(notification_muted, notification_silent),
+        "is_outgoing": message.outgoing(),
+        "text_prefix": truncate_text(message.text(), 200),
+    });
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(_guard) = MESSAGE_DIAGNOSTIC_LOCK.lock() else {
+        return;
+    };
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+    let _ = writeln!(file, "{record}");
+}
+
+fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) {
+    match chat {
+        Chat::User(_) => (
+            "user",
+            Some(chat.name().to_string()),
+            chat.username().map(|value| value.to_string()),
+        ),
+        Chat::Group(_) => (
+            "group",
+            Some(chat.name().to_string()),
+            chat.username().map(|value| value.to_string()),
+        ),
+        Chat::Channel(_) => (
+            "channel",
+            Some(chat.name().to_string()),
+            chat.username().map(|value| value.to_string()),
+        ),
+    }
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
+}
+
+fn now_unix_millis() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i128
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,7 +293,7 @@ mod tests {
     #[test]
     fn delivery_cursor_defaults_to_uninitialized() {
         let cursor = DeliveryCursor::default();
-        assert!(!cursor.is_initialized());
+        assert!(!cursor.initialized);
         assert!(cursor.chats.is_empty());
     }
 

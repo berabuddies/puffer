@@ -517,8 +517,11 @@ fn run_openai_responses_judge(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     let captured_request = RefCell::new(None);
-    let response =
-        match send_openai_request_with_refresh(auth_store, &mut execution, |request_config| {
+    let response = match send_openai_request_with_refresh(
+        auth_store,
+        &mut execution,
+        &state.config.network.proxy,
+        |request_config| {
             let request = build_json_post_request(
                 request_config,
                 responses_path(&request_config.base_url),
@@ -526,17 +529,18 @@ fn run_openai_responses_judge(
             )?;
             let _ = captured_request.replace(Some(request.clone()));
             Ok(request)
-        }) {
-            Ok(value) => value,
-            Err(error) => {
-                if let Some(request) = captured_request.into_inner() {
-                    attempt.request_url = Some(request.url);
-                    attempt.request_body = Some(request.body);
-                }
-                attempt.error = Some(error.to_string());
-                return attempt;
+        },
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(request) = captured_request.into_inner() {
+                attempt.request_url = Some(request.url);
+                attempt.request_body = Some(request.body);
             }
-        };
+            attempt.error = Some(error.to_string());
+            return attempt;
+        }
+    };
     let request = match captured_request
         .into_inner()
         .context("llm judge request was not captured before dispatch")

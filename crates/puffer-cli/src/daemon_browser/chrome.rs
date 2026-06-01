@@ -13,6 +13,7 @@ use super::CHROME_START_TIMEOUT;
 pub(super) struct ChromePageTarget {
     pub(super) target_id: String,
     pub(super) page_ws: String,
+    pub(super) close_on_release: bool,
 }
 
 /// Waits for Chrome to publish its browser-level DevTools WebSocket URL.
@@ -22,13 +23,13 @@ pub(super) fn read_devtools_ws_url(child: &mut Child, profile_dir: &Path) -> Res
     let active_port_path = profile_dir.join("DevToolsActivePort");
     let start = Instant::now();
     while start.elapsed() < CHROME_START_TIMEOUT {
-        if let Some(status) = child.try_wait().context("check Chrome launch status")? {
-            bail!("Chrome exited before publishing a DevTools endpoint: {status}");
-        }
         if let Ok(contents) = std::fs::read_to_string(&active_port_path) {
             if let Some(url) = devtools_url_from_active_port(&contents) {
                 return Ok(url);
             }
+        }
+        if let Some(status) = child.try_wait().context("check Chrome launch status")? {
+            bail!("Chrome exited before publishing a DevTools endpoint: {status}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -75,8 +76,55 @@ pub(super) fn initial_page_target(browser_ws: &str) -> Result<Option<ChromePageT
     Ok(targets
         .iter()
         .find(|target| target.get("type").and_then(Value::as_str) == Some("page"))
-        .map(parse_page_target)
+        .map(|target| parse_page_target(target, false))
         .transpose()?)
+}
+
+/// Waits for a page target to appear on an existing DevTools endpoint.
+pub(super) fn wait_for_initial_page_target(
+    browser_ws: &str,
+    timeout: Duration,
+) -> Result<Option<ChromePageTarget>> {
+    let start = Instant::now();
+    let mut last_error = None;
+    loop {
+        match initial_page_target(browser_ws) {
+            Ok(Some(target)) => return Ok(Some(target)),
+            Ok(None) => {}
+            Err(error) => last_error = Some(error),
+        }
+        if start.elapsed() >= timeout {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if let Some(error) = last_error {
+        return Err(error).context("wait for Chrome page target");
+    }
+    Ok(None)
+}
+
+/// Waits for an already-running DevTools HTTP endpoint to publish its browser WebSocket URL.
+pub(super) fn read_remote_devtools_ws_url(port: u16, timeout: Duration) -> Result<String> {
+    let endpoint = format!("http://127.0.0.1:{port}/json/version");
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("build DevTools HTTP client")?;
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(response) = client.get(&endpoint).send() {
+            if let Ok(response) = response.error_for_status() {
+                if let Ok(value) = response.json::<Value>() {
+                    if let Some(ws) = value.get("webSocketDebuggerUrl").and_then(Value::as_str) {
+                        return Ok(ws.to_string());
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("DevTools endpoint at {endpoint} did not publish a browser WebSocket URL");
 }
 
 /// Creates a new Chrome page target and returns its target id and DevTools WebSocket URL.
@@ -98,7 +146,7 @@ pub(super) fn create_page_target(browser_ws: &str, url: &str) -> Result<ChromePa
         .context("Chrome target creation failed")?
         .json()
         .context("parse Chrome target response")?;
-    parse_page_target(&value)
+    parse_page_target(&value, true)
 }
 
 /// Closes one Chrome page target by target id.
@@ -145,13 +193,21 @@ pub(super) fn terminate_profile_processes(profile_dir: &Path) {
 fn chrome_candidates() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        vec![
+        let mut candidates = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(
+                PathBuf::from(home)
+                    .join("chromium_tintin/src/out/Release/Chromium.app/Contents/MacOS/Chromium"),
+            );
+        }
+        candidates.extend([
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             PathBuf::from(
                 "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             ),
             PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ]
+        ]);
+        candidates
     }
     #[cfg(target_os = "windows")]
     {
@@ -236,25 +292,11 @@ fn which_on_path(name: &&str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Converts a session id into a filesystem-safe browser profile directory name.
-pub(super) fn safe_profile_name(session_id: &str) -> String {
-    session_id
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 fn urlencoding(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-fn parse_page_target(value: &Value) -> Result<ChromePageTarget> {
+fn parse_page_target(value: &Value, close_on_release: bool) -> Result<ChromePageTarget> {
     let target_id = value
         .get("id")
         .and_then(Value::as_str)
@@ -268,6 +310,7 @@ fn parse_page_target(value: &Value) -> Result<ChromePageTarget> {
     Ok(ChromePageTarget {
         target_id: target_id.to_string(),
         page_ws: page_ws.to_string(),
+        close_on_release,
     })
 }
 
@@ -280,4 +323,40 @@ fn devtools_http_base(browser_ws: &str) -> Result<String> {
         .port()
         .ok_or_else(|| anyhow!("Chrome DevTools URL missing port"))?;
     Ok(format!("http://{host}:{port}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_reusable_page_target_keeps_remote_owner() {
+        let target = parse_page_target(
+            &json!({
+                "id": "page-1",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-1"
+            }),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(target.target_id, "page-1");
+        assert!(!target.close_on_release);
+    }
+
+    #[test]
+    fn parse_created_page_target_marks_close_on_release() {
+        let target = parse_page_target(
+            &json!({
+                "id": "page-2",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-2"
+            }),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(target.target_id, "page-2");
+        assert!(target.close_on_release);
+    }
 }

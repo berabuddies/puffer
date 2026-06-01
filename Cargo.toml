@@ -18,6 +18,7 @@ members = [
     "crates/puffer-runner-api",
     "crates/puffer-runner-local",
     "crates/puffer-runner-grpc",
+    "crates/puffer-secrets",
     "crates/puffer-lark",
     "crates/puffer-slack",
     "crates/puffer-tool-runner",
@@ -39,6 +40,9 @@ default-members = ["crates/puffer-cli"]
 exclude = ["vendor/cua-driver"]
 resolver = "2"
 
+[patch.crates-io]
+grammers-session = { path = "vendor/grammers-session" }
+
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
@@ -55,12 +59,14 @@ html2text = "0.13.5"
 glob = "0.3.3"
 fslock = "0.2.1"
 indexmap = { version = "2.12.1", features = ["serde"] }
+ipnet = "2.11.0"
 insta = "1.44.1"
 notify = "6"
 jsonschema = { version = "0.45.1", default-features = false }
 libc = "0.2"
 libloading = "0.8.9"
 psl = "2.1.163"
+qrcode = "0.14.1"
 ratatui = "0.29.0"
 # Anthropic's official Rust SDK for the Model Context Protocol. Pinned to the
 # same major version codex uses (0.15) and opted into the client + server +
@@ -90,7 +96,7 @@ tokio = { version = "1.51", features = [
     "time",
 ] }
 tracing = "0.1"
-reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls", "socks"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
 serde_yaml = "0.9.34"
@@ -100,6 +106,7 @@ tempfile = "3.23.0"
 thiserror = "2.0.17"
 regex = "1.10"
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+rand = "0.8"
 time = { version = "0.3.44", features = ["formatting", "local-offset", "parsing"] }
 toml = "0.9.8"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }

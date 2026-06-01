@@ -1,0 +1,262 @@
+import { Meta, Canvas } from "@storybook/addon-docs/blocks";
+import { useState } from "react";
+import * as ToolCardStories from "./ToolCard.stories";
+
+export const Prompt = ({ story }) => {
+  const prompt = story.args?.prompt ?? "";
+  const [copied, setCopied] = useState(false);
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(prompt);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = prompt;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.top = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  };
+
+  return (
+    <div
+      style={{
+        margin: "16px 0 8px",
+        padding: "10px 12px",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        background: "color-mix(in oklab, var(--muted) 72%, transparent)"
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 4
+        }}
+      >
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted-foreground)" }}>
+          Chat prompt
+        </div>
+        <button
+          type="button"
+          onClick={copyPrompt}
+          style={{
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            background: "var(--background)",
+            color: "var(--foreground)",
+            cursor: "pointer",
+            fontSize: 12,
+            padding: "4px 8px"
+          }}
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <code style={{ fontSize: 12, whiteSpace: "normal", overflowWrap: "anywhere" }}>{prompt}</code>
+    </div>
+  );
+};
+
+<Meta title="Agent/ToolCard" parameters={{ layout: "padded" }} />
+
+# ToolCard
+
+`ToolCard` renders one agent tool invocation in the transcript. The row keeps
+the tool name, primary argument, status, and expandable result together so a
+long conversation stays scannable without losing the detailed execution record.
+
+Use the catalog below as the visual contract for common tool classes.
+
+<Prompt story={ToolCardStories.BashOutput} />
+
+<Canvas of={ToolCardStories.BashOutput} />
+
+## Structure
+
+Each tool card receives a `ToolTimelineItem` with the raw input and output
+strings plus optional parsed `inputJson`. The component derives a compact
+argument label from common fields such as `path`, `file_path`, `pattern`,
+`command`, `query`, `url`, and browser or MCP argument payloads.
+
+```svelte
+<ToolCard
+  item={toolTimelineItem}
+  sessionId={sessionId}
+  defaultCollapsed={true}
+/>
+```
+
+## Renderers
+
+| Renderer | Tool examples | Output treatment |
+| --- | --- | --- |
+| File | `Read`, `Write`, `Edit`, `ApplyPatch` | Line-numbered read views and compact diffs. |
+| Terminal | `Bash`, `Shell`, `PowerShell` | Command line plus stdout/stderr preview. |
+| Search | `Glob`, `Grep` | Count metadata and result rows. |
+| Web | `WebFetch`, `WebSearch` | URL/query title, HTTP metadata, and fetched text. |
+| Browser | `BrowserAction`, browser MCP tools | Recorded browser frames when a session recording exists. |
+| MCP | `mcp__server__tool` | Server/tool title, argument details, sections, and errors. |
+| Generic structured | Workflow, connector, memory, image, task | Status metadata plus structured result text. |
+
+## File and terminal cards
+
+<Prompt story={ToolCardStories.ReadFile} />
+
+<Canvas of={ToolCardStories.ReadFile} />
+
+<Prompt story={ToolCardStories.EditDiff} />
+
+<Canvas of={ToolCardStories.EditDiff} />
+
+<Prompt story={ToolCardStories.WriteFile} />
+
+<Canvas of={ToolCardStories.WriteFile} />
+
+<Prompt story={ToolCardStories.BashOutput} />
+
+<Canvas of={ToolCardStories.BashOutput} />
+
+## Search and source lookup cards
+
+<Prompt story={ToolCardStories.GlobResults} />
+
+<Canvas of={ToolCardStories.GlobResults} />
+
+<Prompt story={ToolCardStories.GrepResults} />
+
+<Canvas of={ToolCardStories.GrepResults} />
+
+<Prompt story={ToolCardStories.NotebookEdit} />
+
+<Canvas of={ToolCardStories.NotebookEdit} />
+
+<Prompt story={ToolCardStories.ProcessControl} />
+
+<Canvas of={ToolCardStories.ProcessControl} />
+
+<Prompt story={ToolCardStories.LspLookup} />
+
+<Canvas of={ToolCardStories.LspLookup} />
+
+## Web and browser cards
+
+<Prompt story={ToolCardStories.WebSearch} />
+
+<Canvas of={ToolCardStories.WebSearch} />
+
+<Prompt story={ToolCardStories.WebFetch} />
+
+<Canvas of={ToolCardStories.WebFetch} />
+
+<Prompt story={ToolCardStories.HttpRequest} />
+
+<Canvas of={ToolCardStories.HttpRequest} />
+
+<Prompt story={ToolCardStories.BrowserAction} />
+
+<Canvas of={ToolCardStories.BrowserAction} />
+
+## Interaction and task cards
+
+<Prompt story={ToolCardStories.AskUserQuestion} />
+
+<Canvas of={ToolCardStories.AskUserQuestion} />
+
+<Prompt story={ToolCardStories.SendUserMessage} />
+
+<Canvas of={ToolCardStories.SendUserMessage} />
+
+<Prompt story={ToolCardStories.TaskCreate} />
+
+<Canvas of={ToolCardStories.TaskCreate} />
+
+<Prompt story={ToolCardStories.CronCreate} />
+
+<Canvas of={ToolCardStories.CronCreate} />
+
+<Prompt story={ToolCardStories.Memory} />
+
+<Canvas of={ToolCardStories.Memory} />
+
+## Connector and workflow cards
+
+<Prompt story={ToolCardStories.SlackAction} />
+
+<Canvas of={ToolCardStories.SlackAction} />
+
+<Prompt story={ToolCardStories.ConnectorAction} />
+
+<Canvas of={ToolCardStories.ConnectorAction} />
+
+<Prompt story={ToolCardStories.WorkflowCreate} />
+
+<Canvas of={ToolCardStories.WorkflowCreate} />
+
+<Prompt story={ToolCardStories.Agent} />
+
+<Canvas of={ToolCardStories.Agent} />
+
+## Media and app action cards
+
+<Prompt story={ToolCardStories.ImageGeneration} />
+
+<Canvas of={ToolCardStories.ImageGeneration} />
+
+<Prompt story={ToolCardStories.VisionAnalyze} />
+
+<Canvas of={ToolCardStories.VisionAnalyze} />
+
+<Prompt story={ToolCardStories.SpotifyAction} />
+
+<Canvas of={ToolCardStories.SpotifyAction} />
+
+<Prompt story={ToolCardStories.ShopifyAction} />
+
+<Canvas of={ToolCardStories.ShopifyAction} />
+
+<Prompt story={ToolCardStories.ComputerUseAction} />
+
+<Canvas of={ToolCardStories.ComputerUseAction} />
+
+## MCP and lifecycle cards
+
+<Prompt story={ToolCardStories.McpResults} />
+
+<Canvas of={ToolCardStories.McpResults} />
+
+<Prompt story={ToolCardStories.FailedMcpCall} />
+
+<Canvas of={ToolCardStories.FailedMcpCall} />
+
+<Prompt story={ToolCardStories.Running} />
+
+<Canvas of={ToolCardStories.Running} />
+
+<Prompt story={ToolCardStories.Collapsed} />
+
+<Canvas of={ToolCardStories.Collapsed} />
+
+## Behavior
+
+Expanded cards show rendered output when available. Pending cards show an
+awaiting-result state. Browser cards can subscribe to the active local daemon
+for matching recording frames when `sessionId` is present.
+
+The card should remain dense: keep titles and argument labels short, put verbose
+data in the expanded body, and prefer structured JSON fixtures in stories so
+new render branches stay easy to inspect.
+
+## Accessibility
+
+The card header is a native button. Expandable cards expose `aria-expanded`, and
+non-toggleable rows are disabled. Icon-only affordances come from the shared
+`Icon` component and the visible name/status text remains the primary cue.

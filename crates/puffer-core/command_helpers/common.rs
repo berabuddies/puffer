@@ -6,9 +6,11 @@ use crate::runtime::lambda_skill_activation::{
 };
 use crate::{AppState, MessageRole};
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::{skill_by_name, LoadedItem, LoadedResources, SkillSpec, SourceKind};
 use puffer_session_store::{GitDiffSnapshot, SessionStore, TranscriptEvent};
+use qrcode::{render::svg, QrCode};
 use std::fmt::Write as _;
 use std::io::{self, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
@@ -194,6 +196,21 @@ pub(crate) fn render_utf8_qr(data: &str) -> Option<String> {
     } else {
         Some(trimmed)
     }
+}
+
+/// Renders a QR code as an SVG data URI.
+pub(crate) fn render_svg_qr_data_uri(data: &str) -> Option<String> {
+    let code = QrCode::new(data.as_bytes()).ok()?;
+    let image = code
+        .render::<svg::Color>()
+        .min_dimensions(240, 240)
+        .dark_color(svg::Color("#111111"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Some(format!(
+        "data:image/svg+xml;base64,{}",
+        BASE64_STANDARD.encode(image.as_bytes())
+    ))
 }
 
 /// Executes one loaded skill command through the provider runtime.

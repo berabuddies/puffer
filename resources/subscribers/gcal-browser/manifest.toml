@@ -1,0 +1,16 @@
+manifest_version = 1
+id = "gcal-browser"
+kind = "subscriber"
+topic = "gcal-browser"
+display_name = "Google Calendar Browser"
+
+# Hidden subcommand baked into the puffer binary. The driver opens Google
+# Calendar through the daemon browser and emits newly observed event rows as
+# ndjson.
+[run]
+cmd = ["puffer", "__subscriber", "gcal-browser"]
+
+# Per-connection state is supplied by the connector template when this
+# manifest is instantiated.
+[state]
+dir = "state"

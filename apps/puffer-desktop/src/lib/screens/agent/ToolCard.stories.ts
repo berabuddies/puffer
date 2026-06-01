@@ -1,7 +1,18 @@
 import type { Meta, StoryObj } from "@storybook/svelte-vite";
-import ToolCard from "./ToolCard.svelte";
 import type { ToolTimelineItem } from "../../types";
 import StoryFrame from "../../storybook/StoryFrame.svelte";
+import ToolCardStoryHarness from "./ToolCardStoryHarness.svelte";
+
+type ToolCardStoryArgs = {
+  item: ToolTimelineItem;
+  sessionId: string | null;
+  defaultCollapsed: boolean;
+  prompt: string;
+};
+
+function toolCardPrompt(storyName: string): string {
+  return `Show the ${storyName} ToolCard in chat for UI testing.`;
+}
 
 function toolItem(overrides: Partial<ToolTimelineItem>): ToolTimelineItem {
   const toolName = overrides.toolName ?? "Bash";
@@ -241,9 +252,16 @@ const subagentOutput = {
 
 const meta = {
   title: "Agent/ToolCard",
-  component: ToolCard,
+  component: ToolCardStoryHarness,
   parameters: {
     layout: "fullscreen"
+  },
+  argTypes: {
+    prompt: {
+      control: "text",
+      description: "Copy this prompt into chat to show the same ToolCard for UI testing.",
+      table: { category: "UI test" }
+    }
   },
   decorators: [
     () => ({
@@ -256,6 +274,7 @@ const meta = {
   args: {
     defaultCollapsed: false,
     sessionId: null,
+    prompt: toolCardPrompt("BashOutput"),
     item: toolItem({
       toolName: "Bash",
       summary: "Searched for the tool call renderer.",
@@ -264,15 +283,20 @@ const meta = {
       output: JSON.stringify(bashOutput, null, 2)
     })
   }
-} satisfies Meta<typeof ToolCard>;
+} satisfies Meta<typeof ToolCardStoryHarness>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const BashOutput: Story = {};
+export const BashOutput: Story = {
+  args: {
+    prompt: toolCardPrompt("BashOutput")
+  }
+};
 
 export const ReadFile: Story = {
   args: {
+    prompt: toolCardPrompt("ReadFile"),
     item: toolItem({
       toolName: "Read",
       summary: "Loaded the tool renderer source.",
@@ -285,6 +309,7 @@ export const ReadFile: Story = {
 
 export const EditDiff: Story = {
   args: {
+    prompt: toolCardPrompt("EditDiff"),
     item: toolItem({
       toolName: "Edit",
       summary: "Added a guard to the row toggle handler.",
@@ -305,6 +330,7 @@ export const EditDiff: Story = {
 
 export const WriteFile: Story = {
   args: {
+    prompt: toolCardPrompt("WriteFile"),
     item: toolItem({
       toolName: "Write",
       summary: "Created a local Storybook coverage fixture.",
@@ -335,6 +361,7 @@ export const WriteFile: Story = {
 
 export const GlobResults: Story = {
   args: {
+    prompt: toolCardPrompt("GlobResults"),
     item: toolItem({
       toolName: "Glob",
       summary: "Matched Storybook and agent view files by path.",
@@ -347,6 +374,7 @@ export const GlobResults: Story = {
 
 export const GrepResults: Story = {
   args: {
+    prompt: toolCardPrompt("GrepResults"),
     item: toolItem({
       toolName: "Grep",
       summary: "Found all tool card usage sites.",
@@ -359,6 +387,7 @@ export const GrepResults: Story = {
 
 export const NotebookEdit: Story = {
   args: {
+    prompt: toolCardPrompt("NotebookEdit"),
     item: toolItem({
       toolName: "NotebookEdit",
       summary: "Updated a notebook cell used for evaluation notes.",
@@ -382,6 +411,7 @@ export const NotebookEdit: Story = {
 
 export const ProcessControl: Story = {
   args: {
+    prompt: toolCardPrompt("ProcessControl"),
     item: toolItem({
       toolName: "ProcessControl",
       summary: "Checked the Storybook dev process.",
@@ -399,6 +429,7 @@ export const ProcessControl: Story = {
 
 export const LspLookup: Story = {
   args: {
+    prompt: toolCardPrompt("LspLookup"),
     item: toolItem({
       toolName: "LSP",
       summary: "Found component definition and references.",
@@ -411,6 +442,7 @@ export const LspLookup: Story = {
 
 export const WebSearch: Story = {
   args: {
+    prompt: toolCardPrompt("WebSearch"),
     item: toolItem({
       toolName: "WebSearch",
       summary: "Searched current Storybook Svelte guidance.",
@@ -423,6 +455,7 @@ export const WebSearch: Story = {
 
 export const WebFetch: Story = {
   args: {
+    prompt: toolCardPrompt("WebFetch"),
     item: toolItem({
       toolName: "WebFetch",
       summary: "Fetched a Storybook documentation page.",
@@ -441,6 +474,7 @@ export const WebFetch: Story = {
 
 export const HttpRequest: Story = {
   args: {
+    prompt: toolCardPrompt("HttpRequest"),
     item: toolItem({
       toolName: "HttpRequest",
       summary: "Sent a JSON request to a local service.",
@@ -461,6 +495,7 @@ export const HttpRequest: Story = {
 
 export const BrowserAction: Story = {
   args: {
+    prompt: toolCardPrompt("BrowserAction"),
     item: toolItem({
       toolName: "BrowserAction",
       summary: "Clicked a Storybook story in the browser.",
@@ -481,6 +516,7 @@ export const BrowserAction: Story = {
 
 export const AskUserQuestion: Story = {
   args: {
+    prompt: toolCardPrompt("AskUserQuestion"),
     item: toolItem({
       toolName: "AskUserQuestion",
       summary: "Asked the user to choose the next UI state.",
@@ -499,6 +535,7 @@ export const AskUserQuestion: Story = {
 
 export const SendUserMessage: Story = {
   args: {
+    prompt: toolCardPrompt("SendUserMessage"),
     item: toolItem({
       toolName: "SendUserMessage",
       summary: "Sent a follow-up message to the user.",
@@ -518,6 +555,7 @@ export const SendUserMessage: Story = {
 
 export const TaskCreate: Story = {
   args: {
+    prompt: toolCardPrompt("TaskCreate"),
     item: toolItem({
       toolName: "TaskCreate",
       summary: "Created a tracked task.",
@@ -536,6 +574,7 @@ export const TaskCreate: Story = {
 
 export const CronCreate: Story = {
   args: {
+    prompt: toolCardPrompt("CronCreate"),
     item: toolItem({
       toolName: "CronCreate",
       summary: "Scheduled a recurring check.",
@@ -557,6 +596,7 @@ export const CronCreate: Story = {
 
 export const Memory: Story = {
   args: {
+    prompt: toolCardPrompt("Memory"),
     item: toolItem({
       toolName: "Memory",
       summary: "Saved a project memory.",
@@ -575,6 +615,7 @@ export const Memory: Story = {
 
 export const SlackAction: Story = {
   args: {
+    prompt: toolCardPrompt("SlackAction"),
     item: toolItem({
       toolName: "SlackAction",
       summary: "Posted a design-system update.",
@@ -593,6 +634,7 @@ export const SlackAction: Story = {
 
 export const ConnectorAction: Story = {
   args: {
+    prompt: toolCardPrompt("ConnectorAction"),
     item: toolItem({
       toolName: "ConnectorAction",
       summary: "Sent a connector request to Telegram.",
@@ -619,6 +661,7 @@ export const ConnectorAction: Story = {
 
 export const ImageGeneration: Story = {
   args: {
+    prompt: toolCardPrompt("ImageGeneration"),
     item: toolItem({
       toolName: "ImageGeneration",
       summary: "Generated a visual preview asset.",
@@ -635,6 +678,7 @@ export const ImageGeneration: Story = {
 
 export const VisionAnalyze: Story = {
   args: {
+    prompt: toolCardPrompt("VisionAnalyze"),
     item: toolItem({
       toolName: "VisionAnalyze",
       summary: "Analyzed the uploaded tool capability screenshot.",
@@ -651,6 +695,7 @@ export const VisionAnalyze: Story = {
 
 export const WorkflowCreate: Story = {
   args: {
+    prompt: toolCardPrompt("WorkflowCreate"),
     item: toolItem({
       toolName: "WorkflowCreate",
       summary: "Created an automation workflow.",
@@ -669,6 +714,7 @@ export const WorkflowCreate: Story = {
 
 export const Agent: Story = {
   args: {
+    prompt: toolCardPrompt("Agent"),
     item: toolItem({
       toolName: "Agent",
       summary: "Spawned sub-agents to inspect coverage.",
@@ -691,6 +737,7 @@ export const Agent: Story = {
 
 export const McpResults: Story = {
   args: {
+    prompt: toolCardPrompt("McpResults"),
     item: toolItem({
       toolName: "mcp__linear__list_tools",
       summary: "Listed Linear MCP tools.",
@@ -711,6 +758,7 @@ export const McpResults: Story = {
 
 export const SpotifyAction: Story = {
   args: {
+    prompt: toolCardPrompt("SpotifyAction"),
     item: toolItem({
       toolName: "SpotifyAction",
       summary: "Controlled Spotify playback.",
@@ -729,6 +777,7 @@ export const SpotifyAction: Story = {
 
 export const ShopifyAction: Story = {
   args: {
+    prompt: toolCardPrompt("ShopifyAction"),
     item: toolItem({
       toolName: "ShopifyAction",
       summary: "Updated a Shopify product draft.",
@@ -753,6 +802,7 @@ export const ShopifyAction: Story = {
 
 export const ComputerUseAction: Story = {
   args: {
+    prompt: toolCardPrompt("ComputerUseAction"),
     item: toolItem({
       toolName: "ComputerUseAction",
       summary: "Clicked through a local desktop UI.",
@@ -776,6 +826,7 @@ export const ComputerUseAction: Story = {
 
 export const FailedMcpCall: Story = {
   args: {
+    prompt: toolCardPrompt("FailedMcpCall"),
     item: toolItem({
       toolName: "mcp__linear__get_issue",
       status: "error",
@@ -797,6 +848,7 @@ export const FailedMcpCall: Story = {
 
 export const Running: Story = {
   args: {
+    prompt: toolCardPrompt("Running"),
     item: toolItem({
       toolName: "Bash",
       status: "running",
@@ -810,6 +862,7 @@ export const Running: Story = {
 
 export const Collapsed: Story = {
   args: {
+    prompt: toolCardPrompt("Collapsed"),
     defaultCollapsed: true
   }
 };

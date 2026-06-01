@@ -20,6 +20,7 @@
 
 mod commands;
 mod config;
+mod email_actions;
 mod events;
 mod imap_poll;
 mod run;

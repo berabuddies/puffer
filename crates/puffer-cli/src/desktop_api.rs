@@ -5,6 +5,7 @@ use puffer_provider_registry::{
     ExternalImportSource, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::LoadedResources;
+use puffer_secrets::{SecretSummary, SecretVault};
 use puffer_session_store::{
     GitDiffSnapshot, MessageActor, SessionRecord, SessionStore, SessionSummary, TranscriptEvent,
     TranscriptRewrite,
@@ -18,12 +19,12 @@ use uuid::Uuid;
 use crate::cli_args::DesktopApiCommand;
 use crate::desktop_activity::session_activity_status;
 use crate::desktop_api_types::{
-    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto,
-    BrowserGoogleAccountDto, BrowserProfileDto, DiffSummaryDto, DivergenceReportDto,
-    ExternalCredentialDto, FolderGroupDto, ProviderSummaryDto, RepoActionResultDto,
-    RepoPullRequestDto, RepoStatusDto, ResourceCountsDto, SessionDetailDto, SessionGroupsPageDto,
-    SessionListItemDto, SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
-    TimelineItemDto,
+    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto, DiffSummaryDto,
+    DivergenceReportDto, ExternalCredentialDto, FolderGroupDto, NetworkProxySettingsDto,
+    ProviderSummaryDto, RepoActionResultDto, RepoPullRequestDto, RepoStatusDto, ResourceCountsDto,
+    SanitizedProxyEndpointDto, SecretSummaryDto, SecretsSettingsDto, SessionDetailDto,
+    SessionGroupsPageDto, SessionListItemDto, SettingsConfigDto, SettingsSessionSummaryDto,
+    SettingsSnapshotDto, TimelineItemDto,
 };
 
 /// Runs one hidden desktop JSON command for SSH-backed desktop integrations.
@@ -403,7 +404,6 @@ pub(crate) fn load_settings_snapshot(
             mascot_enabled: config.mascot.enabled,
             ui_no_alt_screen: config.ui.no_alt_screen,
             ui_tmux_golden_mode: config.ui.tmux_golden_mode,
-            browser_chrome_profile: config.browser.chrome_profile.clone(),
         },
         resources: ResourceCountsDto {
             providers: resources.providers.len(),
@@ -424,31 +424,72 @@ pub(crate) fn load_settings_snapshot(
         },
         auth: auth_statuses(auth_store),
         providers: providers.provider_entries().map(provider_summary).collect(),
-        browser_profiles: browser_profile_dtos(config.browser.chrome_profile.as_deref()),
+        network_proxy: network_proxy_settings_dto(config),
+        secrets: secrets_settings_dto(paths)?,
     })
 }
 
-fn browser_profile_dtos(selected_profile: Option<&str>) -> Vec<BrowserProfileDto> {
-    crate::browser_profiles::discover_chrome_profiles(selected_profile)
+fn secrets_settings_dto(paths: &ConfigPaths) -> Result<SecretsSettingsDto> {
+    let store_file = SecretVault::default_path(&paths.user_config_dir);
+    let items = SecretVault::list_metadata(&store_file)?
         .into_iter()
-        .map(|profile| BrowserProfileDto {
-            id: profile.id,
-            name: profile.name,
-            email: profile.email,
-            google_accounts: profile
-                .google_accounts
-                .into_iter()
-                .map(|account| BrowserGoogleAccountDto {
-                    email: account.email,
-                    name: account.name,
-                    gaia_id: account.gaia_id,
-                })
-                .collect(),
-            path: profile.path.display().to_string(),
-            is_last_used: profile.is_last_used,
-            is_selected: profile.is_selected,
-        })
-        .collect()
+        .map(secret_summary_dto)
+        .collect::<Vec<_>>();
+    Ok(SecretsSettingsDto {
+        store_file: store_file.display().to_string(),
+        key_source: secret_key_source().to_string(),
+        chrome_import_supported: cfg!(target_os = "macos"),
+        items,
+    })
+}
+
+fn secret_key_source() -> &'static str {
+    if std::env::var_os("PUFFER_SECRET_STORE_KEY").is_some() {
+        "env"
+    } else if cfg!(target_os = "macos") {
+        "macos-keychain"
+    } else {
+        "local-key-file"
+    }
+}
+
+fn secret_summary_dto(summary: SecretSummary) -> SecretSummaryDto {
+    SecretSummaryDto {
+        id: summary.id,
+        label: summary.label,
+        username: summary.username,
+        origin: summary.origin,
+        source: summary.source,
+        created_at_ms: summary.created_at_ms,
+        updated_at_ms: summary.updated_at_ms,
+    }
+}
+
+fn network_proxy_settings_dto(config: &PufferConfig) -> NetworkProxySettingsDto {
+    NetworkProxySettingsDto {
+        enabled: config.network.proxy.enabled,
+        selected: config.network.proxy.selected.clone(),
+        bypass: config.network.proxy.bypass.clone(),
+        proxies: config
+            .network
+            .proxy
+            .proxies
+            .iter()
+            .map(|endpoint| {
+                let sanitized = endpoint.sanitized();
+                SanitizedProxyEndpointDto {
+                    id: sanitized.id,
+                    scheme: sanitized.scheme.as_uri_scheme().to_string(),
+                    host: sanitized.host,
+                    port: sanitized.port,
+                    username: sanitized.username,
+                    has_password: sanitized.has_password,
+                    uri: sanitized.uri,
+                }
+            })
+            .collect(),
+        last_test: None,
+    }
 }
 
 fn auth_statuses(auth_store: &AuthStore) -> Vec<AuthProviderStatusDto> {

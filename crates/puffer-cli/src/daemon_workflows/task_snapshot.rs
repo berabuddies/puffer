@@ -197,6 +197,42 @@ fn task_json(task: TaskSnapshotRecord, source: &str, scope: &str, scope_label: &
             &["monitor_memory_path", "monitorMemoryPath"],
             &["memory_path", "memoryPath"]
         ),
+        "monitor_envelope_id": metadata_string(
+            &task.metadata,
+            &["monitor_envelope_id", "monitorEnvelopeId"],
+            &["envelope_id", "envelopeId"]
+        ),
+        "ignore_reason": metadata_string(
+            &task.metadata,
+            &["ignore_reason", "ignoreReason"],
+            &["reason"]
+        ),
+        "ignore_analysis_started": metadata_bool(&task.metadata, "ignore_analysis_started"),
+        "ignore_analysis_status": metadata_string(
+            &task.metadata,
+            &["ignore_analysis_status", "ignoreAnalysisStatus"],
+            &["status"]
+        ),
+        "ignore_analysis_result": metadata_string(
+            &task.metadata,
+            &["ignore_analysis_result", "ignoreAnalysisResult"],
+            &["result"]
+        ),
+        "ignore_analysis_error": metadata_string(
+            &task.metadata,
+            &["ignore_analysis_error", "ignoreAnalysisError"],
+            &["error"]
+        ),
+        "ignore_analysis_usage": metadata_value(
+            &task.metadata,
+            &["ignore_analysis_usage", "ignoreAnalysisUsage"],
+            &["usage"]
+        ),
+        "ignore_analysis_completed_at_ms": metadata_u64(
+            &task.metadata,
+            &["ignore_analysis_completed_at_ms", "ignoreAnalysisCompletedAtMs"],
+            &["completed_at_ms", "completedAtMs"]
+        ),
         "actions": monitor_actions(&task.metadata),
         "possible_ignore_reasons": monitor_ignore_reasons(&task.metadata),
     })
@@ -272,6 +308,46 @@ fn metadata_bool(metadata: &Map<String, Value>, key: &str) -> bool {
                 .and_then(Value::as_bool)
         })
         .unwrap_or(false)
+}
+
+fn metadata_u64(
+    metadata: &Map<String, Value>,
+    top_level_keys: &[&str],
+    monitor_keys: &[&str],
+) -> Option<u64> {
+    top_level_keys
+        .iter()
+        .find_map(|key| metadata.get(*key).and_then(Value::as_u64))
+        .or_else(|| {
+            metadata
+                .get("monitor")
+                .and_then(Value::as_object)
+                .and_then(|monitor| {
+                    monitor_keys
+                        .iter()
+                        .find_map(|key| monitor.get(*key).and_then(Value::as_u64))
+                })
+        })
+}
+
+fn metadata_value(
+    metadata: &Map<String, Value>,
+    top_level_keys: &[&str],
+    monitor_keys: &[&str],
+) -> Option<Value> {
+    top_level_keys
+        .iter()
+        .find_map(|key| metadata.get(*key).cloned())
+        .or_else(|| {
+            metadata
+                .get("monitor")
+                .and_then(Value::as_object)
+                .and_then(|monitor| {
+                    monitor_keys
+                        .iter()
+                        .find_map(|key| monitor.get(*key).cloned())
+                })
+        })
 }
 
 fn monitor_actions(metadata: &Map<String, Value>) -> Vec<Value> {
@@ -383,6 +459,14 @@ mod tests {
                     "metadata": {
                         "_monitor": true,
                         "monitor_connection": "telegram-user",
+                        "monitor_envelope_id": "env-monitor-1",
+                        "ignore_analysis_result": "filter looks scoped",
+                        "ignore_analysis_usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 3,
+                            "cache_read_tokens": 2,
+                            "spent_tokens": 13
+                        },
                         "actions": [{
                             "actionName": "Draft reply",
                             "actionPrompt": "Draft a concise reply."
@@ -416,6 +500,12 @@ mod tests {
             .unwrap();
         assert_eq!(monitor_task["source"], "monitor");
         assert_eq!(monitor_task["monitor_connection"], "telegram-user");
+        assert_eq!(monitor_task["monitor_envelope_id"], "env-monitor-1");
+        assert_eq!(
+            monitor_task["ignore_analysis_result"],
+            "filter looks scoped"
+        );
+        assert_eq!(monitor_task["ignore_analysis_usage"]["spent_tokens"], 13);
         assert_eq!(monitor_task["actions"][0]["name"], "Draft reply");
         assert!(snapshot["task_error"].is_null());
     }

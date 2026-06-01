@@ -1,8 +1,11 @@
 references/
 target/
+.release/
+release/
 .worktree/
 .worktrees/
 .puffer/
+.superpowers/
 .DS_Store
 **/.DS_Store
 resources/subscribers/*/state/
@@ -16,6 +19,7 @@ benchmark/*.pyc
 # Claude Code + OMX tool metadata
 .claude/
 .omx/
+.playwright-mcp/
 
 # Local audit and bug-triage artifacts.
 audit_scope.txt

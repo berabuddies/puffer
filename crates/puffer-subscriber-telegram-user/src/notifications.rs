@@ -1,6 +1,6 @@
 //! Telegram notification mute helpers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -9,13 +9,20 @@ use grammers_client::{
     Client,
 };
 use grammers_tl_types as tl;
-use tracing::warn;
-
-const REMOTE_NOTIFICATION_REFRESH_INTERVAL_MS: u64 = 60_000;
 
 /// Returns whether a dialog's current peer notification settings suppress messages.
 pub(crate) fn dialog_notifications_suppressed(dialog: &Dialog) -> bool {
     dialog_notifications_suppressed_at(dialog, now_unix_seconds())
+}
+
+/// Returns whether the dialog is currently archived into a non-main folder.
+pub(crate) fn dialog_archived(dialog: &Dialog) -> bool {
+    dialog_raw_archived(&dialog.raw)
+}
+
+/// Returns whether this dialog should be suppressed from monitor delivery.
+pub(crate) fn dialog_delivery_suppressed(dialog: &Dialog) -> bool {
+    dialog_notifications_suppressed(dialog) || dialog_archived(dialog)
 }
 
 /// Fetches current peer notification settings and returns whether they suppress messages.
@@ -23,71 +30,77 @@ pub(crate) async fn fetch_chat_notification_suppressed(
     client: &Client,
     chat: &Chat,
 ) -> anyhow::Result<bool> {
-    let peer = tl::types::InputNotifyPeer {
-        peer: chat.pack().to_input_peer(),
-    }
-    .into();
+    fetch_notify_peer_suppressed(
+        client,
+        tl::types::InputNotifyPeer {
+            peer: chat.pack().to_input_peer(),
+        }
+        .into(),
+    )
+    .await
+}
+
+async fn fetch_notify_peer_suppressed(
+    client: &Client,
+    peer: tl::enums::InputNotifyPeer,
+) -> anyhow::Result<bool> {
     let request = tl::functions::account::GetNotifySettings { peer };
     let settings = client
         .invoke(&request)
         .await
-        .with_context(|| format!("get Telegram notification settings for chat {}", chat.id()))?;
+        .context("get Telegram notification settings")?;
     Ok(peer_notify_settings_muted_at(&settings, now_unix_seconds()))
 }
 
-/// Tracks peer notification mute state observed from dialogs and raw updates.
+/// Tracks peer suppression state observed from dialogs and raw updates.
 #[derive(Debug, Default)]
 pub(crate) struct NotificationMuteCache {
     muted_chat_ids: BTreeSet<i64>,
-    remote_checked_at_ms: BTreeMap<i64, u64>,
+    archived_chat_ids: BTreeSet<i64>,
 }
 
 impl NotificationMuteCache {
-    /// Records a dialog's current notification mute state and returns whether it is muted.
-    pub(crate) fn observe_dialog(&mut self, dialog: &Dialog) -> bool {
-        let muted = dialog_notifications_suppressed(dialog);
-        self.set_chat_muted(dialog.chat().id(), muted);
-        muted
+    /// Returns whether the message's chat is known to be suppressed from socket state.
+    pub(crate) fn message_chat_muted(&self, message: &Message) -> bool {
+        self.chat_suppressed(message.chat().id())
     }
 
-    /// Returns whether the message's chat is currently muted or notification-silent.
-    pub(crate) async fn message_chat_muted(&mut self, client: &Client, message: &Message) -> bool {
-        let chat = message.chat();
-        let chat_id = chat.id();
-        if self.remote_refresh_due(chat_id) {
-            match self.refresh_chat(client, &chat).await {
-                Ok(muted) => return muted,
-                Err(error) => {
-                    warn!(
-                        chat = chat_id,
-                        %error,
-                        "failed to refresh Telegram notification settings; using cached state"
-                    );
+    /// Records suppression state from a Telegram dialog snapshot.
+    pub(crate) fn observe_dialog(&mut self, dialog: &Dialog) -> bool {
+        let chat_id = dialog.chat().id();
+        let muted = dialog_notifications_suppressed(dialog);
+        let archived = dialog_archived(dialog);
+        self.set_chat_muted(chat_id, muted);
+        self.set_chat_archived(chat_id, archived);
+        muted || archived
+    }
+
+    /// Applies raw Telegram updates that change mute or archive state.
+    pub(crate) fn apply_raw_update(&mut self, update: &tl::enums::Update) {
+        match update {
+            tl::enums::Update::NotifySettings(update) => match &update.peer {
+                tl::enums::NotifyPeer::NotifyUsers
+                | tl::enums::NotifyPeer::NotifyChats
+                | tl::enums::NotifyPeer::NotifyBroadcasts => {}
+                _ => {
+                    let Some(chat_id) = notify_peer_chat_id(&update.peer) else {
+                        return;
+                    };
+                    let muted =
+                        peer_notify_settings_muted_at(&update.notify_settings, now_unix_seconds());
+                    self.set_chat_muted(chat_id, muted);
+                }
+            },
+            tl::enums::Update::FolderPeers(update) => {
+                for peer in &update.folder_peers {
+                    let tl::enums::FolderPeer::Peer(peer) = peer;
+                    if let Some(chat_id) = peer_chat_id(&peer.peer) {
+                        self.set_chat_archived(chat_id, peer.folder_id != 0);
+                    }
                 }
             }
+            _ => {}
         }
-        self.chat_muted(chat_id)
-    }
-
-    /// Applies a raw Telegram notification-settings update when it targets one concrete peer.
-    pub(crate) fn apply_raw_update(&mut self, update: &tl::enums::Update) {
-        let tl::enums::Update::NotifySettings(update) = update else {
-            return;
-        };
-        let Some(chat_id) = notify_peer_chat_id(&update.peer) else {
-            return;
-        };
-        let muted = peer_notify_settings_muted_at(&update.notify_settings, now_unix_seconds());
-        self.set_chat_muted(chat_id, muted);
-        self.remote_checked_at_ms.insert(chat_id, now_unix_millis());
-    }
-
-    async fn refresh_chat(&mut self, client: &Client, chat: &Chat) -> anyhow::Result<bool> {
-        let muted = fetch_chat_notification_suppressed(client, chat).await?;
-        self.set_chat_muted(chat.id(), muted);
-        self.remote_checked_at_ms
-            .insert(chat.id(), now_unix_millis());
-        Ok(muted)
     }
 
     fn set_chat_muted(&mut self, chat_id: i64, muted: bool) {
@@ -98,18 +111,16 @@ impl NotificationMuteCache {
         }
     }
 
-    fn chat_muted(&self, chat_id: i64) -> bool {
-        self.muted_chat_ids.contains(&chat_id)
+    fn set_chat_archived(&mut self, chat_id: i64, archived: bool) {
+        if archived {
+            self.archived_chat_ids.insert(chat_id);
+        } else {
+            self.archived_chat_ids.remove(&chat_id);
+        }
     }
 
-    fn remote_refresh_due(&self, chat_id: i64) -> bool {
-        match self.remote_checked_at_ms.get(&chat_id) {
-            Some(checked_at) => {
-                now_unix_millis().saturating_sub(*checked_at)
-                    >= REMOTE_NOTIFICATION_REFRESH_INTERVAL_MS
-            }
-            None => true,
-        }
+    fn chat_suppressed(&self, chat_id: i64) -> bool {
+        self.muted_chat_ids.contains(&chat_id) || self.archived_chat_ids.contains(&chat_id)
     }
 }
 
@@ -122,17 +133,27 @@ fn dialog_notifications_suppressed_at(dialog: &Dialog, now_seconds: i64) -> bool
     }
 }
 
+fn dialog_raw_archived(dialog: &tl::enums::Dialog) -> bool {
+    match dialog {
+        tl::enums::Dialog::Dialog(dialog) => dialog.folder_id.is_some_and(|id| id != 0),
+        tl::enums::Dialog::Folder(dialog) => folder_id(&dialog.folder).is_some_and(|id| id != 0),
+    }
+}
+
+fn folder_id(folder: &tl::enums::Folder) -> Option<i32> {
+    match folder {
+        tl::enums::Folder::Folder(folder) => Some(folder.id),
+    }
+}
+
 fn peer_notify_settings_muted_at(
     settings: &tl::enums::PeerNotifySettings,
     now_seconds: i64,
 ) -> bool {
     match settings {
-        tl::enums::PeerNotifySettings::Settings(settings) => {
-            settings.silent == Some(true)
-                || settings
-                    .mute_until
-                    .is_some_and(|mute_until| i64::from(mute_until) > now_seconds)
-        }
+        tl::enums::PeerNotifySettings::Settings(settings) => settings
+            .mute_until
+            .is_some_and(|mute_until| i64::from(mute_until) > now_seconds),
     }
 }
 
@@ -159,13 +180,6 @@ fn now_unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn now_unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -207,10 +221,10 @@ mod tests {
     }
 
     #[test]
-    fn silent_peer_settings_count_as_muted() {
+    fn silent_peer_settings_do_not_count_as_muted() {
         let now = 1_000;
 
-        assert!(peer_notify_settings_muted_at(
+        assert!(!peer_notify_settings_muted_at(
             &settings_with(Some(true), None),
             now
         ));
@@ -266,5 +280,95 @@ mod tests {
         cache.apply_raw_update(&unmuted_update);
 
         assert!(!cache.muted_chat_ids.contains(&42));
+    }
+
+    #[test]
+    fn global_notify_settings_do_not_suppress_individual_chats() {
+        let mut cache = NotificationMuteCache::default();
+
+        let muted_update = tl::types::UpdateNotifySettings {
+            peer: tl::enums::NotifyPeer::NotifyChats,
+            notify_settings: settings(Some(i32::MAX)),
+        }
+        .into();
+        cache.apply_raw_update(&muted_update);
+
+        assert!(cache.muted_chat_ids.is_empty());
+        assert!(cache.archived_chat_ids.is_empty());
+    }
+
+    #[test]
+    fn archived_dialogs_are_delivery_suppressed() {
+        let dialog = tl::types::Dialog {
+            pinned: false,
+            unread_mark: false,
+            view_forum_as_messages: false,
+            peer: tl::types::PeerChannel { channel_id: 42 }.into(),
+            top_message: 1,
+            read_inbox_max_id: 0,
+            read_outbox_max_id: 0,
+            unread_count: 0,
+            unread_mentions_count: 0,
+            unread_reactions_count: 0,
+            notify_settings: settings(Some(0)),
+            pts: None,
+            draft: None,
+            folder_id: Some(1),
+            ttl_period: None,
+        };
+
+        assert!(dialog_raw_archived(&dialog.into()));
+    }
+
+    #[test]
+    fn folder_peer_updates_refresh_archive_cache() {
+        let mut cache = NotificationMuteCache::default();
+
+        let archived_update: tl::enums::Update = tl::types::UpdateFolderPeers {
+            folder_peers: vec![tl::types::FolderPeer {
+                peer: tl::types::PeerChannel { channel_id: 42 }.into(),
+                folder_id: 1,
+            }
+            .into()],
+            pts: 1,
+            pts_count: 1,
+        }
+        .into();
+        cache.apply_raw_update(&archived_update);
+
+        assert!(cache.chat_suppressed(42));
+
+        let unarchived_update: tl::enums::Update = tl::types::UpdateFolderPeers {
+            folder_peers: vec![tl::types::FolderPeer {
+                peer: tl::types::PeerChannel { channel_id: 42 }.into(),
+                folder_id: 0,
+            }
+            .into()],
+            pts: 2,
+            pts_count: 1,
+        }
+        .into();
+        cache.apply_raw_update(&unarchived_update);
+
+        assert!(!cache.chat_suppressed(42));
+    }
+
+    #[test]
+    fn unmute_does_not_clear_archive_suppression() {
+        let mut cache = NotificationMuteCache::default();
+        cache.set_chat_archived(42, true);
+        let peer: tl::enums::NotifyPeer = tl::types::NotifyPeer {
+            peer: tl::types::PeerChannel { channel_id: 42 }.into(),
+        }
+        .into();
+        let unmuted_update = tl::types::UpdateNotifySettings {
+            peer,
+            notify_settings: settings(Some(0)),
+        }
+        .into();
+
+        cache.apply_raw_update(&unmuted_update);
+
+        assert!(cache.chat_suppressed(42));
     }
 }

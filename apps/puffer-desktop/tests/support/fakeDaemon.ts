@@ -59,6 +59,10 @@ type WorkflowSnapshotFixture = {
   monitor_task_error?: string | null;
 };
 
+type MonitorHistoryFixture = {
+  messages: JsonRecord[];
+};
+
 type ConnectorSetupQuestionFixture = {
   type: "input" | "choice";
   header: string;
@@ -287,6 +291,7 @@ export class FakeDaemon {
     defaultProvider: "codex",
     defaultModel: "test-model"
   };
+  private secrets: JsonRecord[] = [];
   private permissions: JsonRecord = {
     path: "/tmp/puffer/.puffer/permissions.json",
     tools: { bash: "ask" }
@@ -329,12 +334,30 @@ export class FakeDaemon {
     }
   ];
   private readonly protocol: "legacy" | "real";
+  private networkProxy: JsonRecord = {
+    enabled: false,
+    selected: "local",
+    bypass: ["localhost", "127.0.0.1", "::1"],
+    proxies: [
+      {
+        id: "local",
+        scheme: "socks5",
+        host: "127.0.0.1",
+        port: 7890,
+        username: null,
+        hasPassword: false,
+        uri: "socks5://127.0.0.1:7890"
+      }
+    ],
+    lastTest: null
+  };
   private readonly activeTurnIds = new Set<string>();
   private readonly pendingConnectorTurns = new Map<string, {
-    sessionId: string;
+    eventChannel: string;
     connectorSlug: string;
     connectionSlug: string;
   }>();
+  private connectorSetupCompletionDelayMs = 0;
   private connectorSetupQuestions: ConnectorSetupQuestionFixture[] = [
     {
       type: "input",
@@ -576,6 +599,7 @@ export class FakeDaemon {
         monitor_connection: "telegram-user",
         monitor_connector: "telegram-login",
         monitor_memory_path: "/tmp/telegram-user.md",
+        monitor_envelope_id: "env-monitor-1",
         ignored: false,
         actions: [
           {
@@ -597,6 +621,47 @@ export class FakeDaemon {
       }
     ],
     monitor_task_error: null
+  };
+  private monitorHistory: MonitorHistoryFixture = {
+    messages: [
+      {
+        idx: 1,
+        run_id: "run-monitor-1",
+        workflow_slug: "monitor-telegram-user",
+        connection_slug: "telegram-user",
+        connector_slug: "telegram-login",
+        envelope_id: "env-monitor-1",
+        received_at_ms: now - 16_000,
+        topic: "telegram-user",
+        kind: "message",
+        dedup_key: "msg-1",
+        summary: "Telegram from Alice: deployment status?",
+        text: "Alice asked whether the deployment is finished.",
+        payload: {
+          chat_title: "Support",
+          sender_username: "alice",
+          message: "deployment status?"
+        },
+        action_log: [
+          {
+            action: "triage_agent",
+            status: "completed",
+            summary: "Created monitor task monitor-1.",
+            started_at_ms: now - 15_500,
+            ended_at_ms: now - 15_000,
+            usage: {
+              input_tokens: 40,
+              output_tokens: 8,
+              cache_read_tokens: 10,
+              cache_creation_tokens: 0
+            }
+          }
+        ],
+        status: "completed",
+        started_at_ms: now - 15_500,
+        ended_at_ms: now - 15_000
+      }
+    ]
   };
   private nextTab = 2;
   private nextPty = 1;
@@ -662,6 +727,20 @@ export class FakeDaemon {
 
   setProviderModels(providerId: string, models: JsonRecord[]): void {
     this.providerModels[providerId] = models;
+  }
+
+  setNetworkProxy(networkProxy: JsonRecord): void {
+    this.networkProxy = {
+      ...networkProxy,
+      bypass: Array.isArray(networkProxy.bypass) ? [...networkProxy.bypass] : [],
+      proxies: Array.isArray(networkProxy.proxies)
+        ? networkProxy.proxies.map((proxy) => ({ ...(proxy as JsonRecord) }))
+        : [],
+      lastTest:
+        typeof networkProxy.lastTest === "object" && networkProxy.lastTest !== null
+          ? { ...(networkProxy.lastTest as JsonRecord) }
+          : null
+    };
   }
 
   setBrowserTabs(sessionId: string, state: TabSet): void {
@@ -740,11 +819,21 @@ export class FakeDaemon {
     };
   }
 
+  setMonitorHistory(history: MonitorHistoryFixture): void {
+    this.monitorHistory = {
+      messages: history.messages.map((message) => ({ ...message }))
+    };
+  }
+
   setConnectorSetupQuestions(questions: ConnectorSetupQuestionFixture[]): void {
     this.connectorSetupQuestions = questions.map((question) => ({
       ...question,
       options: question.options?.map((option) => ({ ...option })) ?? []
     }));
+  }
+
+  setConnectorSetupCompletionDelay(ms: number): void {
+    this.connectorSetupCompletionDelayMs = Math.max(0, ms);
   }
 
   socketCount(): number {
@@ -1000,6 +1089,8 @@ export class FakeDaemon {
         return this.setDesktopPin(request.params);
       case "list_grouped_sessions":
         return this.groupedSessions();
+      case "list_grouped_sessions_page":
+        return this.groupedSessionsPage(request.params);
       case "load_session_detail":
         return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
       case "rename_session":
@@ -1018,6 +1109,8 @@ export class FakeDaemon {
         return this.runAgentTurn(request.params);
       case "dispatch_slash_command":
         return this.runAgentTurn(request.params);
+      case "start_connector_setup":
+        return this.startConnectorSetup(request.params);
       case "cancel_turn": {
         const turnId = String(request.params.turnId ?? "");
         if (this.activeTurnIds.has(turnId)) {
@@ -1040,6 +1133,16 @@ export class FakeDaemon {
         return this.localModelSnapshot();
       case "install_local_model":
         return this.installLocalModel();
+      case "save_proxy_settings":
+        return this.saveProxySettings(request.params);
+      case "save_secret":
+        return this.saveSecret(request.params);
+      case "delete_secret":
+        return this.deleteSecret(request.params);
+      case "import_chrome_secrets":
+        return this.importChromeSecrets();
+      case "test_proxy":
+        return this.testProxy(request.params);
       case "list_permissions":
         return this.permissions;
       case "save_permissions":
@@ -1083,6 +1186,9 @@ export class FakeDaemon {
         return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
       case "workflow_list":
         return this.workflowListResponse();
+      case "task_monitor_history_list":
+      case "monitor_history_list":
+        return this.monitorHistory;
       case "workflow_save":
         return this.saveWorkflow(request.params);
       case "workflow_binding_create":
@@ -1399,9 +1505,38 @@ export class FakeDaemon {
     const connectMatch = /^\/connect\s+([a-z0-9-]+)\s+([a-z0-9-]+)$/i.exec(message);
     if (connectMatch) {
       const [, connectorSlug, connectionSlug] = connectMatch;
-      this.pendingConnectorTurns.set(turnId, { sessionId, connectorSlug, connectionSlug });
+      this.pendingConnectorTurns.set(turnId, {
+        eventChannel: `session:${sessionId}:event`,
+        connectorSlug,
+        connectionSlug
+      });
       setTimeout(() => {
         this.emit(`session:${sessionId}:event`, {
+          type: "user-question-request",
+          turnId,
+          requestId: "connector-setup",
+          questions: this.connectorSetupQuestions.map((question) => ({
+            ...question,
+            options: question.options?.map((option) => ({ ...option })) ?? []
+          }))
+        });
+      }, 0);
+    }
+    return { turnId };
+  }
+
+  private startConnectorSetup(params: JsonRecord): JsonRecord {
+    const setupId = String(params.setupId ?? "connector-setup");
+    const turnId = `turn-${setupId}`;
+    const message = String(params.message ?? "").trim();
+    const connectMatch = /^\/connect\s+([a-z0-9-]+)\s+([a-z0-9-]+)$/i.exec(message);
+    this.activeTurnIds.add(turnId);
+    if (connectMatch) {
+      const [, connectorSlug, connectionSlug] = connectMatch;
+      const eventChannel = `connector-setup:${setupId}:event`;
+      this.pendingConnectorTurns.set(turnId, { eventChannel, connectorSlug, connectionSlug });
+      setTimeout(() => {
+        this.emit(eventChannel, {
           type: "user-question-request",
           turnId,
           requestId: "connector-setup",
@@ -1442,12 +1577,12 @@ export class FakeDaemon {
       ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
     };
     setTimeout(() => {
-      this.emit(`session:${pending.sessionId}:event`, {
+      this.emit(pending.eventChannel, {
         type: "turn-complete",
         turnId,
         assistantText: `Created connector connection ${pending.connectionSlug}.`
       });
-    }, 0);
+    }, this.connectorSetupCompletionDelayMs);
     return {};
   }
 
@@ -1532,6 +1667,96 @@ export class FakeDaemon {
         typeof params.defaultModel === "string" ? params.defaultModel : null;
     }
     return this.settingsSnapshot();
+  }
+
+  private testProxy(params: JsonRecord): JsonRecord {
+    const proxyId = String(params.proxyId ?? this.networkProxy.selected ?? "local");
+    const result = {
+      proxyId,
+      ok: true,
+      message: "Connected to https://www.gstatic.com/generate_204 with HTTP 204",
+      latencyMs: 848,
+      statusCode: 204
+    };
+    this.networkProxy = {
+      ...this.networkProxy,
+      lastTest: result
+    };
+    return result;
+  }
+
+  private saveProxySettings(params: JsonRecord): JsonRecord {
+    this.networkProxy = {
+      enabled: params.enabled === true,
+      selected: typeof params.selected === "string" ? params.selected : null,
+      bypass: Array.isArray(params.bypass) ? params.bypass.map(String) : [],
+      proxies: Array.isArray(params.proxies)
+        ? params.proxies.map((proxy) => {
+            const item = proxy as JsonRecord;
+            const scheme = String(item.scheme ?? "socks5");
+            const host = String(item.host ?? "");
+            const port = Number(item.port ?? 0);
+            return {
+              id: String(item.id ?? ""),
+              scheme,
+              host,
+              port,
+              username: typeof item.username === "string" ? item.username : null,
+              hasPassword: item.keepPassword === true || typeof item.password === "string",
+              uri: `${scheme}://${host}:${port}`
+            };
+          })
+        : [],
+      lastTest: null
+    };
+    return this.settingsSnapshot();
+  }
+
+  private saveSecret(params: JsonRecord): JsonRecord {
+    const id = typeof params.id === "string" && params.id.trim() ? params.id : `sec_${Date.now()}`;
+    const now = Date.now();
+    const existing = this.secrets.findIndex((secret) => secret.id === id);
+    const summary = {
+      id,
+      label: String(params.label ?? "Secret"),
+      username: typeof params.username === "string" ? params.username : null,
+      origin: typeof params.origin === "string" ? params.origin : null,
+      source: "manual",
+      createdAtMs: existing >= 0 ? Number(this.secrets[existing].createdAtMs ?? now) : now,
+      updatedAtMs: now
+    };
+    if (existing >= 0) {
+      this.secrets[existing] = summary;
+    } else {
+      this.secrets.push(summary);
+    }
+    return this.settingsSnapshot();
+  }
+
+  private deleteSecret(params: JsonRecord): JsonRecord {
+    const id = String(params.id ?? "");
+    this.secrets = this.secrets.filter((secret) => secret.id !== id);
+    return this.settingsSnapshot();
+  }
+
+  private importChromeSecrets(): JsonRecord {
+    const now = Date.now();
+    this.secrets = [
+      ...this.secrets,
+      {
+        id: `sec_chrome_${now}`,
+        label: "Chrome developer@example.com @ example.test",
+        username: "developer@example.com",
+        origin: "https://example.test",
+        source: "chrome",
+        createdAtMs: now,
+        updatedAtMs: now
+      }
+    ];
+    return {
+      settings: this.settingsSnapshot(),
+      report: { imported: 1, skipped: 0, errors: [] }
+    };
   }
 
   private loginProvider(params: JsonRecord, kind: "api_key" | "oauth"): JsonRecord {
@@ -1629,6 +1854,12 @@ export class FakeDaemon {
   }
 
   private settingsSnapshot(): JsonRecord {
+    const networkBypass = Array.isArray(this.networkProxy.bypass)
+      ? this.networkProxy.bypass.map(String)
+      : [];
+    const networkProxies = Array.isArray(this.networkProxy.proxies)
+      ? this.networkProxy.proxies.map((proxy) => ({ ...(proxy as JsonRecord) }))
+      : [];
     return {
       workspaceRoot: this.workspaceRoot,
       workspaceConfigFile: `${this.workspaceRoot}/.puffer/config.json`,
@@ -1682,7 +1913,23 @@ export class FakeDaemon {
           sourceKind: "test",
           sourcePath: null
         }
-      ]
+      ],
+      networkProxy: {
+        ...this.networkProxy,
+        bypass: networkBypass,
+        proxies: networkProxies,
+        lastTest:
+          typeof this.networkProxy.lastTest === "object" && this.networkProxy.lastTest !== null
+            ? { ...(this.networkProxy.lastTest as JsonRecord) }
+            : null
+      },
+      secrets: {
+        storeFile: "/tmp/home/.puffer/secrets.json",
+        keySource: "local-key-file",
+        chromeImportSupported: true,
+        items: this.secrets.map((secret) => ({ ...secret }))
+      },
+      browserProfiles: []
     };
   }
 
@@ -1710,6 +1957,37 @@ export class FakeDaemon {
       group.tags = this.projectTags.get(folderPath) ?? [];
     }
     return Array.from(groups.values());
+  }
+
+  private groupedSessionsPage(params: JsonRecord): JsonRecord {
+    const offset = Math.max(0, Number(params.offset ?? 0) || 0);
+    const limit = Math.max(1, Number(params.limit ?? 30) || 30);
+    const entries = this.groupedSessions().flatMap((group) =>
+      ((group.sessions as JsonRecord[] | undefined) ?? []).map((sessionItem) => ({
+        group,
+        session: sessionItem
+      }))
+    );
+    const pageGroups = new Map<string, JsonRecord>();
+    for (const { group, session: sessionItem } of entries.slice(offset, offset + limit)) {
+      const folderId = String(group.folderId ?? group.folderPath ?? "");
+      const pageGroup = pageGroups.get(folderId) ?? {
+        ...group,
+        sessionCount: 0,
+        sessions: []
+      };
+      (pageGroup.sessions as JsonRecord[]).push(sessionItem);
+      pageGroup.sessionCount = (pageGroup.sessions as JsonRecord[]).length;
+      pageGroups.set(folderId, pageGroup);
+    }
+    return {
+      groups: Array.from(pageGroups.values()),
+      offset,
+      limit,
+      returnedSessions: entries.slice(offset, offset + limit).length,
+      totalSessions: entries.length,
+      hasMore: offset + limit < entries.length
+    };
   }
 
   private sessionDetail(sessionId: string): JsonRecord {

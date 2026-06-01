@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,8 @@ use crate::daemon::ServerEnvelope;
 
 use super::chrome::{
     close_page_target, create_page_target, initial_page_target, read_devtools_ws_url,
-    resolve_chrome_executable, ChromePageTarget,
+    read_remote_devtools_ws_url, resolve_chrome_executable, wait_for_initial_page_target,
+    ChromePageTarget,
 };
 use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
@@ -31,6 +32,10 @@ use super::screenshot::{
     BrowserCaptureScreenshotOptions, BrowserCapturedScreenshot, BrowserScreenshotFormat,
 };
 use super::selection::{parse_copy_selection_response, selection_eval_expression};
+use super::session_launch::{
+    cef_remote_debugging_port, configure_chrome_command, remove_stale_devtools_port,
+};
+use super::state_events::{emit_state, emit_state_error, update_state_from_eval};
 use super::upload::{
     parse_upload_handle_response, parse_upload_runtime_response, parse_upload_set_files_response,
     upload_finalize_function, upload_prepare_function,
@@ -43,9 +48,10 @@ use super::{
     parse_evaluation_response, send_cdp, BrowserCopySelection, BrowserCursor, BrowserEvaluation,
     BrowserHistoryDirection, BrowserInputEvent, BrowserState, CDP_READ_TIMEOUT, DEFAULT_URL,
 };
-use crate::browser_profiles::{prepare_managed_profile, ChromeProfileLaunch};
+use crate::browser_profiles::prepare_managed_profile;
 
 type UploadReply = Sender<std::result::Result<(), String>>;
+const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(super) struct BrowserRootSession {
@@ -55,7 +61,8 @@ pub(super) struct BrowserRootSession {
 struct BrowserRootState {
     profile_dir: PathBuf,
     browser_ws: String,
-    child: Child,
+    child: Option<Child>,
+    owns_targets: bool,
     reusable_target: Option<ChromePageTarget>,
     last_active: Instant,
 }
@@ -71,25 +78,25 @@ pub(super) struct BrowserSession {
 
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
-    pub(super) fn spawn(
-        profile_dir: PathBuf,
-        selected_profile: Option<String>,
-        width: u32,
-        height: u32,
-    ) -> Result<Self> {
+    pub(super) fn spawn(profile_dir: PathBuf, width: u32, height: u32) -> Result<Self> {
+        if let Some(root) = Self::spawn_cef_remote_root(&profile_dir)? {
+            return Ok(root);
+        }
         let chrome = resolve_chrome_executable()
             .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
-        super::chrome::terminate_profile_processes(&profile_dir);
-        let launch = prepare_managed_profile(&profile_dir, selected_profile.as_deref())?;
-        remove_stale_devtools_port(&profile_dir)?;
+        let launch = prepare_managed_profile(&profile_dir)?;
+        if launch.owns_user_data_dir {
+            super::chrome::terminate_profile_processes(&launch.user_data_dir);
+            remove_stale_devtools_port(&launch.user_data_dir)?;
+        }
 
         let mut command = Command::new(&chrome);
-        configure_chrome_command(&mut command, &profile_dir, &launch, width, height);
+        configure_chrome_command(&mut command, &launch, width, height);
         let mut child = command
             .spawn()
             .with_context(|| format!("launch Chrome at {}", chrome.display()))?;
 
-        let browser_ws = match read_devtools_ws_url(&mut child, &profile_dir) {
+        let browser_ws = match read_devtools_ws_url(&mut child, &launch.user_data_dir) {
             Ok(url) => url,
             Err(error) => {
                 let _ = child.kill();
@@ -105,13 +112,44 @@ impl BrowserRootSession {
         };
         Ok(Self {
             inner: Arc::new(Mutex::new(BrowserRootState {
-                profile_dir,
+                profile_dir: launch.user_data_dir,
                 browser_ws,
-                child,
+                child: Some(child),
+                owns_targets: true,
                 reusable_target,
                 last_active: Instant::now(),
             })),
         })
+    }
+
+    fn spawn_cef_remote_root(profile_dir: &PathBuf) -> Result<Option<Self>> {
+        let Some(port) = cef_remote_debugging_port() else {
+            return Ok(None);
+        };
+        let browser_ws = match read_remote_devtools_ws_url(port, Duration::from_millis(500)) {
+            Ok(browser_ws) => browser_ws,
+            Err(_) => return Ok(None),
+        };
+        let reusable_target =
+            match wait_for_initial_page_target(&browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)
+                .context("read CEF DevTools page target")?
+            {
+                Some(target) => target,
+                None => match create_page_target(&browser_ws, DEFAULT_URL) {
+                    Ok(target) => target,
+                    Err(_) => return Ok(None),
+                },
+            };
+        Ok(Some(Self {
+            inner: Arc::new(Mutex::new(BrowserRootState {
+                profile_dir: profile_dir.clone(),
+                browser_ws,
+                child: None,
+                owns_targets: false,
+                reusable_target: Some(reusable_target),
+                last_active: Instant::now(),
+            })),
+        }))
     }
 
     pub(super) fn allocate_target(&self) -> Result<ChromePageTarget> {
@@ -121,29 +159,47 @@ impl BrowserRootSession {
         if let Some(target) = inner.reusable_target.take() {
             return Ok(target);
         }
-        create_page_target(&inner.browser_ws, DEFAULT_URL)
+        if inner.owns_targets {
+            create_page_target(&inner.browser_ws, DEFAULT_URL)
+        } else {
+            create_page_target(&inner.browser_ws, DEFAULT_URL).or_else(|create_error| {
+                wait_for_initial_page_target(&inner.browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "CEF DevTools endpoint did not provide a page target and creating one failed: {create_error}"
+                        )
+                    })
+            })
+        }
     }
 
-    pub(super) fn close_target(&self, target_id: &str) -> Result<()> {
+    pub(super) fn close_target(&self, target: &ChromePageTarget) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         touch_root(&mut inner);
         ensure_root_alive(&mut inner)?;
-        close_page_target(&inner.browser_ws, target_id)
+        if inner.owns_targets || target.close_on_release {
+            close_page_target(&inner.browser_ws, &target.target_id)
+        } else {
+            Ok(())
+        }
     }
 
     /// Terminates the shared Chrome process for this root owner.
     pub(super) fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.reusable_target = None;
-        match inner
-            .child
-            .try_wait()
-            .context("check Chrome shutdown status")?
-        {
+        if let Some(target) = inner.reusable_target.take() {
+            if inner.owns_targets || target.close_on_release {
+                let _ = close_page_target(&inner.browser_ws, &target.target_id);
+            }
+        }
+        let Some(child) = inner.child.as_mut() else {
+            return Ok(());
+        };
+        match child.try_wait().context("check Chrome shutdown status")? {
             Some(_) => Ok(()),
             None => {
-                let _ = inner.child.kill();
-                let _ = inner.child.wait();
+                let _ = child.kill();
+                let _ = child.wait();
                 Ok(())
             }
         }
@@ -162,9 +218,14 @@ impl BrowserRootSession {
         let mut inner = self.inner.lock().unwrap();
         inner
             .child
-            .try_wait()
-            .map(|status| status.is_none())
-            .unwrap_or(false)
+            .as_mut()
+            .map(|child| {
+                child
+                    .try_wait()
+                    .map(|status| status.is_none())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true)
     }
 }
 
@@ -464,7 +525,7 @@ fn run_cdp_worker(
         Ok((socket, _)) => socket,
         Err(error) => {
             emit_state_error(&events, &channel_state, error);
-            let _ = root.close_target(&target.target_id);
+            let _ = root.close_target(&target);
             alive.store(false, Ordering::SeqCst);
             return;
         }
@@ -543,7 +604,7 @@ fn run_cdp_worker(
         }
     }
     let _ = socket.close(None);
-    let _ = root.close_target(&target.target_id);
+    let _ = root.close_target(&target);
     alive.store(false, Ordering::SeqCst);
     if let Some(reply) = shutdown_reply {
         let _ = reply.send(());
@@ -879,100 +940,11 @@ fn handle_cdp_message(
     }
 }
 
-fn update_state_from_eval(
-    events: &broadcast::Sender<ServerEnvelope>,
-    channel_state: &str,
-    state: &Arc<Mutex<BrowserState>>,
-    value: &Value,
-) {
-    let Some(result) = value.pointer("/result/result/value") else {
-        return;
-    };
-    let mut state = state.lock().unwrap();
-    if let Some(url) = result.get("url").and_then(Value::as_str) {
-        state.url = url.to_string();
-    }
-    if let Some(title) = result.get("title").and_then(Value::as_str) {
-        state.title = title.to_string();
-    }
-    state.loading = false;
-    emit_state(events, channel_state, &state);
-}
-
-fn emit_state(
-    events: &broadcast::Sender<ServerEnvelope>,
-    channel_state: &str,
-    state: &BrowserState,
-) {
-    let _ = events.send(ServerEnvelope::Event {
-        event: channel_state.to_string(),
-        payload: json!({
-            "url": state.url,
-            "title": state.title,
-            "loading": state.loading,
-            "width": state.width,
-            "height": state.height,
-            "popOut": false
-        }),
-    });
-}
-
-fn emit_state_error<E: std::fmt::Display>(
-    events: &broadcast::Sender<ServerEnvelope>,
-    channel_state: &str,
-    error: E,
-) {
-    let _ = events.send(ServerEnvelope::Event {
-        event: channel_state.to_string(),
-        payload: json!({
-            "url": DEFAULT_URL,
-            "title": "",
-            "loading": false,
-            "error": error.to_string(),
-            "popOut": false
-        }),
-    });
-}
-
-fn remove_stale_devtools_port(profile_dir: &std::path::Path) -> Result<()> {
-    match std::fs::remove_file(profile_dir.join("DevToolsActivePort")) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("remove stale Chrome DevToolsActivePort"),
-    }
-}
-
-fn configure_chrome_command(
-    command: &mut Command,
-    profile_dir: &std::path::Path,
-    launch: &ChromeProfileLaunch,
-    width: u32,
-    height: u32,
-) {
-    command
-        .arg("--headless=new")
-        .arg("--remote-debugging-port=0")
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg("--disable-background-networking")
-        .arg("--disable-features=Translate")
-        .arg("--disable-gpu")
-        .arg("--allow-file-access")
-        .arg("--allow-file-access-from-files")
-        .arg("--force-color-profile=srgb")
-        .arg(format!("--window-size={width},{height}"))
-        .arg(DEFAULT_URL)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    if let Some(profile_directory) = &launch.profile_directory {
-        command.arg(format!("--profile-directory={profile_directory}"));
-    }
-}
-
 fn ensure_root_alive(inner: &mut BrowserRootState) -> Result<()> {
-    if let Some(status) = inner.child.try_wait().context("check Chrome root status")? {
+    let Some(child) = inner.child.as_mut() else {
+        return Ok(());
+    };
+    if let Some(status) = child.try_wait().context("check Chrome root status")? {
         bail!(
             "Chrome root for profile {} exited unexpectedly: {status}",
             inner.profile_dir.display()

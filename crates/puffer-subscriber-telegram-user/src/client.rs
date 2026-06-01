@@ -5,16 +5,14 @@
 //! infinite `next_update` loop that emits ndjson message events.
 
 use anyhow::Context as _;
-use grammers_client::{session::Session, Client, Config, Update};
+use grammers_client::{session::Session, Client, Config};
 use puffer_subscriber_runtime::SubscriberCommand;
 use serde_json::json;
-use std::time::Duration;
-use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
 use crate::actions::handle_telegram_act;
 use crate::commands::CommandStream;
-use crate::delivery::{catch_up_recent_messages, emit_message_if_new, DeliveryCursor};
+use crate::delivery::DeliveryCursor;
 use crate::events::emit_control;
 use crate::import::{import_tdata, TdataImportOptions, TdataImportOutcome};
 use crate::login;
@@ -25,8 +23,18 @@ use crate::qr_login;
 use crate::state::{
     default_init_params, resolve_api_credentials, LoginState, PersistedCredentials, SkillEnv,
 };
+use crate::updates::{handle_live_update, spawn_live_update_task, LiveUpdateEvent};
 
-const TELEGRAM_CATCH_UP_INTERVAL: Duration = Duration::from_secs(30);
+enum UpdateLoopExit {
+    StdinClosed,
+    ReauthStarted,
+}
+
+enum RuntimeCommandOutcome {
+    Continue,
+    ReauthStarted,
+    ClientReplaced,
+}
 
 /// Runs the Telegram user subscriber until stdin closes or a fatal error
 /// occurs. The caller is expected to already be inside a Tokio runtime
@@ -95,17 +103,24 @@ pub async fn run() -> anyhow::Result<()> {
                 None => continue,
             },
             SubscriberCommand::TelegramQrLoginStart { api_id, api_hash } => {
-                if let Some(qr_client) =
-                    qr_login::start(&env, &mut qr_state, api_id, api_hash).await?
+                match qr_login::start(&env, &mut login_state, &mut qr_state, api_id, api_hash)
+                    .await?
                 {
-                    client = Some(qr_client);
+                    qr_login::QrLoginOutcome::Pending => {}
+                    qr_login::QrLoginOutcome::AwaitingPassword(qr_client)
+                    | qr_login::QrLoginOutcome::Complete(qr_client) => {
+                        client = Some(qr_client);
+                    }
                 }
             }
             SubscriberCommand::TelegramQrLoginWait { timeout_seconds } => {
-                if let Some(qr_client) =
-                    qr_login::wait(&env, &mut qr_state, timeout_seconds).await?
+                match qr_login::wait(&env, &mut login_state, &mut qr_state, timeout_seconds).await?
                 {
-                    client = Some(qr_client);
+                    qr_login::QrLoginOutcome::Pending => {}
+                    qr_login::QrLoginOutcome::AwaitingPassword(qr_client)
+                    | qr_login::QrLoginOutcome::Complete(qr_client) => {
+                        client = Some(qr_client);
+                    }
                 }
             }
             SubscriberCommand::TelegramImportTdata {
@@ -215,7 +230,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     loop {
         if authorized {
-            run_update_loop(
+            match run_update_loop(
                 &env,
                 &mut commands,
                 &mut client,
@@ -224,8 +239,14 @@ pub async fn run() -> anyhow::Result<()> {
                 &mut delivery_cursor,
                 &mut notification_mutes,
             )
-            .await?;
-            return Ok(());
+            .await?
+            {
+                UpdateLoopExit::StdinClosed => return Ok(()),
+                UpdateLoopExit::ReauthStarted => {
+                    authorized = false;
+                    continue;
+                }
+            }
         }
 
         let cmd = commands.next().await?;
@@ -257,19 +278,32 @@ pub async fn run() -> anyhow::Result<()> {
                 login::start(&env, &mut login_state, phone, api_id, api_hash).await?;
             }
             SubscriberCommand::TelegramQrLoginStart { api_id, api_hash } => {
-                if let Some(qr_client) =
-                    qr_login::start(&env, &mut qr_state, api_id, api_hash).await?
+                match qr_login::start(&env, &mut login_state, &mut qr_state, api_id, api_hash)
+                    .await?
                 {
-                    client = qr_client;
-                    authorized = true;
+                    qr_login::QrLoginOutcome::Pending => {}
+                    qr_login::QrLoginOutcome::AwaitingPassword(qr_client) => {
+                        client = qr_client;
+                        authorized = false;
+                    }
+                    qr_login::QrLoginOutcome::Complete(qr_client) => {
+                        client = qr_client;
+                        authorized = true;
+                    }
                 }
             }
             SubscriberCommand::TelegramQrLoginWait { timeout_seconds } => {
-                if let Some(qr_client) =
-                    qr_login::wait(&env, &mut qr_state, timeout_seconds).await?
+                match qr_login::wait(&env, &mut login_state, &mut qr_state, timeout_seconds).await?
                 {
-                    client = qr_client;
-                    authorized = true;
+                    qr_login::QrLoginOutcome::Pending => {}
+                    qr_login::QrLoginOutcome::AwaitingPassword(qr_client) => {
+                        client = qr_client;
+                        authorized = false;
+                    }
+                    qr_login::QrLoginOutcome::Complete(qr_client) => {
+                        client = qr_client;
+                        authorized = true;
+                    }
                 }
             }
             SubscriberCommand::TelegramImportTdata {
@@ -405,60 +439,73 @@ async fn run_update_loop(
     qr_state: &mut Option<qr_login::QrLoginState>,
     delivery_cursor: &mut DeliveryCursor,
     notification_mutes: &mut NotificationMuteCache,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<UpdateLoopExit> {
     emit_control(&env.topic, "ready", json!({}))?;
-    catch_up_recent_messages(env, client, delivery_cursor, notification_mutes).await?;
-    let mut catch_up_interval = tokio::time::interval(TELEGRAM_CATCH_UP_INTERVAL);
-    catch_up_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    catch_up_interval.tick().await;
+    crate::startup::hydrate_dialog_state(env, client, delivery_cursor, notification_mutes).await?;
+    persist_live_session_state(env, client);
+    let (mut live_updates, mut live_task) = spawn_live_update_task(env.clone(), client.clone());
     info!("entering telegram update loop");
 
     loop {
         tokio::select! {
             biased;
+            update = live_updates.recv() => {
+                let Some(update) = update else {
+                    live_task.abort();
+                    return Err(anyhow::anyhow!("telegram live update task stopped"));
+                };
+                if let LiveUpdateEvent::Error(error) = update {
+                    live_task.abort();
+                    error!(%error, "next_update failed");
+                    return Err(anyhow::anyhow!("next_update: {error}"));
+                }
+                handle_live_update(
+                    env,
+                    delivery_cursor,
+                    notification_mutes,
+                    update,
+                )
+                .await?;
+                persist_live_session_state(env, client);
+            }
             cmd = commands.next() => {
                 let Some(cmd) = cmd? else {
                     info!("stdin closed; shutting down update loop");
-                    return Ok(());
+                    live_task.abort();
+                    return Ok(UpdateLoopExit::StdinClosed);
                 };
-                handle_runtime_command(env, client, login_state, qr_state, cmd).await?;
-            }
-            _ = catch_up_interval.tick() => {
-                if let Err(err) = catch_up_recent_messages(
-                    env,
-                    client,
-                    delivery_cursor,
-                    notification_mutes,
-                ).await {
-                    warn!(error = %err, "telegram history catch-up failed");
-                }
-            }
-            update = client.next_update() => {
-                match update {
-                    Ok(Update::NewMessage(msg)) => {
-                        if let Err(err) =
-                            emit_message_if_new(env, client, delivery_cursor, notification_mutes, &msg).await
-                        {
-                            error!(error = %err, "failed to emit message event");
-                        }
+                match handle_runtime_command(env, client, login_state, qr_state, cmd).await? {
+                    RuntimeCommandOutcome::Continue => {}
+                    RuntimeCommandOutcome::ReauthStarted => {
+                        live_task.abort();
+                        return Ok(UpdateLoopExit::ReauthStarted);
                     }
-                    Ok(Update::Raw(raw)) => {
-                        notification_mutes.apply_raw_update(&raw);
-                    }
-                    Ok(_) => {
-                        // Silently ignore other update kinds for now. They
-                        // can be surfaced in later revisions (edits,
-                        // deletions, callback queries, ...).
-                    }
-                    Err(err) => {
-                        error!(error = %err, "next_update failed");
-                        // Propagate so the supervisor can restart us with
-                        // backoff; the session file preserves our auth key.
-                        return Err(anyhow::anyhow!("next_update: {err}"));
+                    RuntimeCommandOutcome::ClientReplaced => {
+                        live_task.abort();
+                        crate::startup::hydrate_dialog_state(
+                            env,
+                            client,
+                            delivery_cursor,
+                            notification_mutes,
+                        ).await?;
+                        persist_live_session_state(env, client);
+                        (live_updates, live_task) =
+                            spawn_live_update_task(env.clone(), client.clone());
                     }
                 }
             }
         }
+    }
+}
+
+fn persist_live_session_state(env: &SkillEnv, client: &Client) {
+    client.sync_update_state();
+    if let Err(error) = client.session().save_to_file(&env.session_path) {
+        warn!(
+            error = %error,
+            path = %env.session_path.display(),
+            "failed to persist Telegram live update session state"
+        );
     }
 }
 
@@ -529,48 +576,19 @@ async fn handle_runtime_command(
     login_state: &mut LoginState,
     qr_state: &mut Option<qr_login::QrLoginState>,
     cmd: SubscriberCommand,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RuntimeCommandOutcome> {
     match cmd {
         SubscriberCommand::TelegramLoginStart {
             phone,
             api_id,
             api_hash,
         } => {
-            match emit_already_authorized(env, client).await {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    warn!(%error, "authorized status probe failed; re-requesting login code");
-                }
-            }
-            let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
-            let (resolved_id, resolved_hash) =
-                match resolve_api_credentials(api_id, api_hash, &persisted) {
-                    Ok(pair) => pair,
-                    Err(error) => {
-                        emit_control(
-                            &env.topic,
-                            "login_error",
-                            json!({ "error": error.to_string(), "phase": "credentials" }),
-                        )?;
-                        return Ok(());
-                    }
-                };
-            match client.request_login_code(&phone).await {
-                Ok(token) => {
-                    login_state.login_token = Some(token);
-                    login_state.phone = Some(phone.clone());
-                    login_state.api_id = Some(resolved_id);
-                    login_state.api_hash = Some(resolved_hash);
-                    emit_control(&env.topic, "login_awaiting_code", json!({ "phone": phone }))?;
-                }
-                Err(err) => {
-                    warn!(error = %err, "runtime request_login_code failed");
-                    emit_control(
-                        &env.topic,
-                        "login_error",
-                        json!({ "error": format!("request_login_code failed: {err}") }),
-                    )?;
-                }
+            *qr_state = None;
+            if let Some(login_client) =
+                login::start(env, login_state, phone, api_id, api_hash).await?
+            {
+                *client = login_client;
+                return Ok(RuntimeCommandOutcome::ReauthStarted);
             }
         }
         SubscriberCommand::TelegramLoginSubmitCode { code } => {
@@ -580,25 +598,30 @@ async fn handle_runtime_command(
             login::submit_password(env, login_state, client, password).await?;
         }
         SubscriberCommand::TelegramQrLoginStart { api_id, api_hash } => {
-            match emit_already_authorized(env, client).await {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    warn!(%error, "authorized status probe failed; starting qr login");
+            login_state.clear_tokens();
+            match qr_login::start(env, login_state, qr_state, api_id, api_hash).await? {
+                qr_login::QrLoginOutcome::Pending => {}
+                qr_login::QrLoginOutcome::AwaitingPassword(qr_client) => {
+                    *client = qr_client;
+                    return Ok(RuntimeCommandOutcome::ReauthStarted);
                 }
-            }
-            if let Some(qr_client) = qr_login::start(env, qr_state, api_id, api_hash).await? {
-                *client = qr_client;
+                qr_login::QrLoginOutcome::Complete(qr_client) => {
+                    *client = qr_client;
+                    return Ok(RuntimeCommandOutcome::ClientReplaced);
+                }
             }
         }
         SubscriberCommand::TelegramQrLoginWait { timeout_seconds } => {
-            match emit_already_authorized(env, client).await {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    warn!(%error, "authorized status probe failed; waiting for qr login");
+            match qr_login::wait(env, login_state, qr_state, timeout_seconds).await? {
+                qr_login::QrLoginOutcome::Pending => {}
+                qr_login::QrLoginOutcome::AwaitingPassword(qr_client) => {
+                    *client = qr_client;
+                    return Ok(RuntimeCommandOutcome::ReauthStarted);
                 }
-            }
-            if let Some(qr_client) = qr_login::wait(env, qr_state, timeout_seconds).await? {
-                *client = qr_client;
+                qr_login::QrLoginOutcome::Complete(qr_client) => {
+                    *client = qr_client;
+                    return Ok(RuntimeCommandOutcome::ClientReplaced);
+                }
             }
         }
         SubscriberCommand::TelegramImportTdata {
@@ -619,6 +642,7 @@ async fn handle_runtime_command(
             .await?
             {
                 *client = imported;
+                return Ok(RuntimeCommandOutcome::ClientReplaced);
             }
         }
         SubscriberCommand::TelegramAuthOk => {
@@ -680,7 +704,7 @@ async fn handle_runtime_command(
             }
         }
     }
-    Ok(())
+    Ok(RuntimeCommandOutcome::Continue)
 }
 
 async fn emit_auth_ok(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
@@ -844,18 +868,4 @@ fn import_payload(outcome: &TdataImportOutcome) -> serde_json::Value {
         "dc_id": outcome.dc_id,
         "session_path": outcome.session_path.display().to_string(),
     })
-}
-
-async fn emit_already_authorized(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
-    let user = client.get_me().await?;
-    emit_control(
-        &env.topic,
-        "login_complete",
-        json!({
-            "already_authorized": true,
-            "user_id": user.id(),
-            "first_name": user.first_name(),
-        }),
-    )?;
-    Ok(())
 }

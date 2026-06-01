@@ -37,8 +37,9 @@ mod telegram_e2e_tests;
 
 pub use action::{
     install_connector_action_executor, install_outbound, install_workflow_runner,
-    installed_workflow_runner, ActionDispatcher, ActionResult, BuiltinActionDispatcher,
-    ConnectorActionExecutor, Outbound, WorkflowActionRunner,
+    installed_workflow_runner, ActionDispatcher, ActionResult, ActionUsage,
+    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, WorkflowActionOutput,
+    WorkflowActionRunner,
 };
 pub use catalog::{
     builtin_connector_template, builtin_connector_templates, suggested_connection_slug,
@@ -64,8 +65,8 @@ pub use proxy::{
     AgentProxyDecision, AgentProxyStore, AgentProxyStoreError, TelegramBotAgentProxy,
 };
 pub use router::{
-    prefilter_passes, process_envelope, process_envelope_result, EnvelopeProcessResult,
-    RouterStats, SubscriptionRouter,
+    prefilter_passes, process_envelope, process_envelope_batch_result, process_envelope_result,
+    EnvelopeProcessResult, RouterStats, SubscriptionRouter,
 };
 pub use spec::{
     filter_matches, render_value_templates, validate_action_spec, validate_spec, ActionGraphNode,

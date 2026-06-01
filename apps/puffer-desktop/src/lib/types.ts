@@ -1,4 +1,5 @@
 export type InspectorTab = "latest-diff" | "history" | "tool-details";
+export type BrowserRenderer = "cef" | "screencast";
 export type AppView = "workspace" | "settings" | "login";
 
 export type TimelineKind =
@@ -256,6 +257,7 @@ export type DesktopPreferences = {
   launchInspectorOpen: boolean;
   defaultInspectorTab: InspectorTab;
   defaultInspectorWidth: number;
+  browserRenderer: BrowserRenderer;
   remoteEnabled: boolean;
   remoteTarget: string;
   remoteCwd: string;
@@ -285,7 +287,6 @@ export type SettingsConfig = {
   mascotEnabled: boolean;
   uiNoAltScreen: boolean;
   uiTmuxGoldenMode: boolean;
-  browserChromeProfile: string | null;
 };
 
 export type ResourceCounts = {
@@ -327,20 +328,101 @@ export type ProviderSummary = {
   sourcePath: string | null;
 };
 
-export type BrowserProfile = {
+export type ProxyScheme = "http" | "https" | "socks5" | "socks5h";
+
+export type SanitizedProxyEndpoint = {
   id: string;
-  name: string;
-  email: string | null;
-  googleAccounts: BrowserGoogleAccount[];
-  path: string;
-  isLastUsed: boolean;
-  isSelected: boolean;
+  scheme: ProxyScheme;
+  host: string;
+  port: number;
+  username: string | null;
+  hasPassword: boolean;
+  uri: string;
 };
 
-export type BrowserGoogleAccount = {
-  email: string;
-  name: string | null;
-  gaiaId: string | null;
+export type ProxyTestResult = {
+  proxyId: string | null;
+  ok: boolean;
+  message: string;
+  latencyMs: number | null;
+  statusCode: number | null;
+};
+
+export type NetworkProxySettings = {
+  enabled: boolean;
+  selected: string | null;
+  bypass: string[];
+  proxies: SanitizedProxyEndpoint[];
+  lastTest: ProxyTestResult | null;
+};
+
+export type DraftProxyEndpoint = {
+  id: string;
+  scheme: ProxyScheme;
+  host: string;
+  port: number;
+  username: string | null;
+  password: string | null;
+  keepPassword?: boolean;
+};
+
+export type SaveProxySettingsInput = {
+  enabled: boolean;
+  selected: string | null;
+  bypass: string[];
+  proxies: DraftProxyEndpoint[];
+};
+
+export type SecretSummary = {
+  id: string;
+  label: string;
+  username: string | null;
+  origin: string | null;
+  source: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type SecretsSettings = {
+  storeFile: string;
+  keySource: string;
+  chromeImportSupported: boolean;
+  items: SecretSummary[];
+};
+
+export type SaveSecretInput = {
+  id?: string | null;
+  label: string;
+  value: string;
+  username?: string | null;
+  origin?: string | null;
+};
+
+export type ChromeImportReport = {
+  imported: number;
+  skipped: number;
+  errors: string[];
+};
+
+export type ChromeSecretsImportResult = {
+  settings: SettingsSnapshot;
+  report: ChromeImportReport;
+};
+
+export type OpenAIRealtimeClientSecretOptions = {
+  providerId?: string;
+  model?: string;
+  voice?: string;
+  reasoningEffort?: string;
+  session?: Record<string, unknown>;
+};
+
+export type OpenAIRealtimeClientSecret = {
+  providerId: string;
+  model: string;
+  voice: string;
+  clientSecret: string;
+  expiresAt: number | null;
 };
 
 export type SettingsSnapshot = {
@@ -354,7 +436,8 @@ export type SettingsSnapshot = {
   sessions: SettingsSessionSummary;
   auth: AuthProviderStatus[];
   providers: ProviderSummary[];
-  browserProfiles: BrowserProfile[];
+  networkProxy: NetworkProxySettings;
+  secrets: SecretsSettings;
 };
 
 export type WorkflowTrigger =
@@ -452,6 +535,14 @@ export type WorkflowMonitorTaskAction = {
   prompt: string;
 };
 
+export type WorkflowActionUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  spent_tokens?: number;
+};
+
 export type WorkflowMonitorTask = {
   task_id: string;
   subject: string;
@@ -460,7 +551,15 @@ export type WorkflowMonitorTask = {
   monitor_connection?: string | null;
   monitor_connector?: string | null;
   monitor_memory_path?: string | null;
+  monitor_envelope_id?: string | null;
   ignored?: boolean;
+  ignore_reason?: string | null;
+  ignore_analysis_started?: boolean;
+  ignore_analysis_status?: string | null;
+  ignore_analysis_result?: string | null;
+  ignore_analysis_error?: string | null;
+  ignore_analysis_usage?: WorkflowActionUsage | null;
+  ignore_analysis_completed_at_ms?: number | null;
   actions?: WorkflowMonitorTaskAction[];
   possible_ignore_reasons?: string[];
   started_at_ms?: number | null;
@@ -494,8 +593,45 @@ export type WorkflowTask = {
   monitor_connection?: string | null;
   monitor_connector?: string | null;
   monitor_memory_path?: string | null;
+  monitor_envelope_id?: string | null;
+  ignore_reason?: string | null;
+  ignore_analysis_started?: boolean;
+  ignore_analysis_status?: string | null;
+  ignore_analysis_result?: string | null;
+  ignore_analysis_error?: string | null;
+  ignore_analysis_usage?: WorkflowActionUsage | null;
+  ignore_analysis_completed_at_ms?: number | null;
   actions?: WorkflowMonitorTaskAction[];
   possible_ignore_reasons?: string[];
+};
+
+export type WorkflowMonitorHistoryAction = {
+  action: string;
+  status: string;
+  summary: string;
+  started_at_ms: number;
+  ended_at_ms: number;
+  usage?: WorkflowActionUsage | null;
+};
+
+export type WorkflowMonitorHistoryMessage = {
+  idx: number;
+  run_id: string;
+  workflow_slug: string;
+  connection_slug?: string | null;
+  connector_slug?: string | null;
+  envelope_id?: string | null;
+  received_at_ms?: number | null;
+  topic?: string | null;
+  kind?: string | null;
+  dedup_key?: string | null;
+  summary: string;
+  text: string;
+  payload?: Record<string, unknown> | null;
+  action_log: WorkflowMonitorHistoryAction[];
+  status: string;
+  started_at_ms: number;
+  ended_at_ms: number;
 };
 
 export type WorkflowFilterRule = Record<string, unknown>;

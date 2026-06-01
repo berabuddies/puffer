@@ -32,17 +32,44 @@ pub(crate) fn send_http_request(
     parse_http_json_response(url, anthropic, response)
 }
 
+pub(crate) fn send_http_request_with_proxy(
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    anthropic: bool,
+    proxy: &puffer_config::ProxyConfig,
+) -> Result<Value> {
+    let response = send_http_request_raw_with_proxy(url, headers, body, anthropic, proxy)?;
+    parse_http_json_response(url, anthropic, response)
+}
+
 pub(crate) fn send_http_request_raw(
     url: &str,
     headers: &[(String, String)],
     body: &str,
     anthropic: bool,
 ) -> Result<RawHttpResponse> {
+    send_http_request_raw_with_proxy(
+        url,
+        headers,
+        body,
+        anthropic,
+        &puffer_config::ProxyConfig::default(),
+    )
+}
+
+pub(crate) fn send_http_request_raw_with_proxy(
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    anthropic: bool,
+    proxy: &puffer_config::ProxyConfig,
+) -> Result<RawHttpResponse> {
     trace_http_exchange("request", url, headers, body);
     let retry_config = http_retry_config();
     let total_attempts = retry_config.retries.saturating_add(1);
     for attempt in 1..=total_attempts {
-        match send_http_request_raw_once(url, headers, body, anthropic) {
+        match send_http_request_raw_once_with_proxy(url, headers, body, anthropic, proxy) {
             Ok(response) => {
                 trace_http_response(url, response.status.as_u16(), &response.text);
                 // Retry on 429 (rate limit) and 5xx (server errors) unless the
@@ -75,16 +102,20 @@ pub(crate) fn send_http_request_raw(
     unreachable!("http retry loop exited without returning")
 }
 
-fn send_http_request_raw_once(
+fn send_http_request_raw_once_with_proxy(
     url: &str,
     headers: &[(String, String)],
     body: &str,
     anthropic: bool,
+    proxy: &puffer_config::ProxyConfig,
 ) -> Result<RawHttpResponse> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()
-        .unwrap_or_else(|_| Client::new());
+    let client = crate::network::blocking_client_for_url(
+        proxy,
+        crate::network::HttpPurpose::Model,
+        url,
+        Duration::from_secs(300),
+    )
+    .unwrap_or_else(|_| Client::new());
     let mut request = client.post(url);
     for (key, value) in headers {
         request = request.header(key, value);

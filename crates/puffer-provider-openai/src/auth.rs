@@ -151,33 +151,39 @@ pub(crate) fn exchange_authorization_code(
     redirect_uri: Option<&str>,
 ) -> Result<OpenAIOAuthCredentials> {
     let client = codex_oauth_client()?;
+    exchange_authorization_code_with_client(&client, code, verifier, redirect_uri)
+}
+
+pub(crate) fn exchange_authorization_code_with_client(
+    client: &Client,
+    code: &str,
+    verifier: &str,
+    redirect_uri: Option<&str>,
+) -> Result<OpenAIOAuthCredentials> {
     let response = client
         .post(OPENAI_TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
-            ("client_id", OPENAI_CODEX_CLIENT_ID),
             ("code", code),
             ("code_verifier", verifier),
             ("redirect_uri", redirect_uri.unwrap_or(OPENAI_REDIRECT_URI)),
+            ("client_id", OPENAI_CODEX_CLIENT_ID),
         ])
         .send()
         .context("failed to exchange OpenAI authorization code")?;
-    let status = response.status();
-    let payload: OpenAITokenResponse = response
-        .json()
-        .context("failed to parse OpenAI token response")?;
-    if !status.is_success() {
-        return Err(anyhow!(
-            "OpenAI token exchange failed with status {}",
-            status
-        ));
-    }
-    token_response_to_credentials(payload)
+    parse_token_response(response, "OpenAI token exchange")
 }
 
 /// Refreshes OpenAI OAuth credentials using a stored refresh token.
 pub(crate) fn refresh_oauth_token(refresh_token: &str) -> Result<OpenAIOAuthCredentials> {
     let client = codex_oauth_client()?;
+    refresh_oauth_token_with_client(&client, refresh_token)
+}
+
+pub(crate) fn refresh_oauth_token_with_client(
+    client: &Client,
+    refresh_token: &str,
+) -> Result<OpenAIOAuthCredentials> {
     let response = client
         .post(openai_refresh_token_url())
         .form(&[
@@ -187,15 +193,19 @@ pub(crate) fn refresh_oauth_token(refresh_token: &str) -> Result<OpenAIOAuthCred
         ])
         .send()
         .context("failed to refresh OpenAI OAuth token")?;
+    parse_token_response(response, "OpenAI token refresh")
+}
+
+fn parse_token_response(
+    response: reqwest::blocking::Response,
+    label: &str,
+) -> Result<OpenAIOAuthCredentials> {
     let status = response.status();
     let payload: OpenAITokenResponse = response
         .json()
-        .context("failed to parse OpenAI refresh response")?;
+        .with_context(|| format!("failed to parse {label} response"))?;
     if !status.is_success() {
-        return Err(anyhow!(
-            "OpenAI token refresh failed with status {}",
-            status
-        ));
+        return Err(anyhow!("{label} failed with status {status}"));
     }
     token_response_to_credentials(payload)
 }
@@ -324,6 +334,13 @@ mod tests {
         assert!(!pkce.verifier.is_empty());
         assert!(!pkce.challenge.is_empty());
         assert!(!pkce.state.is_empty());
+    }
+
+    #[test]
+    fn refresh_oauth_token_with_client_builds_request_path() {
+        let client = codex_oauth_client().expect("client");
+        let result = refresh_oauth_token_with_client(&client, "refresh-token");
+        assert!(result.is_err());
     }
 
     #[test]

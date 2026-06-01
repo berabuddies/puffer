@@ -49,11 +49,6 @@ fn normalizes_bare_hosts() {
 }
 
 #[test]
-fn profile_names_are_filesystem_safe() {
-    assert_eq!(safe_profile_name("abc/def gh"), "abc_def_gh");
-}
-
-#[test]
 fn navigate_updates_cached_state_before_worker_ack() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let session = BrowserSession::new_for_test(

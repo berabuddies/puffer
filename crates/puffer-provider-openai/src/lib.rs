@@ -34,6 +34,7 @@ pub use request::OpenAIChatMessage;
 pub use request::OpenAIChatResponseFormat;
 pub use request::OpenAIChatResponseJsonSchema;
 pub use request::OpenAIChatToolCall;
+pub use request::OpenAIRealtimeClientSecretRequest;
 pub use request::OpenAIRequestConfig;
 pub use request::OpenAIResponsesFunctionCallOutput;
 pub use request::OpenAIResponsesNamedToolChoice;
@@ -79,9 +80,27 @@ pub fn exchange_authorization_code(
     auth::exchange_authorization_code(code, verifier, redirect_uri)
 }
 
+/// Exchanges an OAuth authorization code using an injected blocking HTTP client.
+pub fn exchange_authorization_code_with_client(
+    client: &reqwest::blocking::Client,
+    code: &str,
+    verifier: &str,
+    redirect_uri: Option<&str>,
+) -> anyhow::Result<OpenAIOAuthCredentials> {
+    auth::exchange_authorization_code_with_client(client, code, verifier, redirect_uri)
+}
+
 /// Refreshes OpenAI bearer credentials from a stored refresh token.
 pub fn refresh_oauth_token(refresh_token: &str) -> anyhow::Result<OpenAIOAuthCredentials> {
     auth::refresh_oauth_token(refresh_token)
+}
+
+/// Refreshes OpenAI bearer credentials using an injected blocking HTTP client.
+pub fn refresh_oauth_token_with_client(
+    client: &reqwest::blocking::Client,
+    refresh_token: &str,
+) -> anyhow::Result<OpenAIOAuthCredentials> {
+    auth::refresh_oauth_token_with_client(client, refresh_token)
 }
 
 /// Builds an ordered OpenAI Responses API request for execution or testing.
@@ -115,6 +134,14 @@ pub fn build_json_post_request(
     body: &serde_json::Value,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
     request::build_json_post_request(config, path, body)
+}
+
+/// Builds an ordered Realtime API client-secret request.
+pub fn build_realtime_client_secret_request(
+    config: &OpenAIRequestConfig,
+    request: &OpenAIRealtimeClientSecretRequest,
+) -> anyhow::Result<BuiltOpenAIRequest> {
+    request::build_realtime_client_secret_request(config, request)
 }
 
 /// Parses a serialized OpenAI Responses API payload into typed response data.
@@ -217,6 +244,37 @@ mod tests {
         .expect("request should build");
         assert_eq!(request.method, "POST");
         assert_eq!(request.url, "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn crate_root_builds_realtime_client_secret_request() {
+        let request = build_realtime_client_secret_request(
+            &OpenAIRequestConfig {
+                base_url: "https://api.openai.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("test-api-key".to_string()),
+                originator: "codex_cli_rs".to_string(),
+                session_id: None,
+                account_id: None,
+                custom_headers: Vec::new(),
+                query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
+            },
+            &OpenAIRealtimeClientSecretRequest {
+                session: json!({
+                    "type": "realtime",
+                    "model": "gpt-realtime-2"
+                }),
+            },
+        )
+        .expect("realtime client secret request should build");
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            request.url,
+            "https://api.openai.com/v1/realtime/client_secrets"
+        );
     }
 
     #[test]

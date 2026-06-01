@@ -127,6 +127,208 @@ test("default model load errors stay scoped to the selected provider", async ({ 
   await expect(modelSelect).toHaveValue("codex-default");
 });
 
+test("network proxy test renders connected latency inline", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const proxyCard = pane.locator(".pf-network-proxy-card").filter({
+    hasText: "socks5://127.0.0.1:7890"
+  });
+  await proxyCard.getByRole("button", { name: "Test" }).click();
+
+  const request = await daemon.waitForRequest("test_proxy");
+  expect(request.params).toMatchObject({ proxyId: "local" });
+  await expect(proxyCard.locator(".pf-network-status")).toHaveText("connected (ping: 848 ms)");
+  await expect(proxyCard.locator(".pf-network-status")).toHaveAttribute("data-state", "connected");
+});
+
+test("network proxy editor uses compact controls", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const proxySection = page.locator("section[aria-label='Proxy list']");
+  await expect(
+    proxySection.locator(".pf-network-section-head").getByRole("button", { name: "Add proxy" })
+  ).toBeVisible();
+
+  await proxySection.getByRole("button", { name: "Add proxy" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add proxy" });
+  await expect(dialog.getByLabel("Scheme")).toHaveValue("socks5");
+  await expect(dialog.getByText("socks5h://127.0.0.1:7890")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Save proxy" })).toHaveAttribute(
+    "data-variant",
+    "default"
+  );
+  await expect(dialog.getByLabel("Port")).not.toHaveAttribute("type", "number");
+
+  const endpointGrid = dialog.locator(".pf-network-form-grid").first();
+  await expect(endpointGrid.getByLabel("Host")).toBeVisible();
+  await expect(endpointGrid.getByLabel("Port")).toBeVisible();
+
+  const credentialGrid = dialog.locator(".pf-network-form-grid").nth(1);
+  await expect(credentialGrid.getByLabel("Username")).toBeVisible();
+  await expect(credentialGrid.getByLabel("Password")).toBeVisible();
+});
+
+test("network proxy item delete persists the remaining proxy list", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setNetworkProxy({
+    enabled: true,
+    selected: "local",
+    bypass: ["localhost"],
+    proxies: [
+      {
+        id: "local",
+        scheme: "socks5",
+        host: "127.0.0.1",
+        port: 7890,
+        username: null,
+        hasPassword: false,
+        uri: "socks5://127.0.0.1:7890"
+      },
+      {
+        id: "backup",
+        scheme: "socks5h",
+        host: "127.0.0.1",
+        port: 7891,
+        username: null,
+        hasPassword: false,
+        uri: "socks5h://127.0.0.1:7891"
+      }
+    ],
+    lastTest: null
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const proxyCard = pane.locator(".pf-network-proxy-card").filter({
+    hasText: "socks5://127.0.0.1:7890"
+  });
+  await proxyCard.getByRole("button", { name: "Delete" }).click();
+
+  const saveRequest = await daemon.waitForRequest("save_proxy_settings");
+  expect(saveRequest.params).toMatchObject({
+    enabled: true,
+    selected: "backup",
+    bypass: ["localhost"]
+  });
+  expect(saveRequest.params.proxies).toEqual([
+    expect.objectContaining({ id: "backup", scheme: "socks5h", host: "127.0.0.1", port: 7891 })
+  ]);
+  await expect(pane.getByText("socks5://127.0.0.1:7890")).toHaveCount(0);
+});
+
+test("network proxy switch is disabled without proxy list items", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setNetworkProxy({
+    enabled: true,
+    selected: null,
+    bypass: ["localhost"],
+    proxies: [],
+    lastTest: null
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const proxySwitch = pane.locator(".pf-network-switch");
+  await expect(proxySwitch).not.toBeChecked();
+  await expect(proxySwitch).toBeDisabled();
+  await expect(pane.locator(".pf-settings-note.warn")).toHaveCount(0);
+});
+
+test("network proxy deleting the final item disables routing", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setNetworkProxy({
+    enabled: true,
+    selected: "local",
+    bypass: ["localhost"],
+    proxies: [
+      {
+        id: "local",
+        scheme: "socks5",
+        host: "127.0.0.1",
+        port: 7890,
+        username: null,
+        hasPassword: false,
+        uri: "socks5://127.0.0.1:7890"
+      }
+    ],
+    lastTest: null
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const proxyCard = pane.locator(".pf-network-proxy-card").filter({
+    hasText: "socks5://127.0.0.1:7890"
+  });
+  await proxyCard.getByRole("button", { name: "Delete" }).click();
+
+  const saveRequest = await daemon.waitForRequest("save_proxy_settings");
+  expect(saveRequest.params).toMatchObject({
+    enabled: false,
+    selected: null,
+    proxies: []
+  });
+  const proxySwitch = pane.locator(".pf-network-switch");
+  await expect(proxySwitch).not.toBeChecked();
+  await expect(proxySwitch).toBeDisabled();
+});
+
+test("network bypass editor preserves input and validates before save", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Network" }).click();
+
+  const bypassSection = page.locator("section[aria-label='Bypass']");
+  const bypassInput = bypassSection.locator(".pf-network-bypass");
+  const saveButton = bypassSection.getByRole("button", { name: "Save bypass" });
+  await expect(saveButton).toHaveAttribute("data-variant", "default");
+
+  await bypassInput.fill("localhost\napi.example.com");
+  await page.waitForTimeout(80);
+  await expect(bypassInput).toHaveValue("localhost\napi.example.com");
+
+  await saveButton.click();
+  const saveRequest = await daemon.waitForRequest("save_proxy_settings");
+  expect(saveRequest.params.bypass).toEqual(["localhost", "api.example.com"]);
+
+  const savedRequestCount = daemon.requests.filter(
+    (request) => request.method === "save_proxy_settings"
+  ).length;
+  await bypassInput.fill("localhost\n*.example.com");
+  await saveButton.click();
+  await page.waitForTimeout(80);
+
+  await expect(page.getByText("Invalid bypass entry: *.example.com")).toBeVisible();
+  expect(daemon.requests.filter((request) => request.method === "save_proxy_settings")).toHaveLength(
+    savedRequestCount
+  );
+});
+
 test("default routing only offers authenticated agent providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [
@@ -1342,6 +1544,40 @@ test("MCP settings add server through the daemon", async ({ page }) => {
   await expect(page.getByText("Added github")).toBeVisible();
 });
 
+test("Secrets settings save and import without rendering raw secret values", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Secrets" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.locator(".label").filter({ hasText: "Secret store" })).toBeVisible();
+
+  await pane.getByLabel("Label").fill("Build token");
+  await pane.getByLabel("Username").fill("ci");
+  await pane.getByLabel("Origin").fill("https://build.example");
+  await pane.getByLabel("Value").fill("super-secret-token");
+  await pane.getByRole("button", { name: "Save secret" }).click();
+
+  const saveRequest = await daemon.waitForRequest("save_secret");
+  expect(saveRequest.params).toMatchObject({
+    label: "Build token",
+    username: "ci",
+    origin: "https://build.example",
+    value: "super-secret-token"
+  });
+  await expect(page.getByText("super-secret-token")).toHaveCount(0);
+  await expect(pane.locator(".pf-mcp-card").filter({ hasText: "Build token" })).toBeVisible();
+
+  await pane.getByRole("button", { name: "Import from Chrome" }).click();
+  await daemon.waitForRequest("import_chrome_secrets");
+  await expect(
+    pane.locator(".pf-mcp-card").filter({ hasText: "Chrome developer@example.com" })
+  ).toBeVisible();
+});
+
 test("MCP settings add server is ignored while already saving", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("add_mcp_server", () => true, 500);
@@ -1477,6 +1713,7 @@ test("MCP settings do not reload-loop when no servers are configured", async ({ 
 
 test("connector settings renders dynamic AskUserQuestion inputs", async ({ page }) => {
   const daemon = new FakeDaemon();
+  daemon.setConnectorSetupCompletionDelay(500);
   await daemon.install(page);
   await daemon.open(page);
 
@@ -1498,7 +1735,7 @@ test("connector settings renders dynamic AskUserQuestion inputs", async ({ page 
   await createDialog.getByLabel("Connector connection slug").fill("telegram-test");
   await createDialog.getByRole("button", { name: "Start setup" }).click();
 
-  const turn = await daemon.waitForRequest("dispatch_slash_command");
+  const turn = await daemon.waitForRequest("start_connector_setup");
   expect(turn.params).toMatchObject({
     message: "/connect telegram-login telegram-test"
   });
@@ -1519,12 +1756,17 @@ test("connector settings renders dynamic AskUserQuestion inputs", async ({ page 
       "Setup mode": "Default"
     }
   });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("status")).toContainText("Checking connector auth...");
   await expect(pane.getByText("Connector setup finished for telegram-test.")).toBeVisible();
+  await expect(dialog).toBeHidden();
   await expect(pane.locator(".pf-mcp-card").filter({ hasText: "telegram-test" })).toBeVisible();
 });
 
 test("connector settings submits dynamic password, radio, and multiselect answers", async ({ page }) => {
   const daemon = new FakeDaemon();
+  const accountQuestion =
+    "Workspace region\n\n![QR preview](data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSJ3aGl0ZSIvPjxyZWN0IHg9IjIiIHk9IjIiIHdpZHRoPSIxMiIgaGVpZ2h0PSIxMiIgZmlsbD0iYmxhY2siLz48L3N2Zz4=)";
   daemon.setConnectorSetupQuestions([
     {
       type: "input",
@@ -1535,7 +1777,7 @@ test("connector settings submits dynamic password, radio, and multiselect answer
     {
       type: "choice",
       header: "Region",
-      question: "Workspace region",
+      question: accountQuestion,
       options: [
         { label: "US", description: "United States", preview: "us-east" },
         { label: "EU", description: "European Union", preview: "eu-west" }
@@ -1567,7 +1809,7 @@ test("connector settings submits dynamic password, radio, and multiselect answer
   await expect(createDialog.getByLabel("Connector setup command")).toContainText("/connect slack-app team-slack");
   await createDialog.getByRole("button", { name: "Start setup" }).click();
 
-  const turn = await daemon.waitForRequest("dispatch_slash_command");
+  const turn = await daemon.waitForRequest("start_connector_setup");
   expect(turn.params).toMatchObject({
     message: "/connect slack-app team-slack"
   });
@@ -1576,9 +1818,12 @@ test("connector settings submits dynamic password, radio, and multiselect answer
   await expect(questions).toHaveAttribute("aria-modal", "true");
   await expect(questions).toContainText("3 questions");
   const tokenQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Workspace token" });
+  const regionQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Workspace region" });
   const scopeQuestion = questions.locator(".pf-connector-question").filter({ hasText: "Enabled scopes" });
   const tokenInput = tokenQuestion.locator("input");
   await expect(tokenInput).toHaveAttribute("type", "password");
+  await expect(regionQuestion.getByRole("img", { name: "QR preview" })).toBeVisible();
+  await expect(regionQuestion.getByText("![QR preview]")).toHaveCount(0);
   await expect(questions.getByLabel("US")).toBeChecked();
   await expect(questions.getByText("us-east")).toBeVisible();
   await expect(questions.getByText("eu-west")).toBeVisible();
@@ -1597,7 +1842,7 @@ test("connector settings submits dynamic password, radio, and multiselect answer
     requestId: "connector-setup",
     answers: {
       "Workspace token": "xoxb-secret",
-      "Workspace region": "EU",
+      [accountQuestion]: "EU",
       "Enabled scopes": ["messages:read", "messages:write"]
     }
   });

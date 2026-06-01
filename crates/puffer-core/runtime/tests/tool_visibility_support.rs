@@ -330,10 +330,26 @@ fn reference_powershell_prompt() -> String {
 fn reference_task_create_prompt() -> String {
     let reference = read_repo_file("references/claude-code/src/tools/TaskCreateTool/prompt.ts");
     normalize_reference_template(&extract_template_literal(&reference, "  return `"))
+        .replace(
+            "Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.\nIt also helps the user understand the progress of the task and overall progress of their requests.",
+            "Use this tool to create durable workflow tasks only when the user explicitly\nasks to create a task, or when monitor triage instructions require a\nworkspace-level connector task. Do not use this tool for ordinary agent\nprogress tracking; use TodoWrite for the current-session todo list instead.",
+        )
         .replace("${teammateContext}", " and potentially assigned to teammates")
         .replace(
             "${teammateTips}",
             "- Include enough detail in the description for another agent to understand and complete the task\n- New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them\n",
+        )
+        .replace(
+            "Use this tool proactively in these scenarios:\n\n- Complex multi-step tasks - When a task requires 3 or more distinct steps or actions\n- Non-trivial and complex tasks - Tasks that require careful planning or multiple operations and potentially assigned to teammates\n- Plan mode - When using plan mode, create a task list to track the work\n- User explicitly requests todo list - When the user directly asks you to use the todo list\n- User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)\n- After receiving new instructions - Immediately capture user requirements as tasks\n- When you start working on a task - Mark it as in_progress BEFORE beginning work\n- After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation",
+            "Use this tool only in these scenarios:\n\n- The user explicitly asks to create a durable task or workflow task.\n- A monitor triage prompt instructs you to create a monitor task from a\n  connector event.",
+        )
+        .replace(
+            "- A monitor triage prompt instructs you to create a monitor task from a\n  connector event.",
+            "- A monitor triage prompt instructs you to create a monitor task from a\n  connector event that contains an explicit user request, a schedule or\n  deadline, or a service notification clearly requiring user action.",
+        )
+        .replace(
+            "Skip using this tool when:\n- There is only a single, straightforward task\n- The task is trivial and tracking it provides no organizational benefit\n- The task can be completed in less than 3 trivial steps\n- The task is purely conversational or informational\n\nNOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.",
+            "Skip using this tool when:\n- You are only tracking your own progress in the current agent session.\n- You are breaking down implementation work that the user asked you to do.\n- The user asked for a todo list rather than a durable task.\n- The task is purely conversational or informational.",
         )
         .replace(
             "- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., \"Fixing authentication bug\"). If omitted, the spinner shows the subject instead.\n\nAll tasks are created with status `pending`.",
@@ -341,7 +357,7 @@ fn reference_task_create_prompt() -> String {
         )
         .replace(
             "\n## Tips",
-            "\nMonitor triage agents may create workspace-level connector tasks by setting\n`metadata._monitor=true` or `metadata.monitor_connection`. For those tasks,\ninclude `receivedAt`, `expiresAt`, `actions`, and `possibleIgnoreReasons` so\n`/tasks` can offer concrete user choices without another triage pass.\n\n## Tips",
+            "\nMonitor triage agents may create workspace-level connector tasks by setting\n`metadata._monitor=true` or `metadata.monitor_connection`. For those tasks,\ninclude `receivedAt`, `expiresAt`, `actions`, and `possibleIgnoreReasons` so\n`/tasks` can offer concrete user choices without another triage pass.\nMonitor triage agents must only create tasks for explicit requests,\nschedules, deadlines, or service notifications that clearly assign work or\nrequest review/approval from the user. Do not create monitor tasks for\ngreetings, thanks, acknowledgements, FYI/status-only updates, generic bot\nsummaries, GitHub-style commits/comments/notifications, or repeated source\nupdates without an explicit request, assignment, review request, approval\nrequest, or schedule for the user. Useful information is not a task unless it\nhas a clear next action for the user. Monitor triage agents may check\nsurrounding context such as recent messages, thread history, linked task\ncontext, or connector-provided event details when an event is ambiguous, but\ncontext alone must not turn FYI/status information into a task. When unsure,\ndo not create a task.\n\nNormal agents should not call TaskCreate unless the user explicitly asked to\ncreate a durable task. For ordinary current-session progress tracking, use\nTodoWrite instead.\n\n## Tips",
         )
 }
 

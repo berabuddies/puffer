@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
-use puffer_subscriber_runtime::Event;
+use puffer_subscriber_runtime::{Event, SubscriberCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -10,6 +10,10 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, BufReader, Lines};
+
+#[path = "gmail_browser_actions.rs"]
+mod gmail_browser_actions;
 
 /// Connector and default connection slug used by the Gmail browser connector.
 pub(crate) const CONNECTOR_SLUG: &str = "gmail-browser";
@@ -33,8 +37,6 @@ const INITIAL_ROW_EMIT_LIMIT: u64 = 1;
 pub(crate) struct GmailBrowserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) workspace_root: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) chrome_profile: Option<String>,
     #[serde(default)]
     pub(crate) accounts: Vec<String>,
 }
@@ -72,12 +74,63 @@ impl SubscriberEnv {
     }
 }
 
+struct CommandStream {
+    lines: Lines<BufReader<tokio::io::Stdin>>,
+}
+
+impl CommandStream {
+    fn new() -> Self {
+        Self {
+            lines: BufReader::new(tokio::io::stdin()).lines(),
+        }
+    }
+
+    async fn next(&mut self) -> Result<Option<SubscriberCommand>> {
+        loop {
+            let Some(line) = self.lines.next_line().await? else {
+                return Ok(None);
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<SubscriberCommand>(&line) {
+                Ok(command) => return Ok(Some(command)),
+                Err(error) => eprintln!("gmail-browser: ignored malformed command: {error}"),
+            }
+        }
+    }
+}
+
 /// Loads Gmail browser config for one connection, if present.
 pub(crate) fn load_config(
     paths: &ConfigPaths,
     connection_slug: &str,
 ) -> Result<Option<GmailBrowserConfig>> {
     load_config_from_dir(&state_dir(paths, connection_slug))
+}
+
+/// Saves Gmail browser config for one connection.
+pub(crate) fn save_config(
+    paths: &ConfigPaths,
+    workspace_root: &Path,
+    connection_slug: &str,
+    accounts: Vec<String>,
+) -> Result<GmailBrowserConfig> {
+    let accounts = normalize_accounts(accounts);
+    anyhow::ensure!(
+        !accounts.is_empty(),
+        "gmail-browser requires at least one Google account"
+    );
+    let config = GmailBrowserConfig {
+        workspace_root: Some(workspace_root.to_path_buf()),
+        accounts,
+    };
+    let dir = state_dir(paths, connection_slug);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let raw = toml::to_string_pretty(&config).context("serialize Gmail browser config")?;
+    let path = dir.join(CONFIG_FILE);
+    fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
+    Ok(config)
 }
 
 /// Returns the per-connection state directory used by the subscriber runtime.
@@ -95,29 +148,33 @@ pub(crate) async fn run_subscriber() -> Result<()> {
     let mut seen = load_seen(&env.state_dir)?;
     let mut handshake = None;
     let mut last_config_key = String::new();
+    let mut commands = CommandStream::new();
     loop {
         let Some(config) = load_config_from_dir(&env.state_dir)? else {
             emit_control(&env.topic, "config_required", json!({}))?;
-            tokio::time::sleep(POLL_INTERVAL).await;
+            wait_or_handle_command(&env, None, &mut handshake, &mut commands, POLL_INTERVAL)
+                .await?;
             continue;
         };
         if !config.is_configured() {
             emit_control(&env.topic, "config_required", json!({}))?;
-            tokio::time::sleep(POLL_INTERVAL).await;
+            wait_or_handle_command(
+                &env,
+                Some(&config),
+                &mut handshake,
+                &mut commands,
+                POLL_INTERVAL,
+            )
+            .await?;
             continue;
         }
-        let config_key = format!(
-            "{}|{}",
-            config.chrome_profile.as_deref().unwrap_or_default(),
-            config.accounts.join(",")
-        );
+        let config_key = config.accounts.join(",");
         if config_key != last_config_key {
             emit_control(
                 &env.topic,
                 "ready",
                 json!({
                     "accounts": &config.accounts,
-                    "chromeProfile": &config.chrome_profile,
                 }),
             )?;
             handshake = None;
@@ -127,7 +184,14 @@ pub(crate) async fn run_subscriber() -> Result<()> {
         match result {
             Ok(()) => {
                 save_seen(&env.state_dir, &seen)?;
-                tokio::time::sleep(POLL_INTERVAL).await;
+                wait_or_handle_command(
+                    &env,
+                    Some(&config),
+                    &mut handshake,
+                    &mut commands,
+                    POLL_INTERVAL,
+                )
+                .await?;
             }
             Err(error) => {
                 handshake = None;
@@ -136,9 +200,86 @@ pub(crate) async fn run_subscriber() -> Result<()> {
                     "poll_error",
                     json!({ "error": format!("{error:#}") }),
                 )?;
-                tokio::time::sleep(ERROR_BACKOFF).await;
+                wait_or_handle_command(
+                    &env,
+                    Some(&config),
+                    &mut handshake,
+                    &mut commands,
+                    ERROR_BACKOFF,
+                )
+                .await?;
             }
         }
+    }
+}
+
+async fn wait_or_handle_command(
+    env: &SubscriberEnv,
+    config: Option<&GmailBrowserConfig>,
+    handshake: &mut Option<crate::daemon::Handshake>,
+    commands: &mut CommandStream,
+    delay: Duration,
+) -> Result<()> {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => Ok(()),
+        command = commands.next() => {
+            let Some(command) = command? else {
+                tokio::time::sleep(delay).await;
+                return Ok(());
+            };
+            handle_command(env, config, handshake, command)
+        }
+    }
+}
+
+fn handle_command(
+    env: &SubscriberEnv,
+    config: Option<&GmailBrowserConfig>,
+    handshake: &mut Option<crate::daemon::Handshake>,
+    command: SubscriberCommand,
+) -> Result<()> {
+    match command {
+        SubscriberCommand::Custom { op, args } if op == "gmail_browser_act" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let input = args.get("input").cloned().unwrap_or_else(|| json!({}));
+            let Some(config) = config else {
+                emit_control(
+                    &env.topic,
+                    "gmail_browser_action_error",
+                    json!({
+                        "op": op,
+                        "action": action,
+                        "error": "gmail-browser connector is not configured yet",
+                    }),
+                )?;
+                return Ok(());
+            };
+            match gmail_browser_actions::handle_action(env, config, handshake, action, &input) {
+                Ok(payload) => emit_control(&env.topic, "gmail_browser_action_complete", payload),
+                Err(error) => emit_control(
+                    &env.topic,
+                    "gmail_browser_action_error",
+                    json!({
+                        "op": op,
+                        "action": action,
+                        "error": format!("{error:#}"),
+                    }),
+                ),
+            }
+        }
+        SubscriberCommand::Custom { op, .. } => emit_control(
+            &env.topic,
+            "command_ignored",
+            json!({ "op": op, "error": "unknown custom op" }),
+        ),
+        _ => emit_control(
+            &env.topic,
+            "command_ignored",
+            json!({ "error": "gmail-browser subscriber only handles gmail_browser_act custom commands" }),
+        ),
     }
 }
 
@@ -180,7 +321,7 @@ async fn poll_once(
     let mut newly_seen = BTreeSet::new();
     let mut successful_poll = false;
     for account in &config.accounts {
-        let result = poll_account(env, config, account, handshake_ref)?;
+        let result = poll_account(env, account, handshake_ref)?;
         let status = result.get("status").and_then(Value::as_str).unwrap_or("ok");
         match status {
             "ok" => {
@@ -225,7 +366,7 @@ async fn poll_once(
             let key = format!("{account}:{id}");
             newly_seen.insert(key.clone());
             if should_emit_row(seen, &key, &row) {
-                emit_message(env, config, account, &key, row)?;
+                emit_message(env, account, &key, row)?;
             }
         }
     }
@@ -253,13 +394,20 @@ fn ensure_browser_daemon<'a>(
 
 fn poll_account(
     env: &SubscriberEnv,
-    config: &GmailBrowserConfig,
     account: &str,
     handshake: &crate::daemon::Handshake,
 ) -> Result<Value> {
+    poll_account_at_url(env, account, handshake, &gmail_inbox_url(account))
+}
+
+fn poll_account_at_url(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    url: &str,
+) -> Result<Value> {
     let root_session = format!("gmail-browser-{}", safe_session_part(&env.topic));
     let tab_id = safe_session_part(account);
-    let url = gmail_inbox_url(account);
     crate::daemon_browser::send_daemon_request(
         handshake,
         "browser_agent",
@@ -272,7 +420,6 @@ fn poll_account(
             "width": BROWSER_WIDTH,
             "height": BROWSER_HEIGHT,
             "activate": false,
-            "chromeProfile": config.chrome_profile,
         }),
     )
     .context("open Gmail browser tab")?;
@@ -287,7 +434,6 @@ fn poll_account(
                 "tabId": safe_session_part(account),
                 "width": BROWSER_WIDTH,
                 "height": BROWSER_HEIGHT,
-                "chromeProfile": config.chrome_profile,
                 "script": GMAIL_INBOX_SCRIPT,
             }),
         )
@@ -300,13 +446,7 @@ fn poll_account(
     }
 }
 
-fn emit_message(
-    env: &SubscriberEnv,
-    config: &GmailBrowserConfig,
-    account: &str,
-    dedup_key: &str,
-    row: Value,
-) -> Result<()> {
+fn emit_message(env: &SubscriberEnv, account: &str, dedup_key: &str, row: Value) -> Result<()> {
     let sender = row.get("sender").and_then(Value::as_str).unwrap_or("");
     let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
     let snippet = row.get("snippet").and_then(Value::as_str).unwrap_or("");
@@ -324,7 +464,6 @@ fn emit_message(
         payload: json!({
             "platform": "gmail-browser",
             "account": account,
-            "chromeProfile": config.chrome_profile,
             "receivedAtMs": now_ms(),
             "message": row,
         }),
@@ -458,15 +597,23 @@ const GMAIL_INBOX_SCRIPT: &str = r#"
       const fromEl = row.querySelector('.yW span[email], span[email], .yX.xY .yW span');
       const subjectEl = row.querySelector('.bog, span[data-thread-id], .y6 span[id]');
       const snippetEl = row.querySelector('.y2, span[data-thread-id] + span');
-      const threadId =
+      const idEl = row.querySelector('[data-legacy-thread-id], [data-thread-id], [data-legacy-message-id]');
+      const legacyThreadId =
         row.getAttribute("data-legacy-thread-id") ||
-        row.getAttribute("data-thread-id") ||
-        row.getAttribute("data-id") ||
+        (idEl && idEl.getAttribute("data-legacy-thread-id")) ||
         "";
+      const rawThreadId =
+        row.getAttribute("data-thread-id") ||
+        (idEl && idEl.getAttribute("data-thread-id")) ||
+        "";
+      const threadId = legacyThreadId || rawThreadId.replace(/^#/, "");
       const messageId =
         row.getAttribute("data-legacy-message-id") ||
+        (idEl && idEl.getAttribute("data-legacy-message-id")) ||
         row.getAttribute("data-message-id") ||
+        legacyThreadId ||
         threadId ||
+        row.getAttribute("data-id") ||
         "";
       const sender =
         (fromEl && (fromEl.getAttribute("name") || fromEl.getAttribute("aria-label"))) ||
@@ -483,6 +630,8 @@ const GMAIL_INBOX_SCRIPT: &str = r#"
       return {
         id: messageId || fallback,
         threadId,
+        legacyThreadId,
+        gmailThreadId: rawThreadId,
         sender,
         fromEmail,
         subject,

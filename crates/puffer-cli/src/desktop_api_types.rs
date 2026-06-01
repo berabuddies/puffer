@@ -1,5 +1,5 @@
 use puffer_session_store::MessageActor;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize)]
@@ -264,7 +264,83 @@ pub(crate) struct SettingsSnapshotDto {
     pub(crate) sessions: SettingsSessionSummaryDto,
     pub(crate) auth: Vec<AuthProviderStatusDto>,
     pub(crate) providers: Vec<ProviderSummaryDto>,
-    pub(crate) browser_profiles: Vec<BrowserProfileDto>,
+    pub(crate) network_proxy: NetworkProxySettingsDto,
+    pub(crate) secrets: SecretsSettingsDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretsSettingsDto {
+    pub(crate) store_file: String,
+    pub(crate) key_source: String,
+    pub(crate) chrome_import_supported: bool,
+    pub(crate) items: Vec<SecretSummaryDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretSummaryDto {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) username: Option<String>,
+    pub(crate) origin: Option<String>,
+    pub(crate) source: String,
+    pub(crate) created_at_ms: u64,
+    pub(crate) updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NetworkProxySettingsDto {
+    pub(crate) enabled: bool,
+    pub(crate) selected: Option<String>,
+    pub(crate) bypass: Vec<String>,
+    pub(crate) proxies: Vec<SanitizedProxyEndpointDto>,
+    pub(crate) last_test: Option<ProxyTestResultDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SanitizedProxyEndpointDto {
+    pub(crate) id: String,
+    pub(crate) scheme: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: Option<String>,
+    pub(crate) has_password: bool,
+    pub(crate) uri: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyTestResultDto {
+    pub(crate) proxy_id: Option<String>,
+    pub(crate) ok: bool,
+    pub(crate) message: String,
+    pub(crate) latency_ms: Option<u128>,
+    pub(crate) status_code: Option<u16>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveProxySettingsParams {
+    pub(crate) enabled: bool,
+    pub(crate) selected: Option<String>,
+    pub(crate) bypass: Vec<String>,
+    pub(crate) proxies: Vec<ProxyEndpointInputDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyEndpointInputDto {
+    pub(crate) id: String,
+    pub(crate) scheme: String,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: Option<String>,
+    pub(crate) password: Option<String>,
+    #[serde(default)]
+    pub(crate) keep_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -280,7 +356,6 @@ pub(crate) struct SettingsConfigDto {
     pub(crate) mascot_enabled: bool,
     pub(crate) ui_no_alt_screen: bool,
     pub(crate) ui_tmux_golden_mode: bool,
-    pub(crate) browser_chrome_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -329,26 +404,6 @@ pub(crate) struct ProviderSummaryDto {
     pub(crate) auth_modes: Vec<String>,
     pub(crate) source_kind: String,
     pub(crate) source_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct BrowserProfileDto {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) email: Option<String>,
-    pub(crate) google_accounts: Vec<BrowserGoogleAccountDto>,
-    pub(crate) path: String,
-    pub(crate) is_last_used: bool,
-    pub(crate) is_selected: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct BrowserGoogleAccountDto {
-    pub(crate) email: String,
-    pub(crate) name: Option<String>,
-    pub(crate) gaia_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

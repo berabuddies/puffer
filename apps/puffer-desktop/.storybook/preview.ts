@@ -5,6 +5,7 @@ import "../src/lib/design/settings.css";
 import "../src/lib/design/tasks.css";
 import "../src/lib/design/workflow.css";
 import "../src/lib/design/workspace.css";
+import "./preview-docs.css";
 
 import type { Preview } from "@storybook/svelte-vite";
 

@@ -58,6 +58,8 @@ fn failed_pending_turn_discards_streamed_assistant_draft() {
             session_permission_state: Default::default(),
             session_allow_all: false,
             project_memory_review_turns: 0,
+            autodream_review_turns: 0,
+            autodream_suggest_skill: false,
         }))
         .unwrap();
 
@@ -168,6 +170,8 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
             session_permission_state: Default::default(),
             session_allow_all: false,
             project_memory_review_turns: 0,
+            autodream_review_turns: 0,
+            autodream_suggest_skill: false,
         }))
         .unwrap();
 

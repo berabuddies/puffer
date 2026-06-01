@@ -89,6 +89,7 @@ fn key_event_params(
             .unwrap_or_default(),
     ) {
         params.insert("windowsVirtualKeyCode".to_string(), json!(key_code));
+        params.insert("nativeVirtualKeyCode".to_string(), json!(key_code));
     }
     params.insert(
         "location".to_string(),
@@ -175,6 +176,7 @@ mod tests {
         );
 
         assert_eq!(params["windowsVirtualKeyCode"], 13);
+        assert_eq!(params["nativeVirtualKeyCode"], 13);
         assert_eq!(params["location"], 0);
         assert_eq!(params["text"], "\r");
         assert_eq!(params["unmodifiedText"], "\r");
@@ -191,6 +193,7 @@ mod tests {
         );
 
         assert_eq!(params["windowsVirtualKeyCode"], 8);
+        assert_eq!(params["nativeVirtualKeyCode"], 8);
         assert_eq!(params["location"], 0);
         assert!(params.get("text").is_none());
         assert!(params.get("unmodifiedText").is_none());
@@ -207,6 +210,7 @@ mod tests {
         );
 
         assert_eq!(params["windowsVirtualKeyCode"], 65);
+        assert_eq!(params["nativeVirtualKeyCode"], 65);
         assert_eq!(params["location"], 0);
         assert_eq!(params["text"], "a");
         assert_eq!(params["unmodifiedText"], "a");
@@ -223,6 +227,7 @@ mod tests {
         );
 
         assert_eq!(params["windowsVirtualKeyCode"], 13);
+        assert_eq!(params["nativeVirtualKeyCode"], 13);
         assert!(params.get("text").is_none());
         assert!(params.get("unmodifiedText").is_none());
     }

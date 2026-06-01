@@ -31,7 +31,7 @@
     if (!name) return "bolt";
     const t = name.toLowerCase();
     if (t.includes("edit") || t.includes("write")) return "edit";
-    if (t.includes("read") || t.includes("view") || t.includes("image")) return "file";
+    if (t.includes("read") || t.includes("view") || t.includes("image") || t.includes("doc")) return "file";
     if (t.includes("grep") || t.includes("search")) return "search";
     if (t.includes("bash") || t.includes("shell") || t.includes("exec")) return "terminal";
     if (t.includes("browser") || t.includes("fetch") || t.includes("web")) return "globe";
@@ -1306,6 +1306,27 @@
     background: color-mix(in oklab, var(--muted) 45%, transparent);
     font-style: italic;
   }
+  .pf-tool-body .terminal {
+    border-top: 1px solid var(--border);
+    background: var(--background);
+    color: var(--foreground);
+    padding: 10px 12px 12px;
+    font-family: var(--font-mono);
+    font-size: var(--pf-chat-code-size);
+    line-height: 1.45;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .pf-tool-body .terminal :global(.prompt) {
+    color: var(--puffer-accent);
+  }
+  .pf-tool-body .terminal :global(.err) {
+    color: var(--destructive);
+  }
+  .pf-tool-body .terminal .dim {
+    color: var(--muted-foreground);
+  }
   .pf-structured-render {
     background: var(--background);
     border-top: 1px solid var(--border);
@@ -1318,24 +1339,19 @@
   }
   .pf-fake-pty {
     border-top: 1px solid var(--border);
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in oklab, var(--background) 88%, black) 0%,
-        color-mix(in oklab, var(--background) 80%, black) 100%
-      );
-    color: color-mix(in oklab, var(--foreground) 90%, white);
+    background: var(--background);
+    color: var(--foreground);
     padding: 10px 12px 12px;
     font-family: var(--font-mono);
     font-size: var(--pf-chat-code-size);
     line-height: 1.45;
   }
   .pf-fake-pty.danger {
-    box-shadow: inset 3px 0 0 var(--destructive);
+    box-shadow: inset 3px 0 0 color-mix(in oklab, var(--destructive) 70%, transparent);
   }
   .pf-pty-meta {
     margin-bottom: 7px;
-    color: color-mix(in oklab, var(--muted-foreground) 70%, white);
+    color: var(--muted-foreground);
     font-family: var(--font-sans);
     font-size: var(--pf-chat-meta-size);
   }
@@ -1347,7 +1363,7 @@
     margin-bottom: 8px;
   }
   .pf-pty-prompt {
-    color: oklch(0.78 0.16 145);
+    color: var(--puffer-accent);
     user-select: none;
   }
   .pf-pty-command-line pre,
@@ -1359,15 +1375,15 @@
     font-size: var(--pf-chat-code-size);
   }
   .pf-pty-command-line pre {
-    color: color-mix(in oklab, var(--foreground) 88%, white);
+    color: var(--foreground);
   }
   .pf-pty-output {
     padding-left: 26px;
-    color: color-mix(in oklab, var(--foreground) 78%, white);
+    color: color-mix(in oklab, var(--foreground) 84%, var(--muted-foreground));
   }
   .pf-pty-empty {
     padding-left: 26px;
-    color: color-mix(in oklab, var(--muted-foreground) 72%, white);
+    color: var(--muted-foreground);
     font-style: italic;
   }
   .pf-render-title {

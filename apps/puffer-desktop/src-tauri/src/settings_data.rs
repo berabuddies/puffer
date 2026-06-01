@@ -1,12 +1,13 @@
 use crate::dtos::{
     AuthProviderStatusDto, ProviderSummaryDto, ResourceCountsDto, SettingsConfigDto,
-    SettingsSessionSummaryDto, SettingsSnapshotDto,
+    SecretSummaryDto, SecretsSettingsDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::load_resources;
+use puffer_secrets::{SecretSummary, SecretVault};
 use puffer_session_store::SessionStore;
 use std::path::PathBuf;
 
@@ -98,7 +99,43 @@ pub(crate) fn load_settings_snapshot() -> Result<SettingsSnapshotDto> {
         },
         auth: auth_statuses(&auth_store),
         providers: providers.provider_entries().map(provider_summary).collect(),
+        secrets: secrets_settings(&paths)?,
     })
+}
+
+fn secrets_settings(paths: &ConfigPaths) -> Result<SecretsSettingsDto> {
+    let store_file = SecretVault::default_path(&paths.user_config_dir);
+    Ok(SecretsSettingsDto {
+        store_file: store_file.display().to_string(),
+        key_source: secret_key_source().to_string(),
+        chrome_import_supported: cfg!(target_os = "macos"),
+        items: SecretVault::list_metadata(&store_file)?
+            .into_iter()
+            .map(secret_summary)
+            .collect(),
+    })
+}
+
+fn secret_key_source() -> &'static str {
+    if std::env::var_os("PUFFER_SECRET_STORE_KEY").is_some() {
+        "env"
+    } else if cfg!(target_os = "macos") {
+        "macos-keychain"
+    } else {
+        "local-key-file"
+    }
+}
+
+fn secret_summary(summary: SecretSummary) -> SecretSummaryDto {
+    SecretSummaryDto {
+        id: summary.id,
+        label: summary.label,
+        username: summary.username,
+        origin: summary.origin,
+        source: summary.source,
+        created_at_ms: summary.created_at_ms,
+        updated_at_ms: summary.updated_at_ms,
+    }
 }
 
 fn auth_statuses(auth_store: &AuthStore) -> Vec<AuthProviderStatusDto> {

@@ -75,6 +75,8 @@ pub(super) fn execute_monitor_command(
             session_permission_state: worker_state.session_permission_state().clone(),
             session_allow_all: worker_state.session_permission_state().allow_all_tools(),
             project_memory_review_turns: worker_state.project_memory_review_turns,
+            autodream_review_turns: worker_state.autodream_review_turns,
+            autodream_suggest_skill: false,
         }));
     });
     tui.pending_submit = Some(PendingSubmit {

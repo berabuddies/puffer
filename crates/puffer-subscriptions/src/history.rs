@@ -4,7 +4,7 @@
 //! connection workflows live in this crate, so their trigger/action history
 //! is stored here.
 
-use crate::action::ActionResult;
+use crate::action::{ActionResult, ActionUsage};
 use crate::spec::{ActionSpec, WorkflowBindingSpec};
 use puffer_subscriber_runtime::EventEnvelope;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowBindingRunStatus {
+    /// The action is currently running.
+    Running,
     /// The action completed successfully.
     Completed,
     /// The action failed.
@@ -38,6 +40,9 @@ pub struct WorkflowActionLog {
     pub started_at_ms: i128,
     /// End timestamp in milliseconds since UNIX epoch.
     pub ended_at_ms: i128,
+    /// Optional token usage for agent-backed actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ActionUsage>,
 }
 
 /// Persisted run record for a connection-triggered workflow binding.
@@ -142,6 +147,28 @@ impl WorkflowHistoryStore {
             summary: result.summary.clone(),
             started_at_ms,
             ended_at_ms,
+            usage: result.usage,
+        };
+        self.append_event_outcome(binding, envelope, log, status, started_at_ms, ended_at_ms)
+    }
+
+    /// Appends a direct workflow run before a long-running action starts.
+    pub fn append_action_started(
+        &self,
+        binding: &WorkflowBindingSpec,
+        envelope: &EventEnvelope,
+        action: &ActionSpec,
+        started_at_ms: i128,
+    ) -> Result<WorkflowBindingRun, WorkflowHistoryStoreError> {
+        let action = action_kind(action).to_string();
+        let summary = action_running_summary(&action);
+        let log = WorkflowActionLog {
+            action: action.clone(),
+            status: WorkflowBindingRunStatus::Running,
+            summary: summary.clone(),
+            started_at_ms,
+            ended_at_ms: started_at_ms,
+            usage: None,
         };
         let run = WorkflowBindingRun {
             idx: 0,
@@ -149,9 +176,81 @@ impl WorkflowHistoryStore {
             workflow_slug: binding.slug.clone(),
             trigger_info: trigger_info(binding, envelope),
             action_summary: json!({
+                "status": WorkflowBindingRunStatus::Running,
+                "action": action,
+                "summary": summary,
+            }),
+            action_log: vec![log],
+            status: WorkflowBindingRunStatus::Running,
+            started_at_ms,
+            ended_at_ms: started_at_ms,
+        };
+        self.append(run)
+    }
+
+    /// Completes a previously started direct workflow action run.
+    pub fn complete_action_result(
+        &self,
+        idx: u64,
+        action: &ActionSpec,
+        result: &ActionResult,
+        started_at_ms: i128,
+        ended_at_ms: i128,
+    ) -> Result<Option<WorkflowBindingRun>, WorkflowHistoryStoreError> {
+        let status = if result.success {
+            WorkflowBindingRunStatus::Completed
+        } else {
+            WorkflowBindingRunStatus::Failed
+        };
+        let action = action_kind(action).to_string();
+        let log = WorkflowActionLog {
+            action: action.clone(),
+            status,
+            summary: result.summary.clone(),
+            started_at_ms,
+            ended_at_ms,
+            usage: result.usage,
+        };
+        let mut guard = self.inner.lock().unwrap();
+        let Some(position) = guard.runs.iter().position(|run| run.idx == idx) else {
+            return Ok(None);
+        };
+        let run = &mut guard.runs[position];
+        run.action_summary = json!({
+            "status": status,
+            "action": action,
+            "summary": result.summary.clone(),
+        });
+        run.action_log = vec![log];
+        run.status = status;
+        run.started_at_ms = started_at_ms;
+        run.ended_at_ms = ended_at_ms;
+        let updated = run.clone();
+        write_atomic(&self.path, &*guard)?;
+        Ok(Some(updated))
+    }
+
+    /// Appends a direct workflow run for a router outcome without invoking an action.
+    pub fn append_event_outcome(
+        &self,
+        binding: &WorkflowBindingSpec,
+        envelope: &EventEnvelope,
+        log: WorkflowActionLog,
+        status: WorkflowBindingRunStatus,
+        started_at_ms: i128,
+        ended_at_ms: i128,
+    ) -> Result<WorkflowBindingRun, WorkflowHistoryStoreError> {
+        let action = log.action.clone();
+        let summary = log.summary.clone();
+        let run = WorkflowBindingRun {
+            idx: 0,
+            run_id: Uuid::new_v4().to_string(),
+            workflow_slug: binding.slug.clone(),
+            trigger_info: trigger_info(binding, envelope),
+            action_summary: json!({
                 "status": status,
-                "action": log.action,
-                "summary": result.summary,
+                "action": action,
+                "summary": summary,
             }),
             action_log: vec![log],
             status,
@@ -187,6 +286,14 @@ impl WorkflowHistoryStore {
             .into_iter()
             .filter(|run| run.workflow_slug == workflow_slug)
             .collect()
+    }
+
+    /// Returns whether a binding has already recorded a trigger with `dedup_key`.
+    pub fn contains_dedup_key(&self, workflow_slug: &str, dedup_key: &str) -> bool {
+        self.inner.lock().unwrap().runs.iter().any(|run| {
+            run.workflow_slug == workflow_slug
+                && run.trigger_info.get("dedup_key").and_then(Value::as_str) == Some(dedup_key)
+        })
     }
 
     /// Returns one run by numeric index.
@@ -226,6 +333,11 @@ fn action_kind(action: &ActionSpec) -> &'static str {
         ActionSpec::Graph { .. } => "graph",
         ActionSpec::Unknown => "unknown",
     }
+}
+
+fn action_running_summary(action: &str) -> String {
+    let label = action.replace('_', " ");
+    format!("{label} is processing this message.")
 }
 
 fn write_atomic(path: &Path, store: &HistoryFile) -> Result<(), WorkflowHistoryStoreError> {
@@ -291,6 +403,12 @@ mod tests {
         let result = ActionResult {
             success: true,
             summary: "ok".into(),
+            usage: Some(ActionUsage {
+                input_tokens: 10,
+                output_tokens: 3,
+                cache_read_tokens: 4,
+                cache_creation_tokens: 0,
+            }),
         };
         let run = store
             .append_action_result(
@@ -307,6 +425,47 @@ mod tests {
 
         assert_eq!(run.idx, 1);
         assert_eq!(run.status, WorkflowBindingRunStatus::Completed);
+        assert_eq!(run.action_log[0].usage.unwrap().spent_tokens(), 9);
+        assert_eq!(store.list_for("demo").len(), 1);
+    }
+
+    #[test]
+    fn started_action_history_is_completed_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        let action = ActionSpec::TriageAgent {
+            prompt: "triage".into(),
+            model: None,
+        };
+        let started = store
+            .append_action_started(&binding(), &envelope(), &action, 10)
+            .unwrap();
+
+        assert_eq!(started.status, WorkflowBindingRunStatus::Running);
+        assert_eq!(
+            started.action_log[0].status,
+            WorkflowBindingRunStatus::Running
+        );
+
+        let result = ActionResult {
+            success: true,
+            summary: "created task".into(),
+            usage: Some(ActionUsage {
+                input_tokens: 20,
+                output_tokens: 7,
+                cache_read_tokens: 4,
+                cache_creation_tokens: 0,
+            }),
+        };
+        let completed = store
+            .complete_action_result(started.idx, &action, &result, 10, 30)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(completed.idx, started.idx);
+        assert_eq!(completed.status, WorkflowBindingRunStatus::Completed);
+        assert_eq!(completed.action_log[0].summary, "created task");
+        assert_eq!(completed.action_log[0].usage.unwrap().spent_tokens(), 23);
         assert_eq!(store.list_for("demo").len(), 1);
     }
 }

@@ -215,6 +215,7 @@ impl OpenAICompletionsTurnSession {
         let response: Value = send_openai_request_with_refresh(
             auth_store,
             &mut self.execution,
+            &state.config.network.proxy,
             body_for_each_attempt,
         )?;
 

@@ -1,7 +1,9 @@
 use crate::AppState;
 use anyhow::{anyhow, Result};
 use glob::Pattern;
-use puffer_config::{resolve_project_memory, ConfigPaths, ResolvedProjectMemory};
+use puffer_config::{
+    ensure_project_memory, resolve_project_memory, ConfigPaths, ResolvedProjectMemory,
+};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use serde::Deserialize;
@@ -67,6 +69,20 @@ impl ProjectMemoryContext {
             char_limit,
         )
     }
+}
+
+/// Ensures the current cwd has explicit project memory and refreshes app state.
+pub fn activate_project_memory(state: &mut AppState) -> Result<Option<ProjectMemoryContext>> {
+    if !state.memory_enabled() {
+        state.project_memory = None;
+        return Ok(None);
+    }
+    let paths = ConfigPaths::discover(&state.cwd);
+    let resolved = ensure_project_memory(&paths, &state.cwd)?;
+    let context = ProjectMemoryContext::from_resolved(resolved, state.config.memory.char_limit)?;
+    state.project_memory = Some(context.clone());
+    state.refresh_project_memory();
+    Ok(state.project_memory.clone())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

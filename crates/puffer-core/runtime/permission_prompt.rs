@@ -257,6 +257,9 @@ fn permission_request_summary(definition: &ToolDefinition, input: &Value) -> Str
             .map(|to| format!("Send a message to {to}"))
             .unwrap_or_else(|| definition.id.clone()),
         "AskUserQuestion" => "Answer questions?".to_string(),
+        "requestuserbrowseraction" | "RequestUserBrowserAction" => {
+            "Complete browser action?".to_string()
+        }
         "ExitPlanMode" => "Exit plan mode?".to_string(),
         "Email" => email_permission_summary(input),
         "Lark" => lark_permission_summary(input),

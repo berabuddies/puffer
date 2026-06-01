@@ -121,6 +121,9 @@ export type SessionStreamEvent =
       turnId: string;
       requestId: string;
       questions: unknown[];
+      browserSessionId?: string;
+      browserTabId?: string;
+      browserUrl?: string;
       replay?: boolean;
     } & StreamActorFields)
   | ({
@@ -159,6 +162,24 @@ export async function subscribeSessionEvents(
     const client = await ensureLocalDaemonClient();
     await waitForSessionSubscribeTestHook(sessionId);
     const channel = `session:${sessionId}:event`;
+    return client.on(channel, (payload) => {
+      handler(payload as SessionStreamEvent);
+    });
+  } catch (_e) {
+    return () => {};
+  }
+}
+
+/** Subscribes to events for a sessionless connector setup operation. Connector
+ *  setup reuses the turn/question event shape without creating a visible
+ *  persisted session. */
+export async function subscribeConnectorSetupEvents(
+  setupId: string,
+  handler: (event: SessionStreamEvent) => void
+): Promise<Unlisten> {
+  try {
+    const client = await ensureLocalDaemonClient();
+    const channel = `connector-setup:${setupId}:event`;
     return client.on(channel, (payload) => {
       handler(payload as SessionStreamEvent);
     });

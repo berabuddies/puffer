@@ -219,6 +219,62 @@ fn autostart_topics_use_connection_topic_for_configured_subscribers() {
     runtime.shutdown();
 }
 
+#[test]
+fn autostart_manifest_instantiates_connector_subscriber_without_connection_row() {
+    let runtime = test_subscription_runtime();
+    runtime
+        .manager()
+        .connector_store()
+        .upsert(configured_subscriber_template())
+        .unwrap();
+    runtime
+        .manager()
+        .store()
+        .create(workflow_binding(
+            "shared-workflow",
+            "personal",
+            Some("shared"),
+            WorkflowBindingStatus::Enabled,
+        ))
+        .unwrap();
+    let paths = temp_config_paths();
+    let manifest_dir = paths
+        .builtin_resources_dir
+        .join("subscribers")
+        .join("shared-login");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("manifest.toml"),
+        r#"manifest_version = 1
+id = "shared-login"
+kind = "subscriber"
+
+[run]
+cmd = ["puffer", "__subscriber", "shared-login"]
+
+[state]
+dir = "state"
+"#,
+    )
+    .unwrap();
+
+    let manifest = autostart_manifest(&runtime.manager(), &paths, "personal")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(manifest.spec.id, "personal");
+    assert_eq!(manifest.topic(), "personal");
+    assert_eq!(
+        manifest.spec.state.unwrap().dir,
+        paths
+            .user_config_dir
+            .join("shared-accounts/personal")
+            .to_string_lossy()
+    );
+
+    runtime.shutdown();
+}
+
 fn workflow_binding(
     slug: &str,
     connection_slug: &str,

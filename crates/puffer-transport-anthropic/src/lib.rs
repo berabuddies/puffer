@@ -12,12 +12,14 @@ mod response;
 mod usage;
 
 pub use auth::{
-    build_authorization_url, create_api_key, exchange_authorization_code, fetch_user_roles,
-    generate_pkce, get_session_ingress_auth, parse_authorization_input, refresh_oauth_token,
-    should_use_claude_ai_auth, AnthropicAuth, AnthropicOAuthConfig, AnthropicOAuthCredentials,
-    AnthropicPkce, AnthropicUserRoles, ANTHROPIC_ALL_SCOPES, ANTHROPIC_API_BASE_URL,
-    ANTHROPIC_CLAUDE_AI_INFERENCE_SCOPE, ANTHROPIC_CLAUDE_AI_SCOPES, ANTHROPIC_MANUAL_REDIRECT_URL,
-    ANTHROPIC_TOKEN_URL, CLAUDE_AI_AUTHORIZE_URL, CONSOLE_AUTHORIZE_URL, OAUTH_BETA_HEADER,
+    build_authorization_url, create_api_key, exchange_authorization_code,
+    exchange_authorization_code_with_client, fetch_user_roles, generate_pkce,
+    get_session_ingress_auth, parse_authorization_input, refresh_oauth_token,
+    refresh_oauth_token_with_client, should_use_claude_ai_auth, AnthropicAuth,
+    AnthropicOAuthConfig, AnthropicOAuthCredentials, AnthropicPkce, AnthropicUserRoles,
+    ANTHROPIC_ALL_SCOPES, ANTHROPIC_API_BASE_URL, ANTHROPIC_CLAUDE_AI_INFERENCE_SCOPE,
+    ANTHROPIC_CLAUDE_AI_SCOPES, ANTHROPIC_MANUAL_REDIRECT_URL, ANTHROPIC_TOKEN_URL,
+    CLAUDE_AI_AUTHORIZE_URL, CONSOLE_AUTHORIZE_URL, OAUTH_BETA_HEADER,
 };
 pub use cch::finalize_cch_body;
 pub use fingerprint::compute_fingerprint;

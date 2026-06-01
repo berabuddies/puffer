@@ -49,6 +49,7 @@ pub mod quota;
 mod reflection;
 mod request_tool_filter;
 pub mod resource_watcher;
+pub(crate) mod secrets;
 mod side_question;
 mod structured_output_support;
 mod system_prompt;
@@ -128,11 +129,12 @@ pub(crate) use self::hook_support::run_turn_hooks;
 #[cfg(test)]
 pub(crate) use self::http_support::{
     http_5xx_backoff_with_jitter, http_5xx_base_delay, http_5xx_max_attempts, http_retry_config,
-    is_retryable_http_error, parse_retry_after_headers, retry_delay, HttpRetryConfig,
-    RawHttpResponse, HTTP_RETRY_ATTEMPTS_ENV, HTTP_RETRY_DELAY_MS_ENV,
+    is_retryable_http_error, parse_retry_after_headers, retry_delay, send_http_request_raw,
+    HttpRetryConfig, RawHttpResponse, HTTP_RETRY_ATTEMPTS_ENV, HTTP_RETRY_DELAY_MS_ENV,
 };
 pub(crate) use self::http_support::{
-    parse_http_json_response, retry_on_5xx, send_http_request, send_http_request_raw,
+    parse_http_json_response, retry_on_5xx, send_http_request, send_http_request_raw_with_proxy,
+    send_http_request_with_proxy,
 };
 #[cfg(test)]
 use self::openai::parse_openai_sse_response;

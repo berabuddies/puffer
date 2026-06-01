@@ -1,7 +1,7 @@
 use super::{
     execute_tool_call, is_parallel_safe_tool, parse_http_json_response, resolve_tool_permission,
-    run_turn_hooks, send_http_request_raw, PermissionOutcome, ToolExecutionBackend, ToolInvocation,
-    TurnStreamEvent, APP_VERSION, OPENAI_CODEX_COMPAT_VERSION,
+    run_turn_hooks, PermissionOutcome, ToolExecutionBackend, ToolInvocation, TurnStreamEvent,
+    APP_VERSION, OPENAI_CODEX_COMPAT_VERSION,
 };
 use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 mod completions_session;
@@ -27,12 +27,13 @@ use super::structured_output_support::{
 use super::system_prompt::render_runtime_system_prompt;
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
+use puffer_config::ProxyConfig;
 use puffer_provider_openai::{
     build_chat_completions_request, build_json_post_request, extract_chat_completions_text,
     extract_chat_completions_tool_calls, extract_responses_text, extract_responses_tool_calls,
-    parse_chat_completions_response, refresh_oauth_token, OpenAIAuth, OpenAIChatCompletionsRequest,
-    OpenAIRequestConfig, OpenAIResponseToolCall, OpenAIResponsesFunctionCallOutput,
-    OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
+    parse_chat_completions_response, refresh_oauth_token, refresh_oauth_token_with_client,
+    OpenAIAuth, OpenAIChatCompletionsRequest, OpenAIRequestConfig, OpenAIResponseToolCall,
+    OpenAIResponsesFunctionCallOutput, OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
 };
 use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
@@ -258,6 +259,7 @@ where
                 send_openai_request_with_refresh_streaming(
                     auth_store,
                     &mut execution,
+                    &state.config.network.proxy,
                     |request_config| {
                         let mut body = build_codex_openai_request_body(
                             state,
@@ -499,6 +501,7 @@ pub(super) fn execute_openai_tool_calls(
     let provider_context = super::claude_tools::ProviderToolContext::OpenAI {
         request_config,
         model_id,
+        proxy: &state.config.network.proxy,
         structured_output,
     };
     // Cloned before `thread::scope` so each worker can route through the
@@ -538,7 +541,20 @@ pub(super) fn execute_openai_tool_calls(
                     continue;
                 }
             };
-            let args = tc.arguments.clone();
+            let args = match super::secrets::expand_secret_placeholders(state, &tc.arguments) {
+                Ok(args) => args,
+                Err(error) => {
+                    results[i] = Some((
+                        super::secrets::redact_known_secrets(
+                            state,
+                            &format!("Tool execution failed: {error}"),
+                        ),
+                        false,
+                        Value::Null,
+                    ));
+                    continue;
+                }
+            };
             let pc = &provider_context;
             let sid = &state.session.id;
             let runner_clone = runner.clone();
@@ -641,6 +657,8 @@ pub(super) fn execute_openai_tool_calls(
         let (raw_output, success, metadata) = results[i]
             .take()
             .unwrap_or_else(|| ("Tool was not executed".to_string(), false, Value::Null));
+        let raw_output = super::secrets::redact_known_secrets(state, &raw_output);
+        let metadata = super::secrets::redact_json_value(state, &metadata);
         let output =
             super::process_tool_result(&raw_output, super::MAX_TOOL_RESULT_CHARS, session_id);
         outputs.push(OpenAIResponsesFunctionCallOutput {
@@ -724,6 +742,8 @@ fn execute_openai_tool_calls_serial(
                 Value::Null,
             ),
         };
+        let output = super::secrets::redact_known_secrets(state, &output);
+        let metadata = super::secrets::redact_json_value(state, &metadata);
         let output =
             super::process_tool_result(&output, super::MAX_TOOL_RESULT_CHARS, &state.session.id);
         outputs.push(OpenAIResponsesFunctionCallOutput {
@@ -978,13 +998,14 @@ fn codex_style_for_provider(provider: &ProviderDescriptor, oauth: bool) -> bool 
 pub(super) fn send_openai_request_with_refresh<F>(
     auth_store: &mut AuthStore,
     execution: &mut OpenAIExecutionConfig,
+    proxy: &ProxyConfig,
     build_request: F,
 ) -> Result<Value>
 where
     F: Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest>,
 {
     retry_openai_transport(
-        || send_openai_request_with_refresh_once(auth_store, execution, &build_request),
+        || send_openai_request_with_refresh_once(auth_store, execution, proxy, &build_request),
         |_, _, _| {},
     )
 }
@@ -992,13 +1013,20 @@ where
 fn send_openai_request_with_refresh_once<F>(
     auth_store: &mut AuthStore,
     execution: &mut OpenAIExecutionConfig,
+    proxy: &ProxyConfig,
     build_request: &F,
 ) -> Result<Value>
 where
     F: Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest>,
 {
     let request = build_request(&execution.request_config)?;
-    let response = send_http_request_raw(&request.url, &request.headers, &request.body, false)?;
+    let response = super::send_http_request_raw_with_proxy(
+        &request.url,
+        &request.headers,
+        &request.body,
+        false,
+        proxy,
+    )?;
     if response.status != StatusCode::UNAUTHORIZED || execution.refresh_token.is_none() {
         return parse_http_json_response(&request.url, false, response);
     }
@@ -1007,8 +1035,16 @@ where
         .refresh_token
         .clone()
         .ok_or_else(|| anyhow!("missing refresh token for OpenAI OAuth retry"))?;
-    let refreshed = refresh_oauth_token(&refresh_token)
-        .context("failed to refresh OpenAI OAuth credentials after 401")?;
+    let refreshed = match crate::network::blocking_client_for_url(
+        proxy,
+        crate::network::HttpPurpose::OAuth,
+        puffer_provider_openai::OPENAI_TOKEN_URL,
+        std::time::Duration::from_secs(60),
+    ) {
+        Ok(client) => refresh_oauth_token_with_client(&client, &refresh_token),
+        Err(_) => refresh_oauth_token(&refresh_token),
+    }
+    .context("failed to refresh OpenAI OAuth credentials after 401")?;
     let stored = openai_registry_credential(refreshed);
     execution.request_config.auth = OpenAIAuth::OAuthBearer(stored.access_token.clone());
     execution.request_config.account_id = stored.account_id.clone();
@@ -1016,13 +1052,20 @@ where
     auth_store.set_oauth(execution.provider_id.clone(), stored);
 
     let retry = build_request(&execution.request_config)?;
-    let retry_response = send_http_request_raw(&retry.url, &retry.headers, &retry.body, false)?;
+    let retry_response = super::send_http_request_raw_with_proxy(
+        &retry.url,
+        &retry.headers,
+        &retry.body,
+        false,
+        proxy,
+    )?;
     parse_http_json_response(&retry.url, false, retry_response)
 }
 
 pub(super) fn send_openai_request_with_refresh_streaming<F, G>(
     auth_store: &mut AuthStore,
     execution: &mut OpenAIExecutionConfig,
+    proxy: &ProxyConfig,
     build_request: F,
     on_event: &mut G,
 ) -> Result<OpenAISseResult>
@@ -1041,7 +1084,14 @@ where
     let response = super::retry_on_5xx(
         || {
             retry_openai_transport(
-                || send_openai_request_stream_raw(&request.url, &request.headers, &request.body),
+                || {
+                    send_openai_request_stream_raw(
+                        &request.url,
+                        &request.headers,
+                        &request.body,
+                        proxy,
+                    )
+                },
                 |attempt, max, error| {
                     on_event(TurnStreamEvent::RetryAttempt {
                         attempt,
@@ -1067,8 +1117,16 @@ where
         .refresh_token
         .clone()
         .ok_or_else(|| anyhow!("missing refresh token for OpenAI OAuth retry"))?;
-    let refreshed = refresh_oauth_token(&refresh_token)
-        .context("failed to refresh OpenAI OAuth credentials after 401")?;
+    let refreshed = match crate::network::blocking_client_for_url(
+        proxy,
+        crate::network::HttpPurpose::OAuth,
+        puffer_provider_openai::OPENAI_TOKEN_URL,
+        std::time::Duration::from_secs(60),
+    ) {
+        Ok(client) => refresh_oauth_token_with_client(&client, &refresh_token),
+        Err(_) => refresh_oauth_token(&refresh_token),
+    }
+    .context("failed to refresh OpenAI OAuth credentials after 401")?;
     let stored = openai_registry_credential(refreshed);
     execution.request_config.auth = OpenAIAuth::OAuthBearer(stored.access_token.clone());
     execution.request_config.account_id = stored.account_id.clone();
@@ -1079,7 +1137,7 @@ where
     let retry_response = super::retry_on_5xx(
         || {
             retry_openai_transport(
-                || send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body),
+                || send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body, proxy),
                 |attempt, max, error| {
                     on_event(TurnStreamEvent::RetryAttempt {
                         attempt,
@@ -1104,11 +1162,16 @@ fn send_openai_request_stream_raw(
     url: &str,
     headers: &[(String, String)],
     body: &str,
+    proxy: &ProxyConfig,
 ) -> Result<Response> {
     trace_openai_http_request(url, headers, body);
-    let client = Client::builder()
-        .timeout(openai_stream_read_timeout())
-        .build()?;
+    let client = crate::network::blocking_client_for_url(
+        proxy,
+        crate::network::HttpPurpose::Model,
+        url,
+        openai_stream_read_timeout(),
+    )
+    .unwrap_or_else(|_| Client::new());
     let mut request = client.post(url);
     for (key, value) in headers {
         request = request.header(key, value);

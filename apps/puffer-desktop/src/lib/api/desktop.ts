@@ -3,24 +3,33 @@ import type {
   AgentActivityStatus,
   AuthProviderStatus,
   AskUserQuestionItem,
+  BrowserRenderer,
   DesktopPinState,
   DiffSnapshot,
+  DraftProxyEndpoint,
   ExternalCredential,
   FolderGroup,
   ProviderSummary,
+  ProxyTestResult,
   PullRequest,
   RemoteConnection,
   RemoteOperation,
   RepoActionResult,
   RepoStatus,
+  ChromeSecretsImportResult,
+  SaveSecretInput,
+  SaveProxySettingsInput,
   SessionDetail,
   SessionGroupsPage,
   SessionListItem,
   SettingsSnapshot,
   MessageActor,
+  OpenAIRealtimeClientSecret,
+  OpenAIRealtimeClientSecretOptions,
   TimelineItem,
   WorkflowDefinition,
   WorkflowBindingCreateRequest,
+  WorkflowMonitorHistoryMessage,
   WorkflowRun,
   WorkflowSnapshot
 } from "../types";
@@ -240,7 +249,8 @@ type BackendResourceCounts = SettingsSnapshot["resources"];
 type BackendSettingsSessionSummary = SettingsSnapshot["sessions"];
 type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
-type BackendBrowserProfile = SettingsSnapshot["browserProfiles"][number];
+type BackendNetworkProxySettings = SettingsSnapshot["networkProxy"];
+type BackendSecretsSettings = SettingsSnapshot["secrets"];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -253,8 +263,11 @@ type BackendSettingsSnapshot = {
   sessions: BackendSettingsSessionSummary;
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
-  browserProfiles: BackendBrowserProfile[];
+  networkProxy: BackendNetworkProxySettings;
+  secrets: BackendSecretsSettings;
 };
+
+type BackendChromeSecretsImportResult = ChromeSecretsImportResult;
 
 type BackendRemoteOperation = RemoteOperation;
 
@@ -820,6 +833,66 @@ export async function logoutProvider(
   });
 }
 
+export async function saveProxySettings(
+  input: SaveProxySettingsInput
+): Promise<SettingsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BackendSettingsSnapshot>("save_proxy_settings", input);
+}
+
+export async function saveSecret(input: SaveSecretInput): Promise<SettingsSnapshot> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("save_secret", input);
+  }
+  if (!canInvokeTauri()) {
+    return mockSettingsSnapshot;
+  }
+  return invoke<BackendSettingsSnapshot>("backend_request", {
+    method: "save_secret",
+    params: input
+  });
+}
+
+export async function deleteSecret(id: string): Promise<SettingsSnapshot> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("delete_secret", { id });
+  }
+  if (!canInvokeTauri()) {
+    return mockSettingsSnapshot;
+  }
+  return invoke<BackendSettingsSnapshot>("backend_request", {
+    method: "delete_secret",
+    params: { id }
+  });
+}
+
+export async function importChromeSecrets(): Promise<ChromeSecretsImportResult> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendChromeSecretsImportResult>("import_chrome_secrets");
+  }
+  if (!canInvokeTauri()) {
+    return {
+      settings: mockSettingsSnapshot,
+      report: { imported: 0, skipped: 0, errors: ["Chrome import requires the desktop backend."] }
+    };
+  }
+  return invoke<BackendChromeSecretsImportResult>("backend_request", {
+    method: "import_chrome_secrets",
+    params: {}
+  });
+}
+
+export async function testProxy(input: {
+  proxyId?: string;
+  endpoint?: DraftProxyEndpoint;
+}): Promise<ProxyTestResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<ProxyTestResult>("test_proxy", input);
+}
+
 export async function runRemoteBash(
   remote: RemoteConnection,
   command: string
@@ -1250,6 +1323,16 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
   });
 }
 
+/** Load recent received monitor messages and their agent outcomes. */
+export async function loadMonitorHistory(limit = 200): Promise<WorkflowMonitorHistoryMessage[]> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ messages?: WorkflowMonitorHistoryMessage[] }>(
+    "task_monitor_history_list",
+    { limit }
+  );
+  return result.messages ?? [];
+}
+
 /** Delete one connection-triggered workflow binding. */
 export async function deleteWorkflowBinding(slug: string): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
@@ -1329,6 +1412,21 @@ export async function dispatchSlashCommand(
   const client = await ensureLocalDaemonClient();
   const result = await client.request<{ turnId: string }>("dispatch_slash_command", {
     sessionId,
+    message
+  });
+  return result.turnId;
+}
+
+/** Runs deterministic connector setup without creating a persisted session.
+ *  Events stream on `connector-setup:<setupId>:event` and use the same
+ *  question/complete/error payloads as a normal turn. */
+export async function startConnectorSetupCommand(
+  setupId: string,
+  message: string
+): Promise<string> {
+  const client = await ensureLocalDaemonClient();
+  const result = await client.request<{ turnId: string }>("start_connector_setup", {
+    setupId,
     message
   });
   return result.turnId;
@@ -1772,6 +1870,109 @@ export type BrowserRecordingSnapshot = {
   frames: BrowserRecordedFrame[];
 };
 
+export type BrowserBackendStatus = {
+  preferredRenderer: BrowserRenderer;
+  activeRenderer: BrowserRenderer;
+  fallbackReason: string | null;
+  cef: {
+    available: boolean;
+    root: string | null;
+    frameworkPath: string | null;
+    missing: string[];
+    tintinChromium: {
+      executable: string | null;
+      appBundle: string | null;
+      isCefRuntime: boolean;
+    };
+    buildHint: string;
+  };
+  screencast: {
+    chromiumExecutable: string | null;
+  };
+};
+
+export type BrowserCefNativeStatus = {
+  available: boolean;
+  active: boolean;
+  root: string | null;
+  helper: string | null;
+  remoteDebuggingPort: number;
+  buildEnabled: boolean;
+  error: string | null;
+};
+
+export type BrowserCefNativeRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type BrowserCefNativeState = BrowserState & {
+  connected: boolean;
+  remoteDebuggingPort?: number;
+};
+
+/** Report the preferred Browser renderer and the runtime fallback state. */
+export async function browserBackendStatus(
+  preferredRenderer: BrowserRenderer
+): Promise<BrowserBackendStatus> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BrowserBackendStatus>("browser_backend_status", { preferredRenderer });
+}
+
+/** Report whether the Tauri process can host a native CEF browser view. */
+export async function browserCefNativeStatus(): Promise<BrowserCefNativeStatus | null> {
+  try {
+    return await invoke<BrowserCefNativeStatus>("browser_cef_native_status");
+  } catch {
+    return null;
+  }
+}
+
+/** Open or focus a native CEF browser inside the Tauri window. */
+export async function browserCefNativeOpen(params: {
+  sessionId: string;
+  url?: string;
+  rect: BrowserCefNativeRect;
+}): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_open", params);
+}
+
+/** Resize a native CEF browser inside the Tauri window. */
+export async function browserCefNativeResize(
+  sessionId: string,
+  rect: BrowserCefNativeRect
+): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_resize", { sessionId, rect });
+}
+
+/** Navigate a native CEF browser. */
+export async function browserCefNativeNavigate(
+  sessionId: string,
+  url: string
+): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_navigate", { sessionId, url });
+}
+
+/** Reload a native CEF browser. */
+export async function browserCefNativeReload(sessionId: string): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_reload", { sessionId });
+}
+
+/** Move a native CEF browser backward or forward in history. */
+export async function browserCefNativeHistory(
+  sessionId: string,
+  direction: "back" | "forward"
+): Promise<BrowserCefNativeState> {
+  return invoke<BrowserCefNativeState>("browser_cef_native_history", { sessionId, direction });
+}
+
+/** Close a native CEF browser. */
+export async function browserCefNativeClose(sessionId: string): Promise<void> {
+  await invoke("browser_cef_native_close", { sessionId });
+}
+
 /** Open or reuse the Chrome-backed browser session for a Puffer session. */
 export async function browserOpen(params: {
   sessionId: string;
@@ -2062,7 +2263,6 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
-  browserChromeProfile?: string | null;
 };
 
 export async function localModelStatus(modelId = "minicpm5"): Promise<LocalModelStatus> {
@@ -2094,6 +2294,16 @@ export async function listProviderModels(providerId: string): Promise<ModelDescr
     { providerId }
   );
   return result.models;
+}
+
+export async function createOpenAIRealtimeClientSecret(
+  options: OpenAIRealtimeClientSecretOptions = {}
+): Promise<OpenAIRealtimeClientSecret> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<OpenAIRealtimeClientSecret>(
+    "create_openai_realtime_client_secret",
+    options
+  );
 }
 
 export async function listPermissions(): Promise<PermissionsSnapshot> {

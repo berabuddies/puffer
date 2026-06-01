@@ -228,6 +228,25 @@ pub fn exchange_authorization_code(
     base_api_url: Option<&str>,
 ) -> Result<AnthropicOAuthCredentials> {
     let client = Client::new();
+    exchange_authorization_code_with_client(
+        &client,
+        code,
+        verifier,
+        state,
+        redirect_uri,
+        base_api_url,
+    )
+}
+
+/// Exchanges an Anthropic OAuth authorization code using an injected blocking HTTP client.
+pub fn exchange_authorization_code_with_client(
+    client: &Client,
+    code: &str,
+    verifier: &str,
+    state: &str,
+    redirect_uri: Option<&str>,
+    base_api_url: Option<&str>,
+) -> Result<AnthropicOAuthCredentials> {
     let redirect_uri = redirect_uri.unwrap_or(ANTHROPIC_MANUAL_REDIRECT_URL);
     let response = client
         .post(ANTHROPIC_TOKEN_URL)
@@ -254,7 +273,8 @@ pub fn exchange_authorization_code(
         ));
     }
     let mut credentials = token_response_to_credentials(payload, None, None)?;
-    enrich_oauth_credentials(
+    enrich_oauth_credentials_with_client(
+        client,
         base_api_url.unwrap_or(ANTHROPIC_API_BASE_URL),
         &mut credentials,
         None,
@@ -270,6 +290,38 @@ pub fn refresh_oauth_token(
     existing: Option<&AnthropicOAuthCredentials>,
 ) -> Result<AnthropicOAuthCredentials> {
     let client = Client::new();
+    refresh_oauth_token_with_client_for_base_url(
+        &client,
+        refresh_token,
+        scopes,
+        base_api_url.unwrap_or(ANTHROPIC_API_BASE_URL),
+        existing,
+    )
+}
+
+/// Refreshes Anthropic OAuth credentials using an injected blocking HTTP client.
+pub fn refresh_oauth_token_with_client(
+    client: &Client,
+    refresh_token: &str,
+    scopes: Option<&[String]>,
+    existing: Option<&AnthropicOAuthCredentials>,
+) -> Result<AnthropicOAuthCredentials> {
+    refresh_oauth_token_with_client_for_base_url(
+        client,
+        refresh_token,
+        scopes,
+        ANTHROPIC_API_BASE_URL,
+        existing,
+    )
+}
+
+fn refresh_oauth_token_with_client_for_base_url(
+    client: &Client,
+    refresh_token: &str,
+    scopes: Option<&[String]>,
+    base_api_url: &str,
+    existing: Option<&AnthropicOAuthCredentials>,
+) -> Result<AnthropicOAuthCredentials> {
     let requested_scope = scopes
         .map(|scopes| scopes.join(" "))
         .unwrap_or_else(|| ANTHROPIC_CLAUDE_AI_SCOPES.to_string());
@@ -296,17 +348,21 @@ pub fn refresh_oauth_token(
         ));
     }
     let mut credentials = token_response_to_credentials(payload, Some(refresh_token), scopes)?;
-    enrich_oauth_credentials(
-        base_api_url.unwrap_or(ANTHROPIC_API_BASE_URL),
-        &mut credentials,
-        existing,
-    );
+    enrich_oauth_credentials_with_client(client, base_api_url, &mut credentials, existing);
     Ok(credentials)
 }
 
 /// Fetches Anthropic organization roles for the current OAuth account.
 pub fn fetch_user_roles(base_api_url: &str, access_token: &str) -> Result<AnthropicUserRoles> {
     let client = Client::new();
+    fetch_user_roles_with_client(&client, base_api_url, access_token)
+}
+
+fn fetch_user_roles_with_client(
+    client: &Client,
+    base_api_url: &str,
+    access_token: &str,
+) -> Result<AnthropicUserRoles> {
     let response = client
         .get(format!(
             "{}/api/oauth/claude_cli/roles",
@@ -336,6 +392,14 @@ pub fn fetch_user_roles(base_api_url: &str, access_token: &str) -> Result<Anthro
 /// Creates an Anthropic API key from Console OAuth credentials.
 pub fn create_api_key(base_api_url: &str, access_token: &str) -> Result<String> {
     let client = Client::new();
+    create_api_key_with_client(&client, base_api_url, access_token)
+}
+
+fn create_api_key_with_client(
+    client: &Client,
+    base_api_url: &str,
+    access_token: &str,
+) -> Result<String> {
     let response = client
         .post(format!(
             "{}/api/oauth/claude_cli/create_api_key",
@@ -500,12 +564,13 @@ struct AnthropicProfileOrganization {
     rate_limit_tier: Option<String>,
 }
 
-fn enrich_oauth_credentials(
+fn enrich_oauth_credentials_with_client(
+    client: &Client,
     base_api_url: &str,
     credentials: &mut AnthropicOAuthCredentials,
     existing: Option<&AnthropicOAuthCredentials>,
 ) {
-    match fetch_oauth_profile(base_api_url, &credentials.access_token) {
+    match fetch_oauth_profile_with_client(client, base_api_url, &credentials.access_token) {
         Ok(profile) => {
             credentials.account_uuid = Some(profile.account.uuid);
             credentials.email_address = Some(profile.account.email);
@@ -516,7 +581,9 @@ fn enrich_oauth_credentials(
                 .as_ref()
                 .and_then(|org| plan_type_from_organization_type(org.organization_type.as_deref()));
             credentials.rate_limit_tier = profile.organization.and_then(|org| org.rate_limit_tier);
-            if let Ok(roles) = fetch_user_roles(base_api_url, &credentials.access_token) {
+            if let Ok(roles) =
+                fetch_user_roles_with_client(client, base_api_url, &credentials.access_token)
+            {
                 credentials.organization_name = roles.organization_name;
                 credentials.organization_role = roles.organization_role;
                 credentials.workspace_role = roles.workspace_role;
@@ -553,11 +620,11 @@ fn enrich_oauth_credentials(
     }
 }
 
-fn fetch_oauth_profile(
+fn fetch_oauth_profile_with_client(
+    client: &Client,
     base_api_url: &str,
     access_token: &str,
 ) -> Result<AnthropicOAuthProfileResponse> {
-    let client = Client::new();
     client
         .get(format!(
             "{}/api/oauth/profile",
@@ -614,6 +681,13 @@ mod tests {
         let pkce = generate_pkce();
         assert_ne!(pkce.state, pkce.verifier);
         assert!(!pkce.challenge.is_empty());
+    }
+
+    #[test]
+    fn refresh_oauth_token_with_client_accepts_injected_client() {
+        let client = Client::builder().build().expect("client");
+        let result = refresh_oauth_token_with_client(&client, "refresh-token", None, None);
+        assert!(result.is_err());
     }
 
     #[test]

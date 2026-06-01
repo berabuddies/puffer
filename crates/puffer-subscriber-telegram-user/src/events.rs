@@ -6,6 +6,7 @@
 //! the runtime bus.
 
 use std::io::Write as _;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use grammers_client::types::{Chat, Media, Message};
@@ -48,8 +49,15 @@ pub fn emit_control(topic: &str, kind: &str, payload: Value) -> anyhow::Result<(
 ///
 /// `kind` is `"channel_post"` when the message came from a broadcast channel
 /// and `"message"` otherwise. The payload contains routing fields action
-/// handlers rely on (chat id, chat kind, sender id, date in ms, etc.).
-pub fn build_message_event(topic: &str, message: &Message, notification_muted: bool) -> Event {
+/// handlers rely on (chat id, chat kind, sender id, date in ms, delivery
+/// source, etc.).
+pub fn build_message_event(
+    topic: &str,
+    message: &Message,
+    notification_muted: bool,
+    delivery_source: &str,
+    source_received_at_ms: Option<i128>,
+) -> Event {
     let chat = message.chat();
     let (chat_kind, chat_title, chat_username) = describe_chat(&chat);
     let chat_id = chat.id();
@@ -57,6 +65,7 @@ pub fn build_message_event(topic: &str, message: &Message, notification_muted: b
     let date_ms = message.date().timestamp_millis();
     let date = message.date().to_rfc3339();
     let is_outgoing = message.outgoing();
+    let emit_at_ms = now_unix_millis();
 
     let (sender_id, sender_username, sender_name) = match message.sender() {
         Some(s) => (
@@ -94,6 +103,26 @@ pub fn build_message_event(topic: &str, message: &Message, notification_muted: b
     payload.insert("message_id".to_string(), json!(message_id));
     payload.insert("date".to_string(), json!(date));
     payload.insert("date_ms".to_string(), json!(date_ms));
+    payload.insert("delivery_source".to_string(), json!(delivery_source));
+    payload.insert("subscriber_emit_at_ms".to_string(), json!(emit_at_ms));
+    payload.insert(
+        "subscriber_emit_lag_ms".to_string(),
+        json!(emit_at_ms - i128::from(date_ms)),
+    );
+    if let Some(received_at_ms) = source_received_at_ms {
+        payload.insert(
+            "subscriber_received_at_ms".to_string(),
+            json!(received_at_ms),
+        );
+        payload.insert(
+            "subscriber_receive_lag_ms".to_string(),
+            json!(received_at_ms - i128::from(date_ms)),
+        );
+        payload.insert(
+            "subscriber_queue_lag_ms".to_string(),
+            json!(emit_at_ms.saturating_sub(received_at_ms)),
+        );
+    }
     payload.insert("is_outgoing".to_string(), json!(is_outgoing));
     payload.insert("notification_muted".to_string(), json!(notification_muted));
     payload.insert("notification_silent".to_string(), json!(message.silent()));
@@ -116,6 +145,13 @@ pub fn build_message_event(topic: &str, message: &Message, notification_muted: b
         text: message.text().to_string(),
         payload: Value::Object(payload),
     }
+}
+
+fn now_unix_millis() -> i128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i128
 }
 
 /// Returns `(chat_kind, chat_title, chat_username)` describing a chat.

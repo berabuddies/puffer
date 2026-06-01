@@ -152,7 +152,8 @@ pub fn default_init_params() -> grammers_client::InitParams {
         app_version: "6.7.6".to_string(),
         lang_code: "en".to_string(),
         system_lang_code: "en".to_string(),
-        catch_up: true,
+        catch_up: false,
+        update_queue_limit: None,
         ..Default::default()
     }
 }
@@ -249,5 +250,13 @@ mod tests {
 
         assert_eq!(api_id, 67890);
         assert_eq!(api_hash, "saved");
+    }
+
+    #[test]
+    fn default_init_params_prioritize_live_updates() {
+        let params = default_init_params();
+
+        assert!(!params.catch_up);
+        assert_eq!(params.update_queue_limit, None);
     }
 }

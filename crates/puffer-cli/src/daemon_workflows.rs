@@ -3,6 +3,8 @@
 mod binding_delete;
 mod connection_delete;
 mod monitor_create;
+mod monitor_history;
+mod monitor_ignore_result;
 mod monitor_memory;
 mod monitor_task_ignore;
 mod planned;
@@ -11,6 +13,7 @@ mod task_snapshot;
 pub(crate) use binding_delete::handle_workflow_binding_delete;
 pub(crate) use connection_delete::handle_workflow_connection_delete;
 pub(crate) use monitor_create::handle_monitor_create;
+pub(crate) use monitor_history::handle_monitor_history_list;
 pub(crate) use monitor_memory::handle_monitor_memory_save;
 pub(crate) use monitor_task_ignore::handle_monitor_task_ignore;
 

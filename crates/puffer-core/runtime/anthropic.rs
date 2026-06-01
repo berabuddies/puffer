@@ -26,8 +26,8 @@ use super::system_prompt::render_runtime_system_prompt;
 use super::tool_executor::{execute_tool_call, ToolExecutionBackend};
 use super::{
     enforce_tool_result_budget, git_status_context, process_tool_result, resolve_max_output_tokens,
-    send_http_request, ToolCallRequest, ToolInvocation, TurnExecution, TurnRequestOptions,
-    TurnStreamEvent, APP_VERSION, MAX_TOOL_RESULT_CHARS,
+    send_http_request, send_http_request_with_proxy, ToolCallRequest, ToolInvocation,
+    TurnExecution, TurnRequestOptions, TurnStreamEvent, APP_VERSION, MAX_TOOL_RESULT_CHARS,
 };
 use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::AppState;
@@ -251,10 +251,13 @@ impl TurnSession for AnthropicTurnSession {
         trace_anthropic_stream_request(&self.request_url, &body);
 
         // Send streaming request.
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .unwrap_or_else(|_| Client::new());
+        let client = crate::network::blocking_client_for_url(
+            &state.config.network.proxy,
+            crate::network::HttpPurpose::Model,
+            &self.request_url,
+            std::time::Duration::from_secs(300),
+        )
+        .unwrap_or_else(|_| Client::new());
         let mut http_request = client.post(&self.request_url);
         for (key, value) in &self.request_headers {
             http_request = http_request.header(key, value);
@@ -338,11 +341,12 @@ impl TurnSession for AnthropicTurnSession {
         // floor (3 items).
         loop {
             let body = self.build_body(items, state, false);
-            match send_http_request(
+            match send_http_request_with_proxy(
                 &self.request_url,
                 &self.request_headers,
                 &body.to_string(),
                 true,
+                &state.config.network.proxy,
             ) {
                 Ok(response) => return turn_from_response(&response),
                 Err(error) => {
@@ -999,6 +1003,8 @@ pub(super) fn execute_anthropic_tool_calls(
         } else {
             format!("{}\n{}", execution.output.stdout, execution.output.stderr)
         };
+        let raw_output = super::secrets::redact_known_secrets(state, &raw_output);
+        let metadata = super::secrets::redact_json_value(state, &execution.output.metadata);
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &state.session.id);
         results.push(json!({
@@ -1013,7 +1019,7 @@ pub(super) fn execute_anthropic_tool_calls(
             input: call.input.clone(),
             output: output_text.clone(),
             success: execution.success,
-            metadata: execution.output.metadata,
+            metadata,
             terminate: false,
         });
     }

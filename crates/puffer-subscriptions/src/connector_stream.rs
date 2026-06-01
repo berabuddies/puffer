@@ -10,8 +10,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{self, JoinHandle};
 
 /// Synchronous event processor used by connector streams before acking.
 pub trait ConnectorEventProcessor: Send + Sync {
@@ -22,6 +23,20 @@ pub trait ConnectorEventProcessor: Send + Sync {
         connection_slug: &str,
         envelope: &EventEnvelope,
     ) -> Result<()>;
+
+    /// Processes a same-connection event batch. Returning an error prevents
+    /// every cursor in the batch from being acknowledged.
+    fn process_connector_events(
+        &self,
+        connector_slug: &str,
+        connection_slug: &str,
+        envelopes: &[EventEnvelope],
+    ) -> Result<()> {
+        for envelope in envelopes {
+            self.process_connector_event(connector_slug, connection_slug, envelope)?;
+        }
+        Ok(())
+    }
 }
 
 /// Handle for one running connector subscription process.
@@ -129,13 +144,43 @@ async fn run_stream(
 ) {
     let mut stdout_rx = read_lines(stdout);
     let mut stderr_rx = read_lines(stderr);
+    let (pending_tx, pending_rx) = mpsc::unbounded_channel();
+    let (processed_tx, mut processed_rx) = mpsc::unbounded_channel();
+    let processor_task = processor.clone().map(|processor| {
+        spawn_processor_queue(
+            connector_slug.clone(),
+            connection_slug.clone(),
+            processor,
+            pending_rx,
+            processed_tx,
+        )
+    });
     let mut shutdown_requested = false;
+    let mut processor_events_closed = processor_task.is_none();
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
                 shutdown_requested = true;
                 let _ = child.start_kill();
                 break;
+            }
+            maybe = processed_rx.recv(), if !processor_events_closed => {
+                let Some(processed) = maybe else {
+                    processor_events_closed = true;
+                    continue;
+                };
+                if !apply_processed_events(
+                    &connector_slug,
+                    &connection_slug,
+                    &connection_store,
+                    &mut stdin,
+                    processed,
+                )
+                .await
+                {
+                    let _ = child.start_kill();
+                    break;
+                }
             }
             maybe = stdout_rx.recv() => {
                 let Some(line) = maybe else { break; };
@@ -147,6 +192,7 @@ async fn run_stream(
                         &bus,
                         &connection_store,
                         &mut stdin,
+                        &pending_tx,
                         processor.as_deref(),
                     ).await,
                     Err(error) => tracing::warn!(
@@ -170,6 +216,27 @@ async fn run_stream(
             }
         }
     }
+    drop(pending_tx);
+    if let Some(processor_task) = processor_task {
+        if shutdown_requested {
+            processor_task.abort();
+        } else {
+            let _ = processor_task.await;
+            while let Ok(processed) = processed_rx.try_recv() {
+                if !apply_processed_events(
+                    &connector_slug,
+                    &connection_slug,
+                    &connection_store,
+                    &mut stdin,
+                    processed,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+        }
+    }
     let _ = child.wait().await;
     if !shutdown_requested {
         let _ = connection_store.update(&connection_slug, |record| {
@@ -180,6 +247,42 @@ async fn run_stream(
     }
 }
 
+async fn apply_processed_events(
+    connector_slug: &str,
+    connection_slug: &str,
+    connection_store: &ConnectionStore,
+    stdin: &mut tokio::process::ChildStdin,
+    processed: ProcessedConnectorEvents,
+) -> bool {
+    match processed {
+        ProcessedConnectorEvents::Ack(acks) => {
+            for ack in acks {
+                let _ = connection_store.update(connection_slug, |record| {
+                    record.cursor = Some(ack.cursor.clone());
+                });
+                let _ = write_line(
+                    stdin,
+                    &ConnectorSubscribeCommand::Ack {
+                        cursor: ack.cursor,
+                        event_id: ack.event_id,
+                    },
+                )
+                .await;
+            }
+            true
+        }
+        ProcessedConnectorEvents::Failed(error) => {
+            tracing::warn!(
+                connector = %connector_slug,
+                connection = %connection_slug,
+                %error,
+                "connector event processing failed; stopping stream without acking failed batch"
+            );
+            false
+        }
+    }
+}
+
 async fn handle_frame(
     connector_slug: &str,
     connection_slug: &str,
@@ -187,6 +290,7 @@ async fn handle_frame(
     bus: &EventBus,
     connection_store: &ConnectionStore,
     stdin: &mut tokio::process::ChildStdin,
+    pending_tx: &mpsc::UnboundedSender<PendingConnectorEvent>,
     processor: Option<&dyn ConnectorEventProcessor>,
 ) {
     match frame {
@@ -209,38 +313,33 @@ async fn handle_frame(
                     payload,
                 },
             };
-            let processed = match processor {
-                Some(processor) => {
-                    processor.process_connector_event(connector_slug, connection_slug, &envelope)
-                }
-                None => {
-                    bus.publish(envelope);
-                    Ok(())
-                }
-            };
-            match processed {
-                Ok(()) => {
-                    let _ = connection_store.update(connection_slug, |record| {
-                        record.cursor = Some(cursor.clone());
-                    });
-                    let _ = write_line(
-                        stdin,
-                        &ConnectorSubscribeCommand::Ack {
-                            cursor,
-                            event_id: id,
-                        },
-                    )
-                    .await;
-                }
-                Err(error) => {
+            if processor.is_some() {
+                if let Err(error) = pending_tx.send(PendingConnectorEvent {
+                    event_id: id,
+                    cursor,
+                    envelope,
+                }) {
                     tracing::warn!(
                         connector = %connector_slug,
                         connection = %connection_slug,
                         %error,
-                        "connector event processing failed; leaving cursor unacked"
+                        "connector processor queue closed; leaving cursor unacked"
                     );
                 }
+                return;
             }
+            bus.publish(envelope);
+            let _ = connection_store.update(connection_slug, |record| {
+                record.cursor = Some(cursor.clone());
+            });
+            let _ = write_line(
+                stdin,
+                &ConnectorSubscribeCommand::Ack {
+                    cursor,
+                    event_id: id,
+                },
+            )
+            .await;
         }
         ConnectorSubscribeFrame::Checkpoint { cursor } => {
             let _ = connection_store.update(connection_slug, |record| {
@@ -270,6 +369,92 @@ async fn handle_frame(
     }
 }
 
+#[derive(Clone)]
+struct ConnectorEventAck {
+    event_id: String,
+    cursor: String,
+}
+
+struct PendingConnectorEvent {
+    event_id: String,
+    cursor: String,
+    envelope: EventEnvelope,
+}
+
+enum ProcessedConnectorEvents {
+    Ack(Vec<ConnectorEventAck>),
+    Failed(String),
+}
+
+fn spawn_processor_queue(
+    connector_slug: String,
+    connection_slug: String,
+    processor: Arc<dyn ConnectorEventProcessor>,
+    pending_rx: mpsc::UnboundedReceiver<PendingConnectorEvent>,
+    processed_tx: mpsc::UnboundedSender<ProcessedConnectorEvents>,
+) -> JoinHandle<()> {
+    task::spawn(run_processor_queue(
+        connector_slug,
+        connection_slug,
+        processor,
+        pending_rx,
+        processed_tx,
+    ))
+}
+
+async fn run_processor_queue(
+    connector_slug: String,
+    connection_slug: String,
+    processor: Arc<dyn ConnectorEventProcessor>,
+    mut pending_rx: mpsc::UnboundedReceiver<PendingConnectorEvent>,
+    processed_tx: mpsc::UnboundedSender<ProcessedConnectorEvents>,
+) {
+    while let Some(first) = pending_rx.recv().await {
+        let mut batch = vec![first];
+        while let Ok(next) = pending_rx.try_recv() {
+            batch.push(next);
+        }
+        let envelopes: Vec<EventEnvelope> =
+            batch.iter().map(|event| event.envelope.clone()).collect();
+        let acks: Vec<ConnectorEventAck> = batch
+            .iter()
+            .map(|event| ConnectorEventAck {
+                event_id: event.event_id.clone(),
+                cursor: event.cursor.clone(),
+            })
+            .collect();
+        let processor = processor.clone();
+        let connector_slug_for_call = connector_slug.clone();
+        let connection_slug_for_call = connection_slug.clone();
+        let processed = task::spawn_blocking(move || {
+            processor.process_connector_events(
+                &connector_slug_for_call,
+                &connection_slug_for_call,
+                &envelopes,
+            )
+        })
+        .await;
+        match processed {
+            Ok(Ok(())) => {
+                if processed_tx
+                    .send(ProcessedConnectorEvents::Ack(acks))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = processed_tx.send(ProcessedConnectorEvents::Failed(format!("{error:#}")));
+                break;
+            }
+            Err(error) => {
+                let _ = processed_tx.send(ProcessedConnectorEvents::Failed(error.to_string()));
+                break;
+            }
+        }
+    }
+}
+
 fn payload_kind(payload: &Value) -> String {
     payload
         .get("kind")
@@ -294,6 +479,8 @@ mod tests {
     use crate::connection::ConnectionRecord;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     fn template(script: &std::path::Path) -> ConnectorTemplate {
         ConnectorTemplate {
@@ -419,6 +606,115 @@ printf '%s\n' "$ack" > '{}'
         assert!(std::fs::read_to_string(ack_path)
             .unwrap()
             .contains("\"op\":\"ack\""));
+
+        handle.shutdown().await;
+    }
+
+    struct BatchRecordingProcessor {
+        batches: StdMutex<Vec<Vec<String>>>,
+    }
+
+    impl ConnectorEventProcessor for BatchRecordingProcessor {
+        fn process_connector_event(
+            &self,
+            _connector_slug: &str,
+            _connection_slug: &str,
+            _envelope: &EventEnvelope,
+        ) -> Result<()> {
+            unreachable!("batch processor should receive process_connector_events")
+        }
+
+        fn process_connector_events(
+            &self,
+            _connector_slug: &str,
+            _connection_slug: &str,
+            envelopes: &[EventEnvelope],
+        ) -> Result<()> {
+            let texts = envelopes
+                .iter()
+                .map(|envelope| envelope.event.text.clone())
+                .collect::<Vec<_>>();
+            let mut batches = self.batches.lock().unwrap();
+            let is_first = batches.is_empty();
+            batches.push(texts);
+            drop(batches);
+            if is_first {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_process_batches_events_that_arrive_while_processor_is_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("connector.sh");
+        let ack_path = temp.path().join("ack.txt");
+        std::fs::write(
+            &script,
+            format!(
+                r#"IFS= read -r _subscribe
+printf '%s\n' '{{"type":"event","id":"e1","cursor":"c1","payload":{{"message":"one"}}}}'
+sleep 0.05
+printf '%s\n' '{{"type":"event","id":"e2","cursor":"c2","payload":{{"message":"two"}}}}'
+printf '%s\n' '{{"type":"event","id":"e3","cursor":"c3","payload":{{"message":"three"}}}}'
+IFS= read -r ack1
+IFS= read -r ack2
+IFS= read -r ack3
+printf '%s\n%s\n%s\n' "$ack1" "$ack2" "$ack3" > '{}'
+"#,
+                ack_path.display()
+            ),
+        )
+        .unwrap();
+        let store = Arc::new(ConnectionStore::load(temp.path().join("connections.json")).unwrap());
+        store
+            .create(ConnectionRecord::authenticated("conn", "demo", "demo"))
+            .unwrap();
+        let processor = Arc::new(BatchRecordingProcessor {
+            batches: StdMutex::new(Vec::new()),
+        });
+        let handle = ConnectorStreamHandle::spawn(
+            template(&script),
+            "conn".into(),
+            None,
+            EventBus::new(),
+            store.clone(),
+            Some(processor.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if ack_path
+                    .exists()
+                    .then(|| std::fs::read_to_string(&ack_path).ok())
+                    .flatten()
+                    .is_some_and(|acks| acks.lines().count() == 3)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(store.get("conn").unwrap().cursor.as_deref(), Some("c3"));
+        let batches = processor.batches.lock().unwrap();
+        assert_eq!(
+            batches.as_slice(),
+            &[
+                vec!["one".to_string()],
+                vec!["two".to_string(), "three".to_string()]
+            ]
+        );
+        let acks = std::fs::read_to_string(ack_path).unwrap();
+        assert!(acks.contains("\"event_id\":\"e1\""));
+        assert!(acks.contains("\"event_id\":\"e2\""));
+        assert!(acks.contains("\"event_id\":\"e3\""));
 
         handle.shutdown().await;
     }

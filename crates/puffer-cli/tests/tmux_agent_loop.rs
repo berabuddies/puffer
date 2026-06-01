@@ -83,6 +83,7 @@ where
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<String> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8192];

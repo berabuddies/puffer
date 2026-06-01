@@ -1,0 +1,22 @@
+id: worldrouter
+display_name: WorldRouter
+base_url: https://inference-api.worldrouter.ai/v1
+default_api: openai-completions
+chat_completions_path: /chat/completions
+auth_modes:
+  - api_key
+discovery:
+  path: /models
+  response: open_ai_models
+  api: openai-completions
+  context_window: 200000
+  max_output_tokens: 16384
+  supports_reasoning: true
+models:
+  - id: auto
+    display_name: Auto
+    provider: worldrouter
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 16384
+    supports_reasoning: true

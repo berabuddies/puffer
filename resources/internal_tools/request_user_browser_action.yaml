@@ -1,0 +1,37 @@
+id: RequestUserBrowserAction
+name: RequestUserBrowserAction
+aliases:
+  - requestuserbrowseraction
+description: |-
+  Internal browser-interaction prompt surface. Connectors and runtime helpers
+  use this when a browser-backed workflow needs the user to complete an
+  interactive step in the global Puffer browser profile.
+
+  This is not exposed as a provider tool call. Model-facing flows should use a
+  connector action such as ConnectorAct `requestuserbrowseraction`, which the
+  runtime handles through this internal prompt path.
+handler: runtime:workflow:request_user_browser_action
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    description:
+      type: string
+      description: Specific browser action the user should complete.
+    url:
+      type: string
+      description: Optional URL or page that the user should use.
+    connector_slug:
+      type: string
+      description: Optional connector slug that requested the action.
+    connection_slug:
+      type: string
+      description: Optional connection slug that requested the action.
+  required:
+    - description
+  additionalProperties: false
+display:
+  group: browser
+  title: Browser interaction
+  show_in_status: false

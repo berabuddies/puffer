@@ -1,25 +1,14 @@
 //! Natural-language Telegram login workflow actions.
 //!
-//! The consolidated internal `Telegram` tool drives the login state machine
-//! inside a Telegram personal-account subscriber process with actions for
-//! Telegram Desktop import, QR login, and phone-code login. The default
-//! connection slug is `telegram-user`; callers can pass `connection_slug` to
-//! select the Telegram account connection. `account`, `account_slug`, and
-//! `connection` are accepted aliases. Multiple local Telegram accounts can run
-//! in parallel, each with its own subscriber id, event topic, and session
-//! state directory.
+//! The consolidated internal `Telegram` tool drives a Telegram
+//! personal-account subscriber with Desktop import, QR login, and phone-code
+//! login actions. The default connection slug is `telegram-user`; callers may
+//! pass `connection_slug` or aliases `account`, `account_slug`, and `connection`.
 //!
-//! The agent is responsible for the conversation: it asks the user for
-//! their phone number, then for the code Telegram sent them, and (only if
-//! Telegram requests it) for their 2FA password. Each tool call sends one
-//! [`SubscriberCommand`] over the subscriber's stdin; progress is observed
-//! by reading subsequent control events emitted by the subscriber on its
-//! stdout (`login_qr`, `login_awaiting_code`, `login_awaiting_password`,
-//! `login_complete`, `login_error`).
-//!
-//! Each tool ensures the selected subscriber is running before it sends its
-//! command. If the base subscriber manifest is not on disk, an actionable
-//! error is returned so the agent can ask the user to install it.
+//! Each tool call sends one [`SubscriberCommand`] over subscriber stdin and
+//! waits for control events such as `login_qr`, `login_awaiting_code`,
+//! `login_awaiting_password`, `login_complete`, or `login_error`. Tools ensure
+//! the selected subscriber is running before sending commands.
 
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
@@ -442,7 +431,12 @@ pub fn execute_telegram_login_qr_wait(
         &connection_slug,
         &connection_slug,
         &command,
-        &["login_complete", "login_qr", "login_error"],
+        &[
+            "login_complete",
+            "login_qr",
+            "login_awaiting_password",
+            "login_error",
+        ],
         Duration::from_secs(wait_seconds.saturating_add(10)),
     )?;
     match event.event.kind.as_str() {
@@ -462,7 +456,14 @@ pub fn execute_telegram_login_qr_wait(
             "status": "qr_pending",
             "connection_slug": connection_slug,
             "payload": event.event.payload,
-            "next": "The previous QR token expired before approval. Show the refreshed URL to the user, then run `telegram --connection <connection_slug> login-qr-wait` again."
+            "next": "The QR login was not approved before the wait timed out. Show the returned URL to the user, then run `telegram --connection <connection_slug> login-qr-wait` again."
+        })
+        .to_string()),
+        "login_awaiting_password" => Ok(json!({
+            "status": "awaiting_password",
+            "connection_slug": connection_slug,
+            "payload": event.event.payload,
+            "next": "Telegram accepted the QR approval but requires the user's 2FA cloud password. Ask for it with AskUserQuestion, then call Telegram action `login_submit_password` with the same connection_slug."
         })
         .to_string()),
         _ => Err(anyhow!(

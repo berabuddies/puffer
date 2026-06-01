@@ -23,8 +23,12 @@ fn tokenize(s: &str) -> Vec<String> {
 }
 
 /// Searchable text for a message: its text + tool name/input (so a query can
-/// hit a past tool call, not just prose).
+/// hit a past tool call, not just prose). Recall's own calls/results are
+/// excluded (empty) so the tool never ranks itself.
 fn message_text(m: &RenderedMessage) -> String {
+    if m.tool_id.as_deref() == Some("Recall") {
+        return String::new();
+    }
     let mut s = m.text.clone();
     if let Some(t) = &m.tool_id {
         s.push(' ');
@@ -50,7 +54,17 @@ fn rank(transcript: &[RenderedMessage], query: &str) -> Vec<(usize, f64)> {
         .collect();
     let n = docs.len() as f64;
     let avg_len = docs.iter().map(|d| d.len()).sum::<usize>() as f64 / n.max(1.0);
-    // document frequency per query term
+    // Precompute document frequency for each (deduped) query term ONCE — O(n·q),
+    // not O(n²·q). Bound the query so a huge query can't blow up the scan.
+    let mut q_terms: Vec<String> = q;
+    q_terms.sort();
+    q_terms.dedup();
+    q_terms.truncate(64);
+    let mut df: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for term in &q_terms {
+        let c = docs.iter().filter(|dd| dd.contains(term)).count() as f64;
+        df.insert(term.as_str(), c);
+    }
     let mut scored: Vec<(usize, f64)> = Vec::new();
     let (k1, b) = (1.2_f64, 0.6_f64);
     for (i, d) in docs.iter().enumerate() {
@@ -59,13 +73,13 @@ fn rank(transcript: &[RenderedMessage], query: &str) -> Vec<(usize, f64)> {
         }
         let dl = d.len() as f64;
         let mut score = 0.0;
-        for term in &q {
+        for term in &q_terms {
             let tf = d.iter().filter(|w| *w == term).count() as f64;
             if tf == 0.0 {
                 continue;
             }
-            let df = docs.iter().filter(|dd| dd.contains(term)).count() as f64;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let dfv = *df.get(term.as_str()).unwrap_or(&0.0);
+            let idf = ((n - dfv + 0.5) / (dfv + 0.5) + 1.0).ln();
             score += idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avg_len.max(1.0)));
         }
         if score > 0.0 {
@@ -117,10 +131,10 @@ pub fn execute_recall(state: &mut AppState, cwd: &Path, input: Value) -> Result<
         .unwrap_or(5)
         .clamp(1, 20) as usize;
 
-    // Don't rank the last message (the Recall call's own context) into results.
-    let n = state.transcript.len();
-    let cutoff = n.saturating_sub(1);
-    let ranked = rank(&state.transcript[..cutoff], &query);
+    // Rank the whole transcript; Recall's own calls/results score 0 (see
+    // message_text), so no positional cutoff is needed (that dropped the newest
+    // real message).
+    let ranked = rank(&state.transcript, &query);
 
     if ranked.is_empty() {
         return Ok(serde_json::to_string_pretty(&json!({
@@ -135,7 +149,7 @@ pub fn execute_recall(state: &mut AppState, cwd: &Path, input: Value) -> Result<
             json!({
                 "turn": i,
                 "score": (score * 100.0).round() / 100.0,
-                "content": snippet(&state.transcript[*i], 600),
+                "content": snippet(&state.transcript[*i], 4000),
             })
         })
         .collect();

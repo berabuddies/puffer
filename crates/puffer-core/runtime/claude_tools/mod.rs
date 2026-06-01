@@ -4,6 +4,7 @@ use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::state::ClaudeReadState;
 use crate::AppState;
 use anyhow::{bail, Context, Result};
+use puffer_config::ProxyConfig;
 use puffer_provider_openai::OpenAIRequestConfig;
 use puffer_resources::LoadedResources;
 use puffer_runner_api::{
@@ -72,11 +73,13 @@ pub(crate) enum ProviderToolContext<'a> {
     OpenAI {
         request_config: &'a OpenAIRequestConfig,
         model_id: &'a str,
+        proxy: &'a ProxyConfig,
         structured_output: Option<&'a StructuredOutputConfig>,
     },
     Anthropic {
         request_config: &'a AnthropicRequestConfig,
         model_id: &'a str,
+        proxy: &'a ProxyConfig,
         structured_output: Option<&'a StructuredOutputConfig>,
     },
 }
@@ -264,16 +267,24 @@ pub(crate) fn execute_tool(
                 ProviderToolContext::OpenAI {
                     request_config,
                     model_id,
+                    proxy,
                     ..
-                } => web_search::execute_claude_openai_web_search(request_config, model_id, input)?,
+                } => web_search::execute_claude_openai_web_search(
+                    request_config,
+                    model_id,
+                    input,
+                    proxy,
+                )?,
                 ProviderToolContext::Anthropic {
                     request_config,
                     model_id,
+                    proxy,
                     ..
                 } => web_search::execute_claude_anthropic_web_search(
                     request_config,
                     model_id,
                     input,
+                    proxy,
                 )?,
                 ProviderToolContext::None => {
                     bail!("WebSearch requires provider execution context")
@@ -385,16 +396,24 @@ pub(crate) fn execute_parallel_tool(
                 ProviderToolContext::OpenAI {
                     request_config,
                     model_id,
+                    proxy,
                     ..
-                } => web_search::execute_claude_openai_web_search(request_config, model_id, input)?,
+                } => web_search::execute_claude_openai_web_search(
+                    request_config,
+                    model_id,
+                    input,
+                    proxy,
+                )?,
                 ProviderToolContext::Anthropic {
                     request_config,
                     model_id,
+                    proxy,
                     ..
                 } => web_search::execute_claude_anthropic_web_search(
                     request_config,
                     model_id,
                     input,
+                    proxy,
                 )?,
                 ProviderToolContext::None => {
                     bail!("WebSearch requires provider execution context")
@@ -720,6 +739,11 @@ pub fn execute_workflow_tool(
         "AskUserQuestion" => {
             workflow::ask_user_question::execute_ask_user_question(state, cwd, input)
         }
+        "requestuserbrowseraction" | "RequestUserBrowserAction" => {
+            workflow::request_user_browser_action::execute_request_user_browser_action(
+                state, cwd, input,
+            )
+        }
         "Canvas" => workflow::canvas::execute_canvas(state, cwd, input),
         "ComfyUiAction" => workflow::comfyui_action::execute_comfyui_action(state, cwd, input),
         "ComputerUseAction" => {
@@ -775,6 +799,7 @@ pub fn execute_workflow_tool(
         "ProcessControl" => workflow::process_control::execute_process_control(state, cwd, input),
         "PowerShell" => workflow::powershell::execute_powershell(state, cwd, input),
         "Recall" => workflow::recall::execute_recall(state, cwd, input),
+        "RequestSecret" => workflow::request_secret::execute_request_secret(state, cwd, input),
         "SecretValue" => workflow::secret_value::execute_secret_value(state, cwd, input),
         "SendMessage" => workflow::send_message::execute_send_message(state, cwd, input),
         "SendUserMessage" | "Brief" => {
