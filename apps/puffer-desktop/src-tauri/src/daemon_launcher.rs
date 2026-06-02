@@ -269,7 +269,17 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT").is_none() {
+    // Bridge the daemon's agent browser into the embedded native CEF view
+    // (CDP on port 9333) only when that view can actually exist: a non-dev
+    // build with the native CEF bridge compiled in. Under `tauri dev` the CEF
+    // runtime is not provisioned, so the native view never comes up; pointing
+    // the daemon at port 9333 there just makes it attach to a missing view and
+    // fall back to a separate headless Chrome, which collides with the browser
+    // the user sees. Packaged/release builds keep the bridge. An explicit
+    // pre-set env still wins, so the bridge can be forced on for debugging.
+    let cef_bridge_enabled = !cfg!(debug_assertions)
+        && cfg!(all(target_os = "macos", puffer_desktop_cef_native));
+    if cef_bridge_enabled && std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT").is_none() {
         cmd.env("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333");
     }
     // Resources (providers, tools, prompts…) load relative to the workspace
