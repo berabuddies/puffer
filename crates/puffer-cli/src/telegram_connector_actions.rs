@@ -7,10 +7,13 @@ use puffer_subscriptions::{
     find_subscriber_manifest, ConnectionAuthChecker, ConnectorTemplate, SubscriberManifestRoots,
     SubscriptionManager,
 };
+use std::thread;
 use std::time::Duration;
 
 const TELEGRAM_SUBSCRIBER_TOPIC: &str = "telegram-user";
 const TELEGRAM_AUTH_TIMEOUT: Duration = Duration::from_secs(15);
+const TELEGRAM_AUTH_RETRIES: usize = 2;
+const TELEGRAM_AUTH_RETRY_DELAY: Duration = Duration::from_secs(1);
 const TELEGRAM_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct TelegramConnectionAuthChecker;
@@ -33,29 +36,34 @@ impl ConnectionAuthChecker for TelegramConnectionAuthChecker {
             return Ok(None);
         }
         let command = SubscriberCommand::TelegramAuthOk;
-        let envelope = match manager.send_command_and_wait(
-            connection_slug,
-            connection_slug,
-            &command,
-            &["auth_ok", "login_error"],
-            TELEGRAM_AUTH_TIMEOUT,
-        ) {
-            Ok(envelope) => envelope,
-            Err(_) => {
-                // A subscriber restart or command timeout says the probe was
-                // unavailable, not that Telegram rejected the saved session.
-                return Ok(None);
-            }
-        };
-        Ok(Some(
-            envelope.event.kind == "auth_ok"
+        for attempt in 0..=TELEGRAM_AUTH_RETRIES {
+            let envelope = match manager.send_command_and_wait(
+                connection_slug,
+                connection_slug,
+                &command,
+                &["auth_ok", "login_error"],
+                TELEGRAM_AUTH_TIMEOUT,
+            ) {
+                Ok(envelope) => envelope,
+                Err(_) => {
+                    // A subscriber restart or command timeout says the probe was
+                    // unavailable, not that Telegram rejected the saved session.
+                    return Ok(None);
+                }
+            };
+            let auth_ok = envelope.event.kind == "auth_ok"
                 && envelope
                     .event
                     .payload
                     .get("ok")
                     .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-        ))
+                    .unwrap_or(false);
+            if auth_ok || attempt == TELEGRAM_AUTH_RETRIES {
+                return Ok(Some(auth_ok));
+            }
+            thread::sleep(TELEGRAM_AUTH_RETRY_DELAY);
+        }
+        Ok(Some(false))
     }
 }
 

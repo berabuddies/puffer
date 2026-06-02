@@ -124,6 +124,58 @@ fn telegram_subscriber_id_tracks_connection_slug() {
 }
 
 #[test]
+fn telegram_auth_checker_retries_transient_false_response() {
+    let runtime = test_subscription_runtime();
+    let subscriber_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        subscriber_dir.path().join("manifest.toml"),
+        r#"manifest_version = 1
+id = "telegram-user"
+kind = "subscriber"
+topic = "telegram-user"
+
+[run]
+cmd = ["sh", "run.sh"]
+
+[state]
+dir = "state"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        subscriber_dir.path().join("run.sh"),
+        r#"mkdir -p "$PUFFER_SKILL_STATE_DIR"
+count_file="$PUFFER_SKILL_STATE_DIR/auth-count"
+while IFS= read -r _line; do
+  count="$(cat "$count_file" 2>/dev/null || printf 0)"
+  if [ "$count" = "0" ]; then
+    printf 1 > "$count_file"
+    printf '%s\n' '{"topic":"telegram-user","kind":"auth_ok","control":true,"payload":{"ok":false,"authenticated":false}}'
+  else
+    printf '%s\n' '{"topic":"telegram-user","kind":"auth_ok","control":true,"payload":{"ok":true,"authenticated":true}}'
+    exit 0
+  fi
+done
+"#,
+    )
+    .unwrap();
+    let manifest = puffer_subscriber_runtime::Manifest::load(subscriber_dir.path()).unwrap();
+    runtime.manager().start_subscriber(manifest).unwrap();
+
+    let checker = TelegramConnectionAuthChecker;
+    let result = puffer_subscriptions::ConnectionAuthChecker::check(
+        &checker,
+        &runtime.manager(),
+        &telegram_login_template(),
+        "telegram-user",
+    )
+    .unwrap();
+
+    assert_eq!(result, Some(true));
+    runtime.shutdown();
+}
+
+#[test]
 fn autostart_topics_skip_paused_bindings() {
     let runtime = test_subscription_runtime();
     runtime
@@ -386,6 +438,26 @@ fn gmail_browser_template() -> ConnectorTemplate {
         can_subscribe: true,
         can_proxy_agent: false,
         subscriber: None,
+        output_schema: Value::Null,
+        actions: BTreeMap::new(),
+    }
+}
+
+fn telegram_login_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "telegram-login".to_string(),
+        description: "Telegram login".to_string(),
+        skill: "telegram".to_string(),
+        binary: "telegram".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: true,
+        subscriber: Some(ConnectorSubscriberTemplate {
+            manifest_slug: "telegram-user".to_string(),
+            state_root: Some("telegram-accounts".to_string()),
+            display_name: Some("Telegram".to_string()),
+        }),
         output_schema: Value::Null,
         actions: BTreeMap::new(),
     }
