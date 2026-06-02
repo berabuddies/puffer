@@ -51,6 +51,8 @@ pub struct PufferConfig {
     #[serde(default)]
     pub recap: RecapConfig,
     #[serde(default)]
+    pub night: NightConfig,
+    #[serde(default)]
     pub browser: BrowserConfig,
     #[serde(default)]
     pub network: NetworkConfig,
@@ -230,6 +232,7 @@ impl Default for PufferConfig {
             copy_full_response: false,
             memory: MemoryConfig::default(),
             recap: RecapConfig::default(),
+            night: NightConfig::default(),
             browser: BrowserConfig::default(),
             network: NetworkConfig::default(),
             mascot: MascotConfig {
@@ -244,6 +247,22 @@ impl Default for PufferConfig {
             },
             remote_runner: None,
         }
+    }
+}
+
+/// `/night` autonomous overnight work. Experimental: opening pull requests to
+/// the user's fork is OFF by default and must be deliberately enabled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NightConfig {
+    /// When true, `/night` may open pull requests to the user's fork for the
+    /// tested work it produces. Default false (experimental).
+    #[serde(default, alias = "submitPr")]
+    pub submit_pr: bool,
+}
+
+impl Default for NightConfig {
+    fn default() -> Self {
+        Self { submit_pr: false }
     }
 }
 

@@ -1,7 +1,7 @@
 use super::{
-    execute_compact_prompt_command, handle_plan_command, plan_mode_context_message,
-    prepare_btw_prompt_command, prepare_commit_prompt_command, prepare_compact_prompt_command,
-    prepare_plan_prompt_command, prepare_pr_comments_prompt_command,
+    build_night_directive, execute_compact_prompt_command, handle_plan_command,
+    plan_mode_context_message, prepare_btw_prompt_command, prepare_commit_prompt_command,
+    prepare_compact_prompt_command, prepare_plan_prompt_command, prepare_pr_comments_prompt_command,
     prepare_prompt_command_specialization, prepare_security_review_prompt_command,
     prepare_statusline_prompt_command, PromptCommandPreparation,
 };
@@ -739,4 +739,24 @@ fn spawn_json_server(responses: Vec<Value>) -> String {
         }
     });
     format!("http://{address}")
+}
+
+#[test]
+fn night_directive_carries_guardrails_and_gates_pr() {
+    // Fork-PR off (experimental default): leads embedded, all guardrails present.
+    let off = build_night_directive("lead: extend the recall index", false);
+    assert!(off.contains(".worktree/"), "must mandate worktree isolation");
+    assert!(off.contains("NON-DESTRUCTIVE"));
+    assert!(off.contains("NO DRIFT"));
+    assert!(off.contains("SUBAGENTS"));
+    assert!(off.contains("end-to-end") && off.contains("SCREENSHOTS"));
+    assert!(off.contains("lead: extend the recall index"), "autodream leads embedded");
+    assert!(off.contains("Fork-PR is DISABLED"));
+    assert!(!off.contains("Fork-PR is ENABLED"));
+
+    // Fork-PR on + empty leads -> fallback text + enabled clause.
+    let on = build_night_directive("   ", true);
+    assert!(on.contains("Fork-PR is ENABLED"));
+    assert!(on.contains("USER'S FORK"));
+    assert!(on.contains("AutoDream surfaced nothing yet"));
 }

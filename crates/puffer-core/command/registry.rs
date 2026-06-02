@@ -296,6 +296,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Local,
         ),
         cmd(
+            "night",
+            &[],
+            "Autonomous overnight work: AutoDream surfaces tasks, subagents implement them in an isolated git worktree with e2e tests + screenshots (fork-PR only if experimentally enabled)",
+            None,
+            CommandKind::Prompt,
+        ),
+        cmd(
             "pentest",
             &[],
             "Run an authorized web penetration test",

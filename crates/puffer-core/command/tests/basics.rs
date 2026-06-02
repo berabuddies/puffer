@@ -521,6 +521,7 @@ fn app_state_defaults_expose_command_state() {
             copy_full_response: false,
             memory: puffer_config::MemoryConfig::default(),
             recap: puffer_config::RecapConfig::default(),
+            night: puffer_config::NightConfig::default(),
             browser: puffer_config::BrowserConfig::default(),
             network: puffer_config::NetworkConfig::default(),
             mascot: MascotConfig {

@@ -106,6 +106,7 @@ The current supported command surface is intended to include:
 - `/mcp`
 - `/memory`
 - `/model`
+- `/night`
 - `/permissions`
 - `/plan`
 - `/plugin`
