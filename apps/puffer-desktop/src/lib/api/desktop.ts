@@ -1376,6 +1376,10 @@ export type AgentTurnOptions = {
   permissionMode?: AgentPermissionMode;
   mode?: AgentTurnMode;
 };
+export type StaleTurnRecoveryResult =
+  | { recovery: "retry_started"; turnId: string }
+  | { recovery: "already_retried" }
+  | { recovery: "not_recoverable"; reason?: string | null; turnId?: string | null };
 
 /** Starts a new agent turn on `sessionId` with `message`. Returns the turn id
  *  so the caller can correlate streamed events and reply to permission
@@ -1399,6 +1403,21 @@ export async function runAgentTurn(
     // Fallback: the in-process Tauri command (same behavior, just no daemon).
     return invoke<string>("run_agent_turn", { sessionId, message, ...options });
   }
+}
+
+/** Retries one stale unanswered turn after the daemon validates that no live
+ *  turn exists and persists a one-shot recovery marker. */
+export async function recoverStaleAgentTurn(
+  sessionId: string,
+  retryAfterMs: number,
+  options: AgentTurnOptions = {}
+): Promise<StaleTurnRecoveryResult> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<StaleTurnRecoveryResult>("recover_stale_turn", {
+    sessionId,
+    retryAfterMs,
+    ...options
+  });
 }
 
 /** Runs a slash command (e.g. `/connect <slug> <conn>`) through the

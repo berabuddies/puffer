@@ -25,6 +25,7 @@ mod daemon_pty;
 mod daemon_secrets;
 mod daemon_singleton;
 mod daemon_title;
+mod daemon_turn_recovery;
 mod daemon_turn_routing;
 mod daemon_ui_state;
 mod daemon_workflows;

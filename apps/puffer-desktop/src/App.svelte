@@ -43,6 +43,7 @@
     logoutProviderViaDaemon,
     readRemoteFile,
     refreshRepoStatus,
+    recoverStaleAgentTurn,
     runRemoteBash,
     writeRemoteFile,
     runAgentTurn,
@@ -96,6 +97,8 @@
   };
 
   type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
+
+  const STALE_TURN_RETRY_AFTER_MS = 120_000;
 
   type TransientConversationState = {
     submittedMessages: TimelineItem[];
@@ -176,6 +179,7 @@
   let submittedMessageBaselineIds: Record<string, string[]> = {};
   let transientConversationStates = $state<Record<string, TransientConversationState>>({});
   let submitMessageInFlightSessionIds = $state<string[]>([]);
+  const staleTurnRecoveryInFlightSessionIds = new Set<string>();
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
   const DISMISSED_IDS_CAP = 200;
@@ -2326,6 +2330,77 @@
     submittedMessageBaselineIds = {};
   }
 
+  function latestUnansweredUserMessage(timeline: TimelineItem[]): string | null {
+    for (let index = timeline.length - 1; index >= 0; index -= 1) {
+      const item = timeline[index];
+      if (item.kind === "user") {
+        const body = timelineItemBody(item).trim();
+        return body.length > 0 ? body : null;
+      }
+      return null;
+    }
+    return null;
+  }
+
+  function shouldRecoverStaleTurn(session: SessionListItem, timeline: TimelineItem[]): boolean {
+    if (session.activityStatus !== "running") return false;
+    if (turnRunning || currentTurnId !== null || turnStartedAtMs !== null) return false;
+    if (staleTurnRecoveryInFlightSessionIds.has(session.id)) return false;
+    if (Date.now() - session.updatedAtMs < STALE_TURN_RETRY_AFTER_MS) return false;
+    return latestUnansweredUserMessage(timeline) !== null;
+  }
+
+  async function refreshSelectedSessionAfterRecovery(sessionId: string) {
+    const detail = await loadSessionDetailFromDaemon(sessionId);
+    if (selectedSession?.id !== sessionId) return;
+    selectedSession = detail.session;
+    rememberFallbackSession(detail.session);
+    sessionDetail = { ...detail, timeline: detail.timeline };
+    rememberSession(detail.session.id);
+  }
+
+  async function maybeRecoverStaleTurn(session: SessionListItem, timeline: TimelineItem[]) {
+    if (!shouldRecoverStaleTurn(session, timeline)) return;
+    staleTurnRecoveryInFlightSessionIds.add(session.id);
+    try {
+      const result = await recoverStaleAgentTurn(session.id, STALE_TURN_RETRY_AFTER_MS, {
+        providerId: session.providerId,
+        modelId: session.modelId
+      });
+      if (selectedSession?.id !== session.id) return;
+      if (result.recovery === "retry_started") {
+        markTurnActive(session.id, result.turnId);
+        cancelingTurnId = null;
+        turnStartedAtMs = Date.now();
+        turnThinking = true;
+        turnStatusHint = "Retrying interrupted turn";
+        setLiveSidebarAgentState(session.id, "thinking", result.turnId, session);
+        statusMessage = `Retrying interrupted turn ${result.turnId.slice(0, 8)}.`;
+        void refreshGroups();
+        return;
+      }
+      if (result.recovery === "already_retried") {
+        await refreshSelectedSessionAfterRecovery(session.id);
+        statusMessage = "Interrupted turn was already retried once. Continue manually.";
+        void refreshGroups();
+        return;
+      }
+      if (result.reason === "turn_in_flight" && result.turnId) {
+        markTurnActive(session.id, result.turnId);
+        turnStartedAtMs = Date.now();
+        turnThinking = true;
+        turnStatusHint = "Rejoined running turn";
+        setLiveSidebarAgentState(session.id, "thinking", result.turnId, session);
+        return;
+      }
+    } catch (error) {
+      if (selectedSession?.id !== session.id) return;
+      statusMessage = `Stale turn recovery failed: ${errorText(error)}`;
+    } finally {
+      staleTurnRecoveryInFlightSessionIds.delete(session.id);
+    }
+  }
+
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
     if (selectedSession?.id !== session.id) cancelRecapBlurTimer();
     const showLoading = options.showLoading ?? selectedSession?.id !== session.id;
@@ -2382,6 +2457,7 @@
         }
       }
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
+      void maybeRecoverStaleTurn(detail.session, timeline);
     } catch (error) {
       if (loadGeneration !== sessionLoadGeneration) return;
       const detail = errorText(error);

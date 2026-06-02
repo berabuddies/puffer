@@ -87,6 +87,10 @@ use crate::daemon_lambda_skills::{
     handle_set_lambda_skill_enabled,
 };
 use crate::daemon_pty::PtyRegistry;
+use crate::daemon_turn_recovery::{
+    recovery_actor, stale_turn_recovery_decision, StaleTurnRecoveryDecision,
+    DEFAULT_STALE_TURN_RETRY_AFTER_MS,
+};
 use crate::daemon_turn_routing::persist_explicit_turn_routing;
 use crate::daemon_ui_state::{
     load_file_tabs_state, load_pin_state, load_session_routing_state, set_file_tabs_state,
@@ -1105,6 +1109,31 @@ async fn dispatch_request(
                         result: None,
                         error: Some(RpcError {
                             code: "turn-start-error".to_string(),
+                            message: format!("{e:#}"),
+                        }),
+                    },
+                };
+                let _ = send_envelope(&tx_clone, &env).await;
+            });
+        }
+
+        "recover_stale_turn" => {
+            let tx_clone = tx.clone();
+            let state_clone = state.clone();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                let result = recover_stale_turn(state_clone, params).await;
+                let env = match result {
+                    Ok(v) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: Some(v),
+                        error: None,
+                    },
+                    Err(e) => ServerEnvelope::Response {
+                        id: id_clone,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "stale-turn-recovery-error".to_string(),
                             message: format!("{e:#}"),
                         }),
                     },
@@ -3336,6 +3365,104 @@ fn parse_agent_turn_mode(params: &Value) -> Result<AgentTurnMode> {
         "default" | "normal" => Ok(AgentTurnMode::Default),
         "plan" | "plan-mode" | "plan_mode" => Ok(AgentTurnMode::Plan),
         other => anyhow::bail!("unsupported turn mode `{other}`; expected default or plan"),
+    }
+}
+
+fn unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn recover_stale_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .context("missing sessionId")?
+        .to_string();
+    let session_uuid = Uuid::parse_str(&session_id).context("invalid sessionId")?;
+    let retry_after_ms = params
+        .get("retryAfterMs")
+        .or_else(|| params.get("retry_after_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_STALE_TURN_RETRY_AFTER_MS);
+
+    {
+        let turns = state.turns.lock().unwrap();
+        if let Some((existing_turn_id, _)) = turns
+            .iter()
+            .find(|(_, handle)| handle.session_uuid == Some(session_uuid))
+        {
+            return Ok(json!({
+                "recovery": "not_recoverable",
+                "reason": "turn_in_flight",
+                "turnId": existing_turn_id,
+            }));
+        }
+    }
+
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let record = session_store.load_session(session_uuid)?;
+    match stale_turn_recovery_decision(&record, unix_timestamp_ms(), retry_after_ms) {
+        StaleTurnRecoveryDecision::Retry { message, marker } => {
+            session_store.append_event(
+                session_uuid,
+                TranscriptEvent::SystemMessage {
+                    text: marker,
+                    actor: Some(recovery_actor()),
+                },
+            )?;
+            state.publish_event(ServerEnvelope::Event {
+                event: "workspace:sessions:changed".to_string(),
+                payload: json!({
+                    "reason": "stale_turn_retry_marker",
+                    "sessionId": session_id.clone(),
+                }),
+            });
+
+            let mut retry_params = params.clone();
+            if let Some(object) = retry_params.as_object_mut() {
+                object.insert("sessionId".to_string(), json!(session_id.clone()));
+                object.insert("message".to_string(), json!(message));
+            } else {
+                anyhow::bail!("recover_stale_turn params must be an object");
+            }
+            let result = start_turn(state, retry_params).await?;
+            let turn_id = result
+                .get("turnId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(json!({
+                "recovery": "retry_started",
+                "turnId": turn_id,
+            }))
+        }
+        StaleTurnRecoveryDecision::AlreadyRetried { marker } => {
+            session_store.append_event(
+                session_uuid,
+                TranscriptEvent::SystemMessage {
+                    text: marker,
+                    actor: Some(recovery_actor()),
+                },
+            )?;
+            state.publish_event(ServerEnvelope::Event {
+                event: "workspace:sessions:changed".to_string(),
+                payload: json!({
+                    "reason": "stale_turn_retry_exhausted",
+                    "sessionId": session_id.clone(),
+                }),
+            });
+            Ok(json!({
+                "recovery": "already_retried",
+            }))
+        }
+        StaleTurnRecoveryDecision::NotRecoverable => Ok(json!({
+            "recovery": "not_recoverable",
+            "reason": "session_not_stale",
+        })),
     }
 }
 
