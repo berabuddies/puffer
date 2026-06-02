@@ -74,15 +74,17 @@ collecting sender matches; increase `--scan-limit` when a sparse sender needs a
 deeper page. Use `--context 0` for fast search; non-zero context returns
 previous messages before each hit.
 
-Use `--succint` with the internal CLI for normal agent work. It returns plain
+Use `--succinct` with the internal CLI for normal agent work. It returns plain
 text context lines with relative offsets, for example `-2 Sender: message`,
-instead of JSON.
+instead of JSON. Only the message commands accept `--succinct`:
+`list-messages` and `search-messages` support it; the peer commands
+`list-peers` and `search-peers` do not (they always return their peer list).
 Messages with downloadable media include a local file path; captions follow
 the path on the same line. Text-only media such as polls are rendered as
 text with answer indexes, for example
 `poll: Ship it? [open, 3 voters] | 0: Yes / 1: No`. Replies are shown as a
 prefix on the message line, for example `[reply to #42: previous text]`.
-Without `--succint`, results are JSON; inspect `payload.results[].context`,
+Without `--succinct`, results are JSON; inspect `payload.results[].context`,
 where the message with `is_match: true` is the search hit and earlier items are
 previous-message context. JSON `media` is a string with the same contract: local
 file path for downloaded media, or text for text-only media.
@@ -120,7 +122,7 @@ are `ConnectorAct` actions on `telegram-login`; do not invent a separate
 Telegram runtime command. Prefer numeric peer ids resolved by `search-peers`.
 
 Use the `vote_poll` connector action to click a poll answer. Prefer answer
-indexes from `--succint` output or `option_hex` from JSON output; exact answer
+indexes from `--succinct` output or `option_hex` from JSON output; exact answer
 text also works when unambiguous.
 
 ```json

@@ -95,10 +95,7 @@ input_schema:
       description: Optional previous message count before each match for search_messages.
     succinct:
       type: boolean
-      description: Optional plain-text message-search response for LLM use. Media appears as either a local file path or text for text-only media such as polls, with poll answer indexes included for voting. Reply relationships are preserved in message-search output.
-    succint:
-      type: boolean
-      description: Deprecated misspelling alias for succinct; accepted for CLI compatibility.
+      description: Optional plain-text message response for LLM use. Supported only by list_messages and search_messages (not by list_peers or search_peers). Media appears as either a local file path or text for text-only media such as polls, with poll answer indexes included for voting. Reply relationships are preserved in message output.
     phone:
       type: string
       description: E.164 phone number with leading + for login_start.

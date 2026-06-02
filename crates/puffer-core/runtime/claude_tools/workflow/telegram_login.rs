@@ -214,7 +214,7 @@ struct SearchMessagesInput {
     #[serde(default)]
     context: Option<usize>,
     /// Return compact message search payloads for LLM consumption.
-    #[serde(default, alias = "succint")]
+    #[serde(default)]
     succinct: bool,
 }
 
@@ -287,7 +287,7 @@ struct ListMessagesInput {
     #[serde(default)]
     scan_limit: Option<usize>,
     /// Return compact message list payloads for LLM consumption.
-    #[serde(default, alias = "succint")]
+    #[serde(default)]
     succinct: bool,
 }
 

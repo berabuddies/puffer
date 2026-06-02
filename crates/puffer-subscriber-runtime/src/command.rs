@@ -125,7 +125,7 @@ pub enum SubscriberCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<usize>,
         /// Return compact message and context payloads for LLM consumption.
-        #[serde(default, alias = "succint")]
+        #[serde(default)]
         succinct: bool,
     },
     /// List recent messages within one Telegram peer without requiring a
@@ -156,7 +156,7 @@ pub enum SubscriberCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scan_limit: Option<usize>,
         /// Return compact message payloads for LLM consumption.
-        #[serde(default, alias = "succint")]
+        #[serde(default)]
         succinct: bool,
     },
     /// Configure the email subscriber. Sent by the agent after the user

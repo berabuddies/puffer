@@ -479,7 +479,7 @@ pub(crate) enum TelegramCommand {
         #[arg(long = "before-id")]
         before_id: Option<i32>,
         /// Return plain-text messages for LLM use.
-        #[arg(long = "succint", alias = "succinct")]
+        #[arg(long = "succinct")]
         succinct: bool,
     },
     /// Search Telegram messages inside one peer and include previous context.
@@ -497,7 +497,7 @@ pub(crate) enum TelegramCommand {
         #[arg(long, default_value_t = 0)]
         context: usize,
         /// Return plain-text search results for LLM use.
-        #[arg(long = "succint", alias = "succinct")]
+        #[arg(long = "succinct")]
         succinct: bool,
     },
     /// Start Telegram QR login for approval from an already logged-in app.
