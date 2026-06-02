@@ -45,7 +45,7 @@ use std::collections::HashSet;
 use std::io::{BufRead, Read};
 
 pub(super) use super::openai_sse::{is_event_stream, parse_openai_sse_response};
-use super::openai_sse::{parse_openai_sse_reader_typed, OpenAISseResult};
+use super::openai_sse::{is_openai_sse_api_error, parse_openai_sse_reader_typed, OpenAISseResult};
 
 #[cfg(test)]
 pub(super) use super::openai_sse::parse_openai_sse_response_streaming;
@@ -1236,8 +1236,13 @@ where
         is_event_stream(content_type.as_deref(), prefix)
     };
     if looks_like_sse {
-        return parse_openai_sse_reader_typed(reader, on_event)
-            .with_context(|| format!("failed to parse SSE response from {url}"));
+        return match parse_openai_sse_reader_typed(reader, on_event) {
+            Ok(result) => Ok(result),
+            Err(error) if is_openai_sse_api_error(&error) => Err(error),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to parse SSE response from {url}"))
+            }
+        };
     }
     // Non-SSE fallback: parse JSON directly into typed struct — one parse, no roundtrip.
     let mut text = String::new();

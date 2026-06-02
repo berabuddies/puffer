@@ -50,6 +50,7 @@
 .pf-pw-project {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   min-width: 0;
   background: #fff;
   border: 1px solid #e6e6e6;

@@ -1365,6 +1365,30 @@ test("workspace board renders daemon session activity states", async ({ page }) 
   await expect(queuedColumn.getByText("Idle docs followup")).toBeVisible();
 });
 
+test("workspace project cards keep full height on loaded session pages", async ({ page }) => {
+  const sessions = Array.from({ length: 30 }, (_, index) => ({
+    sessionId: `session-project-height-${index}`,
+    displayName: `Height fixture ${index}`,
+    title: `Height fixture ${index}`,
+    cwd: `/tmp/project-height-${index}`,
+    folderPath: `/tmp/project-height-${index}`,
+    updatedAtMs: baseTime - index,
+    createdAtMs: baseTime - 60_000 - index,
+    activityStatus: "idle" as const
+  }));
+  const daemon = new FakeDaemon({ sessions });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const projectCards = page.locator(".pf-pw-project");
+  await expect(projectCards).toHaveCount(30);
+  const heights = await projectCards.evaluateAll((cards) =>
+    cards.map((card) => card.getBoundingClientRect().height)
+  );
+
+  expect(Math.min(...heights)).toBeGreaterThan(90);
+});
+
 test("sidebar keeps full session titles for resizable space", async ({ page }) => {
   const longTitle = "Long running browser investigation that should not be pre-truncated";
   const daemon = new FakeDaemon({

@@ -1,4 +1,5 @@
 use super::openai::{is_event_stream, parse_openai_sse_response};
+use super::openai_sse::is_openai_sse_api_error;
 use super::quota;
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
@@ -371,8 +372,13 @@ pub(crate) fn parse_http_json_response(
         );
     }
     if !anthropic && is_event_stream(response.content_type.as_deref(), &response.text) {
-        return parse_openai_sse_response(&response.text)
-            .with_context(|| format!("failed to parse SSE response from {url}"));
+        return match parse_openai_sse_response(&response.text) {
+            Ok(value) => Ok(value),
+            Err(error) if is_openai_sse_api_error(&error) => Err(error),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to parse SSE response from {url}"))
+            }
+        };
     }
     serde_json::from_str::<Value>(&response.text)
         .with_context(|| format!("response from {url} was not valid JSON"))

@@ -1,3 +1,4 @@
+use super::super::openai_sse::is_retryable_openai_sse_api_error;
 use super::super::{OPENAI_CHATGPT_BASE_URL, OPENAI_CODEX_COMPAT_VERSION};
 use super::StructuredOutputConfig;
 use crate::AppState;
@@ -192,6 +193,9 @@ pub(super) fn is_openai_include_validation_error(error: &Error) -> bool {
 }
 
 fn is_retryable_openai_transport_error(error: &Error) -> bool {
+    if is_retryable_openai_sse_api_error(error) {
+        return true;
+    }
     if error.chain().any(|cause| {
         cause
             .downcast_ref::<reqwest::Error>()
@@ -529,6 +533,7 @@ mod tests {
     use super::is_openai_include_validation_error;
     use super::is_retryable_openai_transport_error;
     use super::openai_supports_response_threading;
+    use crate::runtime::openai_sse::parse_openai_sse_response;
     use crate::runtime::tests::state;
     use crate::runtime::OPENAI_CHATGPT_BASE_URL;
     use anyhow::anyhow;
@@ -596,6 +601,19 @@ mod tests {
     fn retries_wrapped_stream_closed_before_completed_errors() {
         let error = anyhow!("stream closed before response.completed")
             .context("failed to parse SSE response from http://example.test/v1/responses");
+        assert!(is_retryable_openai_transport_error(&error));
+    }
+
+    #[test]
+    fn retries_openai_sse_server_errors() {
+        let stream = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
+        );
+        let error = parse_openai_sse_response(stream)
+            .unwrap_err()
+            .context("failed to parse SSE response from http://example.test/v1/responses");
+
         assert!(is_retryable_openai_transport_error(&error));
     }
 

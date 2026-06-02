@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use puffer_provider_openai::OpenAIResponseToolCall;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::io::{BufRead, BufReader};
@@ -25,6 +26,83 @@ pub(super) struct OpenAISseResult {
     pub(super) reasoning_items: Vec<Value>,
     /// Raw response Value, kept for backward-compat callers that still need it.
     pub(super) raw_response: Value,
+}
+
+/// Structured failure emitted by the OpenAI Responses streaming API.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenAISseApiError {
+    status: String,
+    code: Option<String>,
+    message: Option<String>,
+    reason: Option<String>,
+}
+
+impl OpenAISseApiError {
+    fn from_event(event: &Value) -> Self {
+        Self {
+            status: event
+                .pointer("/response/status")
+                .and_then(Value::as_str)
+                .unwrap_or("failed")
+                .to_string(),
+            code: event
+                .pointer("/response/error/code")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            message: event
+                .pointer("/response/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            reason: event
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        matches!(
+            self.code.as_deref(),
+            Some("rate_limit_exceeded" | "server_error" | "overloaded")
+        )
+    }
+}
+
+impl fmt::Display for OpenAISseApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (
+            self.code.as_deref(),
+            self.message.as_deref(),
+            self.reason.as_deref(),
+        ) {
+            (_, Some(message), _) if !message.is_empty() => match self.code.as_deref() {
+                Some(code) if !code.is_empty() => {
+                    write!(f, "{}: {code}: {message}", self.status)
+                }
+                _ => write!(f, "{}: {message}", self.status),
+            },
+            (_, _, Some(reason)) if !reason.is_empty() => write!(f, "{}: {reason}", self.status),
+            _ => write!(f, "OpenAI stream failed with status {}", self.status),
+        }
+    }
+}
+
+impl std::error::Error for OpenAISseApiError {}
+
+/// Returns true when the error chain contains an OpenAI SSE API failure.
+pub(crate) fn is_openai_sse_api_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<OpenAISseApiError>().is_some())
+}
+
+/// Returns true when the error chain contains a retryable OpenAI SSE failure.
+pub(crate) fn is_retryable_openai_sse_api_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<OpenAISseApiError>()
+            .is_some_and(OpenAISseApiError::is_retryable)
+    })
 }
 
 /// Returns true when an OpenAI response payload is encoded as SSE.
@@ -309,7 +387,7 @@ where
             return Ok(true);
         }
         "response.failed" => {
-            bail!("{}", format_openai_sse_error(&event));
+            return Err(OpenAISseApiError::from_event(event).into());
         }
         _ => {}
     }
@@ -457,33 +535,12 @@ fn extract_text_from_output_items(items: &[Value]) -> String {
     parts.join("")
 }
 
-fn format_openai_sse_error(event: &Value) -> String {
-    let status = event
-        .pointer("/response/status")
-        .and_then(Value::as_str)
-        .unwrap_or("failed");
-    let code = event
-        .pointer("/response/error/code")
-        .and_then(Value::as_str);
-    let message = event
-        .pointer("/response/error/message")
-        .and_then(Value::as_str);
-    let reason = event
-        .pointer("/response/incomplete_details/reason")
-        .and_then(Value::as_str);
-    match (code, message, reason) {
-        (_, Some(message), _) if !message.is_empty() => match code {
-            Some(code) if !code.is_empty() => format!("{status}: {code}: {message}"),
-            _ => format!("{status}: {message}"),
-        },
-        (_, _, Some(reason)) if !reason.is_empty() => format!("{status}: {reason}"),
-        _ => format!("OpenAI stream failed with status {status}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_openai_sse_response, parse_openai_sse_response_streaming};
+    use super::{
+        is_openai_sse_api_error, is_retryable_openai_sse_api_error, parse_openai_sse_response,
+        parse_openai_sse_response_streaming,
+    };
     use crate::runtime::TurnStreamEvent;
     use serde_json::json;
     use std::io::BufReader;
@@ -573,6 +630,20 @@ mod tests {
         assert!(error
             .to_string()
             .contains("failed: rate_limit_exceeded: too many requests"));
+        assert!(is_openai_sse_api_error(&error));
+        assert!(is_retryable_openai_sse_api_error(&error));
+    }
+
+    #[test]
+    fn parse_openai_sse_response_classifies_server_errors_as_retryable() {
+        let stream = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"An error occurred while processing your request.\"}}}\n\n"
+        );
+
+        let error = parse_openai_sse_response(stream).unwrap_err();
+        assert!(error.to_string().contains("failed: server_error"));
+        assert!(is_retryable_openai_sse_api_error(&error));
     }
 
     #[test]

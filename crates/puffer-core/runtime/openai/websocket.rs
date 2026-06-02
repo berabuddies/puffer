@@ -1,4 +1,4 @@
-use super::super::openai_sse::OpenAISseResult;
+use super::super::openai_sse::{is_retryable_openai_sse_api_error, OpenAISseResult};
 use super::super::openai_ws::{OpenAIWebSocket, WsApiError};
 use super::super::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
@@ -579,6 +579,9 @@ where
 /// Returns `true` for WebSocket errors that are worth retrying: rate limits,
 /// server errors, and connection-level transients.
 fn is_retryable_ws_error(error: &anyhow::Error) -> bool {
+    if is_retryable_openai_sse_api_error(error) {
+        return true;
+    }
     // Check structured WS API error codes first.
     if let Some(ws_err) = error.downcast_ref::<WsApiError>() {
         return matches!(
@@ -658,6 +661,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::openai_sse::parse_openai_sse_response;
 
     #[test]
     fn build_ws_url_standard_openai() {
@@ -856,6 +860,17 @@ mod tests {
             message: "try later".to_string(),
         };
         assert!(is_retryable_ws_error(&anyhow::Error::new(err)));
+    }
+
+    #[test]
+    fn is_retryable_ws_error_matches_sse_failed_events() {
+        let stream = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"try again\"}}}\n\n"
+        );
+        let error = parse_openai_sse_response(stream).unwrap_err();
+
+        assert!(is_retryable_ws_error(&error));
     }
 
     #[test]
