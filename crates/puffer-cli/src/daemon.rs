@@ -4648,6 +4648,8 @@ fn publish_sessionless_turn_error_event(
 ///     cryptic transport-level message.
 ///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
 ///     fired. Mirrors the bail string `"cancelled"`.
+///   * `provider_stream_closed` — provider SSE closed before the OpenAI
+///     Responses stream emitted `response.completed`.
 ///   * `other` — anything we haven't classified.
 fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     // anyhow walks the chain via Display when you `format!("{:#}", err)`
@@ -4667,6 +4669,12 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     }
     if lower == "cancelled" || lower.contains(": cancelled") {
         return (chain, "cancelled");
+    }
+    if lower.contains("failed to parse sse response")
+        || lower.contains("stream closed before response.completed")
+        || lower.contains("idle timeout waiting for sse")
+    {
+        return (chain, "provider_stream_closed");
     }
     (chain, "other")
 }
@@ -6591,6 +6599,13 @@ mod tests {
         let (msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "cancelled");
         assert_eq!(msg, "cancelled");
+
+        let err = anyhow::anyhow!("stream closed before response.completed").context(
+            "failed to parse SSE response from https://inference-api.worldrouter.ai/v1/responses",
+        );
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "provider_stream_closed");
+        assert!(msg.contains("stream closed before response.completed"));
 
         // Anything else falls through with the raw chain preserved.
         let err = anyhow::anyhow!("HTTP 503 from upstream");
