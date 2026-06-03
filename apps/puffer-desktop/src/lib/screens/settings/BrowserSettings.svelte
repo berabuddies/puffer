@@ -40,6 +40,8 @@
   let disabled = $derived(!props.daemonReachable || saving || !props.snapshot?.browser);
   let selectedSolverDraft = $derived(solvers.find((solver) => solver.id === selectedSolver) ?? solvers[0]);
   let selectedSolverName = $derived(selectedSolverDraft?.displayName ?? selectedSolver);
+  let selectedSolverHasKey = $derived(Boolean(selectedSolverDraft?.hasApiKey || selectedSolverDraft?.apiKeyDraft.trim()));
+  let selectedSolverReady = $derived(Boolean(captchaEnabled && selectedSolverHasKey));
 
   $effect(() => {
     const key = browserSnapshotKey(props.snapshot);
@@ -97,6 +99,16 @@
 
   function removeExtension(id: string) {
     extensions = extensions.filter((extension) => extension.id !== id);
+  }
+
+  function solverHasKey(solver: SolverDraft): boolean {
+    return Boolean(solver.hasApiKey || solver.apiKeyDraft.trim());
+  }
+
+  function solverStatusLabel(solver: SolverDraft): string {
+    if (selectedSolver !== solver.id) return "Solver extension";
+    if (!captchaEnabled) return "Selected solver";
+    return solverHasKey(solver) ? "Ready solver" : "Needs key";
   }
 
   function secretLabel(solver: BrowserCaptchaSolver): string {
@@ -258,11 +270,8 @@
                 <span class:ready={solver.bundled} class="pf-status-pill">
                   {solver.bundled ? "Bundled" : "Missing"}
                 </span>
-                <span
-                  class:ready={selectedSolver === solver.id}
-                  class="pf-status-pill"
-                >
-                  {selectedSolver === solver.id ? (captchaEnabled ? "Active solver" : "Selected solver") : "Solver extension"}
+                <span class:ready={selectedSolver === solver.id && captchaEnabled && solverHasKey(solver)} class="pf-status-pill">
+                  {solverStatusLabel(solver)}
                 </span>
               </div>
             </div>
@@ -414,8 +423,8 @@
             <span class:ready={solver.bundled} class="pf-status-pill">
               {solver.bundled ? "Bundled" : "Missing"}
             </span>
-            <span class:ready={solver.hasApiKey || Boolean(solver.apiKeyDraft.trim())} class="pf-status-pill">
-              {solver.hasApiKey || solver.apiKeyDraft.trim() ? "Key stored" : "No key"}
+            <span class:ready={solverHasKey(solver)} class="pf-status-pill">
+              {solverHasKey(solver) ? "Key stored" : "No key"}
             </span>
           </span>
         </button>
@@ -429,8 +438,8 @@
             <div class="title">{selectedSolverDraft.displayName}</div>
             <div class="desc">{selectedSolverDraft.extensionPath}</div>
           </div>
-          <span class:ready={captchaEnabled} class="pf-status-pill">
-            {captchaEnabled ? "Active" : "Inactive"}
+          <span class:ready={selectedSolverReady} class="pf-status-pill">
+            {captchaEnabled ? (selectedSolverHasKey ? "Ready" : "Needs key") : "Inactive"}
           </span>
         </div>
 

@@ -57,6 +57,7 @@ pub(super) fn configure_chrome_command(
             .collect::<Vec<_>>()
             .join(",");
         command
+            .arg("--enable-unsafe-extension-debugging")
             .arg(format!("--disable-extensions-except={joined}"))
             .arg(format!("--load-extension={joined}"));
     }
@@ -99,6 +100,7 @@ mod tests {
             .map(|value| value.to_string())
             .collect::<Vec<_>>();
         assert!(args.contains(&"--enable-extensions".to_string()));
+        assert!(args.contains(&"--enable-unsafe-extension-debugging".to_string()));
         assert!(
             args.contains(&"--disable-extensions-except=/tmp/nopecha,/tmp/2captcha".to_string())
         );

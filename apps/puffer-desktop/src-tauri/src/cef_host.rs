@@ -1,17 +1,31 @@
 //! Native Chromium Embedded Framework host commands for Puffer Desktop.
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_void, CStr};
 #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
 use std::ffi::CString;
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use std::fs::{self, File};
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use std::io::copy;
 use std::path::{Path, PathBuf};
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use std::process::Command;
 use std::sync::OnceLock;
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use std::time::Duration;
 use tauri::Window;
 
 const DEFAULT_REMOTE_DEBUGGING_PORT: u16 = 9333;
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+const CT_REPO: &str = "berabuddies/ct";
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+const CT_TAG: &str = "ct";
 
 /// Native CEF runtime status returned to the Svelte shell.
 #[derive(Debug, Serialize)]
@@ -46,7 +60,7 @@ static CEF_INITIALIZATION: OnceLock<Result<CefRuntime, String>> = OnceLock::new(
 /// Returns native CEF availability for the current desktop process.
 #[tauri::command]
 pub(crate) fn browser_cef_native_status() -> Value {
-    let discovered_runtime = CefRuntime::discover();
+    let discovered_runtime = CefRuntime::discover(false);
     let initialization = CEF_INITIALIZATION.get();
     let initialized_runtime = initialization.and_then(|value| value.as_ref().ok());
     let discovery_error = discovered_runtime
@@ -210,12 +224,14 @@ fn window_handle(window: &Window) -> Result<*mut c_void> {
 }
 
 impl CefRuntime {
-    fn discover() -> Result<Self> {
+    fn discover(allow_download: bool) -> Result<Self> {
         #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
         {
             let root = runtime_root_from_env()
                 .or_else(runtime_root_from_bundle)
                 .or_else(runtime_root_from_compiled_env)
+                .or_else(runtime_root_from_ct_cache)
+                .or_else(|| allow_download.then(ensure_ct_cef_root).and_then(Result::ok))
                 .ok_or_else(|| anyhow!("CEF runtime root was not found"))?;
             let helper = runtime_helper_from_env()
                 .or_else(|| helper_for_root(&root))
@@ -229,6 +245,7 @@ impl CefRuntime {
         }
         #[cfg(not(all(target_os = "macos", puffer_desktop_cef_native)))]
         {
+            let _ = allow_download;
             bail!("native CEF bridge was not compiled for this desktop build")
         }
     }
@@ -236,7 +253,7 @@ impl CefRuntime {
 
 fn initialize_native_once() -> Result<&'static CefRuntime> {
     let initialization = CEF_INITIALIZATION.get_or_init(|| {
-        let runtime = CefRuntime::discover().map_err(|error| error.to_string())?;
+        let runtime = CefRuntime::discover(true).map_err(|error| error.to_string())?;
         native_initialize(&runtime).map_err(|error| error.to_string())?;
         Ok(runtime)
     });
@@ -283,6 +300,181 @@ fn runtime_root_from_compiled_env() -> Option<PathBuf> {
     root_candidates(root)
         .into_iter()
         .find(|candidate| cef_framework_binary(candidate).is_file())
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn runtime_root_from_ct_cache() -> Option<PathBuf> {
+    let root = cef_runtime_extract_dir()?;
+    cef_root_in_release_dir(&root)
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn ensure_ct_cef_root() -> Result<PathBuf> {
+    if let Some(root) = runtime_root_from_ct_cache() {
+        return Ok(root);
+    }
+    download_ct_cef_release()?;
+    runtime_root_from_ct_cache()
+        .ok_or_else(|| anyhow!("Puffer CT CEF runtime was downloaded but no root was found"))
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn download_ct_cef_release() -> Result<()> {
+    let Some(asset) = cef_asset_name() else {
+        bail!(
+            "Puffer CT CEF release does not provide an asset for {}-{}",
+            runtime_platform(),
+            runtime_arch()
+        );
+    };
+    let Some(extract_dir) = cef_runtime_extract_dir() else {
+        bail!("HOME or PUFFER_HOME is required to cache the Puffer CT CEF runtime");
+    };
+    let complete_marker = extract_dir.join(".puffer-runtime-complete");
+    if complete_marker.is_file() && cef_root_in_release_dir(&extract_dir).is_some() {
+        return Ok(());
+    }
+    let archive_path = runtime_cache_root()
+        .context("resolve Puffer CT runtime cache")?
+        .join("downloads")
+        .join(&asset);
+    download_release_asset(&asset, &archive_path)?;
+    reset_extract_dir(&extract_dir)?;
+    extract_release_asset(&archive_path, &extract_dir)?;
+    if cef_root_in_release_dir(&extract_dir).is_none() {
+        bail!("Puffer CT CEF asset `{asset}` did not contain a usable CEF runtime");
+    }
+    fs::write(complete_marker, asset).context("mark Puffer CT CEF runtime complete")
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn download_release_asset(asset: &str, archive_path: &Path) -> Result<()> {
+    if archive_path.is_file() {
+        return Ok(());
+    }
+    let parent = archive_path
+        .parent()
+        .ok_or_else(|| anyhow!("release archive path has no parent"))?;
+    fs::create_dir_all(parent).context("create CT runtime download directory")?;
+    let repo = std::env::var("PUFFER_CT_REPO").unwrap_or_else(|_| CT_REPO.to_string());
+    let tag = std::env::var("PUFFER_CT_RELEASE_TAG").unwrap_or_else(|_| CT_TAG.to_string());
+    let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .context("build CT runtime HTTP client")?;
+    let mut response = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("download Puffer CT CEF runtime from {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download Puffer CT CEF runtime from {url}"))?;
+    let tmp_path = archive_path.with_extension("download");
+    let mut out = File::create(&tmp_path).context("create temporary CT runtime archive")?;
+    copy(&mut response, &mut out).context("write CT runtime archive")?;
+    fs::rename(&tmp_path, archive_path).context("move CT runtime archive into cache")
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn extract_release_asset(archive_path: &Path, extract_dir: &Path) -> Result<()> {
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(extract_dir)
+        .status()
+        .context("run tar for CT CEF runtime")?;
+    if !status.success() {
+        bail!("extract Puffer CT CEF runtime failed: {status}");
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn reset_extract_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path).context("reset CT runtime extract directory")?;
+    }
+    fs::create_dir_all(path).context("create CT runtime extract directory")
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn cef_runtime_extract_dir() -> Option<PathBuf> {
+    Some(runtime_cache_root()?.join(cef_asset_stem()?))
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn runtime_cache_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("PUFFER_BROWSER_RUNTIME_DIR") {
+        return Some(PathBuf::from(root));
+    }
+    if let Some(home) = std::env::var_os("PUFFER_HOME") {
+        return Some(PathBuf::from(home).join("browser-runtimes").join("ct"));
+    }
+    Some(
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join(".puffer")
+            .join("browser-runtimes")
+            .join("ct"),
+    )
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn cef_root_in_release_dir(root: &Path) -> Option<PathBuf> {
+    for candidate in root_candidates(root.to_path_buf()) {
+        if cef_framework_binary(&candidate).is_file() {
+            return Some(candidate);
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return None;
+    };
+    entries.flatten().find_map(|entry| {
+        let path = entry.path();
+        path.is_dir()
+            .then(|| {
+                root_candidates(path)
+                    .into_iter()
+                    .find(|candidate| cef_framework_binary(candidate).is_file())
+            })
+            .flatten()
+    })
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn cef_asset_name() -> Option<String> {
+    let platform = runtime_platform();
+    let arch = runtime_arch();
+    match platform.as_str() {
+        "macos" | "linux" => Some(format!("puffer-cef-{platform}-{arch}.tar.gz")),
+        _ => None,
+    }
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn cef_asset_stem() -> Option<String> {
+    let asset = cef_asset_name()?;
+    Some(asset.trim_end_matches(".tar.gz").to_string())
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn runtime_platform() -> String {
+    if cfg!(target_os = "macos") {
+        "macos".to_string()
+    } else if cfg!(target_os = "linux") {
+        "linux".to_string()
+    } else {
+        std::env::consts::OS.to_string()
+    }
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn runtime_arch() -> String {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64".to_string(),
+        "x86_64" => "x64".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn runtime_helper_from_env() -> Option<PathBuf> {

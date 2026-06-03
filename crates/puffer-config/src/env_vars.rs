@@ -512,11 +512,34 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     // Paths, config, & resources
     // -----------------------------------------------------------------
     EnvVar {
+        name: "CEF_PATH",
+        description: "Compatibility alias for a Puffer CT CEF runtime root. Used with \
+             `PUFFER_CEF_PATH` and `PUFFER_CEF_ROOT` for native CEF discovery.",
+        default: None,
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "puffer-cli/src/daemon_browser/cef.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+            "apps/puffer-desktop/src-tauri/build.rs",
+        ],
+    },
+    EnvVar {
         name: "PUFFER_BIN",
         description: "Path to the `puffer` binary itself. Used by the subscriber supervisor when \
              spawning skill processes that re-invoke `puffer ...` as their command.",
         default: None,
         source_files: &["puffer-subscriber-runtime/src/supervisor.rs:279"],
+    },
+    EnvVar {
+        name: "PUFFER_BROWSER_RUNTIME_DIR",
+        description: "Override cache root for CT browser runtimes downloaded from the \
+             `berabuddies/ct` release. Defaults under `PUFFER_HOME` or `~/.puffer`.",
+        default: Some("$PUFFER_HOME/browser-runtimes/ct"),
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "apps/puffer-desktop/src-tauri/src/browser/chrome.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+        ],
     },
     EnvVar {
         name: "PUFFER_BUILTIN_RESOURCES_DIR",
@@ -530,11 +553,57 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         ],
     },
     EnvVar {
-        name: "PUFFER_CHROME",
-        description: "Override path to the Chrome / Chromium executable used by the managed-agent \
-             browser runtime. When unset, falls back to platform-specific candidate paths.",
+        name: "PUFFER_CEF_HELPER",
+        description: "Override path to the native CEF helper executable used by the desktop \
+             CEF bridge.",
         default: None,
-        source_files: &["puffer-cli/src/daemon_browser/chrome.rs:122"],
+        source_files: &["apps/puffer-desktop/src-tauri/src/cef_host.rs"],
+    },
+    EnvVar {
+        name: "PUFFER_CEF_PATH",
+        description: "Override path to a Puffer CT CEF runtime root for daemon status and \
+             desktop native CEF discovery.",
+        default: None,
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "puffer-cli/src/daemon_browser/cef.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+            "apps/puffer-desktop/src-tauri/build.rs",
+        ],
+    },
+    EnvVar {
+        name: "PUFFER_CEF_REMOTE_DEBUGGING_PORT",
+        description: "Remote debugging port exposed by the desktop native CEF bridge and read by \
+             the daemon CEF backend connector.",
+        default: Some("9333"),
+        source_files: &[
+            "puffer-cli/src/daemon_browser/session_launch.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+            "apps/puffer-desktop/src-tauri/src/daemon_launcher.rs",
+        ],
+    },
+    EnvVar {
+        name: "PUFFER_CEF_ROOT",
+        description: "Compatibility alias for a Puffer CT CEF runtime root. Used with \
+             `PUFFER_CEF_PATH` and `CEF_PATH` for native CEF discovery.",
+        default: None,
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "puffer-cli/src/daemon_browser/cef.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+            "apps/puffer-desktop/src-tauri/build.rs",
+        ],
+    },
+    EnvVar {
+        name: "PUFFER_CHROME",
+        description: "Override path to the custom CT Chromium executable used by the managed \
+             browser runtime. When unset, Puffer uses packaged, cached, local Tintin, or \
+             downloaded CT release runtimes only.",
+        default: None,
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "apps/puffer-desktop/src-tauri/src/browser/chrome.rs",
+        ],
     },
     EnvVar {
         name: "PUFFER_CHROME_USER_DATA_DIR",
@@ -542,6 +611,36 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
              managed browser profile seeding.",
         default: None,
         source_files: &["puffer-cli/src/browser_profiles.rs"],
+    },
+    EnvVar {
+        name: "PUFFER_CT_CHROME",
+        description: "Alias for `PUFFER_CHROME` when explicitly pointing managed browser launch \
+             at a CT Chromium executable.",
+        default: None,
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "apps/puffer-desktop/src-tauri/src/browser/chrome.rs",
+        ],
+    },
+    EnvVar {
+        name: "PUFFER_CT_RELEASE_TAG",
+        description: "GitHub release tag used when downloading CT browser runtime assets.",
+        default: Some("ct"),
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "apps/puffer-desktop/src-tauri/src/browser/chrome.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+        ],
+    },
+    EnvVar {
+        name: "PUFFER_CT_REPO",
+        description: "GitHub repository used when downloading CT browser runtime assets.",
+        default: Some("berabuddies/ct"),
+        source_files: &[
+            "puffer-cli/src/daemon_browser/ct_runtime.rs",
+            "apps/puffer-desktop/src-tauri/src/browser/chrome.rs",
+            "apps/puffer-desktop/src-tauri/src/cef_host.rs",
+        ],
     },
     EnvVar {
         name: "PUFFER_DISCOVERY_CACHE_PATH",
@@ -754,38 +853,20 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "LOCALAPPDATA",
-        description: "Windows: candidate base path when looking for Chrome / Chromium installs \
-             and the default Telegram Desktop tdata directory.",
+        description: "Windows: default Telegram Desktop tdata directory base path.",
         default: None,
-        source_files: &[
-            "puffer-cli/src/daemon_browser/chrome.rs:160",
-            "puffer-subscriber-telegram-user/src/import.rs:113",
-        ],
+        source_files: &["puffer-subscriber-telegram-user/src/import.rs:113"],
     },
     EnvVar {
         name: "PATH",
         description:
-            "Read for: locating `command` executables (LSP live, chrome candidates), and the \
-             VSCode-remote-SSH heuristic in terminal-setup.",
+            "Read for: locating `command` executables (LSP live) and the VSCode-remote-SSH \
+             heuristic in terminal-setup.",
         default: None,
         source_files: &[
-            "puffer-cli/src/daemon_browser/chrome.rs:233",
             "puffer-core/runtime/claude_tools/workflow/lsp_live.rs:709",
             "puffer-core/command_helpers/terminal_setup.rs:471",
         ],
-    },
-    EnvVar {
-        name: "PROGRAMFILES",
-        description: "Windows: candidate base path when looking for Chrome / Chromium installs.",
-        default: None,
-        source_files: &["puffer-cli/src/daemon_browser/chrome.rs:160"],
-    },
-    EnvVar {
-        name: "PROGRAMFILES(X86)",
-        description:
-            "Windows: candidate base path when looking for 32-bit Chrome / Chromium installs.",
-        default: None,
-        source_files: &["puffer-cli/src/daemon_browser/chrome.rs:160"],
     },
     EnvVar {
         name: "SHELL",

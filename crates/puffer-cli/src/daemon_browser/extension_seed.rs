@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
@@ -14,10 +15,35 @@ use super::launch_settings::BrowserExtensionSeed;
 
 const EXTENSION_TARGET_WAIT: Duration = Duration::from_secs(2);
 const EXTENSION_TARGET_POLL: Duration = Duration::from_millis(100);
+const EXTENSION_REGISTRATION_WAIT: Duration = Duration::from_secs(3);
 const EXTENSION_SEED_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct ExtensionTarget {
     websocket_url: String,
+}
+
+/// Verifies requested unpacked extensions were registered by the browser runtime.
+pub(super) fn ensure_extensions_registered(
+    browser_ws: &str,
+    profile_dir: Option<&Path>,
+    extension_dirs: &[PathBuf],
+) -> Result<()> {
+    if extension_dirs.is_empty() {
+        return Ok(());
+    }
+    let targets = wait_for_extension_targets(browser_ws)?;
+    if !targets.is_empty() {
+        return Ok(());
+    }
+    if let Some(profile_dir) = profile_dir {
+        if wait_for_extension_preferences(profile_dir, extension_dirs)? {
+            return Ok(());
+        }
+    }
+    bail!(
+        "browser extensions were requested but no extension runtime was registered; \
+         use a Puffer CT Chromium/CEF build that honors unpacked extension loading"
+    )
 }
 
 /// Seeds local storage for bundled CAPTCHA extensions that are loaded in Chrome.
@@ -44,8 +70,8 @@ pub(super) fn seed_extensions(browser_ws: &str, seeds: &[BrowserExtensionSeed]) 
             }
         }
         if !matched {
-            eprintln!(
-                "puffer browser: loaded extension target for `{}` was not found",
+            bail!(
+                "loaded extension target for `{}` was not found, so its API key could not be configured",
                 seed.solver_id()
             );
         }
@@ -95,6 +121,59 @@ fn list_extension_targets(browser_ws: &str) -> Result<Vec<ExtensionTarget>> {
                 })
         })
         .collect())
+}
+
+fn wait_for_extension_preferences(profile_dir: &Path, extension_dirs: &[PathBuf]) -> Result<bool> {
+    let start = Instant::now();
+    while start.elapsed() < EXTENSION_REGISTRATION_WAIT {
+        if extension_preferences_include(profile_dir, extension_dirs)? {
+            return Ok(true);
+        }
+        thread::sleep(EXTENSION_TARGET_POLL);
+    }
+    Ok(false)
+}
+
+fn extension_preferences_include(profile_dir: &Path, extension_dirs: &[PathBuf]) -> Result<bool> {
+    let path = profile_dir.join("Default").join("Preferences");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&contents) else {
+        return Ok(false);
+    };
+    let Some(settings) = value
+        .get("extensions")
+        .and_then(|extensions| extensions.get("settings"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(false);
+    };
+    let registered = settings
+        .values()
+        .filter_map(extension_setting_path)
+        .map(normalize_path_string)
+        .collect::<Vec<_>>();
+    let requested = extension_dirs
+        .iter()
+        .map(|path| normalize_path_string(path.display().to_string()))
+        .collect::<Vec<_>>();
+    Ok(requested
+        .iter()
+        .all(|path| registered.iter().any(|candidate| candidate == path)))
+}
+
+fn extension_setting_path(value: &Value) -> Option<String> {
+    value
+        .get("path")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn normalize_path_string(value: String) -> String {
+    std::fs::canonicalize(&value)
+        .map(|path| path.display().to_string())
+        .unwrap_or(value)
 }
 
 fn is_extension_target(target: &Value) -> bool {

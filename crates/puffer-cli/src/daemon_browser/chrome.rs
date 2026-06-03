@@ -7,6 +7,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use url::Url;
 
+use super::ct_runtime;
 use super::CHROME_START_TIMEOUT;
 
 #[derive(Clone, Debug)]
@@ -165,20 +166,14 @@ pub(super) fn close_page_target(browser_ws: &str, target_id: &str) -> Result<()>
     Ok(())
 }
 
-/// Finds the Chrome or Chromium executable Puffer should manage.
+/// Finds the custom Chromium executable Puffer should manage.
 pub(super) fn resolve_chrome_executable() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("PUFFER_CHROME") {
-        let path = PathBuf::from(path);
-        if is_executable_candidate(&path) {
-            return Some(path);
-        }
-    }
-    for candidate in chrome_candidates() {
-        if is_executable_candidate(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    ct_runtime::discover_chrome_executable()
+}
+
+/// Finds or downloads the custom Chromium executable Puffer should manage.
+pub(super) fn ensure_chrome_executable() -> Result<PathBuf> {
+    ct_runtime::ensure_chrome_executable()
 }
 
 /// Terminates orphaned Chrome processes that still own `profile_dir`.
@@ -188,54 +183,6 @@ pub(super) fn terminate_profile_processes(profile_dir: &Path) {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = profile_dir;
-}
-
-fn chrome_candidates() -> Vec<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut candidates = Vec::new();
-        if let Some(home) = std::env::var_os("HOME") {
-            candidates.push(
-                PathBuf::from(home)
-                    .join("chromium_tintin/src/out/Release/Chromium.app/Contents/MacOS/Chromium"),
-            );
-        }
-        candidates.extend([
-            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            PathBuf::from(
-                "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-            ),
-            PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ]);
-        candidates
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let mut candidates = Vec::new();
-        for base in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
-            if let Ok(base) = std::env::var(base) {
-                candidates.push(PathBuf::from(&base).join("Google/Chrome/Application/chrome.exe"));
-                candidates.push(PathBuf::from(&base).join("Chromium/Application/chrome.exe"));
-            }
-        }
-        candidates
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        [
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium",
-            "chromium-browser",
-        ]
-        .iter()
-        .filter_map(which_on_path)
-        .collect()
-    }
-}
-
-fn is_executable_candidate(path: &Path) -> bool {
-    path.is_file()
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -282,14 +229,6 @@ fn process_is_alive(pid: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn which_on_path(name: &&str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(name))
-        .find(|path| path.is_file())
 }
 
 fn urlencoding(value: &str) -> String {

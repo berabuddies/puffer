@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use super::chrome::resolve_chrome_executable;
+use super::ct_runtime;
 
 const CEF_RENDERER: &str = "cef";
 const SCREENCAST_RENDERER: &str = "screencast";
@@ -103,6 +104,9 @@ fn cef_runtime_status() -> CefRuntimeStatus {
 
 fn cef_candidate_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    if let Some(root) = ct_runtime::discover_cef_root() {
+        add_cef_root_candidates(&mut roots, root);
+    }
     for key in ["PUFFER_CEF_PATH", "PUFFER_CEF_ROOT", "CEF_PATH"] {
         if let Some(path) = std::env::var_os(key) {
             add_cef_root_candidates(&mut roots, PathBuf::from(path));
@@ -212,7 +216,7 @@ fn cef_fallback_reason(status: &CefRuntimeStatus) -> String {
 }
 
 fn cef_build_hint() -> String {
-    "Point PUFFER_CEF_PATH at a CEF distribution built from ~/chromium_tintin. Chromium.app alone is not loadable as CEF.".to_string()
+    "Use the puffer-cef asset from the berabuddies/ct release, point PUFFER_CEF_PATH at that extracted runtime, or build CEF from ~/chromium_tintin. Chromium.app alone is not loadable as CEF.".to_string()
 }
 
 fn display_path(path: PathBuf) -> String {

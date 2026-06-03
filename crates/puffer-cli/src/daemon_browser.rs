@@ -23,6 +23,7 @@ mod cef;
 mod chrome;
 mod client;
 mod console;
+mod ct_runtime;
 mod cursor;
 mod devtools;
 mod extension_seed;

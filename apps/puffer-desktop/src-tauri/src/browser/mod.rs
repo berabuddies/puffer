@@ -37,8 +37,8 @@ use agent::BrowserElementRef;
 use cdp::{apply_viewport, set_read_timeout, start_screencast};
 pub(super) use cdp::{frame_session_id_string, normalize_url, send_cdp};
 use chrome::{
-    cdp_http_endpoint, create_page_target, first_page_target, read_devtools_ws_url,
-    resolve_chrome_executable, safe_profile_name, terminate_profile_processes,
+    cdp_http_endpoint, create_page_target, ensure_chrome_executable, first_page_target,
+    read_devtools_ws_url, safe_profile_name, terminate_profile_processes,
 };
 use cursor::{cursor_eval_expression, parse_cursor_response};
 use devtools::emit_devtools_event;
@@ -362,8 +362,7 @@ impl BrowserSession {
         width: u32,
         height: u32,
     ) -> Result<Self> {
-        let chrome = resolve_chrome_executable()
-            .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
+        let chrome = ensure_chrome_executable()?;
         std::fs::create_dir_all(&profile_dir).context("create browser profile directory")?;
         terminate_profile_processes(&profile_dir);
         match std::fs::remove_file(profile_dir.join("DevToolsActivePort")) {
