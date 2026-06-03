@@ -1,4 +1,6 @@
-use super::super::openai_sse::is_retryable_openai_sse_api_error;
+use super::super::openai_sse::{
+    is_openai_response_incomplete_error, is_retryable_openai_sse_api_error,
+};
 use super::super::{OPENAI_CHATGPT_BASE_URL, OPENAI_CODEX_COMPAT_VERSION};
 use super::StructuredOutputConfig;
 use crate::AppState;
@@ -173,7 +175,7 @@ where
 /// Returns true when an OpenAI streaming failure is safe to retry by
 /// restarting the whole sampling request.
 pub(super) fn is_retryable_openai_stream_error(error: &Error) -> bool {
-    is_retryable_openai_transport_error(error)
+    is_retryable_openai_transport_error(error) || is_openai_response_incomplete_error(error)
 }
 
 fn openai_transport_max_attempts() -> usize {
@@ -682,10 +684,7 @@ mod tests {
             openai_transport_retry_base_delay(),
             Duration::from_millis(200)
         );
-        assert_eq!(
-            openai_stream_retry_base_delay(),
-            Duration::from_millis(200)
-        );
+        assert_eq!(openai_stream_retry_base_delay(), Duration::from_millis(200));
     }
 
     #[test]
@@ -715,10 +714,7 @@ mod tests {
         let _http_base = ScopedEnvVar::set("PUFFER_OPENAI_HTTP_RETRY_BASE_DELAY_MS", "800");
         let _http_delay = ScopedEnvVar::set("PUFFER_OPENAI_HTTP_RETRY_DELAY_MS", "900");
 
-        assert_eq!(
-            openai_stream_retry_base_delay(),
-            Duration::from_millis(400)
-        );
+        assert_eq!(openai_stream_retry_base_delay(), Duration::from_millis(400));
     }
 
     #[test]
@@ -731,10 +727,7 @@ mod tests {
         let _http_base = ScopedEnvVar::set("PUFFER_OPENAI_HTTP_RETRY_BASE_DELAY_MS", "350");
         let _http_delay = ScopedEnvVar::set("PUFFER_OPENAI_HTTP_RETRY_DELAY_MS", "900");
 
-        assert_eq!(
-            openai_stream_retry_base_delay(),
-            Duration::from_millis(350)
-        );
+        assert_eq!(openai_stream_retry_base_delay(), Duration::from_millis(350));
     }
 
     #[test]

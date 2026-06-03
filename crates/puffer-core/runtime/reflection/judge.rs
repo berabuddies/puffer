@@ -11,6 +11,7 @@ use crate::runtime::openai::{
     build_codex_openai_request_body, parse_openai_assistant_text, resolve_openai_execution_config,
     send_openai_request_with_refresh,
 };
+use crate::runtime::openai_sse::openai_response_incomplete_error;
 use crate::runtime::request_tool_filter::build_request_tool_filter;
 use crate::runtime::system_prompt::render_runtime_system_prompt;
 use crate::runtime::{execute_user_prompt_with_options, CancelToken, TurnRequestOptions};
@@ -576,6 +577,13 @@ fn run_openai_responses_judge(
     if let Some(input) = input_tokens {
         state.last_input_tokens = Some(input as u32);
         state.update_cache_stats(input, cached_input_tokens.unwrap_or(0));
+    }
+    if let Some(error) = openai_response_incomplete_error(&response) {
+        attempt.error = Some(error.to_string());
+        attempt.cache_hit_ratio = state
+            .last_cache_hit_ratio
+            .map(|value| format!("{value:.2}"));
+        return attempt;
     }
     let parsed: OpenAIResponsesResponse = match serde_json::from_value(response.clone())
         .context("failed to parse OpenAI Responses payload")

@@ -1,4 +1,5 @@
 use super::retry_http_send;
+use crate::runtime::openai_sse::openai_response_incomplete_error;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ProxyConfig;
 use puffer_provider_openai::{
@@ -98,16 +99,22 @@ pub fn execute_claude_openai_web_search(
         &request.body,
         false,
     )?;
-    let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
+    let (text, sources) = parse_openai_web_search_response(&response)?;
+
+    Ok(format_search_output(text, sources))
+}
+
+fn parse_openai_web_search_response(response: &Value) -> Result<(String, Vec<SourceLink>)> {
+    if let Some(error) = openai_response_incomplete_error(response) {
+        return Err(error);
+    }
+    let parsed = parse_responses_response(&serde_json::to_string(response)?)?;
     let text = extract_responses_text(&parsed);
     if text.trim().is_empty() {
         bail!("OpenAI web search returned no text");
     }
 
-    Ok(format_search_output(
-        text,
-        extract_openai_sources(&response),
-    ))
+    Ok((text, extract_openai_sources(response)))
 }
 
 /// Executes Claude-style WebSearch against an Anthropic Messages-compatible endpoint.
@@ -396,5 +403,24 @@ mod tests {
         assert!(output.contains("Sources:"));
         assert!(output.contains("- [One](https://one.example)"));
         assert!(output.contains("- [Two](https://two.example)"));
+    }
+
+    #[test]
+    fn openai_web_search_rejects_incomplete_response() {
+        let error = parse_openai_web_search_response(&json!({
+            "id": "resp_incomplete",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "partial"}]
+            }]
+        }))
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Incomplete response returned, reason: content_filter"
+        );
     }
 }

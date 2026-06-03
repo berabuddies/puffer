@@ -1,4 +1,6 @@
-use super::super::openai_sse::{is_retryable_openai_sse_api_error, OpenAISseResult};
+use super::super::openai_sse::{
+    is_openai_response_incomplete_error, is_retryable_openai_sse_api_error, OpenAISseResult,
+};
 use super::super::openai_ws::{OpenAIWebSocket, WsApiError};
 use super::super::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
@@ -38,9 +40,7 @@ pub(in super::super) fn openai_websocket_enabled() -> bool {
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// Executes a streaming turn over a persistent WebSocket connection to the
-/// OpenAI Responses API. Falls back to the SSE streaming path on connection
-/// failure so the user never sees a hard error from transport issues alone.
+/// Executes a streaming turn over a persistent OpenAI Responses WebSocket.
 pub(in super::super) fn execute_openai_websocket_streaming<F>(
     state: &mut AppState,
     resources: &LoadedResources,
@@ -86,10 +86,6 @@ where
     }
 }
 
-/// Constructs the WebSocket URL from the provider's HTTP base URL by swapping
-/// the scheme from `https://` to `wss://` (or `http://` to `ws://` for local
-/// development), appending the responses path, and including any configured
-/// query parameters.
 fn build_ws_url(base_url: &str, query_params: &[(String, String)]) -> String {
     let responses_path = openai_responses_path(base_url);
     let ws_base = base_url
@@ -100,7 +96,6 @@ fn build_ws_url(base_url: &str, query_params: &[(String, String)]) -> String {
     if query_params.is_empty() {
         return raw_url;
     }
-    // Append query parameters using the `url` crate for proper encoding.
     match url::Url::parse(&raw_url) {
         Ok(mut parsed) => {
             {
@@ -111,24 +106,17 @@ fn build_ws_url(base_url: &str, query_params: &[(String, String)]) -> String {
             }
             parsed.to_string()
         }
-        Err(_) => raw_url, // Degrade gracefully — use URL without params.
+        Err(_) => raw_url,
     }
 }
 
-/// Collects the HTTP headers needed for the WebSocket upgrade request from
-/// the current execution config. Mirrors the headers sent by the SSE path's
-/// `build_request_to_path` (minus `Content-Type` and `Accept` which are
-/// HTTP-POST-specific).
 fn ws_headers_from_config(config: &OpenAIRequestConfig) -> Vec<(String, String)> {
     let mut headers = Vec::new();
-    // User-Agent and originator — matches the SSE path.
     headers.push((
         "User-Agent".to_string(),
         codex_user_agent(&config.version, &config.originator),
     ));
     headers.push(("originator".to_string(), config.originator.clone()));
-    // Session and account identification — needed for server-side tracking
-    // and ChatGPT backend-api / Codex OAuth flows.
     if let Some(session_id) = config.session_id.as_deref() {
         headers.push(("session_id".to_string(), session_id.to_string()));
         headers.push(("x-client-request-id".to_string(), session_id.to_string()));
@@ -136,12 +124,9 @@ fn ws_headers_from_config(config: &OpenAIRequestConfig) -> Vec<(String, String)>
     if let Some(account_id) = config.account_id.as_deref() {
         headers.push(("ChatGPT-Account-ID".to_string(), account_id.to_string()));
     }
-    // Provider-configured custom headers (includes version, OpenAI-Organization,
-    // OpenAI-Project, and any user-configured headers).
     for (key, value) in &config.custom_headers {
         headers.push((key.clone(), value.clone()));
     }
-    // Authorization — must come after custom_headers to match SSE ordering.
     match &config.auth {
         OpenAIAuth::ApiKey(key) => {
             headers.push(("Authorization".to_string(), format!("Bearer {key}")));
@@ -154,21 +139,13 @@ fn ws_headers_from_config(config: &OpenAIRequestConfig) -> Vec<(String, String)>
     headers
 }
 
-/// Attempts to establish a WebSocket connection. On failure returns `None`
-/// so the caller can fall back to the SSE path.
-fn try_connect_ws(execution: &OpenAIExecutionConfig) -> Option<OpenAIWebSocket> {
+fn try_connect_ws(execution: &OpenAIExecutionConfig) -> Result<OpenAIWebSocket> {
     let url = build_ws_url(
         &execution.request_config.base_url,
         &execution.request_config.query_params,
     );
     let headers = ws_headers_from_config(&execution.request_config);
-    match OpenAIWebSocket::connect(&url, &headers) {
-        Ok(ws) => Some(ws),
-        Err(error) => {
-            eprintln!("[ws] failed to connect to {url}: {error:#}");
-            None
-        }
-    }
+    OpenAIWebSocket::connect(&url, &headers)
 }
 
 /// Inner implementation of the WebSocket streaming agent loop.
@@ -238,24 +215,18 @@ where
     let mut previous_response_id: Option<String> = None;
     let mut continuation_start: Option<usize> = None;
 
-    // Attempt to establish the WebSocket connection. If this fails, fall back
-    // to the regular SSE streaming path immediately.
     let mut ws = match try_connect_ws(&execution) {
-        Some(ws) => ws,
-        None => {
-            return super::execute_openai_streaming(
-                state, resources, providers, provider, model_id, auth_store, input, options,
+        Ok(ws) => ws,
+        Err(error) => {
+            eprintln!("[ws] failed to connect: {error:#}");
+            super::websocket_state::activate_openai_websocket_http_fallback(state);
+            return fallback_to_sse(
+                state, resources, providers, provider, &model_id, auth_store, input, options,
                 on_event,
             );
         }
     };
 
-    // Clone the reflection config because `options` is still needed — the
-    // mid-loop fallback branches below consume `options` by value when
-    // handing control back to the SSE path, and the SSE path constructs its
-    // own tracker from `options.reflection`. If we moved `options.reflection`
-    // into the websocket tracker instead, those fallbacks would lose the
-    // reflection policy.
     let mut reflection = options
         .reflection
         .clone()
@@ -263,7 +234,6 @@ where
     let mut reflection_traces: Vec<super::super::ReflectionTraceEvent> = Vec::new();
 
     loop {
-        // Check for background tasks that completed since the last turn.
         let completed = super::super::claude_tools::workflow::drain_completed_shell_tasks(
             &state.cwd,
             &state.session.id,
@@ -276,7 +246,6 @@ where
             items.push(ConversationItem::user_message(&notice));
         }
 
-        // Wire boundary: ConversationItem -> Responses API input.
         let wire_input = match (
             supports_response_threading,
             previous_response_id.as_ref(),
@@ -292,7 +261,6 @@ where
             None
         };
 
-        // Build the request body (same as the SSE path).
         let mut body = super::build_codex_openai_request_body(
             state,
             &execution.request_config.base_url,
@@ -306,12 +274,12 @@ where
         );
         apply_previous_response_id(&mut body, prev_resp_id.as_deref());
 
-        // Reconnect if the connection is approaching its 60-minute limit.
         if ws.is_expired() {
             ws.close();
             ws = match try_connect_ws(&execution) {
-                Some(new_ws) => new_ws,
-                None => {
+                Ok(new_ws) => new_ws,
+                Err(_) => {
+                    super::websocket_state::activate_openai_websocket_http_fallback(state);
                     if invocations.is_empty() {
                         return fallback_to_sse(
                             state, resources, providers, provider, &model_id, auth_store, input,
@@ -325,22 +293,19 @@ where
             };
         }
 
-        // Send the request and read events over WebSocket.
         let response = match send_and_read_ws_with_retry(&mut ws, &execution, &body, on_event) {
             Ok(result) => result,
             Err(error) => {
-                // Extract the structured error code if this is a WS API error.
                 let ws_code = error.downcast_ref::<WsApiError>().map(|e| e.code.as_str());
 
-                // Check for previous_response_not_found — reset chain and retry.
                 if ws_code == Some("previous_response_not_found") {
                     previous_response_id = None;
                     continuation_start = None;
-                    // Reconnect and retry with full input.
                     ws.close();
                     ws = match try_connect_ws(&execution) {
-                        Some(new_ws) => new_ws,
-                        None => {
+                        Ok(new_ws) => new_ws,
+                        Err(_) => {
+                            super::websocket_state::activate_openai_websocket_http_fallback(state);
                             if invocations.is_empty() {
                                 return fallback_to_sse(
                                     state, resources, providers, provider, &model_id, auth_store,
@@ -354,7 +319,6 @@ where
                     };
                     continue;
                 }
-                // For auth errors, try refreshing OAuth and reconnecting.
                 let is_auth_error = matches!(
                     ws_code,
                     Some("invalid_api_key" | "token_expired" | "authentication_error")
@@ -370,8 +334,11 @@ where
                             auth_store.set_oauth(execution.provider_id.clone(), stored);
                             ws.close();
                             ws = match try_connect_ws(&execution) {
-                                Some(new_ws) => new_ws,
-                                None => {
+                                Ok(new_ws) => new_ws,
+                                Err(_) => {
+                                    super::websocket_state::activate_openai_websocket_http_fallback(
+                                        state,
+                                    );
                                     if invocations.is_empty() {
                                         return fallback_to_sse(
                                             state, resources, providers, provider, &model_id,
@@ -387,8 +354,15 @@ where
                         }
                     }
                 }
-                // Generic WS error.
+                if is_ws_transport_error(&error) {
+                    super::websocket_state::activate_openai_websocket_http_fallback(state);
+                }
                 if invocations.is_empty() {
+                    on_event(TurnStreamEvent::RetryAttempt {
+                        attempt: 1,
+                        max_attempts: 1,
+                        error: error.to_string(),
+                    });
                     return fallback_to_sse(
                         state, resources, providers, provider, &model_id, auth_store, input,
                         options, on_event,
@@ -398,7 +372,6 @@ where
             }
         };
 
-        // Extract results (same logic as the SSE streaming path).
         previous_response_id = if supports_response_threading {
             response.response_id
         } else {
@@ -523,7 +496,6 @@ where
     }
 }
 
-/// Sends a `response.create` message and reads events until completion.
 fn send_and_read_ws<F>(
     ws: &mut OpenAIWebSocket,
     body: &Value,
@@ -536,9 +508,6 @@ where
     ws.read_events(on_event)
 }
 
-/// Sends a request with retry logic for transient errors (rate limits, server
-/// errors, connection resets). Mirrors the SSE path's `retry_openai_transport`
-/// but adapted for WebSocket semantics.
 fn send_and_read_ws_with_retry<F>(
     ws: &mut OpenAIWebSocket,
     execution: &OpenAIExecutionConfig,
@@ -555,10 +524,14 @@ where
             Ok(result) => return Ok(result),
             Err(error) if attempt < max_attempts && is_retryable_ws_error(&error) => {
                 eprintln!("[ws] retryable error on attempt {attempt}/{max_attempts}: {error:#}",);
+                on_event(TurnStreamEvent::RetryAttempt {
+                    attempt,
+                    max_attempts,
+                    error: error.to_string(),
+                });
                 if !delay.is_zero() {
                     std::thread::sleep(delay);
                 }
-                // The connection may be broken — try to reconnect.
                 ws.close();
                 let url = build_ws_url(
                     &execution.request_config.base_url,
@@ -567,7 +540,7 @@ where
                 let headers = ws_headers_from_config(&execution.request_config);
                 match OpenAIWebSocket::connect(&url, &headers) {
                     Ok(new_ws) => *ws = new_ws,
-                    Err(_) => return Err(error),
+                    Err(reconnect_error) => return Err(reconnect_error),
                 }
             }
             Err(error) => return Err(error),
@@ -576,10 +549,8 @@ where
     unreachable!("retry loop always returns or errors")
 }
 
-/// Returns `true` for WebSocket errors that are worth retrying: rate limits,
-/// server errors, and connection-level transients.
 fn is_retryable_ws_error(error: &anyhow::Error) -> bool {
-    if is_retryable_openai_sse_api_error(error) {
+    if is_retryable_openai_sse_api_error(error) || is_openai_response_incomplete_error(error) {
         return true;
     }
     // Check structured WS API error codes first.
@@ -589,21 +560,40 @@ fn is_retryable_ws_error(error: &anyhow::Error) -> bool {
             "rate_limit_exceeded" | "server_error" | "overloaded"
         );
     }
-    // Connection-level transient errors (tungstenite / IO).
-    let text = error.to_string().to_ascii_lowercase();
-    if text.contains("connection reset")
-        || text.contains("broken pipe")
-        || text.contains("operation timed out")
-        || text.contains("unexpected eof")
-    {
+    if ws_transport_error_text_matches(error) {
         return true;
     }
-    // IO timeout errors in the error chain.
     error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
             .is_some_and(|e| e.kind() == std::io::ErrorKind::TimedOut)
     })
+}
+
+fn is_ws_transport_error(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<WsApiError>().is_some()
+        || is_retryable_openai_sse_api_error(error)
+        || is_openai_response_incomplete_error(error)
+    {
+        return false;
+    }
+    ws_transport_error_text_matches(error)
+        || error.chain().any(|cause| {
+            cause.downcast_ref::<tungstenite::Error>().is_some()
+                || cause.downcast_ref::<std::io::Error>().is_some()
+        })
+}
+
+fn ws_transport_error_text_matches(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("connection reset")
+        || text.contains("broken pipe")
+        || text.contains("operation timed out")
+        || text.contains("unexpected eof")
+        || text.contains("websocket connection closed")
+        || text.contains("failed to read websocket message")
+        || text.contains("failed to send response.create")
+        || text.contains("failed to establish websocket connection")
 }
 
 /// Maximum retry attempts for WS transport errors.
@@ -626,10 +616,6 @@ fn ws_transport_retry_delay() -> std::time::Duration {
 }
 
 /// Falls back to a single SSE HTTP request for the current turn body.
-/// This is used when the WebSocket connection cannot be established or
-/// encounters an unrecoverable error mid-session. The original user
-/// `input` is threaded through to avoid re-deriving it from the transcript,
-/// which may have been mutated during the WS agent loop.
 #[allow(clippy::too_many_arguments)]
 fn fallback_to_sse<F>(
     state: &mut AppState,
@@ -645,7 +631,7 @@ fn fallback_to_sse<F>(
 where
     F: FnMut(TurnStreamEvent),
 {
-    super::execute_openai_streaming(
+    super::legacy_streaming::execute_openai_streaming(
         state,
         resources,
         providers,
@@ -662,6 +648,12 @@ where
 mod tests {
     use super::*;
     use crate::runtime::openai_sse::parse_openai_sse_response;
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn build_ws_url_standard_openai() {
@@ -817,8 +809,7 @@ mod tests {
 
     #[test]
     fn openai_websocket_enabled_parses_true_values() {
-        // NOTE: These tests mutate env vars and may interfere with parallel
-        // tests. In practice the test runner serialises within a single file.
+        let _guard = env_guard();
         std::env::set_var("PUFFER_OPENAI_WEBSOCKET", "1");
         assert!(openai_websocket_enabled());
 
@@ -935,8 +926,7 @@ mod tests {
 
     #[test]
     fn ws_transport_max_attempts_defaults_and_clamps() {
-        // T6: Verify default and env-var parsing for max attempts.
-        // Clear any existing env var first.
+        let _guard = env_guard();
         std::env::remove_var("PUFFER_OPENAI_WS_MAX_ATTEMPTS");
         assert_eq!(ws_transport_max_attempts(), 3);
 
@@ -960,7 +950,7 @@ mod tests {
 
     #[test]
     fn ws_transport_retry_delay_defaults_and_caps() {
-        // T6: Verify default and env-var parsing for retry delay.
+        let _guard = env_guard();
         std::env::remove_var("PUFFER_OPENAI_WS_RETRY_DELAY_MS");
         assert_eq!(
             ws_transport_retry_delay(),

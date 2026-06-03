@@ -39,7 +39,7 @@ use super::{
 };
 use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::runtime::agent_loop::{AssistantTurn, TurnSession};
-use crate::runtime::openai_sse::OpenAISseResult;
+use crate::runtime::openai_sse::{openai_response_incomplete_error, OpenAISseResult};
 use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::runtime::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
@@ -367,6 +367,10 @@ impl TurnSession for OpenAIResponsesTurnSession {
                 request_builder_from_body(fallback_body),
             )
         })?;
+
+        if let Some(error) = openai_response_incomplete_error(&response_value) {
+            return Err(error);
+        }
 
         // Typed parsing (re-uses paths from the legacy non-streaming code).
         let input_tokens = response_value

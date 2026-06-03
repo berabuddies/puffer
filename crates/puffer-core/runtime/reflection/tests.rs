@@ -1,7 +1,11 @@
 use super::*;
 use puffer_config::PufferConfig;
+use puffer_provider_registry::{AuthMode, Modality, ModelDescriptor, ProviderDescriptor};
 use puffer_session_store::SessionMetadata;
 use serde_json::Value;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
 use uuid::Uuid;
 
 fn bash_invocation(command: &str, output: &str, success: bool) -> ToolInvocation {
@@ -25,6 +29,64 @@ fn write_invocation(path: &str, content: &str) -> ToolInvocation {
         success: true,
         metadata: Value::Null,
         terminate: false,
+    }
+}
+
+fn reflection_test_state() -> crate::AppState {
+    crate::AppState::new(
+        PufferConfig::default(),
+        std::env::temp_dir(),
+        SessionMetadata {
+            id: Uuid::nil(),
+            display_name: None,
+            generated_title: None,
+            cwd: std::env::temp_dir(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        },
+    )
+}
+
+fn openai_judge_provider(base_url: String) -> ProviderDescriptor {
+    ProviderDescriptor {
+        id: "openai".to_string(),
+        display_name: "OpenAI".to_string(),
+        base_url,
+        default_api: "openai-responses".to_string(),
+        auth_modes: vec![AuthMode::ApiKey],
+        headers: Default::default(),
+        query_params: Default::default(),
+        discovery: None,
+        models: vec![ModelDescriptor {
+            id: "gpt-5".to_string(),
+            display_name: "GPT-5".to_string(),
+            provider: "openai".to_string(),
+            api: "openai-responses".to_string(),
+            context_window: 272_000,
+            max_output_tokens: 16_384,
+            supports_reasoning: true,
+            compat: None,
+            input: vec![Modality::Text],
+            cost: None,
+        }],
+        chat_completions_path: None,
+    }
+}
+
+fn minimal_batch_assessment() -> BatchAssessment {
+    BatchAssessment {
+        validation_progress: false,
+        artifact_progress: false,
+        edit_progress: false,
+        loopiness_score: 0,
+        focus_bad: false,
+        time_since_progress_ms: 0,
+        signal_notes: Vec::new(),
+        recent_actions: Vec::new(),
     }
 }
 
@@ -218,6 +280,72 @@ fn llm_judge_side_state_can_use_dedicated_cache_key() {
         .expect("llm judge cache key");
     assert_ne!(cache_key, "main-cache-key");
     assert!(cache_key.starts_with("reflection-judge-"));
+}
+
+#[test]
+fn openai_llm_judge_rejects_incomplete_responses_payload() {
+    use puffer_provider_registry::{AuthStore, ProviderRegistry};
+    use puffer_resources::LoadedResources;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 8192];
+        let _ = stream.read(&mut buffer).unwrap();
+
+        let body = concat!(
+            "{",
+            "\"id\":\"resp_incomplete_judge\",",
+            "\"status\":\"incomplete\",",
+            "\"incomplete_details\":{\"reason\":\"content_filter\"},",
+            "\"output_text\":\"{\\\"decision\\\":\\\"continue\\\"}\"",
+            "}"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let mut state = reflection_test_state();
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_judge_provider(format!("http://{address}")));
+    let mut auth_store = AuthStore::default();
+    auth_store.set_api_key("openai", "sk-openai");
+
+    let mut config = LlmJudgeConfig::default();
+    config.model_selector = Some("openai/gpt-5".to_string());
+    let attempt = judge::run_llm_judge(
+        "verify incomplete judge payload handling",
+        &std::collections::BTreeSet::new(),
+        ReflectionLanguage::English,
+        &config,
+        &minimal_batch_assessment(),
+        None,
+        &[crate::runtime::openai::conversation::ConversationItem::user_message("still working")],
+        &state,
+        &LoadedResources::default(),
+        &providers,
+        &mut auth_store,
+        None,
+    );
+    server.join().unwrap();
+
+    let error = attempt.error.expect("incomplete payload should fail");
+    assert!(
+        error.contains("Incomplete response returned, reason: content_filter"),
+        "judge error should preserve incomplete reason, got: {error}"
+    );
+    assert!(
+        attempt.raw_response_text.is_none(),
+        "incomplete payload must not be accepted as judge text"
+    );
 }
 
 #[test]

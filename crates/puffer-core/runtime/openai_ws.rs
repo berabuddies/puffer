@@ -84,9 +84,9 @@ impl OpenAIWebSocket {
         Ok(())
     }
 
-    /// Reads streaming events from the WebSocket connection until a terminal
-    /// event (`response.completed`, `response.done`, `response.incomplete`)
-    /// is received. Returns the same typed result as the SSE parser.
+    /// Reads streaming events from the WebSocket connection until a successful
+    /// terminal event is received. Returns the same typed result as the SSE
+    /// parser.
     pub(super) fn read_events<F>(&mut self, on_event: &mut F) -> Result<OpenAISseResult>
     where
         F: FnMut(TurnStreamEvent),
