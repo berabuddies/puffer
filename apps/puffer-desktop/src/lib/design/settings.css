@@ -40,6 +40,78 @@
 .pf-settings-pane h2 { font-size: 22px; letter-spacing: -0.02em; }
 .pf-settings-pane h3 { font-size: 14px; font-weight: 600; }
 .pf-settings-pane .lead { color: var(--muted-foreground); font-size: 14px; margin: 4px 0 24px; }
+.pf-provider-page {
+  max-width: 972px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+.pf-provider-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pf-provider-title h2 {
+  margin: 0;
+  line-height: 26px;
+  letter-spacing: 0;
+}
+.pf-provider-title .lead {
+  margin: 0;
+  line-height: 20px;
+}
+.pf-provider-routing {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--background);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.04);
+}
+.pf-provider-routing-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pf-provider-routing-copy .label {
+  color: var(--foreground);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 18px;
+}
+.pf-provider-routing-copy .desc {
+  max-width: 480px;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+.pf-provider-routing-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+.pf-provider-routing-controls label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 14px;
+}
+.pf-provider-routing-controls .sc-input {
+  height: 36px;
+  min-width: 0;
+  border-radius: 8px;
+}
+.pf-provider-routing-controls .pf-provider-save {
+  height: 36px;
+  min-height: 36px;
+  white-space: nowrap;
+}
 .pf-settings-row {
   display: grid;
   grid-template-columns: 1fr 280px;
@@ -656,6 +728,20 @@
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
     gap: 12px;
+  }
+
+  .pf-provider-page {
+    max-width: none;
+    gap: 24px;
+  }
+
+  .pf-provider-routing-controls {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .pf-provider-save {
+    width: 100%;
   }
 
   .pf-mcp-form,

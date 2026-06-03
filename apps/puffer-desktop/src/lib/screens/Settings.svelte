@@ -1494,65 +1494,79 @@
       </div>
 
     {:else if section === "providers"}
-      <h2>Providers</h2>
-      <p class="lead">Connect providers, review their available models, and choose the default route for new turns.</p>
+      <div class="pf-provider-page">
+        <header class="pf-provider-title">
+          <h2>Providers</h2>
+          <p class="lead">Connect providers, review their available models, and choose the default route for new turns.</p>
+        </header>
 
-      {#if !daemonReachable}
-        <div class="pf-settings-note">
-          Preview mode — launch Puffer in the desktop app to edit live routing.
-        </div>
-      {:else if usingFallbackProviders}
-        <div class="pf-settings-note">
-          Provider registry is empty. Built-in setup options are available below; refresh after
-          resources reload.
-        </div>
-      {/if}
-      <LocalModelSetupCard onRefresh={props.onRefresh} />
+        {#if !daemonReachable}
+          <div class="pf-settings-note">
+            Preview mode - launch Puffer in the desktop app to edit live routing.
+          </div>
+        {:else if usingFallbackProviders}
+          <div class="pf-settings-note">
+            Provider registry is empty. Built-in setup options are available below; refresh after
+            resources reload.
+          </div>
+        {/if}
+        <LocalModelSetupCard onRefresh={props.onRefresh} />
 
-      <div class="pf-settings-row" style="align-items: start;">
-        <div class="meta">
-          <div class="label">Default routing</div>
-          <div class="desc">Which provider + model new agent turns use when the session doesn't override.</div>
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 8px; justify-self: end; min-width: 300px;">
-          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted-foreground);">
-            Provider
-            <select
-              class="sc-input"
-              value={modelPickerProvider}
-              disabled={modelPickerDisabled}
-              onchange={(e) => {
-                modelPickerProvider = (e.currentTarget as HTMLSelectElement).value;
-                modelPickerModel = "";
-                void loadModelsForProvider(modelPickerProvider);
-              }}
+        <section class="pf-provider-routing">
+          <div class="pf-provider-routing-copy">
+            <div class="label">Default routing</div>
+            <div class="desc">Select the AI provider and model your agent uses by default.</div>
+          </div>
+          <div class="pf-provider-routing-controls">
+            <label>
+              Provider
+              <select
+                class="sc-input"
+                value={modelPickerProvider}
+                disabled={modelPickerDisabled}
+                onchange={(e) => {
+                  modelPickerProvider = (e.currentTarget as HTMLSelectElement).value;
+                  modelPickerModel = "";
+                  void loadModelsForProvider(modelPickerProvider);
+                }}
+              >
+                <option value="">No provider</option>
+                {#each defaultRouteProviders as p (p.id)}
+                  <option value={p.id}>{p.displayName} ({p.id})</option>
+                {/each}
+              </select>
+            </label>
+            <label>
+              Model
+              <select
+                class="sc-input"
+                value={modelPickerModel}
+                onchange={(e) => (modelPickerModel = (e.currentTarget as HTMLSelectElement).value)}
+                disabled={modelPickerDisabled || !modelPickerProvider || modelPickerLoading}
+              >
+                <option value="">
+                  {modelPickerLoading
+                    ? "Loading models..."
+                    : modelPickerNoAgentModels
+                      ? "No agent-capable models"
+                      : "Pick a model"}
+                </option>
+                {#each modelPickerModels as m (m.id)}
+                  <option value={m.id}>{m.displayName} ({m.id})</option>
+                {/each}
+              </select>
+            </label>
+            <button
+              type="button"
+              class="sc-btn pf-provider-save"
+              data-variant="default"
+              data-size="sm"
+              disabled={!canSaveDefaultModel}
+              onclick={saveDefaultModel}
             >
-              <option value="">— none —</option>
-              {#each defaultRouteProviders as p (p.id)}
-                <option value={p.id}>{p.displayName} ({p.id})</option>
-              {/each}
-            </select>
-          </label>
-          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted-foreground);">
-            Model
-            <select
-              class="sc-input"
-              value={modelPickerModel}
-              onchange={(e) => (modelPickerModel = (e.currentTarget as HTMLSelectElement).value)}
-              disabled={modelPickerDisabled || !modelPickerProvider || modelPickerLoading}
-            >
-              <option value="">
-                {modelPickerLoading
-                  ? "Loading models..."
-                  : modelPickerNoAgentModels
-                    ? "No agent-capable models"
-                    : "— pick a model —"}
-              </option>
-              {#each modelPickerModels as m (m.id)}
-                <option value={m.id}>{m.displayName} ({m.id})</option>
-              {/each}
-            </select>
-          </label>
+              {modelSaving ? "Saving..." : "Save default"}
+            </button>
+          </div>
           {#if modelPickerLoading}
             <div class="pf-model-loading-note">
               Fetching {modelPickerProviderName} models...
@@ -1562,37 +1576,25 @@
               No {modelPickerProviderName} models support agent tools.
             </div>
           {/if}
-          <div style="display: flex; justify-content: flex-end; gap: 8px;">
-            {#if modelError}
-              <span style="color: var(--destructive, #c03232); font-size: 11.5px; align-self: center;">{modelError}</span>
-            {/if}
-            <button
-              type="button"
-              class="sc-btn"
-              data-variant="default"
-              data-size="sm"
-              disabled={!canSaveDefaultModel}
-              onclick={saveDefaultModel}
-            >
-              {modelSaving ? "Saving…" : "Save default"}
-            </button>
-          </div>
-        </div>
-      </div>
+          {#if modelError}
+            <div class="pf-model-loading-note" data-error="true">{modelError}</div>
+          {/if}
+        </section>
 
-      <LoginView
-        snapshot={props.snapshot}
-        loading={props.loading}
-        remoteEnabled={props.remoteEnabled}
-        busyProviderId={props.busyProviderId ?? null}
-        errorMessage={props.authError ?? null}
-        externals={props.externals ?? []}
-        busyImportKey={props.busyImportKey ?? null}
-        onLoginOauth={props.onLoginOauth ?? (() => {})}
-        onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
-        onImportExternal={props.onImportExternal ?? (() => {})}
-        onRefresh={props.onRefresh}
-      />
+        <LoginView
+          snapshot={props.snapshot}
+          loading={props.loading}
+          remoteEnabled={props.remoteEnabled}
+          busyProviderId={props.busyProviderId ?? null}
+          errorMessage={props.authError ?? null}
+          externals={props.externals ?? []}
+          busyImportKey={props.busyImportKey ?? null}
+          onLoginOauth={props.onLoginOauth ?? (() => {})}
+          onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
+          onImportExternal={props.onImportExternal ?? (() => {})}
+          onRefresh={props.onRefresh}
+        />
+      </div>
 
     {:else if section === "secrets"}
       <SecretsSettings

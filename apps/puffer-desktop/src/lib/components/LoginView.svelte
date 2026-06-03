@@ -1,7 +1,7 @@
 <script lang="ts">
+  import Icon from "../design/Icon.svelte";
   import { providerVisual } from "../providerVisuals";
   import {
-    providerIsAvailableForAgent,
     providerIdsEquivalent,
     providerRunsWithoutAuth
   } from "../providerIds";
@@ -10,6 +10,79 @@
     usesFallbackProviderCatalog
   } from "../providerFallbacks";
   import type { ExternalCredential, ProviderSummary, SettingsSnapshot } from "../types";
+
+  const HIDDEN_PROVIDER_IDS = new Set([
+    "puffer",
+    "cerebras",
+    "groq",
+    "llama-cpp",
+    "lmstudio",
+    "vllm",
+    "ollama"
+  ]);
+
+  const PROVIDER_DISPLAY_ORDER = [
+    "anthropic",
+    "github-copilot",
+    "openai",
+    "google",
+    "openrouter",
+    "vercel-ai-gateway",
+    "custom"
+  ];
+
+  const EXTRA_SETUP_PROVIDERS: ProviderSummary[] = [
+    {
+      id: "github-copilot",
+      displayName: "GitHub Copilot",
+      baseUrl: "https://api.githubcopilot.com",
+      defaultApi: "openai-completions",
+      modelCount: 0,
+      authModes: ["oauth"],
+      sourceKind: "ui-setup",
+      sourcePath: null
+    },
+    {
+      id: "google",
+      displayName: "Google",
+      baseUrl: "https://generativelanguage.googleapis.com",
+      defaultApi: "openai-completions",
+      modelCount: 0,
+      authModes: ["api_key"],
+      sourceKind: "ui-setup",
+      sourcePath: null
+    },
+    {
+      id: "openrouter",
+      displayName: "OpenRouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      defaultApi: "openai-completions",
+      modelCount: 1,
+      authModes: ["api_key"],
+      sourceKind: "ui-setup",
+      sourcePath: null
+    },
+    {
+      id: "vercel-ai-gateway",
+      displayName: "Vercel AI Gateway",
+      baseUrl: "https://ai-gateway.vercel.sh/v1",
+      defaultApi: "openai-completions",
+      modelCount: 0,
+      authModes: ["api_key"],
+      sourceKind: "ui-setup",
+      sourcePath: null
+    },
+    {
+      id: "custom",
+      displayName: "Custom provider",
+      baseUrl: "",
+      defaultApi: "openai-completions",
+      modelCount: 0,
+      authModes: ["api_key"],
+      sourceKind: "ui-setup",
+      sourcePath: null
+    }
+  ];
 
   export let snapshot: SettingsSnapshot | null = null;
   export let loading = false;
@@ -27,6 +100,7 @@
   let query = "";
   let pendingApiKeyProvider: string | null = null;
   let pendingApiKeyBusyObserved = false;
+  let activeProviderId: string | null = null;
   type ProviderAuth = SettingsSnapshot["auth"][number];
 
   function updateApiKey(providerId: string, value: string) {
@@ -51,6 +125,14 @@
     onLoginOauth(providerId);
   }
 
+  function openProviderModal(providerId: string) {
+    activeProviderId = providerId;
+  }
+
+  function closeProviderModal() {
+    activeProviderId = null;
+  }
+
   function supports(provider: ProviderSummary, mode: string): boolean {
     return provider.authModes.includes(mode);
   }
@@ -68,15 +150,53 @@
     return `connected via ${details.join(" · ")}`;
   }
 
-  function providerDisplayName(providerId: string): string {
-    const provider = snapshot?.providers.find((candidate) =>
-      providerIdsEquivalent(candidate.id, providerId)
-    );
-    return provider?.displayName ?? providerId;
+  function setupProviderId(providerId: string): string {
+    const normalized = providerId.trim().toLowerCase();
+    if (normalized === "claude") return "anthropic";
+    if (normalized === "codex") return "openai";
+    return providerId;
+  }
+
+  function setupProviderDisplayName(providerId: string, fallback: string): string {
+    const normalized = providerId.trim().toLowerCase();
+    if (normalized === "claude" || normalized === "anthropic") return "Anthropic";
+    if (normalized === "codex" || normalized === "openai") return "OpenAI";
+    return fallback;
+  }
+
+  function normalizeSetupProvider(provider: ProviderSummary): ProviderSummary {
+    const id = setupProviderId(provider.id);
+    return {
+      ...provider,
+      id,
+      displayName: setupProviderDisplayName(id, provider.displayName)
+    };
+  }
+
+  function providerRank(provider: ProviderSummary): number {
+    const index = PROVIDER_DISPLAY_ORDER.indexOf(provider.id);
+    return index === -1 ? PROVIDER_DISPLAY_ORDER.length : index;
+  }
+
+  function providerSettingsCatalog(snapshot: SettingsSnapshot | null): ProviderSummary[] {
+    const byId = new Map<string, ProviderSummary>();
+    for (const provider of providerCatalogForSetup(snapshot)) {
+      const normalized = normalizeSetupProvider(provider);
+      if (HIDDEN_PROVIDER_IDS.has(normalized.id)) continue;
+      if (!byId.has(normalized.id)) byId.set(normalized.id, normalized);
+    }
+    for (const provider of EXTRA_SETUP_PROVIDERS) {
+      if (!byId.has(provider.id)) byId.set(provider.id, provider);
+    }
+    return [...byId.values()].sort((left, right) => {
+      const rankDelta = providerRank(left) - providerRank(right);
+      if (rankDelta !== 0) return rankDelta;
+      return left.displayName.localeCompare(right.displayName);
+    });
   }
 
   $: filteredProviders = (() => {
-    const all = providerCatalogForSetup(snapshot);
+    const all = providerSettingsCatalog(snapshot);
     const needle = query.trim().toLowerCase();
     if (!needle) return all;
     return all.filter((provider) => {
@@ -89,12 +209,12 @@
   })();
 
   $: connectedAuth = snapshot?.auth ?? [];
-  $: authenticatedProviderIds = connectedAuth.map((auth) => auth.providerId);
-  $: availableAgentProviders =
-    providerCatalogForSetup(snapshot).filter((provider) =>
-      providerIsAvailableForAgent(provider, authenticatedProviderIds)
-    );
-  $: showAvailableProviders = availableAgentProviders.length > connectedAuth.length;
+  $: connectedProviders = providerSettingsCatalog(snapshot).filter((provider) =>
+    connectedAuth.some((auth) => providerIdsEquivalent(auth.providerId, provider.id))
+  );
+  $: activeProvider = activeProviderId
+    ? providerSettingsCatalog(snapshot).find((provider) => providerIdsEquivalent(provider.id, activeProviderId)) ?? null
+    : null;
   $: usingFallbackProviders = usesFallbackProviderCatalog(snapshot);
 
   $: importsByProvider = (() => {
@@ -155,58 +275,42 @@
     </div>
   {/if}
 
-  {#if !loading && snapshot}
-    <div class="connection-summary" role="status" aria-label="Credential connections">
-      <div class="connection-copy">
-        <strong>
-          {#if showAvailableProviders}
-            {availableAgentProviders.length} agent provider{availableAgentProviders.length === 1 ? "" : "s"} ready
-          {:else}
-            {connectedAuth.length} provider{connectedAuth.length === 1 ? "" : "s"} connected
-          {/if}
-        </strong>
-        <span>
-          {availableAgentProviders.length
-            ? "Ready for new sessions and provider switches."
-            : "Connect a provider before starting an agent."}
-        </span>
+  {#if !loading && snapshot && connectedProviders.length}
+    <div class="provider-section">
+      <h3>Connected providers</h3>
+      <div class="provider-grid" data-section="connected">
+        {#each connectedProviders as provider (provider.id)}
+          {@const visual = providerVisual(provider)}
+          {@const auth = authForProvider(provider.id)}
+          {@const authFree = providerRunsWithoutAuth(provider)}
+          <article class="provider-card" style="--provider-accent: {visual.accent};">
+            <header class="card-head">
+              <span class="logo" aria-hidden="true">
+                <img src={visual.icon} alt="" />
+              </span>
+              <div class="head-text">
+                <h2 class="name">{provider.displayName}</h2>
+              </div>
+              <span class="status" data-connected="true">
+                {auth ? `Connected via ${auth.kind}` : authFree ? "Ready" : "Connected"}
+              </span>
+            </header>
+
+            <div class="actions">
+              <button
+                class="oauth-btn"
+                disabled={credentialBusy}
+                on:click={() => openProviderModal(provider.id)}
+              >
+                Manage connection
+              </button>
+            </div>
+
+          </article>
+        {/each}
       </div>
-      {#if showAvailableProviders}
-        <div class="connection-pills" aria-label="Ready agent list">
-          {#each availableAgentProviders as provider (provider.id)}
-            {@const auth = authForProvider(provider.id)}
-            <span class="connection-pill">
-              <span class="pill-name">{provider.displayName}</span>
-              <span class="pill-kind">{auth?.kind ?? "local"}</span>
-            </span>
-          {/each}
-        </div>
-      {:else if connectedAuth.length}
-        <div class="connection-pills" aria-label="Credential list">
-          {#each connectedAuth as auth (auth.providerId)}
-            <span class="connection-pill">
-              <span class="pill-name">{providerDisplayName(auth.providerId)}</span>
-              <span class="pill-kind">{auth.kind}</span>
-            </span>
-          {/each}
-        </div>
-      {/if}
     </div>
   {/if}
-
-  <div class="search-row">
-    <input
-      type="search"
-      class="search-input"
-      placeholder="Search providers (anthropic, openai, groq, …)"
-      bind:value={query}
-      autocomplete="off"
-      spellcheck="false"
-    />
-    <button class="refresh-btn" disabled={credentialBusy} on:click={submitRefresh} title="Re-scan providers">
-      Refresh
-    </button>
-  </div>
 
   {#if usingFallbackProviders}
     <div class="provider-fallback-note" role="status">
@@ -215,60 +319,142 @@
     </div>
   {/if}
 
-  <div class="provider-grid">
-    {#if loading}
-      <div class="empty-card">Loading providers and auth state…</div>
-    {:else if !filteredProviders.length}
-      <div class="empty-card">No providers match "{query}".</div>
-    {:else}
-      {#each filteredProviders as provider (provider.id)}
-        {@const visual = providerVisual(provider)}
-        {@const candidates = importsByProvider[provider.id] ?? []}
-        {@const auth = authForProvider(provider.id)}
-        {@const authFree = providerRunsWithoutAuth(provider)}
-        <article class="provider-card" style="--provider-accent: {visual.accent};">
-          <header class="card-head">
-            <span class="logo" aria-hidden="true">
-              <img src={visual.icon} alt="" />
-            </span>
-            <div class="head-text">
-              <h2 class="name">{provider.displayName}</h2>
-              <p class="meta">{provider.id} · {provider.modelCount} model{provider.modelCount === 1 ? "" : "s"}</p>
-            </div>
-            <span class="status" data-connected={auth !== null || authFree}>
-              {auth ? "Connected" : authFree ? "Ready" : "Not connected"}
-            </span>
-          </header>
+  <div class="provider-section">
+    <h3>Popular providers</h3>
+    <div class="search-row">
+      <input
+        type="search"
+        class="search-input"
+        placeholder="Search providers"
+        bind:value={query}
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button class="refresh-btn" disabled={credentialBusy} on:click={submitRefresh} title="Re-scan providers">
+        Refresh
+      </button>
+    </div>
 
-          {#if candidates.length}
-            <div class="imports">
-              {#each candidates as candidate (importKey(candidate.providerId, candidate.source))}
-                <button
-                  type="button"
-                  class="import"
-                  disabled={credentialBusy}
-                  on:click={() => submitImport(candidate.providerId, candidate.source)}
-                  title={candidate.sourcePath}
-                >
-                  {#if busyImportKey === importKey(candidate.providerId, candidate.source)}
-                    Importing…
-                  {:else}
-                    Use credentials from {sourceLabel(candidate.source)}
-                  {/if}
-                </button>
-              {/each}
-            </div>
-          {/if}
+    <div class="provider-grid">
+      {#if loading}
+        <div class="empty-card">Loading providers and auth state...</div>
+      {:else if !filteredProviders.length}
+        <div class="empty-card">No providers match "{query}".</div>
+      {:else}
+        {#each filteredProviders as provider (provider.id)}
+          {@const visual = providerVisual(provider)}
+          {@const auth = authForProvider(provider.id)}
+          {@const authFree = providerRunsWithoutAuth(provider)}
+          <article class="provider-card" style="--provider-accent: {visual.accent};">
+            <header class="card-head">
+              <span class="logo" aria-hidden="true">
+                <img src={visual.icon} alt="" />
+              </span>
+              <div class="head-text">
+                <h2 class="name">{provider.displayName}</h2>
+                <p class="meta">{provider.modelCount} model{provider.modelCount === 1 ? "" : "s"}</p>
+              </div>
+              {#if auth || authFree}
+                <span class="status" data-connected="true">
+                  {auth ? "Connected" : "Ready"}
+                </span>
+              {/if}
+            </header>
 
-          <div class="actions">
-            {#if supports(provider, "oauth")}
+            <div class="actions">
               <button
                 class="oauth-btn"
                 disabled={credentialBusy}
-                on:click={() => submitOauth(provider.id)}
+                on:click={() => openProviderModal(provider.id)}
               >
-                {busyProviderId === provider.id
-                  ? "Opening browser…"
+                {auth || authFree ? "Manage connection" : "Connect"}
+              </button>
+            </div>
+
+          </article>
+        {/each}
+      {/if}
+    </div>
+  </div>
+
+  {#if activeProvider}
+    {@const visual = providerVisual(activeProvider)}
+    {@const candidates = importsByProvider[activeProvider.id] ?? []}
+    {@const auth = authForProvider(activeProvider.id)}
+    {@const authFree = providerRunsWithoutAuth(activeProvider)}
+    <div
+      class="provider-modal-scrim"
+      role="presentation"
+      on:click={closeProviderModal}
+      on:keydown={(event) => {
+        if (event.key === "Escape") closeProviderModal();
+      }}
+    >
+      <div
+        class="provider-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Connect ${activeProvider.displayName}`}
+        style="--provider-accent: {visual.accent};"
+        tabindex="-1"
+        on:click={(event) => event.stopPropagation()}
+        on:keydown={(event) => {
+          if (event.key === "Escape") closeProviderModal();
+        }}
+      >
+        <header class="provider-modal-head">
+          <span class="logo" aria-hidden="true">
+            <img src={visual.icon} alt="" />
+          </span>
+          <div>
+            <h2>{activeProvider.displayName}</h2>
+            <p>
+              {auth
+                ? connectedHint(auth)
+                : authFree
+                  ? "This provider can run without saved credentials."
+                  : `${activeProvider.modelCount} model${activeProvider.modelCount === 1 ? "" : "s"} available`}
+            </p>
+          </div>
+          <button type="button" class="modal-close" aria-label="Close" on:click={closeProviderModal}>
+            <Icon name="x" size={14} />
+          </button>
+        </header>
+
+        <div class="provider-modal-body">
+          {#if candidates.length}
+            <div class="provider-modal-section">
+              <h3>Saved credentials</h3>
+              <div class="imports">
+                {#each candidates as candidate (importKey(candidate.providerId, candidate.source))}
+                  <button
+                    type="button"
+                    class="import"
+                    disabled={credentialBusy}
+                    on:click={() => submitImport(candidate.providerId, candidate.source)}
+                    title={candidate.sourcePath}
+                  >
+                    {#if busyImportKey === importKey(candidate.providerId, candidate.source)}
+                      Importing...
+                    {:else}
+                      Use credentials from {sourceLabel(candidate.source)}
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          {#if supports(activeProvider, "oauth")}
+            <div class="provider-modal-section">
+              <h3>OAuth</h3>
+              <button
+                class="oauth-btn"
+                disabled={credentialBusy}
+                on:click={() => submitOauth(activeProvider.id)}
+              >
+                {busyProviderId === activeProvider.id
+                  ? "Opening browser..."
                   : auth
                     ? remoteEnabled
                       ? "Reconnect with OAuth (remote)"
@@ -277,54 +463,53 @@
                       ? "Connect with OAuth (remote)"
                       : "Connect with OAuth"}
               </button>
-            {/if}
+            </div>
+          {/if}
 
-            {#if supports(provider, "api_key")}
+          {#if supports(activeProvider, "api_key")}
+            <div class="provider-modal-section">
+              <h3>API key</h3>
               <div class="api-key-row">
                 <input
                   type="password"
-                  aria-label={`API key for ${provider.displayName}`}
-                  value={apiKeys[provider.id] ?? ""}
+                  aria-label={`API key for ${activeProvider.displayName}`}
+                  value={apiKeys[activeProvider.id] ?? ""}
                   placeholder={auth ? "Replace API key" : "Paste API key"}
                   disabled={credentialBusy}
                   on:input={(event) =>
-                    updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
+                    updateApiKey(activeProvider.id, (event.currentTarget as HTMLInputElement).value)}
                   on:keydown={(event) => {
-                    if (event.key === "Enter") submitApiKey(provider.id);
+                    if (event.key === "Enter") submitApiKey(activeProvider.id);
                   }}
                 />
                 <button
                   class="apikey-btn"
-                  disabled={credentialBusy || !(apiKeys[provider.id] ?? "").trim()}
-                  on:click={() => submitApiKey(provider.id)}
+                  disabled={credentialBusy || !(apiKeys[activeProvider.id] ?? "").trim()}
+                  on:click={() => submitApiKey(activeProvider.id)}
                 >
                   {auth ? "Update key" : "Connect"}
                 </button>
               </div>
-            {/if}
-          </div>
+            </div>
+          {/if}
 
-          <p class="hint">
-            {auth
-              ? connectedHint(auth)
-              : authFree
-                ? "No credentials required"
-                : `via ${provider.authModes.join(" · ")}`}
-          </p>
-        </article>
-      {/each}
-    {/if}
-  </div>
+          {#if authFree && !supports(activeProvider, "oauth") && !supports(activeProvider, "api_key") && !candidates.length}
+            <div class="provider-modal-section">
+              <p class="provider-modal-note">No connection setup is required for this provider.</p>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 </section>
 
 <style>
   .login-page {
     min-height: 0;
-    overflow: auto;
-    padding: 1.4rem;
-    display: grid;
-    gap: 1rem;
-    background: rgba(255, 252, 246, 0.46);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
   .error-banner,
@@ -345,74 +530,33 @@
     color: var(--text-muted);
   }
 
-  .connection-summary {
-    border-radius: 12px;
-    border: 1px solid rgba(111, 101, 89, 0.14);
-    background: rgba(255, 255, 255, 0.74);
-    padding: 0.85rem 0.95rem;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 0.85rem;
-  }
-  .connection-copy {
-    min-width: 0;
-    display: grid;
-    gap: 0.18rem;
-  }
-  .connection-copy strong {
-    font-size: 0.92rem;
-    line-height: 1.2;
-  }
-  .connection-copy span {
-    color: var(--text-muted);
-    font-size: 0.8rem;
-    line-height: 1.35;
-  }
-  .connection-pills {
+  .provider-section {
     display: flex;
-    justify-content: flex-end;
-    flex-wrap: wrap;
-    gap: 0.4rem;
+    flex-direction: column;
+    gap: 16px;
   }
-  .connection-pill {
-    border-radius: 999px;
-    border: 1px solid rgba(111, 101, 89, 0.14);
-    background: color-mix(in oklab, var(--accent) 8%, white);
-    padding: 0.38rem 0.55rem;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    max-width: 220px;
-    font-size: 0.78rem;
-    line-height: 1;
+  .provider-section h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 18px;
   }
-  .pill-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 700;
-  }
-  .pill-kind {
-    color: var(--text-muted);
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.72rem;
-  }
-
   .search-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.6rem;
+    grid-template-columns: minmax(0, 1fr) 86px;
+    gap: 10px;
   }
   .search-input {
     width: 100%;
-    padding: 0.7rem 0.95rem;
+    height: 36px;
+    padding: 0 12px;
     border: 1px solid rgba(111, 101, 89, 0.18);
-    border-radius: 999px;
+    border-radius: 8px;
     background: rgba(255, 255, 255, 0.88);
     color: var(--text);
     font: inherit;
+    font-size: 14px;
   }
   .search-input:focus-visible {
     outline: 2px solid color-mix(in oklab, var(--accent) 35%, transparent);
@@ -420,12 +564,15 @@
     border-color: var(--accent);
   }
   .refresh-btn {
-    padding: 0.7rem 1.1rem;
-    border-radius: 999px;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 8px;
     border: 1px solid rgba(111, 101, 89, 0.18);
     background: rgba(255, 255, 255, 0.88);
     color: var(--text);
     cursor: pointer;
+    font: inherit;
+    font-size: 14px;
   }
   .refresh-btn:disabled {
     opacity: 0.6;
@@ -442,20 +589,10 @@
     line-height: 1.4;
   }
 
-  @media (max-width: 680px) {
-    .connection-summary {
-      grid-template-columns: 1fr;
-      align-items: stretch;
-    }
-    .connection-pills {
-      justify-content: flex-start;
-    }
-  }
-
   .provider-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 0.9rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
   }
 
   .provider-card {
@@ -468,9 +605,12 @@
       rgba(255, 255, 255, 0.92) 100%
     );
     box-shadow: var(--shadow-soft);
-    padding: 0.95rem 1rem 0.85rem;
-    display: grid;
-    gap: 0.7rem;
+    padding: 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 118px;
+    justify-content: space-between;
     color: var(--text);
   }
 
@@ -506,18 +646,19 @@
   }
   .name {
     margin: 0;
-    font-size: 1rem;
-    line-height: 1.2;
-    letter-spacing: -0.01em;
+    font-size: 16px;
+    line-height: 19px;
+    letter-spacing: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .meta {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: 12.5px;
     color: var(--text-muted);
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-sans, system-ui, sans-serif);
+    line-height: 18px;
   }
   .status {
     justify-self: end;
@@ -526,17 +667,16 @@
     background: rgba(255, 255, 255, 0.74);
     color: var(--text-muted);
     flex: 0 0 auto;
-    font-size: 0.72rem;
-    font-weight: 600;
-    line-height: 1;
-    padding: 0.35rem 0.5rem;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 14px;
+    padding: 5px 10px;
   }
   .status[data-connected="true"] {
     border-color: color-mix(in oklab, var(--provider-accent) 42%, rgba(111, 101, 89, 0.18));
     background: color-mix(in oklab, var(--provider-accent) 13%, white);
     color: color-mix(in oklab, var(--provider-accent) 72%, black);
   }
-
   .imports {
     display: grid;
     gap: 0.4rem;
@@ -562,15 +702,17 @@
 
   .actions {
     display: grid;
-    gap: 0.55rem;
+    gap: 8px;
   }
   .oauth-btn,
   .apikey-btn {
     border: none;
     border-radius: 10px;
-    padding: 0.55rem 0.85rem;
+    min-height: 34px;
+    padding: 0 12px;
     font: inherit;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 600;
     cursor: pointer;
   }
   .oauth-btn {
@@ -579,6 +721,17 @@
   }
   .oauth-btn:hover:not(:disabled) {
     filter: brightness(1.05);
+  }
+  .provider-card .oauth-btn {
+    border: 1px solid color-mix(in oklab, var(--provider-accent) 24%, rgba(111, 101, 89, 0.16));
+    background: color-mix(in oklab, var(--provider-accent) 10%, rgba(255, 255, 255, 0.9));
+    color: color-mix(in oklab, var(--provider-accent) 78%, black);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--provider-accent) 8%, transparent);
+  }
+  .provider-card .oauth-btn:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--provider-accent) 14%, rgba(255, 255, 255, 0.92));
+    border-color: color-mix(in oklab, var(--provider-accent) 34%, rgba(111, 101, 89, 0.16));
+    filter: none;
   }
   .apikey-btn {
     background: color-mix(in oklab, var(--provider-accent) 14%, white);
@@ -594,28 +747,23 @@
   .api-key-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.5rem;
+    gap: 8px;
   }
   .api-key-row input {
-    padding: 0.55rem 0.7rem;
+    min-height: 34px;
+    padding: 0 10px;
     border-radius: 10px;
     border: 1px solid rgba(111, 101, 89, 0.2);
     background: rgba(255, 255, 255, 0.92);
     color: var(--text);
     font: inherit;
+    font-size: 13px;
     min-width: 0;
   }
   .api-key-row input:focus-visible {
     outline: 2px solid color-mix(in oklab, var(--provider-accent) 40%, transparent);
     outline-offset: 1px;
     border-color: var(--provider-accent);
-  }
-
-  .hint {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: 0.74rem;
-    font-family: var(--font-mono, ui-monospace, monospace);
   }
 
   .empty-card {
@@ -628,9 +776,106 @@
     text-align: center;
   }
 
+  .provider-modal-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(17, 17, 17, 0.28);
+  }
+
+  .provider-modal {
+    width: min(520px, calc(100vw - 32px));
+    max-height: min(720px, calc(100vh - 48px));
+    overflow: auto;
+    border: 1px solid rgba(111, 101, 89, 0.18);
+    border-radius: 16px;
+    background: var(--background);
+    box-shadow: 0 22px 60px rgba(15, 23, 42, 0.18);
+    color: var(--text);
+  }
+
+  .provider-modal-head {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) 30px;
+    gap: 12px;
+    align-items: center;
+    padding: 18px 18px 14px;
+    border-bottom: 1px solid rgba(111, 101, 89, 0.14);
+  }
+
+  .provider-modal-head h2 {
+    margin: 0;
+    font-size: 18px;
+    line-height: 22px;
+    letter-spacing: 0;
+  }
+
+  .provider-modal-head p {
+    margin: 2px 0 0;
+    color: var(--text-muted);
+    font-size: 12.5px;
+    line-height: 18px;
+  }
+
+  .modal-close {
+    width: 30px;
+    height: 30px;
+    border: 1px solid rgba(111, 101, 89, 0.14);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.72);
+    color: var(--text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 14px;
+  }
+
+  .provider-modal-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 16px 18px 18px;
+  }
+
+  .provider-modal-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .provider-modal-section h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 16px;
+  }
+
+  .provider-modal-note {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 18px;
+  }
+
   @media (max-width: 980px) {
+    .provider-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
     .api-key-row {
       grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .search-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .refresh-btn {
+      width: 100%;
     }
   }
 </style>

@@ -224,7 +224,7 @@
     gap: 12px;
     align-items: start;
     padding: 14px;
-    margin: 0 0 14px;
+    min-height: 176px;
     box-shadow: 0 14px 30px rgba(15, 23, 42, 0.05);
   }
   .pf-local-model-card[data-compact="true"] {
@@ -243,6 +243,9 @@
   }
   .pf-local-model-body {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
   .pf-local-model-topline {
     display: flex;
@@ -270,17 +273,16 @@
     background: color-mix(in oklab, oklch(0.7 0.18 145) 14%, var(--background));
   }
   .pf-local-model-body p {
-    margin: 5px 0 0;
-    max-width: 760px;
+    margin: 0;
+    max-width: 700px;
     color: var(--muted-foreground);
     font-size: 12.5px;
-    line-height: 1.45;
+    line-height: 18px;
   }
   .pf-local-model-meta {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin-top: 9px;
   }
   .pf-local-model-meta span {
     border-radius: 999px;
@@ -292,7 +294,6 @@
     padding: 2px 7px;
   }
   .pf-local-model-detail {
-    margin-top: 8px;
     font-size: 11.5px;
     color: var(--muted-foreground);
     line-height: 1.45;
@@ -301,13 +302,11 @@
     color: var(--destructive, #c03232);
   }
   .pf-local-model-checked {
-    margin-top: 4px;
     color: color-mix(in oklab, var(--muted-foreground) 80%, var(--foreground));
     font-family: var(--font-mono);
     font-size: 10.5px;
   }
   .pf-local-model-progress {
-    margin-top: 8px;
     border-radius: 8px;
     border: 1px solid var(--border);
     background: color-mix(in oklab, var(--background) 88%, black 2%);
