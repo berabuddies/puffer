@@ -422,10 +422,18 @@ fn autodream_suggestion_dropdown_lines(
 }
 
 fn generic_overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        overlay_title(overlay).into_owned(),
-        Style::default().add_modifier(Modifier::DIM),
-    ))];
+    // A `Line` is one row, so a multi-line title (e.g. a login prompt with a URL
+    // on its own line) must become one `Line` per `\n`-separated segment, or the
+    // trailing lines (the URL) collapse into the first row and get truncated.
+    let mut lines: Vec<Line<'static>> = overlay_title(overlay)
+        .split('\n')
+        .map(|segment| {
+            Line::from(Span::styled(
+                segment.to_string(),
+                Style::default().add_modifier(Modifier::DIM),
+            ))
+        })
+        .collect();
     let rows = visible_overlay_rows(
         overlay_rows(overlay),
         overlay_selection(overlay),

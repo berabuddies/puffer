@@ -737,3 +737,53 @@ fn render_user_question_shows_selected_preview() {
     assert!(rendered.contains("skips broad tests"));
     assert!(!rendered.contains("Careful path"));
 }
+
+#[test]
+fn render_user_question_shows_full_multiline_question_url() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let payload = json!([
+        {
+            "header": "Authorize",
+            "question": "Open this URL in your browser and authorize:\n\nhttps://accounts.example.test/device/verify?flow_id=ABCDEF123&user_code=WXYZ-1234\n\nThen choose Done",
+            "options": [
+                {"label": "Done", "description": "I authorized in the browser."},
+                {"label": "Cancel", "description": "Stop."}
+            ]
+        }
+    ]);
+    let overlay = OverlayState::UserQuestionPrompt {
+        overlay: UserQuestionOverlay::from_value(payload).unwrap(),
+    };
+
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(Some(overlay.clone()));
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            );
+            render::set_active_overlay(None);
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    // The URL sits after the question's blank lines; if a multi-line title were
+    // collapsed into a single row, this tail would be truncated. It must render.
+    assert!(
+        rendered.contains("user_code=WXYZ-1234"),
+        "URL tail missing from render:\n{rendered}"
+    );
+    assert!(rendered.contains("Then choose Done"));
+}
