@@ -457,7 +457,8 @@ fn lark_cli_available(bin: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// Runs `lark-cli <args>` capturing output, force-killing it after `timeout` so
@@ -886,7 +887,8 @@ fn program_available(name: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// The official larksuite/cli one-liner installer args (needs Node.js for `npx`).
@@ -896,7 +898,7 @@ const LARK_CLI_INSTALL_ARGS: &[&str] = &["--yes", "@larksuite/cli@latest", "inst
 fn lark_cli_install_instructions(bin: &str) -> String {
     format!(
         "Install the official larksuite/cli (needs Node.js for `npx`), then retry \
-         `/connect lark-cli`:\n  npx @larksuite/cli@latest install\n\
+         `/connect lark-login` or `/connect lark-bot`:\n  npx @larksuite/cli@latest install\n\
          Then run `{bin} auth login` to sign in. Set LARK_CLI_BIN to point at a \
          non-PATH binary."
     )
@@ -939,7 +941,7 @@ fn ensure_lark_cli_installed(
     if !program_available("npx") {
         bail!(
             "`npx` (Node.js) is not available. Install Node.js first, then retry \
-             `/connect lark-cli`.\n{}",
+             `/connect lark-login` or `/connect lark-bot`.\n{}",
             lark_cli_install_instructions(bin)
         );
     }
