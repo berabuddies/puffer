@@ -17,6 +17,7 @@ import type {
   RepoActionResult,
   RepoStatus,
   ChromeSecretsImportResult,
+  SaveBrowserSettingsInput,
   SaveSecretInput,
   SaveProxySettingsInput,
   SessionDetail,
@@ -251,6 +252,7 @@ type BackendAuthProviderStatus = AuthProviderStatus;
 type BackendProviderSummary = ProviderSummary;
 type BackendNetworkProxySettings = SettingsSnapshot["networkProxy"];
 type BackendSecretsSettings = SettingsSnapshot["secrets"];
+type BackendBrowserSettings = SettingsSnapshot["browser"];
 
 type BackendSettingsSnapshot = {
   workspaceRoot: string;
@@ -263,6 +265,7 @@ type BackendSettingsSnapshot = {
   sessions: BackendSettingsSessionSummary;
   auth: BackendAuthProviderStatus[];
   providers: BackendProviderSummary[];
+  browser: BackendBrowserSettings;
   networkProxy: BackendNetworkProxySettings;
   secrets: BackendSecretsSettings;
 };
@@ -838,6 +841,13 @@ export async function saveProxySettings(
 ): Promise<SettingsSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<BackendSettingsSnapshot>("save_proxy_settings", input);
+}
+
+export async function saveBrowserSettings(
+  input: SaveBrowserSettingsInput
+): Promise<SettingsSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<BackendSettingsSnapshot>("save_browser_settings", input);
 }
 
 export async function saveSecret(input: SaveSecretInput): Promise<SettingsSnapshot> {

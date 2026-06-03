@@ -441,6 +441,7 @@ dependencies = [
  "image",
  "notify",
  "portable-pty",
+ "puffer-config",
  "puffer-secrets",
  "puffer-session-store",
  "reqwest 0.12.28",

@@ -12,10 +12,12 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "include/cef_app.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_browser.h"
+#include "include/cef_command_line.h"
 #include "include/cef_client.h"
 #include "include/cef_request_handler.h"
 #include "include/cef_version.h"
@@ -359,10 +361,23 @@ class PufferCefClient : public CefClient,
 
 class PufferCefApp : public CefApp, public CefBrowserProcessHandler {
  public:
-  PufferCefApp() = default;
+  explicit PufferCefApp(std::string extension_dirs)
+      : extension_dirs_(std::move(extension_dirs)) {}
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
     return this;
+  }
+
+  void OnBeforeCommandLineProcessing(
+      const CefString& process_type,
+      CefRefPtr<CefCommandLine> command_line) override {
+    if (!process_type.empty() || extension_dirs_.empty()) {
+      return;
+    }
+    command_line->AppendSwitch("enable-extensions");
+    command_line->AppendSwitchWithValue("disable-extensions-except",
+                                       extension_dirs_);
+    command_line->AppendSwitchWithValue("load-extension", extension_dirs_);
   }
 
   void OnScheduleMessagePumpWork(int64_t delay_ms) override {
@@ -370,6 +385,8 @@ class PufferCefApp : public CefApp, public CefBrowserProcessHandler {
   }
 
  private:
+  std::string extension_dirs_;
+
   IMPLEMENT_REFCOUNTING(PufferCefApp);
   DISALLOW_COPY_AND_ASSIGN(PufferCefApp);
 };
@@ -477,6 +494,7 @@ std::string SlotStateJson(const BrowserSlot* slot) {
 int InitializeOnMain(const std::string& runtime_root,
                      const std::string& helper_path,
                      const std::string& cache_path,
+                     const std::string& extension_dirs,
                      int remote_debugging_port,
                      std::string* error) {
   if (g_initialized) {
@@ -506,7 +524,7 @@ int InitializeOnMain(const std::string& runtime_root,
   SetString(&settings.root_cache_path, cache_path);
   SetString(&settings.cache_path, cache_path + "/Default");
 
-  g_app = new PufferCefApp();
+  g_app = new PufferCefApp(extension_dirs);
   if (!CefInitialize(main_args, settings, g_app, nullptr)) {
     g_app = nullptr;
     *error = "CefInitialize returned false";
@@ -692,15 +710,17 @@ void ScheduleMessagePumpWork(int64_t delay_ms) {
 extern "C" int puffer_cef_initialize(const char* runtime_root,
                                       const char* helper_path,
                                       const char* cache_path,
+                                      const char* extension_dirs,
                                       int remote_debugging_port,
                                       char* error,
                                       size_t error_len) {
   const std::string root = runtime_root ? runtime_root : "";
   const std::string helper = helper_path ? helper_path : "";
   const std::string cache = cache_path ? cache_path : "";
+  const std::string extensions = extension_dirs ? extension_dirs : "";
   std::string message;
   int result = RunIntOnMain([&]() {
-    return InitializeOnMain(root, helper, cache, remote_debugging_port, &message);
+    return InitializeOnMain(root, helper, cache, extensions, remote_debugging_port, &message);
   });
   if (!result) {
     WriteError(error, error_len, message);

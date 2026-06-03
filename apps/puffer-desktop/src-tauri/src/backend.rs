@@ -1,6 +1,7 @@
 use crate::codex_app_server::{self, CapturedTurnEvent, CodexTurnOptions, CodexTurnOutcome};
 use crate::dtos::{
-    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto, DiffSummaryDto,
+    AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto,
+    BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserSettingsDto, DiffSummaryDto,
     DivergenceReportDto, ExternalCredentialDto, FolderGroupDto, ProviderSummaryDto,
     ResourceCountsDto, SecretSummaryDto, SecretsSettingsDto, SessionDetailDto, SessionListItemDto,
     SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto, TimelineItemDto,
@@ -10,6 +11,7 @@ use crate::repo_actions;
 use crate::{browser, files, fs_watch, local_model, lsp, pty};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::prelude::*;
+use puffer_config::builtin_captcha_solvers;
 use puffer_secrets::{SecretSummary, SecretUpsert, SecretVault};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -562,6 +564,7 @@ impl BackendState {
             },
             auth,
             providers,
+            browser: legacy_browser_settings(&home),
             secrets: self.secret_settings(&home)?,
         })
     }
@@ -3014,6 +3017,40 @@ fn apply_codex_permission_args(args: &mut Vec<String>, permission_mode: Option<&
         _ => {
             args.push("--full-auto".to_string());
         }
+    }
+}
+
+fn legacy_browser_settings(home: &Path) -> BrowserSettingsDto {
+    let resources_dir = home.join("resources");
+    BrowserSettingsDto {
+        extensions_enabled: true,
+        extensions: Vec::new(),
+        captcha: BrowserCaptchaSettingsDto {
+            enabled: false,
+            selected_solver: "nopecha".to_string(),
+            solvers: builtin_captcha_solvers()
+                .iter()
+                .map(|solver| {
+                    let extension_dir = resources_dir.join(solver.extension_path);
+                    BrowserCaptchaSolverDto {
+                        id: solver.id.to_string(),
+                        display_name: solver.display_name.to_string(),
+                        description: solver.description.to_string(),
+                        enabled: solver.id == "nopecha",
+                        base_url: solver.default_base_url.to_string(),
+                        api_key_secret_id: None,
+                        has_api_key: false,
+                        version: solver.version.to_string(),
+                        bundled: extension_dir.join("manifest.json").exists(),
+                        extension_path: extension_dir.display().to_string(),
+                        release_url: solver.release_url.to_string(),
+                        download_url: solver.download_url.to_string(),
+                        sha256: solver.sha256.to_string(),
+                        license: solver.license.to_string(),
+                    }
+                })
+                .collect(),
+        },
     }
 }
 

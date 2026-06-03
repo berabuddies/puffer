@@ -25,7 +25,9 @@ mod client;
 mod console;
 mod cursor;
 mod devtools;
+mod extension_seed;
 mod input;
+mod launch_settings;
 mod params;
 mod recording;
 mod ref_resolution;
@@ -45,6 +47,7 @@ pub(super) use cdp::parse_evaluation_response;
 pub(super) use cdp::send_cdp;
 pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};
 use console::BrowserConsoleRegistry;
+pub(crate) use launch_settings::BrowserLaunchSettings;
 use recording::BrowserRecordingRegistry;
 pub(crate) use rpc::*;
 use screenshot::BrowserElementRef;
@@ -69,6 +72,7 @@ const AGENT_RECORDING_WINDOW: Duration = Duration::from_secs(5);
 pub(crate) struct BrowserRegistry {
     profile_root: PathBuf,
     roots: Arc<Mutex<HashMap<String, BrowserRootSession>>>,
+    launch_settings: Arc<Mutex<BrowserLaunchSettings>>,
     enabled: bool,
     sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
     tabs: Arc<Mutex<BrowserTabRegistry>>,
@@ -79,7 +83,11 @@ pub(crate) struct BrowserRegistry {
 
 impl BrowserRegistry {
     /// Creates an empty browser session registry.
-    pub(crate) fn new(profile_root: PathBuf, enabled: bool) -> Self {
+    pub(crate) fn new(
+        profile_root: PathBuf,
+        enabled: bool,
+        launch_settings: BrowserLaunchSettings,
+    ) -> Self {
         let roots = Arc::new(Mutex::new(HashMap::<String, BrowserRootSession>::new()));
         let sessions = Arc::new(Mutex::new(HashMap::<String, BrowserSession>::new()));
         let tabs = Arc::new(Mutex::new(BrowserTabRegistry::default()));
@@ -97,6 +105,7 @@ impl BrowserRegistry {
         Self {
             profile_root,
             roots,
+            launch_settings: Arc::new(Mutex::new(launch_settings)),
             enabled,
             sessions,
             tabs,
@@ -104,6 +113,26 @@ impl BrowserRegistry {
             console_logs,
             recordings: Arc::new(Mutex::new(BrowserRecordingRegistry::default())),
         }
+    }
+
+    /// Replaces browser launch settings and restarts active browser roots when needed.
+    pub(crate) fn update_launch_settings(
+        &self,
+        launch_settings: BrowserLaunchSettings,
+    ) -> Result<()> {
+        let changed = {
+            let mut current = self.launch_settings.lock().unwrap();
+            if *current == launch_settings {
+                false
+            } else {
+                *current = launch_settings;
+                true
+            }
+        };
+        if changed {
+            self.shutdown_all_sessions_preserving_tabs()?;
+        }
+        Ok(())
     }
 
     /// Opens or reuses the browser page worker for `session_id`.
@@ -369,10 +398,12 @@ impl BrowserRegistry {
             return Ok(root);
         }
         let _ = self.shutdown_global_root();
+        let launch_settings = self.launch_settings.lock().unwrap().clone();
         let root = BrowserRootSession::spawn(
             self.profile_root.join(GLOBAL_BROWSER_ROOT_ID),
             width,
             height,
+            launch_settings,
         )?;
         self.roots
             .lock()
@@ -438,6 +469,27 @@ impl BrowserRegistry {
             root.shutdown()?;
         }
         Ok(())
+    }
+
+    fn shutdown_all_sessions_preserving_tabs(&self) -> Result<()> {
+        let sessions = drain_all_sessions(&self.sessions);
+        let backend_ids = sessions
+            .iter()
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        cleanup_sessions_metadata(
+            &self.tabs,
+            &self.agent_refs,
+            &self.console_logs,
+            &backend_ids,
+            true,
+        );
+        let shutdown_acks = sessions
+            .iter()
+            .filter_map(|(_, session)| session.begin_close())
+            .collect::<Vec<_>>();
+        wait_for_shutdown_acks(shutdown_acks, Duration::from_secs(5));
+        self.shutdown_global_root()
     }
 
     fn record_backend_state(&self, session_id: &str, browser_state: &BrowserState) {

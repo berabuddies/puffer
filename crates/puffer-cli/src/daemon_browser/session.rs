@@ -25,7 +25,9 @@ use super::chrome::{
 use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
 use super::devtools::{devtools_event_payload, emit_devtools_payload};
+use super::extension_seed::seed_extensions;
 use super::input::send_input;
+use super::launch_settings::BrowserLaunchSettings;
 use super::recording::BrowserRecordingRegistry;
 use super::screenshot::{
     capture_screenshot_command_params, parse_capture_screenshot_response,
@@ -78,8 +80,13 @@ pub(super) struct BrowserSession {
 
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
-    pub(super) fn spawn(profile_dir: PathBuf, width: u32, height: u32) -> Result<Self> {
-        if let Some(root) = Self::spawn_cef_remote_root(&profile_dir)? {
+    pub(super) fn spawn(
+        profile_dir: PathBuf,
+        width: u32,
+        height: u32,
+        launch_settings: BrowserLaunchSettings,
+    ) -> Result<Self> {
+        if let Some(root) = Self::spawn_cef_remote_root(&profile_dir, &launch_settings)? {
             return Ok(root);
         }
         let chrome = resolve_chrome_executable()
@@ -91,7 +98,7 @@ impl BrowserRootSession {
         }
 
         let mut command = Command::new(&chrome);
-        configure_chrome_command(&mut command, &launch, width, height);
+        configure_chrome_command(&mut command, &launch, width, height, &launch_settings);
         let mut child = command
             .spawn()
             .with_context(|| format!("launch Chrome at {}", chrome.display()))?;
@@ -103,6 +110,7 @@ impl BrowserRootSession {
                 return Err(error);
             }
         };
+        seed_extensions(&browser_ws, launch_settings.seeds())?;
         let reusable_target = match initial_page_target(&browser_ws) {
             Ok(target) => target,
             Err(error) => {
@@ -122,7 +130,10 @@ impl BrowserRootSession {
         })
     }
 
-    fn spawn_cef_remote_root(profile_dir: &PathBuf) -> Result<Option<Self>> {
+    fn spawn_cef_remote_root(
+        profile_dir: &PathBuf,
+        launch_settings: &BrowserLaunchSettings,
+    ) -> Result<Option<Self>> {
         let Some(port) = cef_remote_debugging_port() else {
             return Ok(None);
         };
@@ -140,6 +151,7 @@ impl BrowserRootSession {
                     Err(_) => return Ok(None),
                 },
             };
+        seed_extensions(&browser_ws, launch_settings.seeds())?;
         Ok(Some(Self {
             inner: Arc::new(Mutex::new(BrowserRootState {
                 profile_dir: profile_dir.clone(),

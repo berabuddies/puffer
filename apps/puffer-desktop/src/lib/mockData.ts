@@ -597,6 +597,49 @@ const mockProviders: ProviderSummary[] = [
   }
 ];
 
+const mockBrowserSettings = {
+  extensionsEnabled: true,
+  extensions: [],
+  captcha: {
+    enabled: false,
+    selectedSolver: "nopecha",
+    solvers: [
+      {
+        id: "nopecha",
+        displayName: "NopeCHA",
+        description: "NopeCHA Chrome automation extension.",
+        enabled: true,
+        baseUrl: "https://api.nopecha.com",
+        apiKeySecretId: null,
+        hasApiKey: false,
+        version: "0.6.0",
+        bundled: false,
+        extensionPath: "/home/c/puffer/resources/browser_extensions/nopecha/chromium_automation",
+        releaseUrl: "https://github.com/NopeCHALLC/nopecha-extension/releases/tag/0.6.0",
+        downloadUrl: "https://github.com/NopeCHALLC/nopecha-extension/releases/download/0.6.0/chromium_automation.zip",
+        sha256: "4871e1c6ed200dde8e5e790c23458415cb3213312701d3ff757c8ee115b79c3b",
+        license: "MIT"
+      },
+      {
+        id: "2captcha",
+        displayName: "2Captcha",
+        description: "2Captcha solver Chrome extension.",
+        enabled: false,
+        baseUrl: "https://2captcha.com",
+        apiKeySecretId: null,
+        hasApiKey: false,
+        version: "3.7.2",
+        bundled: false,
+        extensionPath: "/home/c/puffer/resources/browser_extensions/2captcha/chromium",
+        releaseUrl: "https://github.com/rucaptcha/2captcha-solver/releases/tag/v3.7.2",
+        downloadUrl: "https://github.com/rucaptcha/2captcha-solver/releases/download/v3.7.2/2captcha-solver-chrome-3.7.2.zip",
+        sha256: "",
+        license: "MIT"
+      }
+    ]
+  }
+};
+
 export const mockSettingsSnapshot: SettingsSnapshot = {
   workspaceRoot: "/home/c/puffer",
   workspaceConfigFile: "/home/c/puffer/.puffer/config.toml",
@@ -633,6 +676,7 @@ export const mockSettingsSnapshot: SettingsSnapshot = {
   },
   auth: mockAuth,
   providers: mockProviders,
+  browser: mockBrowserSettings,
   networkProxy: {
     enabled: false,
     selected: null,

@@ -264,8 +264,55 @@ pub(crate) struct SettingsSnapshotDto {
     pub(crate) sessions: SettingsSessionSummaryDto,
     pub(crate) auth: Vec<AuthProviderStatusDto>,
     pub(crate) providers: Vec<ProviderSummaryDto>,
+    pub(crate) browser: BrowserSettingsDto,
     pub(crate) network_proxy: NetworkProxySettingsDto,
     pub(crate) secrets: SecretsSettingsDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserSettingsDto {
+    pub(crate) extensions_enabled: bool,
+    pub(crate) extensions: Vec<BrowserExtensionDto>,
+    pub(crate) captcha: BrowserCaptchaSettingsDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserExtensionDto {
+    pub(crate) id: String,
+    pub(crate) display_name: String,
+    pub(crate) path: String,
+    pub(crate) enabled: bool,
+    pub(crate) manifest_present: bool,
+    pub(crate) source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCaptchaSettingsDto {
+    pub(crate) enabled: bool,
+    pub(crate) selected_solver: String,
+    pub(crate) solvers: Vec<BrowserCaptchaSolverDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCaptchaSolverDto {
+    pub(crate) id: String,
+    pub(crate) display_name: String,
+    pub(crate) description: String,
+    pub(crate) enabled: bool,
+    pub(crate) base_url: String,
+    pub(crate) api_key_secret_id: Option<String>,
+    pub(crate) has_api_key: bool,
+    pub(crate) version: String,
+    pub(crate) bundled: bool,
+    pub(crate) extension_path: String,
+    pub(crate) release_url: String,
+    pub(crate) download_url: String,
+    pub(crate) sha256: String,
+    pub(crate) license: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -329,6 +376,50 @@ pub(crate) struct SaveProxySettingsParams {
     pub(crate) selected: Option<String>,
     pub(crate) bypass: Vec<String>,
     pub(crate) proxies: Vec<ProxyEndpointInputDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveBrowserSettingsParams {
+    pub(crate) extensions_enabled: bool,
+    #[serde(default)]
+    pub(crate) extensions: Vec<SaveBrowserExtensionParams>,
+    pub(crate) captcha: SaveBrowserCaptchaSettingsParams,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveBrowserExtensionParams {
+    pub(crate) id: String,
+    pub(crate) display_name: String,
+    pub(crate) path: String,
+    #[serde(default = "default_enabled")]
+    pub(crate) enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveBrowserCaptchaSettingsParams {
+    pub(crate) enabled: bool,
+    pub(crate) selected_solver: String,
+    #[serde(default)]
+    pub(crate) solvers: Vec<SaveBrowserCaptchaSolverParams>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveBrowserCaptchaSolverParams {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) api_key_secret_id: Option<String>,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

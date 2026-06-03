@@ -1,10 +1,11 @@
 use crate::dtos::{
-    AuthProviderStatusDto, ProviderSummaryDto, ResourceCountsDto, SettingsConfigDto,
-    SecretSummaryDto, SecretsSettingsDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
+    AuthProviderStatusDto, BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserExtensionDto,
+    BrowserSettingsDto, ProviderSummaryDto, ResourceCountsDto, SecretSummaryDto,
+    SecretsSettingsDto, SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
-use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
+use puffer_config::{builtin_captcha_solvers, ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::load_resources;
 use puffer_secrets::{SecretSummary, SecretVault};
@@ -99,8 +100,67 @@ pub(crate) fn load_settings_snapshot() -> Result<SettingsSnapshotDto> {
         },
         auth: auth_statuses(&auth_store),
         providers: providers.provider_entries().map(provider_summary).collect(),
+        browser: browser_settings(&paths, &config),
         secrets: secrets_settings(&paths)?,
     })
+}
+
+fn browser_settings(
+    paths: &ConfigPaths,
+    config: &puffer_config::PufferConfig,
+) -> BrowserSettingsDto {
+    let mut captcha = config.browser.captcha.clone();
+    captcha.normalize();
+    BrowserSettingsDto {
+        extensions_enabled: config.browser.extensions_enabled,
+        extensions: config
+            .browser
+            .extensions
+            .iter()
+            .map(|extension| BrowserExtensionDto {
+                id: extension.id.clone(),
+                display_name: extension.display_name.clone(),
+                path: extension.path.clone(),
+                enabled: extension.enabled,
+                manifest_present: std::path::Path::new(&extension.path)
+                    .join("manifest.json")
+                    .exists(),
+                source: "custom".to_string(),
+            })
+            .collect(),
+        captcha: BrowserCaptchaSettingsDto {
+            enabled: captcha.enabled,
+            selected_solver: captcha.selected_solver.clone(),
+            solvers: builtin_captcha_solvers()
+                .iter()
+                .map(|solver| {
+                    let configured = captcha.solvers.get(solver.id);
+                    let base_url = configured
+                        .and_then(|item| item.base_url.clone())
+                        .unwrap_or_else(|| solver.default_base_url.to_string());
+                    let api_key_secret_id =
+                        configured.and_then(|item| item.api_key_secret_id.clone());
+                    let extension_dir = paths.builtin_resources_dir.join(solver.extension_path);
+                    BrowserCaptchaSolverDto {
+                        id: solver.id.to_string(),
+                        display_name: solver.display_name.to_string(),
+                        description: solver.description.to_string(),
+                        enabled: solver.id == captcha.selected_solver.as_str(),
+                        base_url,
+                        api_key_secret_id: api_key_secret_id.clone(),
+                        has_api_key: api_key_secret_id.is_some(),
+                        version: solver.version.to_string(),
+                        bundled: extension_dir.join("manifest.json").exists(),
+                        extension_path: extension_dir.display().to_string(),
+                        release_url: solver.release_url.to_string(),
+                        download_url: solver.download_url.to_string(),
+                        sha256: solver.sha256.to_string(),
+                        license: solver.license.to_string(),
+                    }
+                })
+                .collect(),
+        },
+    }
 }
 
 fn secrets_settings(paths: &ConfigPaths) -> Result<SecretsSettingsDto> {

@@ -314,7 +314,7 @@ fn parse_page_target(value: &Value, close_on_release: bool) -> Result<ChromePage
     })
 }
 
-fn devtools_http_base(browser_ws: &str) -> Result<String> {
+pub(super) fn devtools_http_base(browser_ws: &str) -> Result<String> {
     let parsed = Url::parse(browser_ws).context("parse Chrome DevTools URL")?;
     let host = parsed
         .host_str()

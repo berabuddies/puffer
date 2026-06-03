@@ -1,3 +1,4 @@
+mod browser;
 pub mod env_vars;
 mod home_override;
 mod project_memory;
@@ -15,6 +16,10 @@ use std::path::{Path, PathBuf};
 
 const BUILTIN_RESOURCES_DIR_ENV: &str = "PUFFER_BUILTIN_RESOURCES_DIR";
 
+pub use browser::{
+    builtin_captcha_solvers, is_builtin_solver, BrowserConfig, BrowserExtensionConfig,
+    BuiltinCaptchaSolver, CaptchaConfig, CaptchaSolverConfig,
+};
 pub use home_override::{set_puffer_home_override, PufferHomeOverride};
 pub use project_memory::{
     ensure_project_memory, load_project_registry, resolve_project_memory, ProjectEntry,
@@ -209,10 +214,6 @@ impl Default for RecapConfig {
         }
     }
 }
-
-/// Browser launch preferences persisted in the user config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct BrowserConfig {}
 
 impl Default for PufferConfig {
     fn default() -> Self {

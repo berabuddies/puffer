@@ -14,6 +14,7 @@ mod connect;
 mod connectors;
 mod daemon;
 mod daemon_browser;
+mod daemon_browser_settings;
 mod daemon_files;
 mod daemon_fs_watch;
 mod daemon_gcal_browser_setup;

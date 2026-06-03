@@ -1,0 +1,21 @@
+[[solver]]
+id = "nopecha"
+display_name = "NopeCHA"
+version = "0.6.0"
+extension_path = "browser_extensions/nopecha/chromium_automation"
+release_url = "https://github.com/NopeCHALLC/nopecha-extension/releases/tag/0.6.0"
+download_url = "https://github.com/NopeCHALLC/nopecha-extension/releases/download/0.6.0/chromium_automation.zip"
+sha256 = "4871e1c6ed200dde8e5e790c23458415cb3213312701d3ff757c8ee115b79c3b"
+license = "MIT"
+bundled = true
+
+[[solver]]
+id = "2captcha"
+display_name = "2Captcha"
+version = "3.7.2"
+extension_path = "browser_extensions/2captcha/chromium"
+release_url = "https://github.com/rucaptcha/2captcha-solver/releases/tag/v3.7.2"
+download_url = "https://github.com/rucaptcha/2captcha-solver/releases/download/v3.7.2/2captcha-solver-chrome-3.7.2.zip"
+sha256 = ""
+license = "MIT"
+bundled = true

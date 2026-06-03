@@ -30,6 +30,7 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage"],
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "resources": ["../../../resources/browser_extensions"]
   }
 }

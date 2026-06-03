@@ -3,7 +3,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::collections::BTreeSet;
+use std::ffi::{c_char, c_void, CStr};
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tauri::Window;
@@ -329,6 +332,17 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+fn push_extension_dir(extension_dirs: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.join("manifest.json").is_file() {
+        extension_dirs.push(path);
+    }
+}
+
+fn dedupe_extension_dirs(extension_dirs: &mut Vec<PathBuf>) {
+    let mut seen = BTreeSet::new();
+    extension_dirs.retain(|path| seen.insert(path.clone()));
+}
+
 fn native_enabled() -> bool {
     cfg!(all(target_os = "macos", puffer_desktop_cef_native))
 }
@@ -342,6 +356,7 @@ mod ffi {
             runtime_root: *const c_char,
             helper_path: *const c_char,
             cache_path: *const c_char,
+            extension_dirs: *const c_char,
             remote_debugging_port: i32,
             error: *mut c_char,
             error_len: usize,
@@ -404,18 +419,54 @@ fn native_initialize(runtime: &CefRuntime) -> Result<()> {
     let root = cstring_path(&runtime.root)?;
     let helper = cstring_path(&runtime.helper)?;
     let cache = cstring_path(&cache_root()?)?;
+    let extension_dirs = CString::new(native_cef_extension_dirs()?.as_bytes())
+        .context("encode native CEF extension directories")?;
     let mut error = ErrorBuffer::new();
     let ok = unsafe {
         ffi::puffer_cef_initialize(
             root.as_ptr(),
             helper.as_ptr(),
             cache.as_ptr(),
+            extension_dirs.as_ptr(),
             i32::from(remote_debugging_port()),
             error.as_mut_ptr(),
             error.len(),
         )
     };
     error.result(ok, "initialize native CEF")
+}
+
+#[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+fn native_cef_extension_dirs() -> Result<String> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let paths = puffer_config::ConfigPaths::discover(&cwd);
+    let config = puffer_config::load_config(&paths).context("load browser extension config")?;
+    let browser = config.browser;
+    if !browser.extensions_enabled {
+        return Ok(String::new());
+    }
+    let mut dirs = Vec::new();
+    for extension in browser.extensions.iter().filter(|extension| extension.enabled) {
+        push_extension_dir(&mut dirs, PathBuf::from(&extension.path));
+    }
+    if browser.captcha.enabled {
+        if let Some(solver) = puffer_config::builtin_captcha_solvers()
+            .iter()
+            .find(|solver| solver.id == browser.captcha.selected_solver)
+        {
+            let configured = browser.captcha.solvers.get(solver.id);
+            let enabled = configured.map(|item| item.enabled).unwrap_or(true);
+            if enabled {
+                push_extension_dir(&mut dirs, paths.builtin_resources_dir.join(solver.extension_path));
+            }
+        }
+    }
+    dedupe_extension_dirs(&mut dirs);
+    Ok(dirs
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(","))
 }
 
 #[cfg(not(all(target_os = "macos", puffer_desktop_cef_native)))]

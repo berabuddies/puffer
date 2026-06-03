@@ -391,6 +391,68 @@ export type SecretsSettings = {
   items: SecretSummary[];
 };
 
+export type BrowserCaptchaSolver = {
+  id: "nopecha" | "2captcha" | string;
+  displayName: string;
+  description: string;
+  enabled: boolean;
+  baseUrl: string;
+  apiKeySecretId: string | null;
+  hasApiKey: boolean;
+  version: string;
+  bundled: boolean;
+  extensionPath: string;
+  releaseUrl: string;
+  downloadUrl: string;
+  sha256: string;
+  license: string;
+};
+
+export type BrowserCaptchaSettings = {
+  enabled: boolean;
+  selectedSolver: string;
+  solvers: BrowserCaptchaSolver[];
+};
+
+export type BrowserExtension = {
+  id: string;
+  displayName: string;
+  path: string;
+  enabled: boolean;
+  manifestPresent: boolean;
+  source: string;
+};
+
+export type BrowserSettings = {
+  extensionsEnabled: boolean;
+  extensions: BrowserExtension[];
+  captcha: BrowserCaptchaSettings;
+};
+
+export type SaveBrowserExtensionInput = {
+  id: string;
+  displayName: string;
+  path: string;
+  enabled: boolean;
+};
+
+export type SaveBrowserCaptchaSolverInput = {
+  id: string;
+  enabled: boolean;
+  baseUrl: string | null;
+  apiKeySecretId: string | null;
+};
+
+export type SaveBrowserSettingsInput = {
+  extensionsEnabled: boolean;
+  extensions: SaveBrowserExtensionInput[];
+  captcha: {
+    enabled: boolean;
+    selectedSolver: string;
+    solvers: SaveBrowserCaptchaSolverInput[];
+  };
+};
+
 export type SaveSecretInput = {
   id?: string | null;
   label: string;
@@ -438,6 +500,7 @@ export type SettingsSnapshot = {
   sessions: SettingsSessionSummary;
   auth: AuthProviderStatus[];
   providers: ProviderSummary[];
+  browser: BrowserSettings;
   networkProxy: NetworkProxySettings;
   secrets: SecretsSettings;
 };

@@ -79,7 +79,7 @@ use crate::auth_credentials::{
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, OauthFamily,
 };
-use crate::daemon_browser::BrowserRegistry;
+use crate::daemon_browser::{BrowserLaunchSettings, BrowserRegistry};
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_lambda_skills::{
     handle_list_lambda_skill_libraries, handle_remove_lambda_skill_library,
@@ -312,6 +312,31 @@ impl DaemonState {
     pub(crate) fn config_paths(&self) -> &ConfigPaths {
         &self.paths
     }
+
+    /// Returns a clone of the currently loaded daemon config.
+    pub(crate) fn config_snapshot(&self) -> PufferConfig {
+        self.config.lock().unwrap().clone()
+    }
+
+    /// Replaces the currently loaded daemon config.
+    pub(crate) fn replace_config(&self, config: PufferConfig) {
+        *self.config.lock().unwrap() = config;
+    }
+
+    /// Builds the current desktop settings snapshot as a JSON value.
+    pub(crate) fn settings_snapshot_value(&self) -> Result<Value> {
+        let inputs = self.build_runtime_inputs()?;
+        let config = self.config_snapshot();
+        let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
+            &self.paths,
+            &config,
+            &inputs.resources,
+            &inputs.providers,
+            &inputs.auth_store,
+            &inputs.session_store,
+        )?;
+        Ok(serde_json::to_value(snapshot)?)
+    }
 }
 
 #[derive(Clone)]
@@ -349,6 +374,7 @@ impl DaemonState {
         yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
+        let browser_launch_settings = BrowserLaunchSettings::from_config(&paths, &config)?;
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
         let ptys = Arc::new(PtyRegistry::new());
@@ -363,7 +389,11 @@ impl DaemonState {
             next_request_id: Arc::new(AtomicU64::new(0)),
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
-            browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
+            browsers: Arc::new(BrowserRegistry::new(
+                browser_profile_root,
+                !no_browser,
+                browser_launch_settings,
+            )),
             local_models: crate::daemon_local_model::LocalModelInstaller::new(),
             disable_auto_title,
             yolo,
@@ -946,6 +976,11 @@ async fn dispatch_request(
             respond!(detached!(|s, p| handle_import_external_credential(&s, &p)))
         }
         "logout_provider" => respond!(detached!(|s, p| handle_logout_provider(&s, &p))),
+        "save_browser_settings" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_browser_settings::handle_save_browser_settings(&s, &p)
+            }))
+        }
         "list_mcp_servers" => respond!(detached!(|s| handle_list_mcp_servers(&s))),
         "add_mcp_server" => respond!(detached!(|s, p| handle_add_mcp_server(&s, &p))),
         "list_lambda_skill_libraries" => {
@@ -1549,17 +1584,7 @@ fn handle_refresh_repo_status(state: &DaemonState, params: &Value) -> Result<Val
 }
 
 fn handle_load_settings_snapshot(state: &DaemonState) -> Result<Value> {
-    let inputs = state.build_runtime_inputs()?;
-    let config = state.config.lock().unwrap().clone();
-    let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
-        &state.paths,
-        &config,
-        &inputs.resources,
-        &inputs.providers,
-        &inputs.auth_store,
-        &inputs.session_store,
-    )?;
-    Ok(serde_json::to_value(snapshot)?)
+    state.settings_snapshot_value()
 }
 
 fn handle_save_secret(state: &DaemonState, params: &Value) -> Result<Value> {

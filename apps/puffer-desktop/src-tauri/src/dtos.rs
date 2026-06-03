@@ -231,7 +231,58 @@ pub(crate) struct SettingsSnapshotDto {
     pub sessions: SettingsSessionSummaryDto,
     pub auth: Vec<AuthProviderStatusDto>,
     pub providers: Vec<ProviderSummaryDto>,
+    pub browser: BrowserSettingsDto,
     pub secrets: SecretsSettingsDto,
+}
+
+/// Describes browser extension settings for the settings page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserSettingsDto {
+    pub extensions_enabled: bool,
+    pub extensions: Vec<BrowserExtensionDto>,
+    pub captcha: BrowserCaptchaSettingsDto,
+}
+
+/// Describes one user-added browser extension.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserExtensionDto {
+    pub id: String,
+    pub display_name: String,
+    pub path: String,
+    pub enabled: bool,
+    pub manifest_present: bool,
+    pub source: String,
+}
+
+/// Describes captcha extension settings for browser sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCaptchaSettingsDto {
+    pub enabled: bool,
+    pub selected_solver: String,
+    pub solvers: Vec<BrowserCaptchaSolverDto>,
+}
+
+/// Describes one built-in captcha solver extension package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCaptchaSolverDto {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub base_url: String,
+    pub api_key_secret_id: Option<String>,
+    pub has_api_key: bool,
+    pub version: String,
+    pub bundled: bool,
+    pub extension_path: String,
+    pub release_url: String,
+    pub download_url: String,
+    pub sha256: String,
+    pub license: String,
 }
 
 /// Describes the encrypted secret store status for the settings page.

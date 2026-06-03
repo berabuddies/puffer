@@ -761,7 +761,11 @@ mod tests {
     #[test]
     fn open_target_resolution_reserves_first_new_tab() {
         let profile = tempfile::tempdir().unwrap();
-        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false);
+        let browsers = BrowserRegistry::new(
+            profile.path().to_path_buf(),
+            false,
+            crate::daemon_browser::BrowserLaunchSettings::default(),
+        );
         let params = json!({});
 
         let tab_id = resolve_open_target_tab_id(&browsers, "root", &params, true);
@@ -783,7 +787,11 @@ mod tests {
     #[test]
     fn open_target_resolution_reuses_active_tab() {
         let profile = tempfile::tempdir().unwrap();
-        let browsers = BrowserRegistry::new(profile.path().to_path_buf(), false);
+        let browsers = BrowserRegistry::new(
+            profile.path().to_path_buf(),
+            false,
+            crate::daemon_browser::BrowserLaunchSettings::default(),
+        );
         browsers.tabs.lock().unwrap().open_tab(
             "root",
             Some("existing".to_string()),
