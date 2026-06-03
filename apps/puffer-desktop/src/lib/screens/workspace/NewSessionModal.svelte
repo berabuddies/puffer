@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
+  import { listProviderModels, type ModelDescriptorInfo } from "../../api/desktop";
   import { focusTrap } from "../../focusTrap";
   import { providerCatalogForSetup } from "../../providerFallbacks";
   import {
@@ -21,15 +22,30 @@
 
   let { cwd, snapshot, busy = false, error = null, onClose, onCreate }: Props = $props();
   let selectedProvider = $state("");
+  let providerModels = $state<Record<string, ModelDescriptorInfo[]>>({});
+  let providerModelLoading = $state(false);
+  let providerModelError = $state<string | null>(null);
+  let providerModelGeneration = 0;
   let authenticatedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
 
-  let providerOptions = $derived(
+  let candidateProviders = $derived(
     providerCatalogForSetup(snapshot).filter((provider) =>
       snapshot === null
         ? providerCanRunAgent(provider)
         : providerIsAvailableForAgent(provider, authenticatedProviderIds)
     )
   );
+  let providerOptions = $derived(
+    candidateProviders.filter((provider) => agentToolModels(providerModels[provider.id] ?? []).length > 0)
+  );
+  let providerModelsLoaded = $derived(
+    candidateProviders.length > 0 &&
+      candidateProviders.every((provider) => Object.prototype.hasOwnProperty.call(providerModels, provider.id))
+  );
+  let noProviderModelsAvailable = $derived(
+    providerModelsLoaded && !providerModelLoading && providerOptions.length === 0
+  );
+  let noCandidateProviders = $derived(candidateProviders.length === 0 && !providerModelLoading);
 
   function defaultProviderId(): string {
     const configured = snapshot?.config.defaultProvider;
@@ -55,12 +71,49 @@
     return provider.defaultApi ? `${provider.defaultApi} provider` : "Model provider";
   }
 
+  function modelSupportsAgentTools(model: ModelDescriptorInfo): boolean {
+    return model.supportsTools !== false;
+  }
+
+  function agentToolModels(models: ModelDescriptorInfo[]): ModelDescriptorInfo[] {
+    return models.filter(modelSupportsAgentTools);
+  }
+
+  async function loadProviderModels(providers: ProviderSummary[]) {
+    const generation = ++providerModelGeneration;
+    providerModelLoading = providers.length > 0;
+    providerModelError = null;
+    try {
+      const next: Record<string, ModelDescriptorInfo[]> = {};
+      for (const provider of providers) {
+        try {
+          next[provider.id] = await listProviderModels(provider.id);
+        } catch (e) {
+          next[provider.id] = [];
+          providerModelError = (e as Error).message ?? String(e);
+        }
+      }
+      if (generation !== providerModelGeneration) return;
+      providerModels = next;
+    } finally {
+      if (generation === providerModelGeneration) {
+        providerModelLoading = false;
+      }
+    }
+  }
+
   $effect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  });
+
+  $effect(() => {
+    const providerKey = candidateProviders.map((provider) => provider.id).join("\n");
+    providerKey;
+    void loadProviderModels(candidateProviders);
   });
 </script>
 
@@ -116,8 +169,12 @@
           </label>
         {/each}
       </div>
-      {#if providerOptions.length === 0}
-        <div class="pf-field-hint">Connect a provider in Settings before starting an agent.</div>
+      {#if providerModelLoading && !providerModelsLoaded}
+        <div class="pf-field-hint">Loading provider models...</div>
+      {:else if noCandidateProviders || noProviderModelsAvailable}
+        <div class="pf-field-hint">Add a provider in Settings before starting an agent.</div>
+      {:else if providerModelError && providerOptions.length === 0}
+        <div class="pf-field-hint">Add a provider in Settings before starting an agent.</div>
       {/if}
       <div class="pf-field-hint">
         Session root: <span class="pf-mono">{cwd}</span>

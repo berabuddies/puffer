@@ -1917,6 +1917,93 @@ test("new agent provider picker supports authenticated custom model providers", 
   });
 });
 
+test("new agent provider picker hides providers without agent-capable models", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: canonicalProviderAuth,
+    providers: [],
+    providerModels: {
+      openai: [
+        {
+          id: "openai-hidden",
+          displayName: "OpenAI Hidden",
+          provider: "openai",
+          api: "openai-responses",
+          contextWindow: 128000,
+          maxOutputTokens: 4096,
+          supportsReasoning: true,
+          supportsTools: false,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ],
+      anthropic: [
+        {
+          id: "claude-agent",
+          displayName: "Claude Agent",
+          provider: "anthropic",
+          api: "anthropic-messages",
+          contextWindow: 200000,
+          maxOutputTokens: 8192,
+          supportsReasoning: true,
+          supportsTools: true,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /OpenAI/ })).toHaveCount(0);
+  await expect(dialog.getByRole("radio", { name: /Anthropic/ })).toBeVisible();
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    providerId: "anthropic"
+  });
+});
+
+test("new agent prompts to add provider when connected providers have no selectable models", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    auth: codexAuth,
+    providers: [],
+    providerModels: {
+      openai: [
+        {
+          id: "openai-hidden",
+          displayName: "OpenAI Hidden",
+          provider: "openai",
+          api: "openai-responses",
+          contextWindow: 128000,
+          maxOutputTokens: 4096,
+          supportsReasoning: true,
+          supportsTools: false,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Add a provider in Settings before starting an agent.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Start agent" })).toBeDisabled();
+});
+
 test("new agent explains when no agent provider is authenticated", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [
@@ -1937,7 +2024,7 @@ test("new agent explains when no agent provider is authenticated", async ({ page
   await page.getByRole("button", { name: "New agent in puffer" }).click();
   const dialog = page.getByRole("dialog", { name: "New agent" });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Connect a provider in Settings before starting an agent.")).toBeVisible();
+  await expect(dialog.getByText("Add a provider in Settings before starting an agent.")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Start agent" })).toBeDisabled();
   await dialog.getByRole("button", { name: "Start agent" }).evaluate((button) => {
     (button as HTMLButtonElement).click();

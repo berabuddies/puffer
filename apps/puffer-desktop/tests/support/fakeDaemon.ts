@@ -288,9 +288,14 @@ export class FakeDaemon {
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
   private externalCredentials: JsonRecord[];
-  private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
+  private settingsConfig: {
+    defaultProvider: string | null;
+    defaultModel: string | null;
+    openaiBaseUrl: string | null;
+  } = {
     defaultProvider: "codex",
-    defaultModel: "test-model"
+    defaultModel: "test-model",
+    openaiBaseUrl: null
   };
   private secrets: JsonRecord[] = [];
   private permissions: JsonRecord = {
@@ -719,7 +724,13 @@ export class FakeDaemon {
     };
   }
 
-  setSettingsConfig(config: Partial<{ defaultProvider: string | null; defaultModel: string | null }>): void {
+  setSettingsConfig(
+    config: Partial<{
+      defaultProvider: string | null;
+      defaultModel: string | null;
+      openaiBaseUrl: string | null;
+    }>
+  ): void {
     this.settingsConfig = {
       ...this.settingsConfig,
       ...config
@@ -1675,6 +1686,10 @@ export class FakeDaemon {
       this.settingsConfig.defaultModel =
         typeof params.defaultModel === "string" ? params.defaultModel : null;
     }
+    if ("openaiBaseUrl" in params) {
+      this.settingsConfig.openaiBaseUrl =
+        typeof params.openaiBaseUrl === "string" ? params.openaiBaseUrl : null;
+    }
     return this.settingsSnapshot();
   }
 
@@ -1774,7 +1789,7 @@ export class FakeDaemon {
     const providerId = String(params.providerId ?? "");
     if (!providerId) return this.settingsSnapshot();
     this.authStatuses = [
-      ...this.authStatuses.filter((item) => item.providerId !== providerId),
+      ...this.authStatuses,
       {
         providerId,
         kind,
@@ -1802,7 +1817,7 @@ export class FakeDaemon {
     );
     if (credential) {
       this.authStatuses = [
-        ...this.authStatuses.filter((item) => item.providerId !== providerId),
+        ...this.authStatuses,
         {
           providerId,
           kind: credential.kind ?? "api_key",
@@ -1881,7 +1896,7 @@ export class FakeDaemon {
         appName: "Puffer Code",
         defaultProvider: this.settingsConfig.defaultProvider,
         defaultModel: this.settingsConfig.defaultModel,
-        openaiBaseUrl: null,
+        openaiBaseUrl: this.settingsConfig.openaiBaseUrl,
         theme: "system",
         mascotId: "puffer",
         mascotDisplayName: "Puffer",

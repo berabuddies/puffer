@@ -43,7 +43,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   codex: "codex",
   google: "google",
   "github-copilot": "github-copilot",
-  custom: "llm",
+  custom: "settings",
   puffer: "brand-logo",
   "anthropic-bedrock": "anthropic",
   "anthropic-vertex": "anthropic",

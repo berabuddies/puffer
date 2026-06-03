@@ -55,7 +55,7 @@ async function openBrowserPane(page: Page, daemon: FakeDaemon): Promise<void> {
 async function openProviderSettings(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Providers" }).click();
-  await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Providers", exact: true })).toBeVisible();
 }
 
 function responseFrame(id: string | number, result: unknown): string {
@@ -507,15 +507,19 @@ test("settings provider credential success stays in provider settings", async ({
   await openProviderSettings(page);
 
   const openAiCard = page.locator(".provider-card").filter({ hasText: "OpenAI" });
-  await openAiCard.getByLabel("API key for OpenAI").fill("sk-openai-longhunt");
-  await openAiCard.getByRole("button", { name: "Connect", exact: true }).click();
+  await openAiCard.getByRole("button", { name: "Add connect", exact: true }).click();
+  const openAiModal = page.getByRole("dialog", { name: "Connect OpenAI" });
+  await openAiModal.getByLabel("API key for OpenAI").fill("sk-openai-longhunt");
+  await openAiModal.getByRole("button", { name: "Add connect", exact: true }).click();
   await daemon.waitForRequest("login_with_api_key", (request) => request.params.providerId === "openai");
-  await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Providers", exact: true })).toBeVisible();
+  await expect(openAiModal).toHaveCount(0);
 
   const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
-  await anthropicCard.getByRole("button", { name: /Use credentials from/ }).click();
+  await anthropicCard.getByRole("button", { name: "Add connect" }).click();
+  await page.getByRole("dialog", { name: "Connect Anthropic" }).getByRole("button", { name: /Use credentials from/ }).click();
   await daemon.waitForRequest("import_external_credential", (request) => request.params.providerId === "anthropic");
-  await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Providers", exact: true })).toBeVisible();
 });
 
 test("terminal PTY data subscription is restored after websocket reconnect", async ({ page }) => {

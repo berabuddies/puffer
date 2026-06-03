@@ -25,7 +25,12 @@
     externals: ExternalCredential[];
     busyImportKey: string | null;
     onLoginOauth: (providerId: string) => void;
-    onLoginApiKey: (providerId: string, apiKey: string) => void;
+    onLoginApiKey: (
+      providerId: string,
+      apiKey: string,
+      options?: { baseUrl?: string | null }
+    ) => void;
+    onLogout: (providerId: string) => void;
     onImportExternal: (providerId: string, source: "claude" | "codex") => void;
     onRefresh: () => void;
     onFinish: () => void;
@@ -170,6 +175,7 @@
         busyImportKey={props.busyImportKey}
         onLoginOauth={props.onLoginOauth}
         onLoginApiKey={props.onLoginApiKey}
+        onLogout={props.onLogout}
         onImportExternal={props.onImportExternal}
         onRefresh={props.onRefresh}
       />

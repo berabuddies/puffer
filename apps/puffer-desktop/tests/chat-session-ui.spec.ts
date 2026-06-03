@@ -2297,17 +2297,20 @@ test("reconnecting a provider re-enables an existing blocked session", async ({ 
 
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Providers" }).click();
-  await page.getByLabel("API key for Anthropic").fill("sk-reconnected");
   await page
     .locator(".provider-card")
     .filter({ hasText: "Anthropic" })
-    .getByRole("button", { name: "Connect" })
+    .getByRole("button", { name: "Add connect" })
     .click();
+  const modal = page.getByRole("dialog", { name: "Connect Anthropic" });
+  await modal.getByLabel("API key for Anthropic").fill("sk-reconnected");
+  await modal.getByRole("button", { name: "Add connect" }).click();
   const login = await daemon.waitForRequest("login_with_api_key");
   expect(login.params).toMatchObject({
     providerId: "anthropic",
     apiKey: "sk-reconnected"
   });
+  await expect(modal).toHaveCount(0);
 
   await openSession(page, /Claude reconnect/);
   await expect(composer).toBeEnabled();

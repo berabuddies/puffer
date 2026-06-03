@@ -92,23 +92,55 @@
   export let externals: ExternalCredential[] = [];
   export let busyImportKey: string | null = null;
   export let onLoginOauth: (providerId: string) => void = () => {};
-  export let onLoginApiKey: (providerId: string, apiKey: string) => void = () => {};
+  export let onLoginApiKey: (
+    providerId: string,
+    apiKey: string,
+    options?: { baseUrl?: string | null }
+  ) => void = () => {};
+  export let onLogout: (providerId: string) => void = () => {};
   export let onImportExternal: (providerId: string, source: "claude" | "codex") => void = () => {};
   export let onRefresh: () => void = () => {};
 
   let apiKeys: Record<string, string> = {};
+  let baseUrls: Record<string, string> = {};
   let query = "";
   let pendingApiKeyProvider: string | null = null;
   let pendingApiKeyBusyObserved = false;
+  let pendingConnectionProvider: string | null = null;
+  let pendingConnectionImportKey: string | null = null;
+  let pendingConnectionBusyObserved = false;
   let activeProviderId: string | null = null;
   type ProviderAuth = SettingsSnapshot["auth"][number];
+  type ConnectedConnection = {
+    auth: ProviderAuth;
+    provider: ProviderSummary;
+    key: string;
+  };
 
   function updateApiKey(providerId: string, value: string) {
     apiKeys = { ...apiKeys, [providerId]: value };
   }
 
+  function updateBaseUrl(providerId: string, value: string) {
+    baseUrls = { ...baseUrls, [providerId]: value };
+  }
+
   function apiKeyValue(providerId: string): string {
     return apiKeys[providerId] ?? "";
+  }
+
+  function baseUrlValue(provider: ProviderSummary): string {
+    return baseUrls[provider.id] ?? provider.baseUrl ?? "";
+  }
+
+  function isCustomProvider(provider: ProviderSummary): boolean {
+    return provider.id === "custom";
+  }
+
+  function beginPendingConnection(providerId: string, importKeyValue: string | null = null) {
+    pendingConnectionProvider = providerId;
+    pendingConnectionImportKey = importKeyValue;
+    pendingConnectionBusyObserved = false;
   }
 
   function submitApiKey(providerId: string) {
@@ -117,12 +149,30 @@
     if (!apiKey) return;
     pendingApiKeyProvider = providerId;
     pendingApiKeyBusyObserved = false;
+    beginPendingConnection(providerId);
     onLoginApiKey(providerId, apiKey);
+  }
+
+  function submitCustomProvider(provider: ProviderSummary) {
+    if (credentialBusy) return;
+    const apiKey = apiKeyValue(provider.id).trim();
+    const baseUrl = baseUrlValue(provider).trim();
+    if (!baseUrl || !apiKey) return;
+    pendingApiKeyProvider = provider.id;
+    pendingApiKeyBusyObserved = false;
+    beginPendingConnection(provider.id);
+    onLoginApiKey(provider.id, apiKey, { baseUrl });
   }
 
   function submitOauth(providerId: string) {
     if (credentialBusy) return;
+    beginPendingConnection(providerId);
     onLoginOauth(providerId);
+  }
+
+  function submitLogout(providerId: string) {
+    if (credentialBusy) return;
+    onLogout(providerId);
   }
 
   function openProviderModal(providerId: string) {
@@ -141,6 +191,12 @@
     return (
       snapshot?.auth.find((auth) => providerIdsEquivalent(auth.providerId, providerId)) ?? null
     );
+  }
+
+  function showInPopularProviders(provider: ProviderSummary): boolean {
+    if (isCustomProvider(provider)) return true;
+    if (providerRunsWithoutAuth(provider)) return true;
+    return authForProvider(provider.id) === null;
   }
 
   function connectedHint(auth: ProviderAuth): string {
@@ -196,7 +252,7 @@
   }
 
   $: filteredProviders = (() => {
-    const all = providerSettingsCatalog(snapshot);
+    const all = providerSettingsCatalog(snapshot).filter(showInPopularProviders);
     const needle = query.trim().toLowerCase();
     if (!needle) return all;
     return all.filter((provider) => {
@@ -209,9 +265,27 @@
   })();
 
   $: connectedAuth = snapshot?.auth ?? [];
-  $: connectedProviders = providerSettingsCatalog(snapshot).filter((provider) =>
-    connectedAuth.some((auth) => providerIdsEquivalent(auth.providerId, provider.id))
-  );
+  $: connectedConnections = (() => {
+    const catalog = providerSettingsCatalog(snapshot);
+    return connectedAuth.map((auth, index): ConnectedConnection => {
+      const provider =
+        catalog.find((candidate) => providerIdsEquivalent(candidate.id, auth.providerId)) ?? {
+          id: auth.providerId,
+          displayName: setupProviderDisplayName(auth.providerId, auth.providerId),
+          baseUrl: "",
+          defaultApi: auth.kind,
+          modelCount: 0,
+          authModes: [],
+          sourceKind: "auth",
+          sourcePath: null
+        };
+      return {
+        auth,
+        provider,
+        key: `${auth.providerId}:${auth.kind}:${auth.email ?? ""}:${index}`
+      };
+    });
+  })();
   $: activeProvider = activeProviderId
     ? providerSettingsCatalog(snapshot).find((provider) => providerIdsEquivalent(provider.id, activeProviderId)) ?? null
     : null;
@@ -231,6 +305,7 @@
 
   function submitImport(providerId: string, source: "claude" | "codex") {
     if (credentialBusy) return;
+    beginPendingConnection(providerId, importKey(providerId, source));
     onImportExternal(providerId, source);
   }
 
@@ -248,6 +323,24 @@
   $: if (pendingApiKeyProvider && busyProviderId === pendingApiKeyProvider) {
     pendingApiKeyBusyObserved = true;
   }
+  $: {
+    const pendingProvider = pendingConnectionProvider;
+    const pendingImportKeyValue = pendingConnectionImportKey;
+    const connectionBusy =
+      pendingProvider !== null &&
+      (pendingImportKeyValue
+        ? busyImportKey === pendingImportKeyValue
+        : busyProviderId === pendingProvider);
+    if (connectionBusy) {
+      pendingConnectionBusyObserved = true;
+    }
+    if (pendingProvider && pendingConnectionBusyObserved && !connectionBusy) {
+      if (!errorMessage) closeProviderModal();
+      pendingConnectionProvider = null;
+      pendingConnectionImportKey = null;
+      pendingConnectionBusyObserved = false;
+    }
+  }
   $: if (
     pendingApiKeyProvider &&
     pendingApiKeyBusyObserved &&
@@ -257,6 +350,9 @@
       const next = { ...apiKeys };
       delete next[pendingApiKeyProvider];
       apiKeys = next;
+      const nextBaseUrls = { ...baseUrls };
+      delete nextBaseUrls[pendingApiKeyProvider];
+      baseUrls = nextBaseUrls;
     }
     pendingApiKeyProvider = null;
     pendingApiKeyBusyObserved = false;
@@ -275,13 +371,14 @@
     </div>
   {/if}
 
-  {#if !loading && snapshot && connectedProviders.length}
+  {#if !loading && snapshot && connectedConnections.length}
     <div class="provider-section">
       <h3>Connected providers</h3>
       <div class="provider-grid" data-section="connected">
-        {#each connectedProviders as provider (provider.id)}
+        {#each connectedConnections as connection (connection.key)}
+          {@const provider = connection.provider}
           {@const visual = providerVisual(provider)}
-          {@const auth = authForProvider(provider.id)}
+          {@const auth = connection.auth}
           {@const authFree = providerRunsWithoutAuth(provider)}
           <article class="provider-card" style="--provider-accent: {visual.accent};">
             <header class="card-head">
@@ -298,11 +395,11 @@
 
             <div class="actions">
               <button
-                class="oauth-btn"
+                class="disconnect-btn"
                 disabled={credentialBusy}
-                on:click={() => openProviderModal(provider.id)}
+                on:click={() => submitLogout(auth.providerId)}
               >
-                Manage connection
+                Disconnect
               </button>
             </div>
 
@@ -367,7 +464,7 @@
                 disabled={credentialBusy}
                 on:click={() => openProviderModal(provider.id)}
               >
-                {auth || authFree ? "Manage connection" : "Connect"}
+                {authFree ? "Ready" : "Add connect"}
               </button>
             </div>
 
@@ -422,7 +519,54 @@
         </header>
 
         <div class="provider-modal-body">
-          {#if candidates.length}
+          {#if isCustomProvider(activeProvider)}
+            <div class="provider-modal-section">
+              <div class="custom-provider-form">
+                <label>
+                  <span>Base URL</span>
+                  <input
+                    type="url"
+                    aria-label="Base URL"
+                    value={baseUrlValue(activeProvider)}
+                    placeholder="https://api.example.com/v1"
+                    autocomplete="url"
+                    spellcheck="false"
+                    disabled={credentialBusy}
+                    on:input={(event) =>
+                      updateBaseUrl(activeProvider.id, (event.currentTarget as HTMLInputElement).value)}
+                    on:keydown={(event) => {
+                      if (event.key === "Enter") submitCustomProvider(activeProvider);
+                    }}
+                  />
+                </label>
+
+                <label>
+                  <span>API key</span>
+                  <input
+                    type="password"
+                    aria-label="API key"
+                    value={apiKeys[activeProvider.id] ?? ""}
+                    placeholder={auth ? "Replace API key" : "Paste API key"}
+                    autocomplete="off"
+                    disabled={credentialBusy}
+                    on:input={(event) =>
+                      updateApiKey(activeProvider.id, (event.currentTarget as HTMLInputElement).value)}
+                    on:keydown={(event) => {
+                      if (event.key === "Enter") submitCustomProvider(activeProvider);
+                    }}
+                  />
+                </label>
+
+                <button
+                  class="apikey-btn"
+                  disabled={credentialBusy || !baseUrlValue(activeProvider).trim() || !(apiKeys[activeProvider.id] ?? "").trim()}
+                  on:click={() => submitCustomProvider(activeProvider)}
+                >
+                  Add connect
+                </button>
+              </div>
+            </div>
+          {:else if candidates.length}
             <div class="provider-modal-section">
               <h3>Saved credentials</h3>
               <div class="imports">
@@ -445,7 +589,7 @@
             </div>
           {/if}
 
-          {#if supports(activeProvider, "oauth")}
+          {#if !isCustomProvider(activeProvider) && supports(activeProvider, "oauth")}
             <div class="provider-modal-section">
               <h3>OAuth</h3>
               <button
@@ -466,7 +610,7 @@
             </div>
           {/if}
 
-          {#if supports(activeProvider, "api_key")}
+          {#if !isCustomProvider(activeProvider) && supports(activeProvider, "api_key")}
             <div class="provider-modal-section">
               <h3>API key</h3>
               <div class="api-key-row">
@@ -487,13 +631,13 @@
                   disabled={credentialBusy || !(apiKeys[activeProvider.id] ?? "").trim()}
                   on:click={() => submitApiKey(activeProvider.id)}
                 >
-                  {auth ? "Update key" : "Connect"}
+                  Add connect
                 </button>
               </div>
             </div>
           {/if}
 
-          {#if authFree && !supports(activeProvider, "oauth") && !supports(activeProvider, "api_key") && !candidates.length}
+          {#if !isCustomProvider(activeProvider) && authFree && !supports(activeProvider, "oauth") && !supports(activeProvider, "api_key") && !candidates.length}
             <div class="provider-modal-section">
               <p class="provider-modal-note">No connection setup is required for this provider.</p>
             </div>
@@ -705,7 +849,8 @@
     gap: 8px;
   }
   .oauth-btn,
-  .apikey-btn {
+  .apikey-btn,
+  .disconnect-btn {
     border: none;
     border-radius: 10px;
     min-height: 34px;
@@ -738,8 +883,17 @@
     color: color-mix(in oklab, var(--provider-accent) 80%, black);
     border: 1px solid color-mix(in oklab, var(--provider-accent) 35%, rgba(111, 101, 89, 0.25));
   }
+  .disconnect-btn {
+    border: 1px solid rgba(111, 101, 89, 0.18);
+    background: rgba(255, 255, 255, 0.78);
+    color: var(--text);
+  }
+  .disconnect-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.94);
+  }
   .oauth-btn:disabled,
-  .apikey-btn:disabled {
+  .apikey-btn:disabled,
+  .disconnect-btn:disabled {
     opacity: 0.6;
     cursor: progress;
   }
@@ -748,6 +902,39 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
+  }
+  .custom-provider-form {
+    display: grid;
+    gap: 12px;
+  }
+  .custom-provider-form label {
+    display: grid;
+    gap: 6px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 16px;
+  }
+  .custom-provider-form input {
+    width: 100%;
+    min-height: 36px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(111, 101, 89, 0.2);
+    background: rgba(255, 255, 255, 0.92);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 400;
+    min-width: 0;
+  }
+  .custom-provider-form input:focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--provider-accent) 40%, transparent);
+    outline-offset: 1px;
+    border-color: var(--provider-accent);
+  }
+  .custom-provider-form .apikey-btn {
+    justify-self: end;
   }
   .api-key-row input {
     min-height: 34px;
