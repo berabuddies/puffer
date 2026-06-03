@@ -814,8 +814,8 @@ write_file:
     #[test]
     fn workflow_trigger_support_rejects_action_only_connectors() {
         let temp = tempfile::tempdir().unwrap();
-        let connection = ConnectionRecord::authenticated("work-lark", "lark-login", "demo");
-        let template = connector_template("lark-login", false);
+        let connection = ConnectionRecord::authenticated("work-slack", "slack-app", "demo");
+        let template = connector_template("slack-app", false);
 
         assert!(!workflow_trigger_supported(
             temp.path(),

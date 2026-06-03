@@ -10,8 +10,6 @@
 mod email_connector_actions;
 #[path = "gcal_connector_actions.rs"]
 mod gcal_connector_actions;
-#[path = "lark_connector_actions.rs"]
-mod lark_connector_actions;
 #[path = "slack_connector_actions.rs"]
 mod slack_connector_actions;
 #[path = "telegram_connector_actions.rs"]
@@ -41,9 +39,6 @@ use self::email_connector_actions::{
 };
 use self::gcal_connector_actions::{
     gcal_action_via_subscriber, gcal_subscriber_for_action, is_gcal_action, is_gcal_connector,
-};
-use self::lark_connector_actions::{
-    is_lark_action, is_lark_connector, run_lark_action, LarkConnectionAuthChecker,
 };
 use self::slack_connector_actions::{
     is_slack_action, is_slack_connector, run_slack_action, SlackConnectionAuthChecker,
@@ -391,13 +386,6 @@ impl puffer_subscriptions::ConnectionAuthChecker for BuiltinConnectionAuthChecke
         if slack.is_some() {
             return Ok(slack);
         }
-        let lark = LarkConnectionAuthChecker {
-            paths: self.paths.clone(),
-        }
-        .check(manager, template, connection_slug)?;
-        if lark.is_some() {
-            return Ok(lark);
-        }
         TelegramConnectionAuthChecker.check(manager, template, connection_slug)
     }
 }
@@ -460,13 +448,6 @@ impl ConnectorActionExecutor for ManagerConnectorActionExecutor {
         }
         if is_slack_connector(connector_slug) && is_slack_action(action) {
             let summary = run_slack_action(&self.paths, &connection, action, &input)?;
-            return Ok(format!(
-                "{} [{}]",
-                summary, action_definition.permission.category
-            ));
-        }
-        if is_lark_connector(connector_slug) && is_lark_action(action) {
-            let summary = run_lark_action(&self.paths, &connection, action, &input)?;
             return Ok(format!(
                 "{} [{}]",
                 summary, action_definition.permission.category
@@ -868,6 +849,9 @@ fn autostart_topics(manager: &SubscriptionManager, paths: &ConfigPaths) -> Vec<S
         if binding.status != puffer_subscriptions::WorkflowBindingStatus::Enabled {
             continue;
         }
+        if connector_uses_command_stream(manager, binding.connector_slug.as_deref()) {
+            continue;
+        }
         needed.insert(resolve_autostart_topic(
             manager,
             paths,
@@ -883,6 +867,9 @@ fn autostart_topics(manager: &SubscriptionManager, paths: &ConfigPaths) -> Vec<S
             .connection_store()
             .get(&binding.connection_slug)
             .map(|connection| connection.connector_slug);
+        if connector_uses_command_stream(manager, connector_slug.as_deref()) {
+            continue;
+        }
         needed.insert(resolve_autostart_topic(
             manager,
             paths,
@@ -891,6 +878,16 @@ fn autostart_topics(manager: &SubscriptionManager, paths: &ConfigPaths) -> Vec<S
         ));
     }
     needed.into_iter().collect()
+}
+
+/// Command-backed connectors stream via `connector_stream`, not a manifest subscriber.
+fn connector_uses_command_stream(
+    manager: &SubscriptionManager,
+    connector_slug: Option<&str>,
+) -> bool {
+    connector_slug
+        .and_then(|slug| manager.connector_store().get(slug))
+        .is_some_and(|template| template.command_argv().is_some() && template.can_subscribe)
 }
 
 fn resolve_autostart_topic(

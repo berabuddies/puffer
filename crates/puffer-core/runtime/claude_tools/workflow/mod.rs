@@ -21,7 +21,6 @@ pub mod goal;
 pub mod http_request;
 pub mod image_generation;
 pub mod lambda_internal;
-pub mod lark;
 pub mod lsp;
 mod lsp_live;
 mod lsp_live_diagnostics;

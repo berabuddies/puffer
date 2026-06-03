@@ -32,7 +32,6 @@ puffer-runner-grpc = { path = "../puffer-runner-grpc" }
 puffer-runner-local = { path = "../puffer-runner-local" }
 puffer-session-store = { path = "../puffer-session-store" }
 puffer-secrets = { path = "../puffer-secrets" }
-puffer-lark = { path = "../puffer-lark" }
 puffer-slack = { path = "../puffer-slack" }
 puffer-subscriber-email = { path = "../puffer-subscriber-email" }
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
@@ -43,7 +42,7 @@ puffer-tools = { path = "../puffer-tools" }
 puffer-tui = { path = "../puffer-tui" }
 puffer-workflow = { path = "../puffer-workflow" }
 reqwest.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "process", "io-util", "io-std"] }
 tungstenite.workspace = true
 webbrowser = "1.0"
 

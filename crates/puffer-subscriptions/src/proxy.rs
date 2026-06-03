@@ -201,12 +201,18 @@ pub trait AgentProxy: Send + Sync {
 
     /// Converts an agent response into a connector action input.
     fn render_agent_reply(&self, agent_output: &str, binding: &AgentProxyBinding) -> Value;
+
+    /// Builds the agent prompt for a routed message. Default forwards to a named agent.
+    fn route_prompt(&self, target: &str, message: &str) -> String {
+        format!("Route this external connector message to agent `{target}`.\n\n{message}")
+    }
 }
 
 /// Returns a built-in agent proxy implementation for connectors that support it.
 pub fn builtin_agent_proxy(connector_slug: &str) -> Option<Box<dyn AgentProxy>> {
     match connector_slug {
         "telegram-bot" => Some(Box::new(TelegramBotAgentProxy)),
+        "lark-bot" => Some(Box::new(LarkBotAgentProxy)),
         _ => None,
     }
 }
@@ -261,6 +267,40 @@ impl AgentProxy for TelegramBotAgentProxy {
             "to": target,
             "message": agent_output,
         })
+    }
+}
+
+/// Agent proxy for Lark chats (`lark-cli`); same `/connect <agent>` flow as Telegram, replies to `chat_id`.
+pub struct LarkBotAgentProxy;
+
+impl AgentProxy for LarkBotAgentProxy {
+    fn connect_phase(&self, event: &Value) -> AgentProxyDecision {
+        command_decision(event, "lark-bot")
+    }
+
+    fn agent_phase(&self, event: &Value, binding: &AgentProxyBinding) -> AgentProxyDecision {
+        route_bound_message(event, binding)
+    }
+
+    fn render_agent_reply(&self, agent_output: &str, binding: &AgentProxyBinding) -> Value {
+        let target = binding
+            .reply_target
+            .as_deref()
+            .unwrap_or(&binding.external_principal);
+        serde_json::json!({
+            "chat_id": target,
+            "text": agent_output,
+        })
+    }
+
+    /// The agent IS `target` and replies directly — it does not forward elsewhere.
+    fn route_prompt(&self, target: &str, message: &str) -> String {
+        format!(
+            "You are `{target}`, an assistant chatting directly with a user in Lark. Reply to \
+             their message below; your entire response is sent back to them as one chat message, \
+             so write only the reply itself — do not route, forward, or mention other agents.\n\n\
+             User message:\n{message}"
+        )
     }
 }
 
@@ -492,6 +532,52 @@ mod tests {
                     "message": "Connected to agent-1.",
                 })),
             }
+        );
+    }
+
+    #[test]
+    fn lark_route_prompt_makes_agent_the_target_not_a_forwarder() {
+        let lark = LarkBotAgentProxy.route_prompt("assistant", "几点了");
+        assert!(lark.contains("You are `assistant`"));
+        assert!(!lark.to_lowercase().contains("route this external"));
+        // Telegram keeps the default forwarding prompt (unchanged behavior).
+        let tg = TelegramBotAgentProxy.route_prompt("assistant", "几点了");
+        assert!(tg.contains("Route this external connector message to agent `assistant`"));
+    }
+
+    #[test]
+    fn lark_proxy_binds_then_routes_and_replies_to_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AgentProxyStore::load(temp.path().join("agent_proxy_bindings.json")).unwrap();
+
+        // A Lark event payload as emitted by the lark-cli connector bridge.
+        let connect = serde_json::json!({
+            "message": "/connect agent-1",
+            "chat_id": "oc_demo",
+            "sender_open_id": "ou_user"
+        });
+        let decision = handle_agent_proxy_event("lark-bot", "lark-bot", &connect, &store).unwrap();
+        assert!(matches!(decision, AgentProxyDecision::BindAgent { .. }));
+
+        let chat = serde_json::json!({
+            "message": "几点了",
+            "chat_id": "oc_demo",
+            "sender_open_id": "ou_user"
+        });
+        let decision = handle_agent_proxy_event("lark-bot", "lark-bot", &chat, &store).unwrap();
+        let AgentProxyDecision::RouteToAgent {
+            target, binding, ..
+        } = decision
+        else {
+            panic!("expected RouteToAgent, got {decision:?}");
+        };
+        assert_eq!(target, "agent-1");
+
+        // The bot reply targets the originating Lark chat.
+        let reply = LarkBotAgentProxy.render_agent_reply("现在三点", &binding);
+        assert_eq!(
+            reply,
+            serde_json::json!({"chat_id": "oc_demo", "text": "现在三点"})
         );
     }
 

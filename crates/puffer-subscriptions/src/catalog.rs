@@ -103,8 +103,8 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         telegram_login_template(),
         telegram_bot_template(),
         discord_bot_template(),
-        lark_app_template(),
         lark_login_template(),
+        lark_bot_template(),
         matrix_bot_template(),
         slack_app_template(),
         slack_login_template(),
@@ -129,8 +129,8 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "email" => "email".to_string(),
         "gmail-browser" => "gmail-browser".to_string(),
         "gcal-browser" => "gcal-browser".to_string(),
-        "lark-app" => "lark-app".to_string(),
-        "lark-login" => "lark-login".to_string(),
+        "lark-login" => "lark-user".to_string(),
+        "lark-bot" => "lark-bot".to_string(),
         "discord-bot" => "discord-bot".to_string(),
         "matrix-bot" => "matrix-bot".to_string(),
         "slack-app" => "slack-app".to_string(),
@@ -258,35 +258,98 @@ fn matrix_bot_template() -> ConnectorTemplate {
     }
 }
 
-fn lark_app_template() -> ConnectorTemplate {
-    ConnectorTemplate {
-        slug: "lark-app".to_string(),
-        description: "Lark custom app connector over OpenAPI".to_string(),
-        skill: "lark".to_string(),
-        binary: "puffer internal-tool lark".to_string(),
-        command: Vec::new(),
-        requires_auth: true,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        subscriber: None,
-        output_schema: message_output_schema(),
-        actions: lark_actions(),
-    }
-}
-
+/// Lark personal account over lark-cli (`--as user`): monitor your messages and
+/// act as you. No auto-reply.
 fn lark_login_template() -> ConnectorTemplate {
     ConnectorTemplate {
         slug: "lark-login".to_string(),
-        description: "Lark user-token account connector over OpenAPI".to_string(),
+        description: "Lark personal account over lark-cli (monitor + act as you)".to_string(),
         skill: "lark".to_string(),
-        binary: "puffer internal-tool lark".to_string(),
-        command: Vec::new(),
+        binary: "puffer __connector lark-user".to_string(),
+        command: vec![
+            "puffer".to_string(),
+            "__connector".to_string(),
+            "lark-user".to_string(),
+        ],
         requires_auth: true,
-        can_subscribe: false,
+        can_subscribe: true,
         can_proxy_agent: false,
         subscriber: None,
         output_schema: message_output_schema(),
-        actions: lark_actions(),
+        actions: lark_cli_actions(),
+    }
+}
+
+/// Lark bot over lark-cli (`--as bot`): auto-reply to incoming messages and act
+/// as the bot.
+fn lark_bot_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "lark-bot".to_string(),
+        description: "Lark bot over lark-cli (auto-reply + act as the bot)".to_string(),
+        skill: "lark".to_string(),
+        binary: "puffer __connector lark-bot".to_string(),
+        command: vec![
+            "puffer".to_string(),
+            "__connector".to_string(),
+            "lark-bot".to_string(),
+        ],
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: true,
+        subscriber: None,
+        output_schema: message_output_schema(),
+        actions: lark_cli_actions(),
+    }
+}
+
+/// `lark-cli` connector actions: `send_message` plus reaction actions.
+fn lark_cli_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = send_message_actions();
+    for action in lark_specific_actions() {
+        actions.insert(action.slug.clone(), action);
+    }
+    actions
+}
+
+fn lark_specific_actions() -> Vec<ConnectorActionDefinition> {
+    vec![
+        lark_action_definition(
+            "react",
+            "Add a reaction to a Lark message",
+            "external_message_interaction",
+            "React to an external Lark message",
+        ),
+        lark_action_definition(
+            "send_reaction",
+            "Alias for adding a reaction to a Lark message",
+            "external_message_interaction",
+            "React to an external Lark message",
+        ),
+        lark_action_definition(
+            "remove_reaction",
+            "Remove a reaction from a Lark message by reaction_id",
+            "external_message_interaction",
+            "Remove a reaction from an external Lark message",
+        ),
+    ]
+}
+
+fn lark_action_definition(
+    slug: &str,
+    description: &str,
+    category: &str,
+    summary: &str,
+) -> ConnectorActionDefinition {
+    ConnectorActionDefinition {
+        slug: slug.to_string(),
+        description: description.to_string(),
+        input_schema: lark_message_action_schema(),
+        output_schema: action_output_schema(),
+        permission: ConnectorPermissionDefinition {
+            category: category.to_string(),
+            summary: summary.to_string(),
+            external_side_effect: true,
+        },
     }
 }
 
@@ -675,60 +738,6 @@ fn slack_specific_actions() -> Vec<ConnectorActionDefinition> {
 }
 
 fn slack_action_definition(
-    slug: &str,
-    description: &str,
-    category: &str,
-    summary: &str,
-    input_schema: Value,
-) -> ConnectorActionDefinition {
-    ConnectorActionDefinition {
-        slug: slug.to_string(),
-        description: description.to_string(),
-        input_schema,
-        output_schema: action_output_schema(),
-        permission: ConnectorPermissionDefinition {
-            category: category.to_string(),
-            summary: summary.to_string(),
-            external_side_effect: true,
-        },
-    }
-}
-
-fn lark_actions() -> BTreeMap<String, ConnectorActionDefinition> {
-    let mut actions = send_message_actions();
-    for action in lark_specific_actions() {
-        actions.insert(action.slug.clone(), action);
-    }
-    actions
-}
-
-fn lark_specific_actions() -> Vec<ConnectorActionDefinition> {
-    vec![
-        lark_action_definition(
-            "react",
-            "React to a Lark message",
-            "external_message_interaction",
-            "React to an external Lark message",
-            lark_message_action_schema(),
-        ),
-        lark_action_definition(
-            "send_reaction",
-            "Alias for reacting to a Lark message",
-            "external_message_interaction",
-            "React to an external Lark message",
-            lark_message_action_schema(),
-        ),
-        lark_action_definition(
-            "remove_reaction",
-            "Remove a reaction from a Lark message by reaction_id",
-            "external_message_interaction",
-            "Remove a reaction from an external Lark message",
-            lark_message_action_schema(),
-        ),
-    ]
-}
-
-fn lark_action_definition(
     slug: &str,
     description: &str,
     category: &str,

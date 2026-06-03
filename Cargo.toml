@@ -19,7 +19,6 @@ members = [
     "crates/puffer-runner-local",
     "crates/puffer-runner-grpc",
     "crates/puffer-secrets",
-    "crates/puffer-lark",
     "crates/puffer-slack",
     "crates/puffer-tool-runner",
     "crates/puffer-session-store",

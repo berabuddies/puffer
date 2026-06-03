@@ -174,7 +174,6 @@ fn workspace_builtin_tool_resources_are_registerable() {
     assert!(registry.definition("Sleep").is_some());
     assert!(!registered.contains("Browser"));
     assert!(!registered.contains("Email"));
-    assert!(!registered.contains("Lark"));
     assert!(!registered.contains("Slack"));
     assert!(!registered.contains("Telegram"));
     assert!(registry.definition("EmailConfigure").is_none());
@@ -210,7 +209,6 @@ fn workspace_builtin_internal_tool_resources_are_registerable() {
     );
     assert!(registry.internal_definition("Browser").is_some());
     assert!(registry.internal_definition("Email").is_some());
-    assert!(registry.internal_definition("Lark").is_some());
     assert!(registry
         .internal_definition("RequestUserBrowserAction")
         .is_some());
@@ -221,7 +219,6 @@ fn workspace_builtin_internal_tool_resources_are_registerable() {
     assert!(registry.internal_definition("Telegram").is_some());
     assert!(registry.definition("Browser").is_none());
     assert!(registry.definition("Email").is_none());
-    assert!(registry.definition("Lark").is_none());
     assert!(registry.definition("RequestUserBrowserAction").is_none());
     assert!(registry.definition("requestuserbrowseraction").is_none());
     assert!(registry.definition("Slack").is_none());

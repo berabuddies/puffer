@@ -14,6 +14,11 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::{self, JoinHandle};
 
+/// Grace period to let a command-backed subscribe bridge unsubscribe and exit
+/// after its stdin is closed, before falling back to SIGKILL. Must exceed the
+/// bridge's own child-shutdown grace so its clean unsubscribe can complete.
+const STREAM_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Synchronous event processor used by connector streams before acking.
 pub trait ConnectorEventProcessor: Send + Sync {
     /// Processes one connector event. Returning an error prevents cursor ack.
@@ -63,7 +68,8 @@ impl ConnectorStreamHandle {
         let Some((program, fixed_args)) = argv.split_first() else {
             return Ok(None);
         };
-        let mut command = Command::new(program);
+        let mut command =
+            Command::new(puffer_subscriber_runtime::resolve_manifest_program(program));
         command
             .args(fixed_args)
             .arg("subscribe")
@@ -161,7 +167,6 @@ async fn run_stream(
         tokio::select! {
             _ = shutdown_rx.changed() => {
                 shutdown_requested = true;
-                let _ = child.start_kill();
                 break;
             }
             maybe = processed_rx.recv(), if !processor_events_closed => {
@@ -236,6 +241,18 @@ async fn run_stream(
                 }
             }
         }
+    }
+    // Graceful stop for a command-backed bridge: closing our stdin lets it
+    // unsubscribe and exit cleanly. SIGKILL would orphan its `event consume`
+    // child and leak the server-side subscription. Fall back to a kill if the
+    // bridge overruns the grace window.
+    drop(stdin);
+    if shutdown_requested
+        && tokio::time::timeout(STREAM_SHUTDOWN_GRACE, child.wait())
+            .await
+            .is_err()
+    {
+        let _ = child.start_kill();
     }
     let _ = child.wait().await;
     if !shutdown_requested {

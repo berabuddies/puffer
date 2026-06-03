@@ -1,6 +1,6 @@
 use crate::browser_args::BrowserArgs;
 use crate::non_interactive::NonInteractiveArgs;
-use crate::subscriber_tool_args::{EmailArgs, LarkArgs, SlackArgs, TelegramArgs};
+use crate::subscriber_tool_args::{EmailArgs, SlackArgs, TelegramArgs};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -211,6 +211,17 @@ pub(crate) enum Command {
         /// Subscriber id, matches `manifest.id` (e.g. `telegram-user`).
         id: String,
     },
+    /// Internal: command-backed connector protocol bridge. Invoked by the
+    /// subscription manager via the connector template `command` argv (e.g.
+    /// `puffer __connector lark-bot auth-ok <conn>`); not intended for direct use.
+    #[command(hide = true, name = "__connector")]
+    Connector {
+        /// Connector id selecting the bridge implementation (e.g. `lark-bot`).
+        id: String,
+        /// Protocol operation (`auth-ok`, `act`, or `subscribe`) and its args.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Run one unattended benchmark turn and emit result artifacts.
     #[command(hide = true)]
     BenchmarkRun {
@@ -259,8 +270,6 @@ pub(crate) enum InternalToolCommand {
     Browser(#[command(flatten)] BrowserArgs),
     /// Configure the email subscriber through the parent runtime.
     Email(#[command(flatten)] EmailArgs),
-    /// Log in to Lark or look up Lark chats/users through the parent runtime.
-    Lark(#[command(flatten)] LarkArgs),
     /// Log in to Slack or look up Slack conversations through the parent runtime.
     Slack(#[command(flatten)] SlackArgs),
     /// Log in to Telegram or look up Telegram peers through the parent runtime.

@@ -36,6 +36,7 @@ mod gcal_browser;
 mod gmail_browser;
 mod heartbeat;
 mod internal_tools;
+mod lark_connector;
 mod non_interactive;
 mod project_metadata;
 mod resource_fs;
@@ -102,6 +103,15 @@ fn main() -> Result<()> {
     // or the subscription manager itself.
     if let Some(Command::Subscriber { id }) = &cli.subcommand {
         return run_subscriber(id);
+    }
+
+    // Hidden connector-protocol bridge. The subscription manager invokes
+    // `puffer __connector <id> <op> ...` (per the connector template `command`
+    // argv) to run `auth-ok`, `act`, or `subscribe` against an external tool.
+    // Like `__subscriber`, this process is dedicated to the bridge and must not
+    // load resources, providers, or the subscription manager.
+    if let Some(Command::Connector { id, args }) = &cli.subcommand {
+        return run_connector_bridge(id, args);
     }
 
     let cwd = std::env::current_dir()?;
@@ -220,6 +230,10 @@ fn main() -> Result<()> {
         Some(Command::Subscriber { .. }) => {
             // Already handled above; here only to satisfy exhaustiveness.
             unreachable!("__subscriber dispatched before main match")
+        }
+        Some(Command::Connector { .. }) => {
+            // Already handled above; here only to satisfy exhaustiveness.
+            unreachable!("__connector dispatched before main match")
         }
         Some(Command::Agents { setting_sources }) => {
             run_agents_command(&paths, &config, setting_sources.as_deref())
@@ -1342,6 +1356,26 @@ fn run_subscriber(id: &str) -> Result<()> {
             "gmail-browser" => crate::gmail_browser::run_subscriber().await,
             other => Err(anyhow::anyhow!(
                 "unknown subscriber id `{other}`; this puffer build does not bundle a driver for it"
+            )),
+        }
+    })
+}
+
+/// Dispatcher for the hidden `__connector <id> <op> ...` bridge subcommand.
+/// Each supported connector id maps to one baked-in protocol bridge. Unknown
+/// ids exit with a clear error.
+fn run_connector_bridge(id: &str, args: &[String]) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name(format!("puffer-connector-{id}"))
+        .build()
+        .context("failed to build connector bridge tokio runtime")?;
+    runtime.block_on(async move {
+        match id {
+            "lark-user" => lark_connector::run("user", args).await,
+            "lark-bot" => lark_connector::run("bot", args).await,
+            other => Err(anyhow::anyhow!(
+                "unknown connector id `{other}`; this puffer build does not bundle a bridge for it"
             )),
         }
     })

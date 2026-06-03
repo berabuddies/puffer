@@ -47,50 +47,35 @@ fn slack_common_properties() -> Value {
     })
 }
 
-/// Returns the Lark message action input schema.
+/// Returns the Lark message action input schema (react / remove_reaction / reply).
 pub(super) fn lark_message_action_schema() -> Value {
     serde_json::json!({
         "type": "object",
-        "properties": lark_common_properties(),
+        "properties": {
+            "to": {"type": "string"},
+            "target": {"type": "string"},
+            "chat_id": {"type": "string"},
+            "open_id": {"type": "string"},
+            "user_id": {"type": "string"},
+            "user": {"type": "string"},
+            "message": {"type": "string"},
+            "text": {"type": "string"},
+            "message_id": {"type": "string"},
+            "id": {"type": "string"},
+            "reply_to": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+            "reply_to_message_id": {"type": "string"},
+            "reply_in_thread": {"type": "boolean"},
+            "emoji_type": {"type": "string"},
+            "emoji": {"type": "string"},
+            "reaction": {"type": "string"},
+            "reaction_id": {"type": "string"},
+            "as": {"type": "string", "enum": ["bot", "user"]},
+            "image": {"type": "string"},
+            "file": {"type": "string"},
+            "audio": {"type": "string"},
+            "media": {"type": "string"}
+        },
         "additionalProperties": true
-    })
-}
-
-fn lark_common_properties() -> Value {
-    serde_json::json!({
-        "to": {"type": "string"},
-        "target": {"type": "string"},
-        "receive_id": {"type": "string"},
-        "receive_id_type": {"type": "string"},
-        "chat_id": {"type": "string"},
-        "chat": {"type": "string"},
-        "channel": {"type": "string"},
-        "open_id": {"type": "string"},
-        "user_id": {"type": "string"},
-        "user": {"type": "string"},
-        "message": {"type": "string"},
-        "text": {"type": "string"},
-        "caption": {"type": "string"},
-        "content": {"oneOf": [{"type": "string"}, {"type": "object"}]},
-        "msg_type": {"type": "string"},
-        "message_type": {"type": "string"},
-        "message_id": {"type": "string"},
-        "id": {"type": "string"},
-        "reply_to": {"oneOf": [{"type": "string"}, {"type": "object"}]},
-        "reply_to_message_id": {"type": "string"},
-        "reply_in_thread": {"type": "boolean"},
-        "emoji_type": {"type": "string"},
-        "emoji": {"type": "string"},
-        "reaction": {"type": "string"},
-        "reaction_id": {"type": "string"},
-        "remove": {"type": "boolean"},
-        "path": {"type": "string"},
-        "image": {"oneOf": [{"type": "string"}, {"type": "object"}]},
-        "file": {"oneOf": [{"type": "string"}, {"type": "object"}]},
-        "media": {"oneOf": [{"type": "string"}, {"type": "object"}, {"type": "array"}]},
-        "files": {"type": "array"},
-        "idempotency_key": {"type": "string"},
-        "uuid": {"type": "string"}
     })
 }
 

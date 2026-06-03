@@ -266,7 +266,8 @@ async fn spawn_once(
     Ok(status)
 }
 
-fn resolve_manifest_program(program: &str) -> PathBuf {
+/// Resolves a manifest `cmd[0]` to a runnable path; `"puffer"` becomes the running binary.
+pub fn resolve_manifest_program(program: &str) -> PathBuf {
     if program == "puffer" {
         if let Some(path) = puffer_binary_path() {
             return path;

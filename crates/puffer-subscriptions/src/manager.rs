@@ -773,9 +773,10 @@ impl ManagerConnectorEventProcessor {
                 message,
                 binding,
             } => {
-                let prompt = format!(
-                    "Route this external connector message to agent `{target}`.\n\n{message}"
-                );
+                let Some(proxy) = builtin_agent_proxy(connector_slug) else {
+                    return Ok(());
+                };
+                let prompt = proxy.route_prompt(&target, &message);
                 let result = self.dispatcher.dispatch(
                     &ActionSpec::TriageAgent {
                         prompt,
@@ -786,9 +787,6 @@ impl ManagerConnectorEventProcessor {
                 if !result.success {
                     anyhow::bail!("{}", result.summary);
                 }
-                let Some(proxy) = builtin_agent_proxy(connector_slug) else {
-                    return Ok(());
-                };
                 let input = proxy.render_agent_reply(&result.summary, &binding);
                 self.dispatch_connector_action(connector_slug, "send_message", input, envelope)
             }

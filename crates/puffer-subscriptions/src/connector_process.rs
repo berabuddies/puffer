@@ -72,7 +72,7 @@ where
     let Some((program, fixed_args)) = argv.split_first() else {
         anyhow::bail!("connector command is empty");
     };
-    let mut command = Command::new(program);
+    let mut command = Command::new(puffer_subscriber_runtime::resolve_manifest_program(program));
     command
         .args(fixed_args)
         .args(extra_args)

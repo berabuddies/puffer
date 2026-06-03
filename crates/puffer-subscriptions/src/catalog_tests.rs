@@ -10,8 +10,8 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"telegram-bot".to_string()));
     assert!(slugs.contains(&"telegram-login".to_string()));
     assert!(slugs.contains(&"discord-bot".to_string()));
-    assert!(slugs.contains(&"lark-app".to_string()));
     assert!(slugs.contains(&"lark-login".to_string()));
+    assert!(slugs.contains(&"lark-bot".to_string()));
     assert!(slugs.contains(&"matrix-bot".to_string()));
     assert!(slugs.contains(&"slack-app".to_string()));
     assert!(slugs.contains(&"slack-login".to_string()));
@@ -28,7 +28,8 @@ fn suggested_connection_slugs_match_connect_defaults() {
     assert_eq!(suggested_connection_slug("gmail-browser"), "gmail-browser");
     assert_eq!(suggested_connection_slug("gcal-browser"), "gcal-browser");
     assert_eq!(suggested_connection_slug("discord-bot"), "discord-bot");
-    assert_eq!(suggested_connection_slug("lark-app"), "lark-app");
+    assert_eq!(suggested_connection_slug("lark-login"), "lark-user");
+    assert_eq!(suggested_connection_slug("lark-bot"), "lark-bot");
     assert_eq!(suggested_connection_slug("matrix-bot"), "matrix-bot");
     assert_eq!(suggested_connection_slug("slack-login"), "slack-login");
     assert_eq!(suggested_connection_slug("custom-feed"), "custom-feed");
@@ -40,7 +41,8 @@ fn builtins_define_host_enforced_action_permissions() {
     let action = telegram.actions.get("send_message").unwrap();
     let vote = telegram.actions.get("vote_poll").unwrap();
     let update_group = telegram.actions.get("update_group_title").unwrap();
-    let lark = builtin_connector_template("lark-login").unwrap();
+    let lark = builtin_connector_template("lark-bot").unwrap();
+    let lark_login = builtin_connector_template("lark-login").unwrap();
     let slack = builtin_connector_template("slack-login").unwrap();
     let email = builtin_connector_template("email").unwrap();
     let gmail = builtin_connector_template("gmail-browser").unwrap();
@@ -57,10 +59,29 @@ fn builtins_define_host_enforced_action_permissions() {
     assert_eq!(update_group.permission.category, "external_chat_admin");
     assert!(lark.actions.contains_key("send_message"));
     assert_eq!(
-        lark.actions.get("react").unwrap().permission.category,
-        "external_message_interaction"
+        lark.actions
+            .get("send_message")
+            .unwrap()
+            .permission
+            .category,
+        "external_message_send"
     );
-    assert!(!lark.can_subscribe);
+    assert!(lark.actions.contains_key("react"));
+    assert!(lark.actions.contains_key("remove_reaction"));
+    // lark-bot is command-backed, streams, and auto-replies.
+    assert!(lark.can_subscribe);
+    assert!(lark.can_proxy_agent);
+    assert_eq!(
+        lark.command_argv().unwrap(),
+        ["puffer", "__connector", "lark-bot"]
+    );
+    // lark-login shares the actions but does NOT auto-reply.
+    assert!(lark_login.can_subscribe);
+    assert!(!lark_login.can_proxy_agent);
+    assert_eq!(
+        lark_login.command_argv().unwrap(),
+        ["puffer", "__connector", "lark-user"]
+    );
     assert!(slack.actions.contains_key("send_message"));
     assert_eq!(
         slack.actions.get("react").unwrap().permission.category,

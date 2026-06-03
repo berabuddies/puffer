@@ -28,4 +28,6 @@ pub use command::{
 };
 pub use event::{Event, EventEnvelope};
 pub use manifest::{Manifest, ManifestError, ManifestKind, StateSpec};
-pub use supervisor::{SubscriberHandle, SubscriberSupervisor, SupervisorConfig};
+pub use supervisor::{
+    resolve_manifest_program, SubscriberHandle, SubscriberSupervisor, SupervisorConfig,
+};

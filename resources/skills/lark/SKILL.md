@@ -1,105 +1,92 @@
 ---
 name: lark
-description: Configure LarkApp or LarkLogin with /connect, then resolve Lark chats/users and search/read Lark messages through the internal CLI.
+description: Authenticate Lark with /connect (delegated to the official lark-cli), then send/react/reply through the connector and consume incoming Lark messages as a stream. Two connectors mirror Telegram — lark-login (your user account; monitor + act as you) and lark-bot (the app bot; auto-reply). Use lark-cli directly from Bash for chat/user lookup and any API not exposed as a connector action.
 allowed-tools:
   - Bash
 argument-hint: "[Lark task]"
 arguments: target
-user-invocable: true
+user-invocable: false
 disable-model-invocation: false
 ---
 
-Use `/connect lark-app <connection>` or `/connect lark-login <connection>`
-when the user needs Lark connector setup, account setup, or auth repair. That
-flow uses AskUserQuestion for method choices and secrets.
-
-Use Bash to run the Lark internal CLI only after auth exists, when the user
-needs Lark id lookup or message search/read workflows. Run Lark lookup
-commands as `lark ...` inside Bash.
+The Lark connectors are backed by the official
+[larksuite/cli](https://github.com/larksuite/cli) (`lark-cli`). Puffer shells out
+to it for every operation and never stores Lark tokens — `lark-cli` keeps its own
+OAuth credentials in the OS keychain.
 
 Target: $target
 
-Connection/account selection:
+## Two connectors (mirror Telegram login/bot)
 
-Lark has two first-party connector templates:
+| Connector | lark-cli identity | Streams | Auto-reply | Use |
+|---|---|---|---|---|
+| **lark-login** | `--as user` (you) | yes | no | watch your messages → tasks; send/act as you |
+| **lark-bot** | `--as bot` (app bot) | yes | yes | auto-responding chatbot |
 
-- `lark-app`: a custom app connection using app_id/app_secret and tenant access
-  tokens. Use it for bot-style sends through OpenAPI.
-- `lark-login`: a user access token connection. Use it for user-visible
-  searches, user sends, and local account operations.
+Both share the same actions; they differ in identity and whether they auto-reply.
+Default connection slugs: `lark-user` and `lark-bot`.
 
-The default connection slug is `lark-app` for `configure-app`, and `lark-login`
-for login/lookup commands. Use `--brand lark` for international Lark and
-`--brand feishu` for Feishu. When the user has multiple tenants or accounts,
-use a distinct kebab-case connection slug and pass it to every command with
-`--connection` or `--account`.
+## Authentication
 
-Lark workflow subscriptions and agent proxy mode are not implemented yet for
-these first-party templates. Do not create Lark workflows that rely on inbound
-Lark events until a typed Lark subscribe runtime exists.
+Run `/connect lark-login <connection>` or `/connect lark-bot <connection>`. The
+flow verifies `lark-cli auth status` and records the connection; it never prompts
+for tokens, and offers to install `lark-cli` (`npx @larksuite/cli@latest install`)
+if missing. Log in once in a terminal if needed:
 
 ```bash
-lark --connection work-login search-chats "deploys"
-lark --connection work-login search-users --query "Tony" --has-chatted
+lark-cli auth login      # interactive OAuth, picks scopes
+lark-cli auth status     # confirm a logged-in account
 ```
 
-When `/connect` uses the environment import method, it reads `LARK_APP_ID`
-plus `LARK_APP_SECRET` for `lark-app`, or `LARK_USER_ACCESS_TOKEN` for
-`lark-login`. It honors `LARK_BRAND` unless an explicit brand is supplied.
+`LARK_CLI_BIN` overrides the binary; `LARK_CLI_AS` overrides the event identity.
 
-After `/connect` auth completes, the auth tool automatically registers the
-connection with either `connector_slug="lark-app"` or
-`connector_slug="lark-login"`. Use the same connection slug in `ConnectorAct`.
+## Sending / reacting / replying (connector actions)
 
-Lookup workflow:
+Use `ConnectorAct` (or a workflow) on the connection. Actions: `send_message`,
+`react` / `send_reaction`, `remove_reaction`. Identity defaults to the
+connector's (`user` for lark-login, `bot` for lark-bot); override per call with
+`as: "bot"|"user"`.
 
-When the user names a Lark group, chat, or person, resolve the stable Lark id
-before acting. Do not send to a display name directly.
+- `send_message`: recipient `chat_id` (`oc_...`→`--chat-id`) or
+  `open_id`/`user_id`/`user` (→`--user-id`); a generic `to`/`target` is inferred
+  by `oc_` prefix. Body `text` (aliases `message`/`caption`). Media via
+  `image`/`file`/`audio` (file key, URL, or cwd-relative path). Reply via
+  `reply_to` (a `om_...` id, or `{message_id}`) → `lark-cli im +messages-reply`
+  (`reply_in_thread: true` for a thread reply).
+- `react` / `send_reaction`: `{message_id, emoji_type}` (EmojiType e.g. `SMILE`,
+  `THUMBSUP`, `DONE`).
+- `remove_reaction`: `{message_id, reaction_id}`.
+
+## Incoming messages (stream)
+
+Both connectors stream newly received messages as workflow/monitor events; each
+payload carries `text`, `message_id`, `chat_id`, `sender_open_id`, `create_time`,
+`message_type`. Produced by `lark-cli event consume im.message.receive_v1 --as
+bot` — `im.message.receive_v1` is an app-level stream and `event consume` is
+bot-only, so both connectors (including lark-login) consume it as the bot; it
+covers messages in chats where the app is present. Lark's websocket only delivers
+new messages (no resumable cursor), so it starts from "now". Use `/monitor
+<connection>` to turn messages into tasks.
+
+## Auto-reply (lark-bot only)
+
+`lark-bot` (`can_proxy_agent = true`) replies automatically. With a running
+Puffer runtime (TUI or `puffer daemon`) and the stream active, message the bot
+`/connect <agent-slug>` once to bind the chat to a persona; later messages are
+answered by that agent (it IS the agent and replies directly), sent back to the
+chat as the bot. `lark-login` never auto-replies — it only monitors / acts on
+demand.
+
+## Lookups and other APIs
+
+For chat/user discovery or anything not exposed as a connector action, call
+`lark-cli` directly from Bash:
 
 ```bash
-lark --connection work-login search-chats "deploys"
-lark --connection work-login search-users --query "Tony" --has-chatted
+lark-cli im +chat-list --types group        # list chats
+lark-cli im +chat-search --query "team"      # resolve a chat id by name
+lark-cli api POST /open-apis/im/v1/messages --params '{"receive_id_type":"chat_id"}' \
+  --data '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"hi\"}"}'
 ```
 
-Use returned `chat_id` values such as `oc_...` as group targets. Use returned
-`open_id` values such as `ou_...` as user targets. If you already have a raw id,
-you can pass it directly to `ConnectorAct`.
-
-Message read and search workflow:
-
-Use `read-messages` when you already have a `chat_id`; pass `--thread-id`
-instead when you need replies from a specific Lark thread. Use
-`search-messages` when the user asks to find text across Lark. Use
-`mget-messages` when search returns ids and you need full message details.
-
-```bash
-lark --connection work-login read-messages --chat-id oc_xxx --page-size 20
-lark --connection work-login read-messages --thread-id omt_xxx --page-size 20
-lark --connection work-login search-messages "karen" --chat-ids oc_xxx --page-size 20
-lark --connection work-login mget-messages --message-ids om_xxx,om_yyy
-```
-
-Connector action workflow:
-
-Use `ConnectorAct` for outbound Lark side effects. For messages, pass `to`
-with an `oc_...` chat id or `ou_...` open id, plus `message` or `caption`.
-To reply, pass `reply_to` or `reply_to_message_id` with an `om_...` message id.
-To send local files/images, include `media`, `file`, `files`, `image`, or `path`.
-Captions are sent as a text message before the uploaded media because Lark IM
-file/image messages carry media keys rather than captions.
-
-```json
-{"connector_slug":"lark-login","connection_slug":"work-login","action":"send_message","input":{"to":"ou_xxx","message":"gm"}}
-{"connector_slug":"lark-app","connection_slug":"work-app","action":"send_message","input":{"to":"oc_xxx","message":"done","reply_to":"om_xxx"}}
-{"connector_slug":"lark-login","connection_slug":"work-login","action":"send_message","input":{"to":"oc_xxx","media":{"path":"/tmp/report.pdf","caption":"report"}}}
-```
-
-Use Lark reaction actions after reading/searching messages for the exact
-`message_id`. Adding a reaction takes an `emoji_type`; common ASCII aliases
-like `thumbsup` are normalized. Removing a reaction requires Lark's
-`reaction_id`.
-
-```json
-{"connector_slug":"lark-login","connection_slug":"work-login","action":"react","input":{"message_id":"om_xxx","emoji_type":"THUMBSUP"}}
-{"connector_slug":"lark-login","connection_slug":"work-login","action":"remove_reaction","input":{"message_id":"om_xxx","reaction_id":"reaction_xxx"}}
-```
+Never print Lark secrets or access tokens in output, logs, or event payloads.
