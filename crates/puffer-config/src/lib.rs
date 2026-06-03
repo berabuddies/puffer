@@ -258,12 +258,24 @@ pub struct NightConfig {
     /// tested work it produces. Default false (experimental).
     #[serde(default, alias = "submitPr")]
     pub submit_pr: bool,
+    /// Token budget for one `/night` run. `/night` sets a session goal with
+    /// this budget so the run is bounded (the goal flips to budget-limited and
+    /// the model is steered to stop) rather than running unbounded overnight.
+    #[serde(default = "default_night_token_budget", alias = "tokenBudget")]
+    pub token_budget: u32,
 }
 
 impl Default for NightConfig {
     fn default() -> Self {
-        Self { submit_pr: false }
+        Self {
+            submit_pr: false,
+            token_budget: default_night_token_budget(),
+        }
     }
+}
+
+fn default_night_token_budget() -> u32 {
+    1_000_000
 }
 
 fn default_editor_mode() -> String {
