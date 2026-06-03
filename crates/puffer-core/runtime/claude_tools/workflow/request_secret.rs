@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RequestSecretInput {
     #[serde(default)]
@@ -37,8 +37,7 @@ struct RequestSecretInput {
 
 /// Searches, creates, or requests one encrypted user secret.
 pub fn execute_request_secret(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
-    let parsed: RequestSecretInput =
-        serde_json::from_value(input).context("invalid RequestSecret input")?;
+    let parsed = parse_request_secret_input(input)?;
     let action = parsed
         .action
         .as_deref()
@@ -54,6 +53,37 @@ pub fn execute_request_secret(state: &mut AppState, cwd: &Path, input: Value) ->
         "search" | "list" => search_secrets(vault, parsed),
         "create" => create_secret(vault, parsed),
         other => bail!("unsupported RequestSecret action `{other}`"),
+    }
+}
+
+fn parse_request_secret_input(input: Value) -> Result<RequestSecretInput> {
+    match input {
+        Value::String(query) => {
+            let query = query.trim().to_string();
+            if query.is_empty() {
+                bail!("RequestSecret string input must be a non-empty search query");
+            }
+            Ok(RequestSecretInput {
+                action: Some("search".to_string()),
+                query: Some(query),
+                ..RequestSecretInput::default()
+            })
+        }
+        value => {
+            let mut parsed: RequestSecretInput =
+                serde_json::from_value(value).context("invalid RequestSecret input")?;
+            if parsed.action.as_deref().is_none_or(str::is_empty)
+                && parsed.id.as_deref().is_none_or(str::is_empty)
+                && parsed.label.as_deref().is_none_or(str::is_empty)
+                && parsed
+                    .query
+                    .as_deref()
+                    .is_some_and(|query| !query.trim().is_empty())
+            {
+                parsed.action = Some("search".to_string());
+            }
+            Ok(parsed)
+        }
     }
 }
 
@@ -300,6 +330,69 @@ mod tests {
         assert!(output.contains("Deploy token"));
         assert!(output.contains("production deploy token"));
         assert!(!output.contains("raw-deploy-secret"));
+    }
+
+    #[test]
+    fn request_secret_string_input_searches_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let _secret_env = secret_test_env(dir.path());
+        let mut state = temp_state(dir.path());
+        let paths = ConfigPaths::discover(dir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let vault = SecretVault::open(SecretVault::default_path(&paths.user_config_dir)).unwrap();
+        vault
+            .put(SecretUpsert {
+                id: None,
+                label: "Google password".to_string(),
+                description: Some("test.user@example.com".to_string()),
+                value: "raw-google-password".to_string(),
+                username: Some("test.user@example.com".to_string()),
+                origin: Some("https://accounts.google.com".to_string()),
+                source: "manual".to_string(),
+            })
+            .unwrap();
+
+        let output = execute_request_secret(
+            &mut state,
+            dir.path(),
+            json!("test.user@example.com google password"),
+        )
+        .unwrap();
+
+        assert!(output.contains("Google password"));
+        assert!(output.contains("test.user@example.com"));
+        assert!(!output.contains("raw-google-password"));
+        assert!(!output.contains("PUFFER_SECRET_"));
+    }
+
+    #[test]
+    fn request_secret_query_without_action_searches_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let _secret_env = secret_test_env(dir.path());
+        let mut state = temp_state(dir.path());
+        let paths = ConfigPaths::discover(dir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let vault = SecretVault::open(SecretVault::default_path(&paths.user_config_dir)).unwrap();
+        vault
+            .put(SecretUpsert {
+                id: None,
+                label: "Calendar password".to_string(),
+                description: Some("google calendar login".to_string()),
+                value: "raw-calendar-password".to_string(),
+                username: None,
+                origin: Some("https://calendar.google.com".to_string()),
+                source: "manual".to_string(),
+            })
+            .unwrap();
+
+        let output =
+            execute_request_secret(&mut state, dir.path(), json!({"query": "calendar google"}))
+                .unwrap();
+
+        assert!(output.contains("Calendar password"));
+        assert!(output.contains("google calendar login"));
+        assert!(!output.contains("raw-calendar-password"));
+        assert!(!output.contains("PUFFER_SECRET_"));
     }
 
     #[test]
