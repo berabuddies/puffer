@@ -142,6 +142,16 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 .unwrap_or(false);
             state.browsers.console_logs(&backend_id, clear)
         }
+        "waitNetworkIdle" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.wait_for_network_idle(
+                &backend_id,
+                network_idle_duration(params),
+                navigation_timeout(params),
+            )?;
+            Ok(json!({ "ok": true }))
+        }
         "screenshot" => {
             let (tab_id, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
@@ -702,6 +712,14 @@ fn navigation_timeout(params: &Value) -> Duration {
         optional_u32(params, "timeoutMs")
             .unwrap_or(30_000)
             .clamp(1, 120_000),
+    ))
+}
+
+fn network_idle_duration(params: &Value) -> Duration {
+    Duration::from_millis(u64::from(
+        optional_u32(params, "idleMs")
+            .unwrap_or(500)
+            .clamp(0, 30_000),
     ))
 }
 

@@ -22,10 +22,12 @@ mod cdp;
 mod cef;
 mod chrome;
 mod client;
+mod command;
 mod console;
 mod cursor;
 mod devtools;
 mod input;
+mod network_idle;
 mod params;
 mod recording;
 mod ref_resolution;
@@ -160,6 +162,16 @@ impl BrowserRegistry {
     /// Waits for a live page worker to report that navigation has completed.
     pub(crate) fn wait_for_load(&self, session_id: &str, timeout: Duration) -> Result<()> {
         self.get(session_id)?.wait_for_load(timeout)
+    }
+
+    /// Waits for a live page worker to report a quiet network window.
+    pub(crate) fn wait_for_network_idle(
+        &self,
+        session_id: &str,
+        idle: Duration,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.get(session_id)?.wait_for_network_idle(idle, timeout)
     }
 
     /// Reloads a live page worker.

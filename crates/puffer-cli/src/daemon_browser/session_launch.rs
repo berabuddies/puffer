@@ -56,3 +56,10 @@ pub(super) fn cef_remote_debugging_port() -> Option<u16> {
         .and_then(|value| value.parse::<u16>().ok())
         .filter(|port| *port >= 1024)
 }
+
+/// Emits an opt-in browser backend diagnostic to daemon stderr.
+pub(super) fn log_browser_backend(message: impl AsRef<str>) {
+    if std::env::var_os("PUFFER_BROWSER_LOG").is_some() {
+        eprintln!("puffer-browser: {}", message.as_ref());
+    }
+}

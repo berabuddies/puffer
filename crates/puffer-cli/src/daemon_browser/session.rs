@@ -19,13 +19,15 @@ use crate::daemon::ServerEnvelope;
 
 use super::chrome::{
     close_page_target, create_page_target, initial_page_target, read_devtools_ws_url,
-    read_remote_devtools_ws_url, resolve_chrome_executable, wait_for_initial_page_target,
+    read_remote_devtools_ws_url, resolve_chrome_executable, wait_for_initial_page_targets,
     ChromePageTarget,
 };
+use super::command::{BrowserCommand, UploadReply};
 use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
 use super::devtools::{devtools_event_payload, emit_devtools_payload};
 use super::input::send_input;
+use super::network_idle::BrowserNetworkState;
 use super::recording::BrowserRecordingRegistry;
 use super::screenshot::{
     capture_screenshot_command_params, parse_capture_screenshot_response,
@@ -33,7 +35,8 @@ use super::screenshot::{
 };
 use super::selection::{parse_copy_selection_response, selection_eval_expression};
 use super::session_launch::{
-    cef_remote_debugging_port, configure_chrome_command, remove_stale_devtools_port,
+    cef_remote_debugging_port, configure_chrome_command, log_browser_backend,
+    remove_stale_devtools_port,
 };
 use super::state_events::{emit_state, emit_state_error, update_state_from_eval};
 use super::upload::{
@@ -49,9 +52,8 @@ use super::{
     BrowserHistoryDirection, BrowserInputEvent, BrowserState, CDP_READ_TIMEOUT, DEFAULT_URL,
 };
 use crate::browser_profiles::prepare_managed_profile;
-
-type UploadReply = Sender<std::result::Result<(), String>>;
-const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const CEF_REMOTE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub(super) struct BrowserRootSession {
@@ -63,7 +65,7 @@ struct BrowserRootState {
     browser_ws: String,
     child: Option<Child>,
     owns_targets: bool,
-    reusable_target: Option<ChromePageTarget>,
+    reusable_targets: Vec<ChromePageTarget>,
     last_active: Instant,
 }
 
@@ -71,6 +73,7 @@ struct BrowserRootState {
 pub(super) struct BrowserSession {
     tx: Sender<BrowserCommand>,
     state: Arc<Mutex<BrowserState>>,
+    network: Arc<Mutex<BrowserNetworkState>>,
     last_active: Arc<Mutex<Instant>>,
     alive: Arc<AtomicBool>,
     root: Option<BrowserRootSession>,
@@ -84,6 +87,10 @@ impl BrowserRootSession {
         }
         let chrome = resolve_chrome_executable()
             .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
+        log_browser_backend(format!(
+            "launching Chrome screencast fallback at {}",
+            chrome.display()
+        ));
         let launch = prepare_managed_profile(&profile_dir)?;
         if launch.owns_user_data_dir {
             super::chrome::terminate_profile_processes(&launch.user_data_dir);
@@ -116,7 +123,7 @@ impl BrowserRootSession {
                 browser_ws,
                 child: Some(child),
                 owns_targets: true,
-                reusable_target,
+                reusable_targets: reusable_target.into_iter().collect(),
                 last_active: Instant::now(),
             })),
         })
@@ -124,29 +131,34 @@ impl BrowserRootSession {
 
     fn spawn_cef_remote_root(profile_dir: &PathBuf) -> Result<Option<Self>> {
         let Some(port) = cef_remote_debugging_port() else {
+            log_browser_backend(
+                "CEF remote debugging port is not configured; using Chrome fallback",
+            );
             return Ok(None);
         };
-        let browser_ws = match read_remote_devtools_ws_url(port, Duration::from_millis(500)) {
+        log_browser_backend(format!("trying native CEF DevTools on 127.0.0.1:{port}"));
+        let browser_ws = match read_remote_devtools_ws_url(port, CEF_REMOTE_START_TIMEOUT) {
             Ok(browser_ws) => browser_ws,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("native CEF DevTools on 127.0.0.1:{port} was not reachable")
+                });
+            }
         };
-        let reusable_target =
-            match wait_for_initial_page_target(&browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)
-                .context("read CEF DevTools page target")?
-            {
-                Some(target) => target,
-                None => match create_page_target(&browser_ws, DEFAULT_URL) {
-                    Ok(target) => target,
-                    Err(_) => return Ok(None),
-                },
-            };
+        let reusable_targets =
+            wait_for_initial_page_targets(&browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)
+                .context("read CEF DevTools page targets")?;
+        if reusable_targets.is_empty() {
+            bail!("native CEF DevTools did not provide prewarmed page targets");
+        }
+        log_browser_backend(format!("using native CEF DevTools on 127.0.0.1:{port}"));
         Ok(Some(Self {
             inner: Arc::new(Mutex::new(BrowserRootState {
                 profile_dir: profile_dir.clone(),
                 browser_ws,
                 child: None,
                 owns_targets: false,
-                reusable_target: Some(reusable_target),
+                reusable_targets,
                 last_active: Instant::now(),
             })),
         }))
@@ -156,20 +168,15 @@ impl BrowserRootSession {
         let mut inner = self.inner.lock().unwrap();
         touch_root(&mut inner);
         ensure_root_alive(&mut inner)?;
-        if let Some(target) = inner.reusable_target.take() {
+        if let Some(target) = inner.reusable_targets.pop() {
             return Ok(target);
         }
         if inner.owns_targets {
             create_page_target(&inner.browser_ws, DEFAULT_URL)
         } else {
-            create_page_target(&inner.browser_ws, DEFAULT_URL).or_else(|create_error| {
-                wait_for_initial_page_target(&inner.browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)?
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "CEF DevTools endpoint did not provide a page target and creating one failed: {create_error}"
-                        )
-                    })
-            })
+            bail!(
+                "native CEF DevTools has no available prewarmed page targets; restart Corbina with a larger PUFFER_CEF_PREWARM_TARGETS value"
+            )
         }
     }
 
@@ -180,6 +187,7 @@ impl BrowserRootSession {
         if inner.owns_targets || target.close_on_release {
             close_page_target(&inner.browser_ws, &target.target_id)
         } else {
+            inner.reusable_targets.push(target.clone());
             Ok(())
         }
     }
@@ -187,7 +195,7 @@ impl BrowserRootSession {
     /// Terminates the shared Chrome process for this root owner.
     pub(super) fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(target) = inner.reusable_target.take() {
+        while let Some(target) = inner.reusable_targets.pop() {
             if inner.owns_targets || target.close_on_release {
                 let _ = close_page_target(&inner.browser_ws, &target.target_id);
             }
@@ -249,9 +257,11 @@ impl BrowserSession {
             width,
             height,
         }));
+        let network = Arc::new(Mutex::new(BrowserNetworkState::default()));
         let last_active = Arc::new(Mutex::new(Instant::now()));
         let alive = Arc::new(AtomicBool::new(true));
         let worker_state = Arc::clone(&state);
+        let worker_network = Arc::clone(&network);
         let worker_alive = Arc::clone(&alive);
         let worker_root = root.clone();
         std::thread::spawn(move || {
@@ -264,6 +274,7 @@ impl BrowserSession {
                 target,
                 rx,
                 worker_state,
+                worker_network,
                 worker_alive,
                 width,
                 height,
@@ -272,6 +283,7 @@ impl BrowserSession {
         Ok(Self {
             tx,
             state,
+            network,
             last_active,
             alive,
             root: Some(root),
@@ -288,6 +300,7 @@ impl BrowserSession {
         Self {
             tx,
             state,
+            network: Arc::new(Mutex::new(BrowserNetworkState::default())),
             last_active,
             alive: Arc::new(AtomicBool::new(true)),
             root: None,
@@ -316,6 +329,27 @@ impl BrowserSession {
             }
             if start.elapsed() >= timeout {
                 bail!("timed out waiting for browser page load");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Waits until the page worker reports no active network requests for `idle`.
+    pub(super) fn wait_for_network_idle(&self, idle: Duration, timeout: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            let active_count = {
+                let network = self.network.lock().unwrap();
+                if network.is_idle_for(idle) {
+                    return Ok(());
+                }
+                network.active_count()
+            };
+            if start.elapsed() >= timeout {
+                bail!(
+                    "timed out waiting for browser network idle after {}ms with {active_count} active request(s)",
+                    timeout.as_millis()
+                );
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -435,41 +469,6 @@ impl BrowserSession {
     }
 }
 
-pub(super) enum BrowserCommand {
-    Navigate(String),
-    Reload,
-    History(BrowserHistoryDirection),
-    Resize {
-        width: u32,
-        height: u32,
-    },
-    Input(BrowserInputEvent),
-    CopySelection {
-        reply: Sender<std::result::Result<BrowserCopySelection, String>>,
-    },
-    Cursor {
-        x: f64,
-        y: f64,
-        reply: Sender<std::result::Result<BrowserCursor, String>>,
-    },
-    Evaluate {
-        expression: String,
-        reply: Sender<std::result::Result<BrowserEvaluation, String>>,
-    },
-    CaptureScreenshot {
-        options: BrowserCaptureScreenshotOptions,
-        reply: Sender<std::result::Result<BrowserCapturedScreenshot, String>>,
-    },
-    Upload {
-        expression: String,
-        files: Vec<String>,
-        reply: UploadReply,
-    },
-    Close {
-        reply: Sender<()>,
-    },
-}
-
 enum PendingKind {
     StateEval,
     CopySelection {
@@ -513,6 +512,7 @@ fn run_cdp_worker(
     target: ChromePageTarget,
     rx: Receiver<BrowserCommand>,
     state: Arc<Mutex<BrowserState>>,
+    network: Arc<Mutex<BrowserNetworkState>>,
     alive: Arc<AtomicBool>,
     width: u32,
     height: u32,
@@ -588,6 +588,7 @@ fn run_cdp_worker(
                         &mut next_id,
                         &mut pending,
                         &state,
+                        &network,
                         value,
                     );
                 }
@@ -752,6 +753,7 @@ fn handle_cdp_message(
     next_id: &mut u64,
     pending: &mut HashMap<u64, PendingKind>,
     state: &Arc<Mutex<BrowserState>>,
+    network: &Arc<Mutex<BrowserNetworkState>>,
     value: Value,
 ) {
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
@@ -863,6 +865,7 @@ fn handle_cdp_message(
     let Some(method) = value.get("method").and_then(Value::as_str) else {
         return;
     };
+    network.lock().unwrap().update_from_cdp(method, &value);
     match method {
         "Page.screencastFrame" => {
             let params = value.get("params").cloned().unwrap_or_else(|| json!({}));

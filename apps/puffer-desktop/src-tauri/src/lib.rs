@@ -396,6 +396,11 @@ fn cancel_turn(
 }
 
 pub fn run() {
+    #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+    if let Err(err) = cef_host::browser_cef_native_preinitialize() {
+        eprintln!("native CEF preinitialize failed: {err}");
+    }
+
     let backend = Arc::new(BackendState::new());
     let launcher = Arc::new(DaemonLauncher::new());
     websocket::start_backend_ws(backend.clone());
@@ -425,6 +430,41 @@ pub fn run() {
         )
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            #[cfg(all(target_os = "macos", puffer_desktop_cef_native))]
+            {
+                use tauri::Manager;
+                let smoke_url = std::env::var("PUFFER_CEF_SMOKE_URL").ok();
+                let prewarm_targets = std::env::var("PUFFER_CEF_PREWARM_TARGETS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(3);
+                if smoke_url.is_some() || prewarm_targets > 0 {
+                    let app_handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let app_for_main = app_handle.clone();
+                        if let Err(err) = app_handle.run_on_main_thread(move || {
+                            if let Some(window) = app_for_main.get_webview_window("main") {
+                                if let Some(url) = smoke_url {
+                                    if let Err(err) =
+                                        cef_host::browser_cef_native_smoke_open(window.clone(), url)
+                                    {
+                                        eprintln!("CEF smoke open failed: {err}");
+                                    }
+                                }
+                                if let Err(err) = cef_host::browser_cef_native_prewarm_targets(
+                                    window,
+                                    prewarm_targets,
+                                ) {
+                                    eprintln!("CEF prewarm failed: {err}");
+                                }
+                            }
+                        }) {
+                            eprintln!("CEF smoke dispatch failed: {err}");
+                        }
+                    });
+                }
+            }
             if let Err(err) = app.global_shortcut().register(mini_shortcut) {
                 eprintln!("mini-window shortcut unavailable (continuing without it): {err}");
             }

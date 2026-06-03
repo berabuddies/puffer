@@ -350,6 +350,10 @@ build_tauri() {
       staged_runtime="$(stage_tauri_cef_runtime "$cef_runtime")"
       log "building macOS Tauri app with CEF runtime $cef_runtime"
       (cd "$APP_DIR" && PUFFER_CEF_PATH="$staged_runtime" PUFFER_CEF_ROOT="$staged_runtime" npm run tauri -- build --bundles app)
+      local app
+      app="$(mac_app_bundle)"
+      [[ -n "$app" ]] || fail "Tauri macOS app bundle was not produced"
+      embed_macos_app_runtime "$app" "$cef_runtime"
       ;;
     linux)
       local bundles
@@ -2875,19 +2879,12 @@ mac_app_executable() {
   find "$app/Contents/MacOS" -maxdepth 1 -type f -perm -111 ! -name puffer -print -quit
 }
 
-bundle_macos_app() {
-  require_macos pack-macos
-  require_command ditto
-  build_macos
-  local source_app app_name stage app cef_runtime executable asset
-  source_app="$(mac_app_bundle)"
-  [[ -n "$source_app" ]] || fail "Tauri macOS app bundle was not produced"
-  app_name="$(basename "$source_app")"
-  cef_runtime="$(ensure_cef_runtime_for_tauri)"
-  stage="$CACHE_DIR/stage/macos-app"
-  reset_dir "$stage"
-  ditto "$source_app" "$stage/$app_name"
-  app="$stage/$app_name"
+embed_macos_app_runtime() {
+  local app="$1"
+  local cef_runtime="$2"
+  local executable
+  require_command install_name_tool
+  require_command rsync
 
   [[ -x "$ROOT/target/release/puffer" ]] || build_rust
   cp "$ROOT/target/release/puffer" "$app/Contents/MacOS/puffer"
@@ -2901,6 +2898,23 @@ bundle_macos_app() {
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$executable" 2>/dev/null || true
   fi
   sign_macos_app_bundle "$app"
+}
+
+bundle_macos_app() {
+  require_macos pack-macos
+  require_command ditto
+  build_macos
+  local source_app app_name stage app cef_runtime asset
+  source_app="$(mac_app_bundle)"
+  [[ -n "$source_app" ]] || fail "Tauri macOS app bundle was not produced"
+  app_name="$(basename "$source_app")"
+  cef_runtime="$(ensure_cef_runtime_for_tauri)"
+  stage="$CACHE_DIR/stage/macos-app"
+  reset_dir "$stage"
+  ditto "$source_app" "$stage/$app_name"
+  app="$stage/$app_name"
+
+  embed_macos_app_runtime "$app" "$cef_runtime"
 
   ensure_dirs
   asset="$ARTIFACT_DIR/$(desktop_asset_name)"

@@ -57,6 +57,11 @@ fn spawn_stderr_drain<R: std::io::Read + Send + 'static>(mut reader: BufReader<R
 
 /// Returns the initial Chrome page target created during browser launch, if present.
 pub(super) fn initial_page_target(browser_ws: &str) -> Result<Option<ChromePageTarget>> {
+    Ok(initial_page_targets(browser_ws)?.into_iter().next())
+}
+
+/// Returns all page targets currently published by the DevTools endpoint.
+pub(super) fn initial_page_targets(browser_ws: &str) -> Result<Vec<ChromePageTarget>> {
     let endpoint = format!("{}/json/list", devtools_http_base(browser_ws)?);
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
@@ -73,11 +78,11 @@ pub(super) fn initial_page_target(browser_ws: &str) -> Result<Option<ChromePageT
     let Some(targets) = value.as_array() else {
         bail!("Chrome target listing response was not an array");
     };
-    Ok(targets
+    targets
         .iter()
-        .find(|target| target.get("type").and_then(Value::as_str) == Some("page"))
+        .filter(|target| is_reusable_page_target(target))
         .map(|target| parse_page_target(target, false))
-        .transpose()?)
+        .collect()
 }
 
 /// Waits for a page target to appear on an existing DevTools endpoint.
@@ -85,12 +90,22 @@ pub(super) fn wait_for_initial_page_target(
     browser_ws: &str,
     timeout: Duration,
 ) -> Result<Option<ChromePageTarget>> {
+    Ok(wait_for_initial_page_targets(browser_ws, timeout)?
+        .into_iter()
+        .next())
+}
+
+/// Waits for at least one page target to appear on an existing DevTools endpoint.
+pub(super) fn wait_for_initial_page_targets(
+    browser_ws: &str,
+    timeout: Duration,
+) -> Result<Vec<ChromePageTarget>> {
     let start = Instant::now();
     let mut last_error = None;
     loop {
-        match initial_page_target(browser_ws) {
-            Ok(Some(target)) => return Ok(Some(target)),
-            Ok(None) => {}
+        match initial_page_targets(browser_ws) {
+            Ok(targets) if !targets.is_empty() => return Ok(targets),
+            Ok(_) => {}
             Err(error) => last_error = Some(error),
         }
         if start.elapsed() >= timeout {
@@ -101,7 +116,7 @@ pub(super) fn wait_for_initial_page_target(
     if let Some(error) = last_error {
         return Err(error).context("wait for Chrome page target");
     }
-    Ok(None)
+    Ok(Vec::new())
 }
 
 /// Waits for an already-running DevTools HTTP endpoint to publish its browser WebSocket URL.
@@ -314,6 +329,11 @@ fn parse_page_target(value: &Value, close_on_release: bool) -> Result<ChromePage
     })
 }
 
+fn is_reusable_page_target(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("page")
+        && value.get("url").and_then(Value::as_str) == Some("about:blank")
+}
+
 fn devtools_http_base(browser_ws: &str) -> Result<String> {
     let parsed = Url::parse(browser_ws).context("parse Chrome DevTools URL")?;
     let host = parsed
@@ -358,5 +378,21 @@ mod tests {
 
         assert_eq!(target.target_id, "page-2");
         assert!(target.close_on_release);
+    }
+
+    #[test]
+    fn reusable_page_targets_ignore_nonblank_visible_pages() {
+        assert!(is_reusable_page_target(&json!({
+            "id": "page-1",
+            "type": "page",
+            "url": "about:blank",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-1"
+        })));
+        assert!(!is_reusable_page_target(&json!({
+            "id": "page-2",
+            "type": "page",
+            "url": "http://127.0.0.1:1420/native-start",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-2"
+        })));
     }
 }
