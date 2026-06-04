@@ -472,7 +472,8 @@ fn lark_cli_output_timed(
     args: &[&str],
     timeout: std::time::Duration,
 ) -> Result<std::process::Output> {
-    let mut child = std::process::Command::new(bin)
+    let mut command = lark_cli_command(bin);
+    let mut child = command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -485,11 +486,62 @@ fn lark_cli_output_timed(
             return child.wait_with_output().context("collect lark-cli output");
         }
         if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_lark_cli_child(&mut child);
             bail!("`{bin} {}` timed out", args.join(" "));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn lark_cli_command(bin: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(bin);
+    configure_lark_cli_child(&mut command);
+    command
+}
+
+#[cfg(unix)]
+fn configure_lark_cli_child(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // lark-cli installed through npm is a Node wrapper that can spawn another
+    // process. Put it in its own process group so timeout/cancel cleanup can
+    // stop the wrapper and the real CLI process together.
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_lark_cli_child(_command: &mut std::process::Command) {}
+
+fn terminate_lark_cli_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        terminate_lark_cli_process_group(child.id(), libc::SIGTERM);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        terminate_lark_cli_process_group(child.id(), libc::SIGKILL);
+        let _ = child.wait();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn terminate_lark_cli_process_group(pid: u32, signal: libc::c_int) {
+    let pgid = pid as libc::pid_t;
+    if pgid <= 0 {
+        return;
+    }
+    // Ignore ESRCH: the process may have completed between try_wait and cleanup.
+    unsafe {
+        libc::killpg(pgid, signal);
     }
 }
 
@@ -873,7 +925,8 @@ fn lark_cli_config_init_new(
         args.join(" ")
     );
     let flow_start = Instant::now();
-    let mut child = std::process::Command::new(bin)
+    let mut command = lark_cli_command(bin);
+    let mut child = command
         .args(args)
         .stdin(std::process::Stdio::null())
         // stdout is unused (URL + QR go to stderr); null it so a chatty stdout
@@ -909,8 +962,7 @@ fn lark_cli_config_init_new(
     let url = match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(url) => url,
         Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_lark_cli_child(&mut child);
             let tail = lark_cli_log_tail(&stderr_lines);
             eprintln!(
                 "[lark-connect][config-init-new] verification_url_timeout pid={child_id} elapsed_ms={} stderr_tail={tail}",
@@ -947,8 +999,7 @@ fn lark_cli_config_init_new(
         flow_start.elapsed().as_millis()
     );
     if choice != "Done" {
-        let _ = child.kill();
-        let _ = child.wait();
+        terminate_lark_cli_child(&mut child);
         bail!("App creation cancelled");
     }
 
@@ -963,15 +1014,14 @@ fn lark_cli_config_init_new(
             break status;
         }
         if start.elapsed() >= Duration::from_secs(180) {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_lark_cli_child(&mut child);
             let tail = lark_cli_log_tail(&stderr_lines);
             eprintln!(
                 "[lark-connect][config-init-new] registration_timeout pid={child_id} elapsed_ms={} stderr_tail={tail}",
                 flow_start.elapsed().as_millis()
             );
             bail!(
-                "`{bin} config init --new` did not finish; complete the browser steps, then retry `/connect lark-bot`. stderr: {tail}"
+                "`{bin} config init --new` did not finish. Close this dialog and click Connect again to start a fresh Feishu/Lark app-registration URL. stderr: {tail}"
             );
         }
         if last_wait_log.elapsed() >= Duration::from_secs(15) {
@@ -1501,6 +1551,60 @@ mod tests {
             lark_cli_config_init_new_args("feishu"),
             ["config", "init", "--new", "--brand", "feishu"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_lark_cli_child_signals_descendant_wrapper_process() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let inner = tempdir.path().join("inner.sh");
+        let wrapper = tempdir.path().join("wrapper.sh");
+        let marker = tempdir.path().join("inner-terminated");
+        let pid_file = tempdir.path().join("inner.pid");
+        let ready_file = tempdir.path().join("inner-ready");
+
+        std::fs::write(
+            &inner,
+            "#!/bin/sh\necho $$ > \"$2\"\ntrap 'touch \"$1\"; exit 0' TERM\ntouch \"$3\"\nwhile true; do sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::write(&wrapper, "#!/bin/sh\n\"$1\" \"$2\" \"$3\" \"$4\"\n").unwrap();
+        for script in [&inner, &wrapper] {
+            let mut permissions = std::fs::metadata(script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(script, permissions).unwrap();
+        }
+
+        let mut command = lark_cli_command(wrapper.to_str().unwrap());
+        let mut child = command
+            .arg(inner.to_str().unwrap())
+            .arg(marker.to_str().unwrap())
+            .arg(pid_file.to_str().unwrap())
+            .arg(ready_file.to_str().unwrap())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_until(Duration::from_secs(2), || ready_file.exists());
+
+        terminate_lark_cli_child(&mut child);
+
+        wait_until(Duration::from_secs(2), || marker.exists());
+
+        fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if predicate() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(predicate(), "condition timed out");
+        }
     }
 
     #[test]
