@@ -9,11 +9,13 @@ use puffer_subscriptions::{ConnectionRecord, ConnectionState};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 const CONNECTOR_SLUG: &str = "gmail-browser";
 const STATE_ROOT: &str = "gmail-browser-accounts";
 const CONFIG_FILE: &str = "config.toml";
+const AUTH_STATE_FILE: &str = "auth_state.json";
 
 #[derive(Serialize)]
 struct GmailBrowserConfig {
@@ -77,8 +79,17 @@ fn save_gmail_config(
         accounts: accounts.to_vec(),
     };
     let raw = toml::to_string_pretty(&config).context("serialize Gmail browser config")?;
-    fs::write(state_dir.join(CONFIG_FILE), raw)
-        .with_context(|| format!("write {}", state_dir.join(CONFIG_FILE).display()))
+    let config_path = state_dir.join(CONFIG_FILE);
+    fs::write(&config_path, raw).with_context(|| format!("write {}", config_path.display()))?;
+    clear_gmail_auth_state(&state_dir)?;
+    tracing::info!(
+        connector = CONNECTOR_SLUG,
+        connection,
+        state_dir = %state_dir.display(),
+        account_count = accounts.len(),
+        "saved gmail-browser config and cleared stale auth state"
+    );
+    Ok(())
 }
 
 fn upsert_connection(connection: &str, accounts: &[String]) -> Result<bool> {
@@ -109,7 +120,23 @@ fn upsert_connection(connection: &str, accounts: &[String]) -> Result<bool> {
     };
     manager.refresh_connection_consumers()?;
     manager.refresh_connection_auth()?;
+    tracing::info!(
+        connector = CONNECTOR_SLUG,
+        connection,
+        registered,
+        account_count = accounts.len(),
+        "upserted gmail-browser connection"
+    );
     Ok(registered)
+}
+
+fn clear_gmail_auth_state(state_dir: &Path) -> Result<()> {
+    let path = state_dir.join(AUTH_STATE_FILE);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 fn answer_string(output: &Value, question: &str) -> Result<String> {
@@ -161,5 +188,29 @@ mod tests {
         ));
 
         assert_eq!(accounts, vec!["me@example.com", "other@example.com"]);
+    }
+
+    #[test]
+    fn save_config_clears_stale_auth_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            workspace_config_dir: temp.path().join("workspace").join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: temp.path().join("resources"),
+            workspace_root: temp.path().join("workspace"),
+        };
+        let state_dir = paths.user_config_dir.join(STATE_ROOT).join("gmail-browser");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join(AUTH_STATE_FILE), "{}").unwrap();
+
+        save_gmail_config(
+            &paths,
+            &paths.workspace_root,
+            "gmail-browser",
+            &["me@example.com".to_string()],
+        )
+        .unwrap();
+
+        assert!(!state_dir.join(AUTH_STATE_FILE).exists());
     }
 }

@@ -1,5 +1,6 @@
 //! Gmail web connector backed by daemon-managed Chrome sessions.
 
+use crate::gmail_browser_log as diag;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{Event, SubscriberCommand};
@@ -14,6 +15,9 @@ use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 
 #[path = "gmail_browser_actions.rs"]
 mod gmail_browser_actions;
+#[path = "gmail_browser_script.rs"]
+mod gmail_browser_script;
+use gmail_browser_script::GMAIL_INBOX_SCRIPT;
 
 /// Connector and default connection slug used by the Gmail browser connector.
 pub(crate) const CONNECTOR_SLUG: &str = "gmail-browser";
@@ -190,17 +194,25 @@ pub(crate) async fn run_subscriber() -> Result<()> {
         .with_context(|| format!("create {}", env.state_dir.display()))?;
 
     let mut seen = load_seen(&env.state_dir)?;
+    diag::subscriber_start(
+        &env.topic,
+        &env.state_dir,
+        seen.initialized,
+        seen.seen.len(),
+    );
     let mut handshake = None;
     let mut last_config_key = String::new();
     let mut commands = CommandStream::new();
     loop {
         let Some(config) = load_config_from_dir(&env.state_dir)? else {
+            diag::config_required(&env.topic, &env.state_dir, "missing");
             emit_control(&env.topic, "config_required", json!({}))?;
             wait_or_handle_command(&env, None, &mut handshake, &mut commands, POLL_INTERVAL)
                 .await?;
             continue;
         };
         if !config.is_configured() {
+            diag::config_required(&env.topic, &env.state_dir, "no_accounts");
             emit_control(&env.topic, "config_required", json!({}))?;
             wait_or_handle_command(
                 &env,
@@ -215,6 +227,17 @@ pub(crate) async fn run_subscriber() -> Result<()> {
         let config_key = config.accounts.join(",");
         if config_key != last_config_key {
             prune_auth_state(&env.state_dir, &config.accounts)?;
+            let auth_required_count = load_auth_state(&env.state_dir)?
+                .auth_required_accounts
+                .len();
+            diag::config_ready(
+                &env.topic,
+                &env.state_dir,
+                config.accounts.len(),
+                auth_required_count,
+                seen.initialized,
+                seen.seen.len(),
+            );
             emit_control(
                 &env.topic,
                 "ready",
@@ -240,6 +263,7 @@ pub(crate) async fn run_subscriber() -> Result<()> {
             }
             Err(error) => {
                 handshake = None;
+                diag::poll_loop_error(&env.topic, &error);
                 emit_control(
                     &env.topic,
                     "poll_error",
@@ -428,8 +452,12 @@ async fn poll_once(
     handshake: &mut Option<crate::daemon::Handshake>,
 ) -> Result<()> {
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
+    let seen_count_before = seen.seen.len();
+    let initialized_before = seen.initialized;
     let mut newly_seen = BTreeSet::new();
     let mut successful_poll = false;
+    let mut observed_rows = 0usize;
+    let mut emitted_rows = 0usize;
     for account in &config.accounts {
         let result = poll_account(env, account, handshake_ref)?;
         let status = result.get("status").and_then(Value::as_str).unwrap_or("ok");
@@ -440,6 +468,7 @@ async fn poll_once(
             }
             "auth_required" => {
                 mark_account_auth_required(&env.state_dir, account, &result)?;
+                diag::account_auth_required(&env.topic, account, &result);
                 emit_control(
                     &env.topic,
                     "auth_required",
@@ -452,6 +481,7 @@ async fn poll_once(
                 continue;
             }
             other => {
+                diag::account_poll_error(&env.topic, account, other, &result);
                 emit_control(
                     &env.topic,
                     "poll_error",
@@ -466,18 +496,20 @@ async fn poll_once(
                 continue;
             }
         }
-        for row in result
+        let rows = result
             .get("rows")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default()
-        {
+            .unwrap_or_default();
+        observed_rows += rows.len();
+        for row in rows {
             let Some(id) = row.get("id").and_then(Value::as_str) else {
                 continue;
             };
             let key = format!("{account}:{id}");
             newly_seen.insert(key.clone());
             if should_emit_row(seen, &key, &row) {
+                emitted_rows += 1;
                 emit_message(env, account, &key, row)?;
             }
         }
@@ -486,6 +518,16 @@ async fn poll_once(
         seen.seen.extend(newly_seen);
         seen.initialized = true;
     }
+    diag::poll_complete(
+        &env.topic,
+        successful_poll,
+        observed_rows,
+        emitted_rows,
+        initialized_before,
+        seen.initialized,
+        seen_count_before,
+        seen.seen.len(),
+    );
     Ok(())
 }
 
@@ -499,6 +541,7 @@ fn ensure_browser_daemon<'a>(
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let paths = ConfigPaths::discover(workspace_root);
+        diag::browser_daemon_connect(&paths);
         *handshake = Some(crate::daemon_browser::ensure_daemon(&paths)?);
     }
     Ok(handshake.as_ref().expect("handshake populated above"))
@@ -520,6 +563,7 @@ fn poll_account_at_url(
 ) -> Result<Value> {
     let root_session = format!("gmail-browser-{}", safe_session_part(&env.topic));
     let tab_id = safe_session_part(account);
+    let started = Instant::now();
     crate::daemon_browser::send_daemon_request(
         handshake,
         "browser_agent",
@@ -552,6 +596,13 @@ fn poll_account_at_url(
         .context("read Gmail browser tab")?;
         let result = value.get("value").cloned().unwrap_or(Value::Null);
         if gmail_poll_result_ready(&result) || Instant::now() >= deadline {
+            diag::account_poll_result(
+                &env.topic,
+                account,
+                &result,
+                started.elapsed().as_millis(),
+                Instant::now() >= deadline,
+            );
             return Ok(result);
         }
         std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
@@ -567,6 +618,16 @@ fn emit_message(env: &SubscriberEnv, account: &str, dedup_key: &str, row: Value)
         .filter(|part| !part.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
+    diag::emit_message(
+        &env.topic,
+        account,
+        dedup_key,
+        &row,
+        sender,
+        subject,
+        snippet,
+        text.len(),
+    );
     emit_event(Event {
         topic: env.topic.clone(),
         kind: "message".to_string(),
@@ -675,93 +736,6 @@ fn gmail_poll_result_ready(result: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|rows| !rows.is_empty())
 }
-
-const GMAIL_INBOX_SCRIPT: &str = r#"
-(() => {
-  const href = location.href;
-  const title = document.title || "";
-  const bodyText = document.body ? document.body.innerText || "" : "";
-  const host = location.hostname || "";
-  const signinLike =
-    host.includes("accounts.google.com") ||
-    /ServiceLogin|signin|identifier/.test(href) ||
-    (/sign in/i.test(title) && !/gmail/i.test(title));
-  if (signinLike) {
-    return { status: "auth_required", href, title, rows: [] };
-  }
-  const temporaryError =
-    /temporary error/i.test(title) ||
-    /temporarily unavailable/i.test(bodyText) ||
-    /Temporary Error/.test(bodyText);
-  if (temporaryError) {
-    return { status: "temporary_error", href, title, bodyText: bodyText.slice(0, 200), rows: [] };
-  }
-  const visible = (node) => {
-    if (!node) return false;
-    const rect = node.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
-  const text = (node) => (node && node.textContent ? node.textContent.trim().replace(/\s+/g, " ") : "");
-  const rows = Array.from(document.querySelectorAll('tr[role="row"]'))
-    .filter(visible)
-    .slice(0, 75)
-    .map((row, index) => {
-      const fromEl = row.querySelector('.yW span[email], span[email], .yX.xY .yW span');
-      const subjectEl = row.querySelector('.bog, span[data-thread-id], .y6 span[id]');
-      const snippetEl = row.querySelector('.y2, span[data-thread-id] + span');
-      const idEl = row.querySelector('[data-legacy-thread-id], [data-thread-id], [data-legacy-message-id]');
-      const legacyThreadId =
-        row.getAttribute("data-legacy-thread-id") ||
-        (idEl && idEl.getAttribute("data-legacy-thread-id")) ||
-        "";
-      const rawThreadId =
-        row.getAttribute("data-thread-id") ||
-        (idEl && idEl.getAttribute("data-thread-id")) ||
-        "";
-      const threadId = legacyThreadId || rawThreadId.replace(/^#/, "");
-      const messageId =
-        row.getAttribute("data-legacy-message-id") ||
-        (idEl && idEl.getAttribute("data-legacy-message-id")) ||
-        row.getAttribute("data-message-id") ||
-        legacyThreadId ||
-        threadId ||
-        row.getAttribute("data-id") ||
-        "";
-      const sender =
-        (fromEl && (fromEl.getAttribute("name") || fromEl.getAttribute("aria-label"))) ||
-        text(fromEl);
-      const fromEmail = (fromEl && fromEl.getAttribute("email")) || "";
-      const subject = text(subjectEl);
-      const snippet = text(snippetEl);
-      const aria = (row.getAttribute("aria-label") || "").toLowerCase();
-      const unread =
-        row.classList.contains("zE") ||
-        row.querySelector(".zF") !== null ||
-        aria.includes("unread");
-      const fallback = [sender, subject, snippet, index].join(":");
-      return {
-        id: messageId || fallback,
-        threadId,
-        legacyThreadId,
-        gmailThreadId: rawThreadId,
-        sender,
-        fromEmail,
-        subject,
-        snippet,
-        unread,
-        url: href,
-        index
-      };
-    })
-    .filter((row) => row.id && (row.sender || row.subject || row.snippet || row.unread));
-  const empty =
-    /no conversations/i.test(bodyText) ||
-    /inbox is empty/i.test(bodyText) ||
-    /no mail/i.test(bodyText);
-  const status = rows.length > 0 || empty ? "ok" : "loading";
-  return { status, href, title, bodyText: bodyText.slice(0, 200), empty, rows };
-})()
-"#;
 
 #[cfg(test)]
 mod tests {

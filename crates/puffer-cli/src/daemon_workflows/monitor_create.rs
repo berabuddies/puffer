@@ -45,6 +45,13 @@ fn create_or_resume_monitor(
         .connection_store()
         .get(connection_slug)
         .ok_or_else(|| anyhow::anyhow!("connection `{connection_slug}` not found"))?;
+    eprintln!(
+        "monitor-create: connection={connection_slug} connector={} state={:?} has_consumer={} auth_failure_notified={}",
+        connection.connector_slug,
+        connection.state,
+        connection.has_consumer,
+        connection.auth_failure_notified
+    );
     ensure_connection_auth_usable(&connection)?;
     let template = manager
         .connector_store()
@@ -87,6 +94,11 @@ fn create_or_resume_monitor(
         )?,
     };
     manager.store().upsert(binding)?;
+    eprintln!(
+        "monitor-create: binding={} connection={connection_slug} action=triage_agent previous_exists={}",
+        monitor_slug,
+        previous.is_some()
+    );
     let setup_result = (|| -> Result<()> {
         ensure_workflow_subscriber_started(manager.as_ref(), paths, &connection, &template)?;
         manager.refresh_connection_consumers()?;
@@ -97,6 +109,7 @@ fn create_or_resume_monitor(
         manager.refresh_connection_consumers()?;
         return Err(error).with_context(|| format!("monitor `{monitor_slug}` setup failed"));
     }
+    eprintln!("monitor-create: monitor={monitor_slug} setup_complete=true");
     Ok(())
 }
 

@@ -35,6 +35,7 @@ mod desktop_api;
 mod desktop_api_types;
 mod gcal_browser;
 mod gmail_browser;
+mod gmail_browser_log;
 mod heartbeat;
 mod internal_tools;
 mod lark_connector;

@@ -257,12 +257,17 @@ pub fn process_envelope_result(
 ) -> EnvelopeProcessResult {
     let mut result = EnvelopeProcessResult::default();
     if envelope.event.control {
+        tracing::info!(
+            subscriber = %envelope.subscriber_id,
+            envelope = %envelope.envelope_id,
+            topic = %envelope.event.topic,
+            kind = %envelope.event.kind,
+            "workflow router skipped control event"
+        );
         return result;
     }
+    let mut topic_matched_any = false;
     for spec in store.list() {
-        if spec.status == WorkflowBindingStatus::Paused {
-            continue;
-        }
         let topic_matches = spec.connection_slug == envelope.event.topic
             || spec
                 .connector_slug
@@ -271,10 +276,17 @@ pub fn process_envelope_result(
         if !topic_matches {
             continue;
         }
+        topic_matched_any = true;
+        if spec.status == WorkflowBindingStatus::Paused {
+            log_router_skip(&spec, envelope, "binding_paused");
+            continue;
+        }
         if event_dedup_key_seen(history_store, &spec, envelope) {
+            log_router_skip(&spec, envelope, "dedup_seen");
             continue;
         }
         if monitor_binding_should_skip_event(&spec, &envelope.event.payload) {
+            log_router_skip(&spec, envelope, "monitor_muted_skip");
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -285,6 +297,7 @@ pub fn process_envelope_result(
             continue;
         }
         if ignore_filter_matches(&spec, &envelope.event.text, &envelope.event.payload) {
+            log_router_skip(&spec, envelope, "monitor_ignore_filter");
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -299,6 +312,7 @@ pub fn process_envelope_result(
             &envelope.event.text,
             &envelope.event.payload,
         ) {
+            log_router_skip(&spec, envelope, "monitor_filter_skip");
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -312,6 +326,7 @@ pub fn process_envelope_result(
             match classifier.classify(&spec, &envelope.event) {
                 ClassifyDecision::Pass => {}
                 ClassifyDecision::Reject | ClassifyDecision::Inconclusive => {
+                    log_router_skip(&spec, envelope, "monitor_classifier_skip");
                     record_monitor_router_outcome(
                         history_store,
                         &spec,
@@ -324,6 +339,16 @@ pub fn process_envelope_result(
             }
         }
         result.matched = true;
+        tracing::info!(
+            workflow_binding = %spec.slug,
+            envelope = %envelope.envelope_id,
+            topic = %envelope.event.topic,
+            kind = %envelope.event.kind,
+            dedup_hash = %dedup_hash(envelope),
+            text_len = envelope.event.text.len(),
+            action = %action_label(&spec.action),
+            "workflow router dispatching event"
+        );
         let started_at_ms = now_ms();
         let started_history_idx = history_store.and_then(|history_store| {
             match history_store.append_action_started(&spec, envelope, &spec.action, started_at_ms)
@@ -408,6 +433,18 @@ pub fn process_envelope_result(
             );
         }
     }
+    if !result.matched {
+        tracing::info!(
+            subscriber = %envelope.subscriber_id,
+            envelope = %envelope.envelope_id,
+            topic = %envelope.event.topic,
+            kind = %envelope.event.kind,
+            dedup_hash = %dedup_hash(envelope),
+            text_len = envelope.event.text.len(),
+            topic_matched_any,
+            "workflow router produced no action for event"
+        );
+    }
     result
 }
 
@@ -483,9 +520,11 @@ fn prefilter_envelope_for_spec<'a>(
         return None;
     }
     if event_dedup_key_seen(history_store, spec, envelope) {
+        log_router_skip(spec, envelope, "dedup_seen");
         return None;
     }
     if monitor_binding_should_skip_event(spec, &envelope.event.payload) {
+        log_router_skip(spec, envelope, "monitor_muted_skip");
         record_monitor_router_outcome(
             history_store,
             spec,
@@ -496,6 +535,7 @@ fn prefilter_envelope_for_spec<'a>(
         return None;
     }
     if ignore_filter_matches(spec, &envelope.event.text, &envelope.event.payload) {
+        log_router_skip(spec, envelope, "monitor_ignore_filter");
         record_monitor_router_outcome(
             history_store,
             spec,
@@ -510,6 +550,7 @@ fn prefilter_envelope_for_spec<'a>(
         &envelope.event.text,
         &envelope.event.payload,
     ) {
+        log_router_skip(spec, envelope, "monitor_filter_skip");
         record_monitor_router_outcome(
             history_store,
             spec,
@@ -523,6 +564,7 @@ fn prefilter_envelope_for_spec<'a>(
         match classifier.classify(spec, &envelope.event) {
             ClassifyDecision::Pass => {}
             ClassifyDecision::Reject | ClassifyDecision::Inconclusive => {
+                log_router_skip(spec, envelope, "monitor_classifier_skip");
                 record_monitor_router_outcome(
                     history_store,
                     spec,
@@ -605,6 +647,12 @@ fn dispatch_matched_batch(
         .iter()
         .map(|envelope| (*envelope).clone())
         .collect();
+    tracing::info!(
+        workflow_binding = %spec.slug,
+        batch_size = batch.len(),
+        action = %action_label(&spec.action),
+        "workflow router dispatching event batch"
+    );
     let action_result = dispatcher.dispatch_batch(&spec.action, &batch);
     let ended_at_ms = now_ms();
     for envelope in envelopes {
@@ -704,6 +752,51 @@ fn account_action_result(
             "{}",
             action_result.summary
         );
+    }
+}
+
+fn log_router_skip(spec: &WorkflowBindingSpec, envelope: &EventEnvelope, reason: &str) {
+    tracing::info!(
+        workflow_binding = %spec.slug,
+        envelope = %envelope.envelope_id,
+        topic = %envelope.event.topic,
+        kind = %envelope.event.kind,
+        dedup_hash = %dedup_hash(envelope),
+        text_len = envelope.event.text.len(),
+        reason = %reason,
+        "workflow router skipped event"
+    );
+}
+
+fn dedup_hash(envelope: &EventEnvelope) -> String {
+    envelope
+        .event
+        .dedup_key
+        .as_deref()
+        .map(fnv1a64_hex)
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn fnv1a64_hex(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn action_label(action: &ActionSpec) -> &'static str {
+    match action {
+        ActionSpec::SqliteInsert { .. } => "sqlite_insert",
+        ActionSpec::FileAppend { .. } => "file_append",
+        ActionSpec::ForwardMessage { .. } => "forward_message",
+        ActionSpec::RunWorkflow { .. } => "run_workflow",
+        ActionSpec::ConnectorAct { .. } => "connector_act",
+        ActionSpec::ToolCall { .. } => "tool_call",
+        ActionSpec::TriageAgent { .. } => "triage_agent",
+        ActionSpec::Graph { .. } => "graph",
+        ActionSpec::Unknown => "unknown",
     }
 }
 

@@ -33,6 +33,11 @@ pub(crate) fn handle_monitor_history_list(_paths: &ConfigPaths, params: &Value) 
         .take(limit)
         .map(history_message_json)
         .collect::<Result<Vec<_>>>()?;
+    eprintln!(
+        "monitor-history: monitor_count={} message_count={} limit={limit}",
+        monitor_slugs.len(),
+        messages.len()
+    );
     Ok(json!({ "messages": messages }))
 }
 

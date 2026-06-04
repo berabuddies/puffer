@@ -252,6 +252,16 @@ impl SubscriptionManager {
                     ConnectionState::Active | ConnectionState::Authenticated
                 )
             {
+                tracing::info!(
+                    connection = %connection.slug,
+                    connector = %connection.connector_slug,
+                    has_workflow_consumer,
+                    has_proxy_consumer,
+                    has_consumer,
+                    previous_has_consumer = connection.has_consumer,
+                    previous_state = ?connection.state,
+                    "refreshing connection consumer state"
+                );
                 self.connection_store.update(&connection.slug, |record| {
                     record.set_has_consumer(has_consumer)
                 })?;
@@ -507,8 +517,20 @@ impl SubscriptionManager {
         let id = manifest.spec.id.clone();
         let mut guard = self.subscribers.lock().unwrap();
         if guard.contains_key(&id) {
+            tracing::info!(
+                subscriber = %id,
+                topic = %manifest.topic(),
+                "subscriber already running"
+            );
             return Ok(id);
         }
+        tracing::info!(
+            subscriber = %id,
+            topic = %manifest.topic(),
+            manifest_dir = %manifest.dir.display(),
+            state_dir = ?manifest.spec.state.as_ref().map(|state| state.dir.as_str()),
+            "starting subscriber"
+        );
         let bus = self.bus.clone();
         let handle = block_on_manager_handle(&self.handle, async move {
             SubscriberSupervisor::spawn(manifest, bus, SupervisorConfig::default()).await

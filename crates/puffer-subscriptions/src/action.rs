@@ -487,12 +487,41 @@ impl BuiltinActionDispatcher {
     ) -> ActionResult {
         let rendered = render_template(prompt, &envelope.event.text, &envelope.event.payload);
         let trigger = trigger_payload(envelope);
+        tracing::info!(
+            envelope = %envelope.envelope_id,
+            topic = %envelope.event.topic,
+            kind = %envelope.event.kind,
+            model = %model.unwrap_or("default"),
+            prompt_len = rendered.len(),
+            text_len = envelope.event.text.len(),
+            "triage_agent action starting"
+        );
         match self.resolved_workflow_runner() {
             Some(runner) => match runner.triage_agent(&rendered, model, trigger) {
-                Ok(output) => ActionResult::success_with_usage(output.summary, output.usage),
-                Err(error) => ActionResult::failure(format!("triage_agent failed: {error:#}")),
+                Ok(output) => {
+                    tracing::info!(
+                        envelope = %envelope.envelope_id,
+                        summary = %output.summary,
+                        "triage_agent action completed"
+                    );
+                    ActionResult::success_with_usage(output.summary, output.usage)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        envelope = %envelope.envelope_id,
+                        %error,
+                        "triage_agent action failed"
+                    );
+                    ActionResult::failure(format!("triage_agent failed: {error:#}"))
+                }
             },
-            None => ActionResult::failure("triage_agent: no workflow action runner is installed"),
+            None => {
+                tracing::warn!(
+                    envelope = %envelope.envelope_id,
+                    "triage_agent action missing workflow runner"
+                );
+                ActionResult::failure("triage_agent: no workflow action runner is installed")
+            }
         }
     }
 
@@ -507,12 +536,40 @@ impl BuiltinActionDispatcher {
         };
         let rendered = render_template(prompt, &first.event.text, &first.event.payload);
         let triggers: Vec<_> = envelopes.iter().map(trigger_payload).collect();
+        tracing::info!(
+            batch_size = envelopes.len(),
+            topic = %first.event.topic,
+            kind = %first.event.kind,
+            model = %model.unwrap_or("default"),
+            prompt_len = rendered.len(),
+            "triage_agent batch action starting"
+        );
         match self.resolved_workflow_runner() {
             Some(runner) => match runner.triage_agent_batch(&rendered, model, triggers) {
-                Ok(output) => ActionResult::success_with_usage(output.summary, output.usage),
-                Err(error) => ActionResult::failure(format!("triage_agent failed: {error:#}")),
+                Ok(output) => {
+                    tracing::info!(
+                        batch_size = envelopes.len(),
+                        summary = %output.summary,
+                        "triage_agent batch action completed"
+                    );
+                    ActionResult::success_with_usage(output.summary, output.usage)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        batch_size = envelopes.len(),
+                        %error,
+                        "triage_agent batch action failed"
+                    );
+                    ActionResult::failure(format!("triage_agent failed: {error:#}"))
+                }
             },
-            None => ActionResult::failure("triage_agent: no workflow action runner is installed"),
+            None => {
+                tracing::warn!(
+                    batch_size = envelopes.len(),
+                    "triage_agent batch action missing workflow runner"
+                );
+                ActionResult::failure("triage_agent: no workflow action runner is installed")
+            }
         }
     }
 

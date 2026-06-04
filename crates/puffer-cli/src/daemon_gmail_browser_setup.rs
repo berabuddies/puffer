@@ -1,6 +1,7 @@
 //! Daemon-owned setup flow for the Gmail browser connector.
 
 use crate::daemon::{DaemonState, ServerEnvelope};
+use crate::gmail_browser_log as diag;
 use anyhow::{bail, Context, Result};
 use puffer_core::{CancelToken, UserQuestionPromptResponse};
 use puffer_subscriptions::{ConnectionRecord, ConnectionState};
@@ -153,6 +154,12 @@ pub(crate) fn execute_gmail_browser_setup(
 ) -> Result<String> {
     let target = parse_setup_target(&connect_args)?;
     let session_id = format!("gmail-browser-setup-{}", safe_session_part(&turn_id));
+    diag::line(format!(
+        "setup_start connection={} session_id={} cwd={}",
+        target.connection_slug,
+        session_id,
+        state.cwd_path().display()
+    ));
     let mut flow = SetupFlow {
         state,
         channel,
@@ -188,6 +195,13 @@ impl SetupFlow {
             }
 
             let selected = self.ask_account_selection(&discovery.accounts)?;
+            diag::line(format!(
+                "setup_selection connection={} discovered_count={} selected_count={} sign_in_another={}",
+                self.target.connection_slug,
+                discovery.accounts.len(),
+                selected.accounts.len(),
+                selected.sign_in_another
+            ));
             if selected.sign_in_another {
                 sign_in_rounds += 1;
                 if sign_in_rounds > MAX_SIGN_IN_ROUNDS {
@@ -209,6 +223,17 @@ impl SetupFlow {
                 selected.accounts,
             )?;
             let registered = upsert_connection(&self.target.connection_slug, &config.accounts)?;
+            diag::line(format!(
+                "setup_configured connection={} account_count={} registered={} state_dir={}",
+                self.target.connection_slug,
+                config.accounts.len(),
+                registered,
+                crate::gmail_browser::state_dir(
+                    self.state.config_paths(),
+                    &self.target.connection_slug
+                )
+                .display()
+            ));
             let action = if registered { "created" } else { "updated" };
             return Ok(format!(
                 "Configured gmail-browser connection `{}` for {} account(s) using the global Puffer browser profile ({action}).",
@@ -237,7 +262,8 @@ impl SetupFlow {
     }
 
     fn discover_accounts(&self) -> Result<Discovery> {
-        let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+        let started = Instant::now();
+        let deadline = started + DISCOVERY_TIMEOUT;
         loop {
             self.cancel.check()?;
             let value = crate::daemon_browser::handle_browser_agent(
@@ -258,6 +284,15 @@ impl SetupFlow {
                 || matches!(discovery.status.as_str(), "login_required" | "gmail_loaded")
                 || Instant::now() >= deadline
             {
+                diag::line(format!(
+                    "setup_discovery connection={} status={} account_count={} href_host={} title_class={} elapsed_ms={}",
+                    self.target.connection_slug,
+                    discovery.status,
+                    discovery.accounts.len(),
+                    diag::host_hint(discovery.href.as_deref()),
+                    diag::title_class(discovery.title.as_deref()),
+                    started.elapsed().as_millis()
+                ));
                 return Ok(discovery);
             }
             std::thread::sleep(DISCOVERY_INTERVAL);
