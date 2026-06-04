@@ -432,6 +432,20 @@ fn gcal_browser_actions() -> BTreeMap<String, ConnectorActionDefinition> {
     let mut actions = BTreeMap::new();
     for action in [
         calendar_action_definition(
+            "list_events",
+            "List visible Google Calendar agenda events from the browser session",
+            "external_calendar_read",
+            "Read external calendar events",
+            false,
+        ),
+        calendar_action_definition(
+            "search_events",
+            "Search visible Google Calendar agenda events from the browser session",
+            "external_calendar_read",
+            "Read external calendar events",
+            false,
+        ),
+        calendar_action_definition(
             "get_detail",
             "Read Google Calendar event details from the browser session",
             "external_calendar_read",

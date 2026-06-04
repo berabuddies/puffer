@@ -166,6 +166,34 @@ fn builtins_define_host_enforced_action_permissions() {
         gcal.actions.get("get_detail").unwrap().permission.category,
         "external_calendar_read"
     );
+    assert_eq!(
+        gcal.actions.get("list_events").unwrap().permission.category,
+        "external_calendar_read"
+    );
+    assert!(
+        !gcal
+            .actions
+            .get("list_events")
+            .unwrap()
+            .permission
+            .external_side_effect
+    );
+    assert_eq!(
+        gcal.actions
+            .get("search_events")
+            .unwrap()
+            .permission
+            .category,
+        "external_calendar_read"
+    );
+    assert!(
+        !gcal
+            .actions
+            .get("search_events")
+            .unwrap()
+            .permission
+            .external_side_effect
+    );
     assert!(
         !gcal
             .actions
