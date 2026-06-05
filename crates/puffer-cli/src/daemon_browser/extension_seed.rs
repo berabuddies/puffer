@@ -135,24 +135,16 @@ fn wait_for_extension_preferences(profile_dir: &Path, extension_dirs: &[PathBuf]
 }
 
 fn extension_preferences_include(profile_dir: &Path, extension_dirs: &[PathBuf]) -> Result<bool> {
-    let path = profile_dir.join("Default").join("Preferences");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return Ok(false);
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&contents) else {
-        return Ok(false);
-    };
-    let Some(settings) = value
-        .get("extensions")
-        .and_then(|extensions| extensions.get("settings"))
-        .and_then(Value::as_object)
-    else {
-        return Ok(false);
-    };
-    let registered = settings
-        .values()
-        .filter_map(extension_setting_path)
-        .map(normalize_path_string)
+    // Chromium/CEF records the extension registry in the protected
+    // `Secure Preferences` file; plain `Preferences` usually carries no
+    // `extensions.settings` (verified empty in CEF profiles). Read both and
+    // union the registered paths so this time-independent check works whichever
+    // file holds the registry — without `Secure Preferences` the fallback never
+    // matches and a dormant MV3 service worker forces a spurious bail.
+    let default_dir = profile_dir.join("Default");
+    let registered = ["Preferences", "Secure Preferences"]
+        .iter()
+        .flat_map(|file| registered_extension_paths(&default_dir.join(file)))
         .collect::<Vec<_>>();
     let requested = extension_dirs
         .iter()
@@ -161,6 +153,27 @@ fn extension_preferences_include(profile_dir: &Path, extension_dirs: &[PathBuf])
     Ok(requested
         .iter()
         .all(|path| registered.iter().any(|candidate| candidate == path)))
+}
+
+fn registered_extension_paths(prefs_path: &Path) -> Vec<String> {
+    let Ok(contents) = std::fs::read_to_string(prefs_path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&contents) else {
+        return Vec::new();
+    };
+    let Some(settings) = value
+        .get("extensions")
+        .and_then(|extensions| extensions.get("settings"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    settings
+        .values()
+        .filter_map(extension_setting_path)
+        .map(normalize_path_string)
+        .collect()
 }
 
 fn extension_setting_path(value: &Value) -> Option<String> {
