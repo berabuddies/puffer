@@ -18,8 +18,8 @@ use super::ref_resolution::{
 use super::screenshot::{parse_agent_screenshot_options, BrowserElementRef};
 use super::tabs::{backend_session_id, BrowserTabInfo, BrowserTabsState};
 use super::{
-    BrowserHistoryDirection, BrowserInputEvent, BrowserRegistry, DEFAULT_URL, INITIAL_HEIGHT,
-    INITIAL_WIDTH,
+    browser_debug, BrowserHistoryDirection, BrowserInputEvent, BrowserRegistry, DEFAULT_URL,
+    INITIAL_HEIGHT, INITIAL_WIDTH,
 };
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +35,17 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
     let root_session_id = required_string(params, "sessionId")?;
     let width = optional_u32(params, "width").unwrap_or(INITIAL_WIDTH);
     let height = optional_u32(params, "height").unwrap_or(INITIAL_HEIGHT);
+    browser_debug(
+        "agent.request",
+        format!(
+            "action={} root_session_id={} tab_id={:?} width={} height={}",
+            action,
+            root_session_id,
+            optional_string(params, "tabId"),
+            width,
+            height
+        ),
+    );
     match action.as_str() {
         "list" => Ok(serde_json::to_value(
             state.browsers.list_tabs(&root_session_id),
@@ -86,6 +97,10 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                         .map(|tab| tab.tab_id)
                 })
                 .with_context(|| format!("no browser tabs for session `{root_session_id}`"))?;
+            browser_debug(
+                "agent.close.resolved",
+                format!("root_session_id={} tab_id={}", root_session_id, tab_id),
+            );
             let tabs = state.browsers.close_tab(&root_session_id, &tab_id)?;
             publish_tabs(state, &root_session_id);
             Ok(serde_json::to_value(tabs)?)

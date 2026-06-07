@@ -1,5 +1,6 @@
 mod backend;
 mod browser;
+mod browser_debug;
 mod cef_host;
 mod chat_attachments;
 mod codex_app_server;

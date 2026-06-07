@@ -69,6 +69,31 @@ const CDP_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const AGENT_RECORDING_WINDOW: Duration = Duration::from_secs(5);
 
+fn browser_debug_enabled() -> bool {
+    std::env::var_os("PUFFER_BROWSER_DEBUG").is_some()
+}
+
+fn browser_debug(event: &str, details: impl AsRef<str>) {
+    if !browser_debug_enabled() {
+        return;
+    }
+    eprintln!("[puffer-browser-daemon] {event} {}", details.as_ref());
+}
+
+fn tab_state_summary(state: &BrowserTabsState) -> String {
+    state
+        .tabs
+        .iter()
+        .map(|tab| {
+            format!(
+                "{}:{}:{}:{}",
+                tab.tab_id, tab.backend_session_id, tab.connected, tab.active
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Tracks live browser roots and page workers by session id.
 pub(crate) struct BrowserRegistry {
     profile_root: PathBuf,
@@ -149,6 +174,13 @@ impl BrowserRegistry {
         if !self.enabled {
             bail!("Puffer browser is disabled for this runtime");
         }
+        browser_debug(
+            "open.begin",
+            format!(
+                "session_id={} url={:?} width={} height={} foreground={}",
+                session_id, url, width, height, foreground
+            ),
+        );
         let width = width.max(1);
         let height = height.max(1);
         let normalized_url = url.as_deref().map(normalize_url).transpose()?;
@@ -156,6 +188,13 @@ impl BrowserRegistry {
             if session.resize(width, height).is_ok() {
                 let browser_state = session.state();
                 self.record_backend_state(&session_id, &browser_state);
+                browser_debug(
+                    "open.reuse-live",
+                    format!(
+                        "session_id={} url={} loading={}",
+                        session_id, browser_state.url, browser_state.loading
+                    ),
+                );
                 return Ok(browser_state);
             }
         }
@@ -181,6 +220,13 @@ impl BrowserRegistry {
             .unwrap()
             .insert(session_id.clone(), session);
         self.record_backend_state(&session_id, &browser_state);
+        browser_debug(
+            "open.ok",
+            format!(
+                "session_id={} url={} loading={}",
+                session_id, browser_state.url, browser_state.loading
+            ),
+        );
         Ok(browser_state)
     }
 
@@ -260,6 +306,15 @@ impl BrowserRegistry {
                 }
             }
         }
+        browser_debug(
+            "tabs.list",
+            format!(
+                "root_session_id={} active={:?} tabs={}",
+                root_session_id,
+                state.active_tab_id,
+                tab_state_summary(&state)
+            ),
+        );
         state
     }
 
@@ -298,6 +353,13 @@ impl BrowserRegistry {
             tab_id.unwrap_or_else(|| self.tabs.lock().unwrap().next_tab_id(&root_session_id));
         let backend_id = backend_session_id(&root_session_id, &tab_id);
         let reused_live = self.live_session(&backend_id).is_some();
+        browser_debug(
+            "tab.open.begin",
+            format!(
+                "root_session_id={} tab_id={} backend_id={} url={:?} activate={} background={} reused_live={}",
+                root_session_id, tab_id, backend_id, url, activate, background, reused_live
+            ),
+        );
         let recovery_url = url.clone().or_else(|| {
             self.tabs
                 .lock()
@@ -330,6 +392,13 @@ impl BrowserRegistry {
             browser_state,
             activate,
         );
+        browser_debug(
+            "tab.open.ok",
+            format!(
+                "root_session_id={} tab_id={} backend_id={} active={} connected={}",
+                root_session_id, tab.tab_id, tab.backend_session_id, tab.active, tab.connected
+            ),
+        );
         Ok(tab)
     }
 
@@ -348,8 +417,26 @@ impl BrowserRegistry {
         tab_id: &str,
     ) -> Result<BrowserTabsState> {
         let backend_id = backend_session_id(root_session_id, tab_id);
+        browser_debug(
+            "tab.close.begin",
+            format!(
+                "root_session_id={} tab_id={} backend_id={}",
+                root_session_id, tab_id, backend_id
+            ),
+        );
         self.close_page_session(&backend_id, true);
-        Ok(self.list_tabs(root_session_id))
+        let state = self.list_tabs(root_session_id);
+        browser_debug(
+            "tab.close.ok",
+            format!(
+                "root_session_id={} tab_id={} active={:?} remaining={}",
+                root_session_id,
+                tab_id,
+                state.active_tab_id,
+                state.tabs.len()
+            ),
+        );
+        Ok(state)
     }
 
     /// Reads buffered console logs for a live browser page worker.
@@ -426,15 +513,38 @@ impl BrowserRegistry {
     }
 
     fn close_page_session(&self, session_id: &str, remove_tab_entry: bool) {
-        if let Some(session) = self.remove_page_session(session_id) {
+        let removed_live_session = self.remove_page_session(session_id);
+        browser_debug(
+            "page.close",
+            format!(
+                "session_id={} remove_tab_entry={} removed_live_session={}",
+                session_id,
+                remove_tab_entry,
+                removed_live_session.is_some()
+            ),
+        );
+        if let Some(session) = removed_live_session {
             let _ = session.close();
         }
         if let Some((root_session_id, tab_id)) = parse_backend_session_id(session_id) {
             let mut tabs = self.tabs.lock().unwrap();
             if remove_tab_entry {
-                tabs.close_tab(root_session_id, tab_id);
+                let removed = tabs.close_tab(root_session_id, tab_id);
+                browser_debug(
+                    "tab.metadata-close",
+                    format!(
+                        "root_session_id={} tab_id={} removed={}",
+                        root_session_id,
+                        tab_id,
+                        removed.is_some()
+                    ),
+                );
             } else {
                 tabs.remove_backend(root_session_id, tab_id);
+                browser_debug(
+                    "tab.metadata-disconnect",
+                    format!("root_session_id={} tab_id={}", root_session_id, tab_id),
+                );
             }
         }
     }
@@ -507,6 +617,13 @@ impl BrowserRegistry {
 
     fn record_backend_state(&self, session_id: &str, browser_state: &BrowserState) {
         if let Some((root_session_id, tab_id)) = parse_backend_session_id(session_id) {
+            browser_debug(
+                "tab.record-backend",
+                format!(
+                    "root_session_id={} tab_id={} session_id={} url={} loading={}",
+                    root_session_id, tab_id, session_id, browser_state.url, browser_state.loading
+                ),
+            );
             self.tabs.lock().unwrap().record_opened_backend(
                 root_session_id,
                 tab_id,

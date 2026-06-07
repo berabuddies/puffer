@@ -82,6 +82,29 @@
     tabId: string;
   };
 
+  type BrowserDebugEntry = {
+    at: string;
+    event: string;
+    sessionId: string;
+    activeRootSessionId: string;
+    activeTabId: string;
+    renderer: BrowserRenderer;
+    tabCount: number;
+    tabs: Array<{
+      id: string;
+      backendSessionId: string;
+      connected: boolean;
+      loading: boolean;
+      url: string;
+    }>;
+    details: Record<string, unknown>;
+  };
+
+  type SavedBrowserTabs = {
+    tabs?: Partial<BrowserTab>[];
+    nextTabNumber?: number;
+  };
+
   let { sessionId, browserRenderer = "cef" }: Props = $props();
 
   let viewport: HTMLDivElement | null = $state(null);
@@ -113,6 +136,7 @@
   let navigationFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let nativeCefHealthTimer: ReturnType<typeof setInterval> | null = null;
   let nativeCefHealthProbeInFlight = false;
+  let nativeCefSettleSerials = new Map<string, number>();
 
   let disposers: Array<() => void> = [];
   let activeDisposers: Array<() => void> = [];
@@ -146,6 +170,7 @@
   const pendingNavigationSessions = new Set<string>();
   const recentlyOpenedTabIds = new Map<string, number>();
   const recentlyClosedTabIds = new Map<string, number>();
+  const retiredCefBackendSessionIds = new Set<string>();
   let pendingNavigationUrls = new Map<string, string>();
   let pendingActiveTabSelection: { tabId: string; at: number } | null = null;
   let pendingFrame: BrowserFrameEvent | null = null;
@@ -154,10 +179,13 @@
   const NATIVE_CEF_HEALTH_CHECK_MS = 30_000;
   const NATIVE_CEF_RECONNECT_GRACE_MS = 2_000;
   const NATIVE_CEF_RECONNECT_POLL_MS = 100;
+  const NATIVE_CEF_LOAD_SETTLE_MS = 8_000;
   const NATIVE_CEF_HISTORY_SETTLE_MS = 150;
   const TAB_INFO_STALE_GRACE_MS = 250;
   const LOCAL_TAB_TRANSITION_GRACE_MS = 5_000;
   const LOCAL_TAB_SELECTION_GRACE_MS = 2_500;
+  const BROWSER_DEBUG_LOG_KEY = "puffer-browser-debug-log";
+  const BROWSER_DEBUG_MAX_ENTRIES = 200;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserCommandPending = $derived(
@@ -252,20 +280,26 @@
     resizeObserver = ro;
     window.addEventListener("pointerup", globalPointerUp);
     window.addEventListener("pointercancel", globalPointerCancel);
+    window.addEventListener("error", browserWindowError);
+    window.addEventListener("unhandledrejection", browserWindowUnhandledRejection);
     nativeCefHealthTimer = setInterval(() => {
       void probeNativeCefHealth();
     }, NATIVE_CEF_HEALTH_CHECK_MS);
 
+    browserDebug("mount", { requestedRenderer: runtimeBrowserRenderer });
     void activateSession(sessionId);
   });
 
   onDestroy(() => {
+    browserDebug("destroy", {});
     disposed = true;
     mounted = false;
     resizeObserver?.disconnect();
     resizeObserver = null;
     window.removeEventListener("pointerup", globalPointerUp);
     window.removeEventListener("pointercancel", globalPointerCancel);
+    window.removeEventListener("error", browserWindowError);
+    window.removeEventListener("unhandledrejection", browserWindowUnhandledRejection);
     clearCursorTimer();
     clearNativeCefHealthTimer();
     clearNavigationFallbackTimers();
@@ -288,7 +322,9 @@
 
   function hideNativeCefSessions() {
     for (const tab of tabs) {
+      browserDebug("cef.hide.begin", { tabId: tab.id, backendSessionId: tab.backendSessionId });
       void browserCefNativeHide(tab.backendSessionId).catch(() => {
+        browserDebug("cef.hide.error", { tabId: tab.id, backendSessionId: tab.backendSessionId });
         /* Native CEF may already be unavailable during teardown or fallback. */
       });
     }
@@ -296,7 +332,10 @@
 
   function closeNativeCefSessions() {
     for (const tab of tabs) {
+      markRetiredCefBackendSession(tab.backendSessionId);
+      browserDebug("cef.close-all.begin", { tabId: tab.id, backendSessionId: tab.backendSessionId });
       void browserCefNativeClose(tab.backendSessionId).catch(() => {
+        browserDebug("cef.close-all.error", { tabId: tab.id, backendSessionId: tab.backendSessionId });
         /* Native CEF may already be unavailable during teardown or fallback. */
       });
     }
@@ -306,6 +345,74 @@
     if (!nativeCefHealthTimer) return;
     clearInterval(nativeCefHealthTimer);
     nativeCefHealthTimer = null;
+  }
+
+  function browserDebugEnabled(): boolean {
+    const meta = import.meta as ImportMeta & { env?: { DEV?: boolean } };
+    if (meta.env?.DEV) return true;
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem("pufferBrowserDebug") === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function browserDebug(event: string, details: Record<string, unknown>) {
+    if (!browserDebugEnabled()) return;
+    const entry: BrowserDebugEntry = {
+      at: new Date().toISOString(),
+      event,
+      sessionId,
+      activeRootSessionId,
+      activeTabId,
+      renderer: effectiveRenderer,
+      tabCount: tabs.length,
+      tabs: tabs.map((tab) => ({
+        id: tab.id,
+        backendSessionId: tab.backendSessionId,
+        connected: tab.connected,
+        loading: tab.loading,
+        url: tab.url
+      })),
+      details
+    };
+    try {
+      console.info("[puffer-browser]", event, entry);
+    } catch {
+      /* ignore debug console failures */
+    }
+    persistBrowserDebug(entry);
+  }
+
+  function persistBrowserDebug(entry: BrowserDebugEntry) {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(BROWSER_DEBUG_LOG_KEY);
+      const existing = raw ? JSON.parse(raw) : [];
+      const next = Array.isArray(existing) ? [...existing, entry] : [entry];
+      window.localStorage.setItem(
+        BROWSER_DEBUG_LOG_KEY,
+        JSON.stringify(next.slice(-BROWSER_DEBUG_MAX_ENTRIES))
+      );
+    } catch {
+      /* Debug logging must never affect browser controls. */
+    }
+  }
+
+  function browserWindowError(event: ErrorEvent) {
+    browserDebug("window.error", {
+      message: event.message,
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno
+    });
+  }
+
+  function browserWindowUnhandledRejection(event: PromiseRejectionEvent) {
+    browserDebug("window.unhandledrejection", {
+      message: browserActionErrorText(event.reason)
+    });
   }
 
   $effect(() => {
@@ -325,6 +432,7 @@
   async function refreshBackendStatus(preferredRenderer: BrowserRenderer) {
     const generation = ++backendStatusGeneration;
     backendStatusError = null;
+    browserDebug("backend-status.begin", { generation, preferredRenderer });
     const [backend, native] = await Promise.allSettled([
       browserBackendStatus(preferredRenderer),
       preferredRenderer === "cef" ? browserCefNativeStatus() : Promise.resolve(null)
@@ -338,10 +446,16 @@
     if (native.status === "fulfilled") {
       nativeCefStatus = native.value;
     }
+    browserDebug("backend-status.end", {
+      generation,
+      backend: backend.status === "fulfilled" ? backend.value : browserActionErrorText(backend.reason),
+      native: native.status === "fulfilled" ? native.value : browserActionErrorText(native.reason)
+    });
   }
 
   function demoteNativeCef(err: unknown): string {
     const message = browserActionErrorText(err) || "Native CEF command failed";
+    browserDebug("cef.demote", { message });
     nativeCefRuntimeError = message;
     forceScreencastFallback = true;
     backendStatus = backendStatus
@@ -389,7 +503,7 @@
     clearNavigationPending(target.backendSessionId);
     if (disposed || target.generation !== sessionGeneration) return;
     const tabId = tabIdForBackendSession(target.backendSessionId);
-    if (!tabId) return;
+    if (!tabId || !targetStillAssignedToTab(target, tabId)) return;
     void fallbackToScreencast(target.generation, tabId, err);
   }
 
@@ -401,10 +515,19 @@
     clearNavigationPending(target.backendSessionId);
     const tabId = tabIdForBackendSession(target.backendSessionId);
     const tab = tabId ? tabs.find((candidate) => candidate.id === tabId) : null;
-    if (!tabId || !tab || disposed || target.generation !== sessionGeneration) {
+    if (!tabId || !tab || !targetStillAssignedToTab(target, tabId)) {
+      return false;
+    }
+    if (handleNativeCefClosingSlot(target, tabId, err, urlOverride)) {
       return false;
     }
     const message = browserActionErrorText(err) || "Native CEF browser disconnected";
+    browserDebug("cef.recover.begin", {
+      tabId,
+      backendSessionId: target.backendSessionId,
+      message,
+      urlOverride
+    });
     updateTab(tabId, {
       connected: false,
       loading: false,
@@ -431,6 +554,9 @@
         width: lastResize.width,
         height: lastResize.height
       };
+      if (!targetStillAssignedToTab(target, tabId)) {
+        return false;
+      }
       const next = await browserCefNativeOpen({
         sessionId: target.backendSessionId,
         url: urlOverride || tab.url || currentUrl || "about:blank",
@@ -447,6 +573,7 @@
         return false;
       }
       applyState(recovered, tabId);
+      scheduleNativeCefStateSettle(target, tabId, recovered, "recover");
       if (recovered.error || recovered.connected === false) {
         throw new Error(recovered.error || "Native CEF browser did not reconnect");
       }
@@ -456,13 +583,22 @@
         status = "Connected";
         error = null;
       }
+      browserDebug("cef.recover.ok", { tabId, backendSessionId: target.backendSessionId });
       return true;
     } catch (recoveryErr) {
+      browserDebug("cef.recover.error", {
+        tabId,
+        backendSessionId: target.backendSessionId,
+        message: browserActionErrorText(recoveryErr)
+      });
       if (
         disposed ||
         target.generation !== sessionGeneration ||
-        !tabIdForBackendSession(target.backendSessionId)
+        !targetStillAssignedToTab(target, tabId)
       ) {
+        return false;
+      }
+      if (handleNativeCefClosingSlot(target, tabId, recoveryErr, urlOverride)) {
         return false;
       }
       fallbackTargetToScreencast(target, recoveryErr);
@@ -489,21 +625,74 @@
     return next;
   }
 
-  async function waitForNativeCefHistoryState(
+  function scheduleNativeCefStateSettle(
     target: BrowserCommandTarget,
     tabId: string,
-    initial: BrowserState
+    initial: BrowserState,
+    reason: string
+  ) {
+    const serial = (nativeCefSettleSerials.get(target.backendSessionId) ?? 0) + 1;
+    nativeCefSettleSerials.set(target.backendSessionId, serial);
+    void settleNativeCefState(target, tabId, initial, reason, serial);
+  }
+
+  async function settleNativeCefState(
+    target: BrowserCommandTarget,
+    tabId: string,
+    initial: BrowserState,
+    reason: string,
+    serial: number
+  ) {
+    try {
+      const reconnected = await waitForNativeCefReconnect(target, tabId, initial);
+      const settled = await waitForNativeCefLoadState(target, tabId, reconnected, serial);
+      if (!nativeCefSettleStillCurrent(target, tabId, serial)) return;
+      browserDebug("cef.settle.apply", {
+        tabId,
+        backendSessionId: target.backendSessionId,
+        reason,
+        state: settled
+      });
+      applyState(settled, tabId);
+    } catch (err) {
+      if (!nativeCefSettleStillCurrent(target, tabId, serial)) return;
+      browserDebug("cef.settle.error", {
+        tabId,
+        backendSessionId: target.backendSessionId,
+        reason,
+        message: browserActionErrorText(err)
+      });
+      void recoverNativeCefTarget(target, err);
+    }
+  }
+
+  function nativeCefSettleStillCurrent(
+    target: BrowserCommandTarget,
+    tabId: string,
+    serial: number
+  ): boolean {
+    return (
+      nativeCefSettleSerials.get(target.backendSessionId) === serial &&
+      targetStillAssignedToTab(target, tabId)
+    );
+  }
+
+  async function waitForNativeCefLoadState(
+    target: BrowserCommandTarget,
+    tabId: string,
+    initial: BrowserState,
+    serial: number
   ): Promise<BrowserState> {
     let next = initial;
     if (!next.loading || next.error || next.connected === false) return next;
     let lastSignature = `${next.url}\0${next.title}\0${next.loading}`;
     let quietSince: number | null = null;
-    const deadline = Date.now() + NATIVE_CEF_RECONNECT_GRACE_MS;
+    const deadline = Date.now() + NATIVE_CEF_LOAD_SETTLE_MS;
     while (Date.now() < deadline) {
       await sleep(
         Math.min(NATIVE_CEF_RECONNECT_POLL_MS, Math.max(0, deadline - Date.now()))
       );
-      if (!targetStillAssignedToTab(target, tabId)) {
+      if (!nativeCefSettleStillCurrent(target, tabId, serial)) {
         return next;
       }
       next = await browserCefNativeState(target.backendSessionId);
@@ -539,15 +728,24 @@
     if (!target) return;
     nativeCefHealthProbeInFlight = true;
     try {
+      browserDebug("cef.health.begin", { backendSessionId: target.backendSessionId });
       const next = await browserCefNativeState(target.backendSessionId);
       if (!targetStillActive(target)) return;
       if (next.error || next.connected === false) {
+        browserDebug("cef.health.disconnected", {
+          backendSessionId: target.backendSessionId,
+          state: next
+        });
         await recoverNativeCefTarget(target, next.error || "Native CEF browser disconnected");
         return;
       }
       applyState(next, activeTabId);
     } catch (err) {
       if (!targetStillActive(target)) return;
+      browserDebug("cef.health.error", {
+        backendSessionId: target.backendSessionId,
+        message: browserActionErrorText(err)
+      });
       await recoverNativeCefTarget(target, err);
     } finally {
       nativeCefHealthProbeInFlight = false;
@@ -611,17 +809,41 @@
 
   function applyTabsState(state: BrowserTabsState, options: ApplyTabsOptions = {}) {
     if (!Array.isArray(state.tabs)) return;
+    browserDebug("tabs.apply.begin", {
+      incomingActiveTabId: state.activeTabId ?? null,
+      incomingTabs: state.tabs.map((tab) => ({
+        tabId: tab.tabId,
+        backendSessionId: tab.backendSessionId,
+        connected: tab.connected,
+        active: tab.active,
+        updatedAtMs: tab.updatedAtMs
+      })),
+      options
+    });
     pruneLocalTabTransitions();
     const hasLocalTransition =
       tabOpenPending || closingTabs.length > 0 || pendingBrowserCommands.length > 0;
     if (state.tabs.length === 0) {
-      if (!options.allowEmpty) return;
-      if (hasLocalTransition && tabs.length > 0 && !options.allowLocalTransitionShrink) return;
+      if (!options.allowEmpty) {
+        browserDebug("tabs.apply.skip-empty", { reason: "allowEmpty false" });
+        return;
+      }
+      if (shouldKeepLocalCefTabsOnEmptyState(options)) {
+        browserDebug("tabs.apply.skip-empty", { reason: "cef local tabs remain" });
+        return;
+      }
+      if (hasLocalTransition && tabs.length > 0 && !options.allowLocalTransitionShrink) {
+        browserDebug("tabs.apply.skip-empty", { reason: "local transition" });
+        return;
+      }
       tabStateVersion += 1;
       pendingNavigationSessions.clear();
       tabs = [];
       activeTabId = "";
-      nextTabNumber = 2;
+      nextTabNumber = Math.max(
+        nextTabNumber,
+        loadSavedNextTabNumberFor(activeRootSessionId || sessionId, [])
+      );
       saveTabs([]);
       connected = false;
       loading = false;
@@ -640,18 +862,30 @@
       resetPointer(activePointerId ?? undefined);
       disposeActiveSubscriptions();
       clearCanvas();
+      browserDebug("tabs.apply.empty", {});
       return;
     }
     const previousActiveTabId = activeTabId;
-    const stateTabs = state.tabs.filter((tab) => !recentlyClosedTabIds.has(tab.tabId));
+    const stateTabs = state.tabs.filter(
+      (tab) => !recentlyClosedTabIds.has(tab.tabId) && !isRetiredCefTabInfo(tab)
+    );
     const nextTabsById = new Map(stateTabs.map((tab) => [tab.tabId, tabFromInfo(tab)]));
     for (const [tabId] of recentlyOpenedTabIds) {
       const existing = tabs.find((tab) => tab.id === tabId);
       if (existing && !nextTabsById.has(tabId)) nextTabsById.set(tabId, existing);
     }
     const nextTabs = [...nextTabsById.values()];
-    if (nextTabs.length === 0) return;
-    if (hasLocalTransition && nextTabs.length < tabs.length && !options.allowLocalTransitionShrink) return;
+    if (nextTabs.length === 0) {
+      browserDebug("tabs.apply.skip-all-filtered", {});
+      return;
+    }
+    if (hasLocalTransition && nextTabs.length < tabs.length && !options.allowLocalTransitionShrink) {
+      browserDebug("tabs.apply.skip-shrink", {
+        previousCount: tabs.length,
+        nextCount: nextTabs.length
+      });
+      return;
+    }
     tabStateVersion += 1;
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
     const activeEvent = stateTabs.find((tab) => tab.tabId === state.activeTabId);
@@ -668,13 +902,18 @@
     }
     tabs = nextTabs;
     activeTabId = pendingSelectedTabId || validActiveTabId || connectedTabId || nextTabs[0].id;
-    nextTabNumber = nextTabIndex(nextTabs);
+    nextTabNumber = nextKnownTabNumber(nextTabs);
     saveTabs(nextTabs);
     syncFromActiveTab();
     if (activeTabId !== previousActiveTabId) syncFrameFromActiveTab();
     if (!connected || activeTabId !== previousActiveTabId) {
       resetPointer(activePointerId ?? undefined);
     }
+    browserDebug("tabs.apply.end", {
+      previousActiveTabId,
+      nextActiveTabId: activeTabId,
+      nextTabCount: tabs.length
+    });
   }
 
   function pruneLocalTabTransitions() {
@@ -705,6 +944,7 @@
 
   async function activateSession(nextSessionId: string) {
     const generation = ++sessionGeneration;
+    browserDebug("session.activate.begin", { nextSessionId, generation });
     activeRootSessionId = nextSessionId;
     activeEventSessionId = "";
     disposeSessionSubscriptions();
@@ -714,12 +954,13 @@
     clearCursorTimer();
     pendingNavigationSessions.clear();
     pendingNavigationUrls = new Map();
+    nativeCefSettleSerials = new Map();
     clearNavigationFallbackTimers();
     resetPointer(activePointerId ?? undefined);
     const restored = loadSavedTabsFor(nextSessionId);
     tabs = restored;
     activeTabId = restored[0]?.id ?? "";
-    nextTabNumber = nextTabIndex(restored);
+    nextTabNumber = loadSavedNextTabNumberFor(nextSessionId, restored);
     tabStateVersion += 1;
     syncFromActiveTab();
     if (activeTab?.frame) {
@@ -754,6 +995,7 @@
     );
 
     if (activeTabId) await connectActiveTab(generation);
+    browserDebug("session.activate.end", { nextSessionId, generation, activeTabId });
   }
 
   function disposeSessionSubscriptions() {
@@ -770,10 +1012,22 @@
 
   async function syncDaemonTabs(generation = sessionGeneration, targetSessionId = sessionId) {
     try {
+      browserDebug("daemon.tabs-list.begin", { generation, targetSessionId });
       const state = await browserTabsList(targetSessionId);
       if (generation !== sessionGeneration || activeRootSessionId !== targetSessionId) return;
+      browserDebug("daemon.tabs-list.ok", {
+        generation,
+        targetSessionId,
+        tabCount: state.tabs.length,
+        activeTabId: state.activeTabId ?? null
+      });
       applyTabsState(state);
-    } catch {
+    } catch (err) {
+      browserDebug("daemon.tabs-list.error", {
+        generation,
+        targetSessionId,
+        message: browserActionErrorText(err)
+      });
       /* Local saved tabs remain the migration fallback. */
     }
   }
@@ -789,8 +1043,7 @@
   function loadSavedTabsFor(value: string): BrowserTab[] {
     if (typeof window === "undefined") return [newBrowserTab("tab-1", "New tab")];
     try {
-      const raw = window.localStorage.getItem(storageKeyFor(value));
-      const saved = raw ? JSON.parse(raw) : null;
+      const saved = readSavedTabsFor(value);
       if (!Array.isArray(saved?.tabs)) return [newBrowserTab("tab-1", "New tab")];
       const restored = saved.tabs
         .filter((tab: Partial<BrowserTab>) => typeof tab.id === "string")
@@ -806,6 +1059,33 @@
     } catch {
       return [newBrowserTab("tab-1", "New tab")];
     }
+  }
+
+  function readSavedTabsFor(value: string): SavedBrowserTabs | null {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem(storageKeyFor(value));
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function loadSavedNextTabNumberFor(value: string, restoredTabs: BrowserTab[]): number {
+    const saved = readSavedTabsFor(value);
+    const savedNext =
+      typeof saved?.nextTabNumber === "number" && Number.isFinite(saved.nextTabNumber)
+        ? Math.floor(saved.nextTabNumber)
+        : 2;
+    return Math.max(nextTabIndex(restoredTabs), savedNext);
+  }
+
+  function nextKnownTabNumber(nextTabs: BrowserTab[]): number {
+    return Math.max(
+      nextTabNumber,
+      nextTabIndex(nextTabs),
+      loadSavedNextTabNumberFor(activeRootSessionId || sessionId, nextTabs)
+    );
   }
 
   function shouldHydrateFallbackFromRecording(): boolean {
@@ -829,7 +1109,7 @@
       const activeRecordedTab = recordedTabs.at(-1)!;
       tabs = recordedTabs.map(recordedTabFromFrame);
       activeTabId = activeRecordedTab.tabId;
-      nextTabNumber = nextTabIndex(tabs);
+      nextTabNumber = nextKnownTabNumber(tabs);
       tabStateVersion += 1;
       saveTabs(tabs);
       syncFromActiveTab();
@@ -879,6 +1159,7 @@
     window.localStorage.setItem(
       storageKey(),
       JSON.stringify({
+        nextTabNumber,
         tabs: nextTabs.map(({ id, label, url, title, favicon }) => ({
           id,
           label,
@@ -895,6 +1176,23 @@
       const match = /^tab-(\d+)$/.exec(tab.id);
       return match ? Math.max(next, Number(match[1]) + 1) : next;
     }, 2);
+  }
+
+  function allocateNewTabId(rootSessionId: string): string {
+    let index = nextTabNumber;
+    while (true) {
+      const tabId = `tab-${index}`;
+      if (
+        !tabs.some((tab) => tab.id === tabId) &&
+        !retiredCefBackendSessionIds.has(backendSessionId(tabId, rootSessionId)) &&
+        !recentlyClosedTabIds.has(tabId) &&
+        !isClosingTab(rootSessionId, tabId)
+      ) {
+        nextTabNumber = index + 1;
+        return tabId;
+      }
+      index += 1;
+    }
   }
 
   function faviconFor(url: string): string {
@@ -933,7 +1231,8 @@
     return (
       !disposed &&
       target.generation === sessionGeneration &&
-      activeBackendSessionId() === target.backendSessionId
+      activeBackendSessionId() === target.backendSessionId &&
+      !isClosingTab(activeRootSessionId || sessionId, activeTabId)
     );
   }
 
@@ -941,6 +1240,7 @@
     return (
       !disposed &&
       target.generation === sessionGeneration &&
+      !isClosingTab(activeRootSessionId || sessionId, tabId) &&
       tabs.some((tab) => tab.id === tabId && tab.backendSessionId === target.backendSessionId)
     );
   }
@@ -995,6 +1295,27 @@
     const timer = navigationFallbackTimers.get(backendId);
     if (timer) clearTimeout(timer);
     navigationFallbackTimers.delete(backendId);
+  }
+
+  function cancelPendingTabWork(backendId: string) {
+    clearNavigationPending(backendId);
+    nativeCefSettleSerials.delete(backendId);
+    pendingBrowserCommands = pendingBrowserCommands.filter(
+      (item) => item.backendSessionId !== backendId
+    );
+    if (activeEventSessionId === backendId) {
+      activeEventSessionId = "";
+    }
+  }
+
+  function shouldUseLocalCefCloseState(state: BrowserTabsState, closedTabId: string): boolean {
+    if (effectiveRenderer !== "cef") return false;
+    if (state.tabs.length > 0) return false;
+    return tabs.some((tab) => tab.id !== closedTabId);
+  }
+
+  function shouldKeepLocalCefTabsOnEmptyState(options: ApplyTabsOptions): boolean {
+    return effectiveRenderer === "cef" && tabs.length > 0 && !options.allowLocalTransitionShrink;
   }
 
   function clearNavigationFallbackTimers() {
@@ -1067,9 +1388,9 @@
         ? browserCefNativeHistory(target.backendSessionId, direction).then((next) => {
             const tabId = tabIdForBackendSession(target.backendSessionId);
             if (!tabId) return;
-            return waitForNativeCefHistoryState(target, tabId, next).then((settled) => {
-              if (targetStillAssignedToTab(target, tabId)) applyState(settled, tabId);
-            });
+            if (!targetStillAssignedToTab(target, tabId)) return;
+            applyState(next, tabId);
+            scheduleNativeCefStateSettle(target, tabId, next, "history");
           })
         : browserHistory(target.backendSessionId, direction);
     void request
@@ -1094,7 +1415,9 @@
       commandRenderer === "cef"
         ? browserCefNativeReload(target.backendSessionId).then((next) => {
             const tabId = tabIdForBackendSession(target.backendSessionId);
-            if (tabId) applyState(next, tabId);
+            if (!tabId || !targetStillAssignedToTab(target, tabId)) return;
+            applyState(next, tabId);
+            scheduleNativeCefStateSettle(target, tabId, next, "reload");
           })
         : browserReload(target.backendSessionId);
     void request
@@ -1155,6 +1478,13 @@
   async function connectActiveTab(generation = sessionGeneration) {
     const tab = activeTab;
     if (!mounted || !viewport || !canvas || disposed || !activeTabId || !tab) return;
+    browserDebug("tab.connect.begin", {
+      generation,
+      tabId: tab.id,
+      backendSessionId: tab.backendSessionId,
+      connected: tab.connected,
+      renderer: effectiveRenderer
+    });
     disposeActiveSubscriptions();
     syncFromActiveTab();
     if (tab.frame) {
@@ -1170,21 +1500,63 @@
     activeEventSessionId = eventSessionId;
     if (effectiveRenderer === "cef") {
       const rect = measureViewportRect();
-      if (!rect) return;
+      if (!rect) {
+        browserDebug("tab.connect.skip", { tabId, reason: "missing viewport rect" });
+        return;
+      }
       try {
+        browserDebug("cef.open.begin", { tabId, backendSessionId: eventSessionId, rect });
         const next = await browserCefNativeOpen({
           sessionId: eventSessionId,
           url: tab.url,
           rect
         });
-        if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+        if (
+          generation !== sessionGeneration ||
+          activeEventSessionId !== eventSessionId ||
+          !targetStillAssignedToTab({ backendSessionId: eventSessionId, generation }, tabId)
+        ) {
+          browserDebug("cef.open.stale", {
+            tabId,
+            backendSessionId: eventSessionId,
+            generation,
+            activeEventSessionId
+          });
+          return;
+        }
+        browserDebug("cef.open.ok", { tabId, backendSessionId: eventSessionId, state: next });
         applyState(next, tabId);
-        updateTab(tabId, { connected: true, status: "Connected", error: null });
+        updateTab(tabId, {
+          connected: true,
+          status: next.loading ? "Loading" : "Connected",
+          error: null
+        });
         connected = true;
-        status = "Connected";
+        status = next.loading ? "Loading" : "Connected";
         error = null;
+        scheduleNativeCefStateSettle(
+          { backendSessionId: eventSessionId, generation },
+          tabId,
+          next,
+          "open"
+        );
       } catch (err) {
-        if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+        if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) {
+          browserDebug("cef.open.error-stale", {
+            tabId,
+            backendSessionId: eventSessionId,
+            message: browserActionErrorText(err)
+          });
+          return;
+        }
+        if (handleNativeCefClosingSlot({ backendSessionId: eventSessionId, generation }, tabId, err)) {
+          return;
+        }
+        browserDebug("cef.open.error", {
+          tabId,
+          backendSessionId: eventSessionId,
+          message: browserActionErrorText(err)
+        });
         await fallbackToScreencast(generation, tabId, err);
       }
       return;
@@ -1323,7 +1695,7 @@
     tabs = existing
       ? tabs.map((tab) => (tab.id === frame.tabId ? nextTab : tab))
       : [...tabs, nextTab];
-    nextTabNumber = nextTabIndex(tabs);
+    nextTabNumber = nextKnownTabNumber(tabs);
     saveTabs(tabs);
     if (!shouldActivate) return;
     const switchedTabs = activeTabId !== frame.tabId;
@@ -1522,7 +1894,19 @@
               }
             });
         if (disposed || requestedGeneration !== sessionGeneration) return;
+        if (
+          !targetStillAssignedToTab(commandTarget, requestedTabId) ||
+          activeBackendSessionId() !== requestedBackendSessionId
+        ) {
+          browserDebug("navigate.stale-after-cef", {
+            requestedTabId,
+            requestedBackendSessionId,
+            requestedGeneration
+          });
+          return;
+        }
         applyState(next, requestedTabId);
+        scheduleNativeCefStateSettle(commandTarget, requestedTabId, next, "navigate");
       } else if (connected) {
         await browserNavigate(requestedBackendSessionId, requestedUrl);
       } else {
@@ -1537,7 +1921,14 @@
       }
     } catch (err) {
       if (disposed || requestedGeneration !== sessionGeneration) return;
-      if (!tabs.some((tab) => tab.id === requestedTabId)) return;
+      if (!targetStillAssignedToTab(commandTarget, requestedTabId)) {
+        browserDebug("navigate.error-stale", {
+          requestedTabId,
+          requestedBackendSessionId,
+          message: browserActionErrorText(err)
+        });
+        return;
+      }
       if (commandRenderer === "cef") {
         await recoverNativeCefTarget(commandTarget, err, requestedUrl);
       } else {
@@ -1559,10 +1950,15 @@
   async function addTab() {
     if (tabOpenPending) return;
     const size = measureViewport() ?? lastResize;
-    const tabId = `tab-${nextTabNumber}`;
-    nextTabNumber += 1;
     const requestedAtGeneration = sessionGeneration;
     const requestedSessionId = sessionId;
+    const tabId = allocateNewTabId(requestedSessionId);
+    browserDebug("tab.add.begin", {
+      tabId,
+      requestedSessionId,
+      requestedAtGeneration,
+      renderer: effectiveRenderer
+    });
     tabOpenPending = true;
     try {
       if (effectiveRenderer === "cef") {
@@ -1571,12 +1967,18 @@
         recentlyClosedTabIds.delete(tab.id);
         tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
         activeTabId = tab.id;
-        nextTabNumber = nextTabIndex(tabs);
+        nextTabNumber = nextKnownTabNumber(tabs);
         saveTabs();
         syncFromActiveTab();
+        browserDebug("tab.add.local-cef", {
+          tabId,
+          backendSessionId: tab.backendSessionId,
+          requestedSessionId
+        });
         void connectActiveTab(requestedAtGeneration);
         return;
       }
+      browserDebug("daemon.tab-open.begin", { tabId, requestedSessionId, size });
       const info = await browserTabOpen({
         sessionId: requestedSessionId,
         tabId,
@@ -1589,16 +1991,26 @@
         disposed ||
         requestedAtGeneration !== sessionGeneration
       ) return;
+      browserDebug("daemon.tab-open.ok", {
+        tabId,
+        backendSessionId: info.backendSessionId,
+        info
+      });
       const tab = tabFromInfo(info);
       recentlyOpenedTabIds.set(tab.id, Date.now());
       recentlyClosedTabIds.delete(tab.id);
       tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
       activeTabId = tab.id;
-      nextTabNumber = nextTabIndex(tabs);
+      nextTabNumber = nextKnownTabNumber(tabs);
       saveTabs();
       syncFromActiveTab();
       void connectActiveTab(requestedAtGeneration);
     } catch (err) {
+      browserDebug("tab.add.error", {
+        tabId,
+        requestedSessionId,
+        message: browserActionErrorText(err)
+      });
       if (
         disposed ||
         requestedAtGeneration !== sessionGeneration ||
@@ -1620,6 +2032,13 @@
     if (tabId === activeTabId) return;
     const requestedSessionId = sessionId;
     const requestedGeneration = sessionGeneration;
+    browserDebug("tab.select", {
+      tabId,
+      requestedSessionId,
+      requestedGeneration,
+      previousActiveTabId: activeTabId,
+      renderer: effectiveRenderer
+    });
     pendingActiveTabSelection = { tabId, at: Date.now() };
     activeTabId = tabId;
     syncFromActiveTab();
@@ -1649,6 +2068,95 @@
     return /unhandled browser_agent action|unknown browser_agent action|unsupported.*tab close/i.test(
       browserActionErrorText(err).toLowerCase()
     );
+  }
+
+  function isNativeCefClosingError(err: unknown): boolean {
+    return /CEF browser session is closing/i.test(browserActionErrorText(err));
+  }
+
+  function markRetiredCefBackendSession(backendSessionId: string) {
+    if (!backendSessionId) return;
+    retiredCefBackendSessionIds.add(backendSessionId);
+  }
+
+  function isRetiredCefTabInfo(info: BrowserTabInfo): boolean {
+    if (effectiveRenderer !== "cef") return false;
+    const backendId = info.backendSessionId || backendSessionId(info.tabId);
+    return retiredCefBackendSessionIds.has(backendId);
+  }
+
+  function handleNativeCefClosingSlot(
+    target: BrowserCommandTarget,
+    tabId: string,
+    err: unknown,
+    urlOverride?: string
+  ): boolean {
+    if (!isNativeCefClosingError(err)) return false;
+    markRetiredCefBackendSession(target.backendSessionId);
+    clearNavigationPending(target.backendSessionId);
+    const rootSessionId = activeRootSessionId || sessionId;
+    const closing = isClosingTab(rootSessionId, tabId);
+    const recentlyClosed = recentlyClosedTabIds.has(tabId);
+    const tab = tabs.find(
+      (candidate) =>
+        candidate.id === tabId && candidate.backendSessionId === target.backendSessionId
+    );
+    browserDebug("cef.closing-slot", {
+      tabId,
+      backendSessionId: target.backendSessionId,
+      assigned: Boolean(tab),
+      closing,
+      recentlyClosed,
+      urlOverride
+    });
+    if (disposed || target.generation !== sessionGeneration || !tab || closing || recentlyClosed) {
+      return true;
+    }
+    const replacementTabId = allocateNewTabId(rootSessionId);
+    const replacementUrl = urlOverride || tab.url || "about:blank";
+    const replacement: BrowserTab = {
+      ...tab,
+      id: replacementTabId,
+      backendSessionId: backendSessionId(replacementTabId, rootSessionId),
+      url: replacementUrl,
+      title: urlOverride ? "" : tab.title,
+      loading: false,
+      error: null,
+      status: "Starting Chrome...",
+      connected: false,
+      favicon: faviconFor(replacementUrl),
+      updatedAtMs: Date.now(),
+      frame: null,
+      devtools: []
+    };
+    recentlyClosedTabIds.set(tabId, Date.now());
+    recentlyOpenedTabIds.set(replacementTabId, Date.now());
+    if (pendingActiveTabSelection?.tabId === tabId) {
+      pendingActiveTabSelection = { tabId: replacementTabId, at: Date.now() };
+    }
+    tabs = tabs.map((candidate) =>
+      candidate.id === tabId && candidate.backendSessionId === target.backendSessionId
+        ? replacement
+        : candidate
+    );
+    if (activeTabId === tabId) {
+      activeTabId = replacementTabId;
+      activeEventSessionId = "";
+      syncFromActiveTab();
+      syncFrameFromActiveTab();
+    }
+    nextTabNumber = nextKnownTabNumber(tabs);
+    saveTabs(tabs);
+    browserDebug("cef.closing-slot.replaced", {
+      oldTabId: tabId,
+      oldBackendSessionId: target.backendSessionId,
+      replacementTabId,
+      replacementBackendSessionId: replacement.backendSessionId
+    });
+    if (activeTabId === replacementTabId) {
+      void connectActiveTab(target.generation);
+    }
+    return true;
   }
 
   function isClosingTab(targetSessionId: string, tabId: string): boolean {
@@ -1694,34 +2202,103 @@
     const requestedBackendSessionId = requestedTab?.backendSessionId || backendSessionId(tabId, requestedSessionId);
     const index = tabs.findIndex((tab) => tab.id === tabId);
     if (index === -1) return;
+    cancelPendingTabWork(requestedBackendSessionId);
+    browserDebug("tab.close.begin", {
+      tabId,
+      requestedSessionId,
+      requestedGeneration,
+      requestedBackendSessionId,
+      index,
+      closingActiveTab: activeTabId === tabId,
+      renderer: effectiveRenderer
+    });
     closingTabs = [...closingTabs, { sessionId: requestedSessionId, tabId }];
     try {
       if (effectiveRenderer === "cef") {
+        markRetiredCefBackendSession(requestedBackendSessionId);
+        browserDebug("cef.close.begin", { tabId, backendSessionId: requestedBackendSessionId });
         await browserCefNativeClose(requestedBackendSessionId);
+        browserDebug("cef.close.ok", { tabId, backendSessionId: requestedBackendSessionId });
+        browserDebug("daemon.tab-close.begin", { tabId, requestedSessionId });
+        const state = await browserTabClose(requestedSessionId, tabId);
+        browserDebug("daemon.tab-close.ok", {
+          tabId,
+          requestedSessionId,
+          activeTabId: state.activeTabId ?? null,
+          tabCount: state.tabs.length
+        });
         if (
           disposed ||
           requestedGeneration !== sessionGeneration ||
           activeRootSessionId !== requestedSessionId
-        ) return;
+        ) {
+          browserDebug("tab.close.stale-after-daemon", {
+            tabId,
+            requestedSessionId,
+            requestedGeneration,
+            activeRootSessionId
+          });
+          return;
+        }
         error = null;
-        removeClosedTabLocally(tabId, index);
+        recentlyClosedTabIds.set(tabId, Date.now());
+        recentlyOpenedTabIds.delete(tabId);
+        if (shouldUseLocalCefCloseState(state, tabId)) {
+          browserDebug("tab.close.local-cef-state", {
+            tabId,
+            requestedSessionId,
+            reason: "daemon returned empty state while local tabs remain"
+          });
+          removeClosedTabLocally(tabId, index);
+        } else {
+          applyTabsState(state, { allowEmpty: true, allowLocalTransitionShrink: true });
+        }
+        browserDebug("tab.close.end", { tabId, requestedSessionId });
         return;
       }
+      browserDebug("daemon.tab-close.begin", { tabId, requestedSessionId });
       const state = await browserTabClose(requestedSessionId, tabId);
+      browserDebug("daemon.tab-close.ok", {
+        tabId,
+        requestedSessionId,
+        activeTabId: state.activeTabId ?? null,
+        tabCount: state.tabs.length
+      });
       if (
         disposed ||
         requestedGeneration !== sessionGeneration ||
         activeRootSessionId !== requestedSessionId
-      ) return;
+      ) {
+        browserDebug("tab.close.stale-after-daemon", {
+          tabId,
+          requestedSessionId,
+          requestedGeneration,
+          activeRootSessionId
+        });
+        return;
+      }
       error = null;
       recentlyClosedTabIds.set(tabId, Date.now());
       recentlyOpenedTabIds.delete(tabId);
       applyTabsState(state, { allowEmpty: true, allowLocalTransitionShrink: true });
+      browserDebug("tab.close.end", { tabId, requestedSessionId });
     } catch (err) {
+      browserDebug("tab.close.error", {
+        tabId,
+        requestedSessionId,
+        requestedBackendSessionId,
+        message: browserActionErrorText(err)
+      });
       if (shouldUseLegacyTabClose(err)) {
         try {
+          browserDebug("legacy.close.begin", { tabId, requestedBackendSessionId });
           await browserClose(requestedBackendSessionId);
         } catch (legacyErr) {
+          browserDebug("legacy.close.error", {
+            tabId,
+            requestedBackendSessionId,
+            message: browserActionErrorText(legacyErr)
+          });
           if (
             !disposed &&
             requestedGeneration === sessionGeneration &&
@@ -1738,6 +2315,7 @@
         ) return;
         error = null;
         removeClosedTabLocally(tabId, index);
+        browserDebug("legacy.close.end", { tabId, requestedSessionId });
         return;
       }
       if (
@@ -1750,6 +2328,7 @@
       closingTabs = closingTabs.filter(
         (target) => target.sessionId !== requestedSessionId || target.tabId !== tabId
       );
+      browserDebug("tab.close.finally", { tabId, requestedSessionId });
     }
   }
 

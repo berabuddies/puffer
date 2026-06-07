@@ -150,15 +150,8 @@ impl BrowserRootSession {
             Err(_) => return Ok(None),
         };
         let reusable_target =
-            match wait_for_initial_page_target(&browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)
-                .context("read CEF DevTools page target")?
-            {
-                Some(target) => target,
-                None => match create_page_target(&browser_ws, DEFAULT_URL) {
-                    Ok(target) => target,
-                    Err(_) => return Ok(None),
-                },
-            };
+            wait_for_initial_page_target(&browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)
+                .context("read CEF DevTools page target")?;
         let cef_profile_dir = cef_profile_dir().unwrap_or_else(|| profile_dir.clone());
         ensure_extensions_registered(
             &browser_ws,
@@ -172,7 +165,7 @@ impl BrowserRootSession {
                 browser_ws,
                 child: None,
                 owns_targets: false,
-                reusable_target: Some(reusable_target),
+                reusable_target,
                 last_active: Instant::now(),
             })),
         }))
@@ -186,17 +179,10 @@ impl BrowserRootSession {
             return Ok(target);
         }
         if inner.owns_targets {
-            create_page_target(&inner.browser_ws, DEFAULT_URL)
-        } else {
-            create_page_target(&inner.browser_ws, DEFAULT_URL).or_else(|create_error| {
-                wait_for_initial_page_target(&inner.browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)?
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "CEF DevTools endpoint did not provide a page target and creating one failed: {create_error}"
-                        )
-                    })
-            })
+            return create_page_target(&inner.browser_ws, DEFAULT_URL);
         }
+        wait_for_initial_page_target(&inner.browser_ws, CEF_TARGET_DISCOVERY_TIMEOUT)?
+            .ok_or_else(|| anyhow!("CEF DevTools endpoint did not provide a page target"))
     }
 
     pub(super) fn close_target(&self, target: &ChromePageTarget) -> Result<()> {

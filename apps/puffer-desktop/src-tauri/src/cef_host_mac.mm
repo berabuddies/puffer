@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -133,6 +134,32 @@ BrowserSlot* FindSlot(const std::string& session_id) {
   return it->second;
 }
 
+bool CefDebugEnabled() {
+  return std::getenv("PUFFER_BROWSER_DEBUG") != nullptr;
+}
+
+void CefDebugLog(const std::string& event, const std::string& details) {
+  if (!CefDebugEnabled()) {
+    return;
+  }
+  std::fprintf(stderr, "[puffer-cef-native] %s %s\n", event.c_str(), details.c_str());
+  std::fflush(stderr);
+}
+
+std::string SlotSummary(const BrowserSlot* slot) {
+  if (!slot) {
+    return "slot=-";
+  }
+  std::ostringstream out;
+  out << "session_id=" << slot->session_id
+      << " browser=" << (slot->browser ? "yes" : "no")
+      << " creating=" << (slot->creating ? "true" : "false")
+      << " closing=" << (slot->closing ? "true" : "false")
+      << " container=" << (slot->container ? "yes" : "no")
+      << " slots=" << g_slots.size();
+  return out.str();
+}
+
 void SetString(cef_string_t* target, const std::string& value) {
   CefString(target).FromString(value);
 }
@@ -140,6 +167,7 @@ void SetString(cef_string_t* target, const std::string& value) {
 void InstallCefApplicationHooks();
 bool LoadCefFramework(const std::string& runtime_root, std::string* error);
 void ScheduleMessagePumpWork(int64_t delay_ms);
+void RetireBrowserSlotLater(const std::string& session_id);
 
 class PufferCefClient : public CefClient,
                         public CefLifeSpanHandler,
@@ -190,6 +218,7 @@ class PufferCefClient : public CefClient,
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     if (auto* slot = FindSlot(session_id_)) {
+      CefDebugLog("after-created", SlotSummary(slot));
       slot->browser = browser;
       slot->creating = false;
       slot->error.clear();
@@ -199,11 +228,11 @@ class PufferCefClient : public CefClient,
         if (slot->container) {
           [slot->container setHidden:YES];
         }
-        browser->GetHost()->CloseBrowser(true);
-        ScheduleMessagePumpWork(0);
+        RetireBrowserSlotLater(session_id_);
       }
       return;
     }
+    CefDebugLog("after-created-untracked", "session_id=" + session_id_);
     browser->GetHost()->CloseBrowser(true);
     ScheduleMessagePumpWork(0);
   }
@@ -211,10 +240,13 @@ class PufferCefClient : public CefClient,
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     auto it = g_slots.find(session_id_);
     if (it == g_slots.end()) {
+      CefDebugLog("before-close-untracked", "session_id=" + session_id_);
       return;
     }
     BrowserSlot* slot = it->second;
+    CefDebugLog("before-close", SlotSummary(slot));
     if (!slot->browser || !slot->browser->IsSame(browser)) {
+      CefDebugLog("before-close-stale", SlotSummary(slot));
       return;
     }
     slot->browser = nullptr;
@@ -459,9 +491,31 @@ void HideOtherSlots(const std::string& session_id) {
   }
 }
 
+void RetireBrowserSlotLater(const std::string& session_id) {
+  const std::string close_session_id = session_id;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    BrowserSlot* slot = FindSlot(close_session_id);
+    CefDebugLog("close-retired", SlotSummary(slot));
+    if (!slot || !slot->closing) {
+      return;
+    }
+    slot->loading = false;
+    slot->error.clear();
+    if (slot->container) {
+      [slot->container setHidden:YES];
+      [slot->container setFrame:NSZeroRect];
+    }
+    TouchSlot(slot);
+    ScheduleMessagePumpWork(0);
+  });
+}
+
 std::string SlotUnavailableMessage(const BrowserSlot* slot) {
   if (!slot) {
     return "CEF browser session is not open";
+  }
+  if (slot->closing) {
+    return "CEF browser session is closing";
   }
   if (!slot->error.empty()) {
     return slot->error;
@@ -475,7 +529,7 @@ std::string SlotStateJson(const BrowserSlot* slot) {
   }
   std::ostringstream out;
   out << "{\"connected\":"
-      << (slot->browser && slot->error.empty() ? "true" : "false")
+      << (slot->browser && !slot->closing && slot->error.empty() ? "true" : "false")
       << ",\"url\":\"" << JsonEscape(slot->url.empty() ? "about:blank" : slot->url)
       << "\",\"title\":\"" << JsonEscape(slot->title)
       << "\",\"loading\":" << (slot->loading ? "true" : "false")
@@ -753,6 +807,10 @@ extern "C" int puffer_cef_open(const char* session_id,
       slot->client = new PufferCefClient(id);
       g_slots[id] = slot;
       TouchSlot(slot);
+    } else if (slot->closing) {
+      message = "CEF browser session is closing";
+      CefDebugLog("open-closing-slot", SlotSummary(slot));
+      return 0;
     }
     if (slot->browser && !slot->error.empty()) {
       slot->browser->GetHost()->CloseBrowser(true);
@@ -812,7 +870,7 @@ extern "C" int puffer_cef_resize(const char* session_id,
   std::string message;
   int result = RunIntOnMain([&]() {
     BrowserSlot* slot = FindSlot(id);
-    if (!slot || !slot->browser || !slot->error.empty()) {
+    if (!slot || slot->closing || !slot->browser || !slot->error.empty()) {
       message = SlotUnavailableMessage(slot);
       return 0;
     }
@@ -841,7 +899,7 @@ extern "C" int puffer_cef_navigate(const char* session_id,
   std::string message;
   int result = RunIntOnMain([&]() {
     BrowserSlot* slot = FindSlot(id);
-    if (!slot || !slot->browser || !slot->error.empty()) {
+    if (!slot || slot->closing || !slot->browser || !slot->error.empty()) {
       message = SlotUnavailableMessage(slot);
       if (slot) {
         slot->error = message;
@@ -869,7 +927,7 @@ extern "C" int puffer_cef_reload(const char* session_id,
   std::string message;
   int result = RunIntOnMain([&]() {
     BrowserSlot* slot = FindSlot(id);
-    if (!slot || !slot->browser || !slot->error.empty()) {
+    if (!slot || slot->closing || !slot->browser || !slot->error.empty()) {
       message = SlotUnavailableMessage(slot);
       if (slot) {
         slot->error = message;
@@ -897,7 +955,7 @@ extern "C" int puffer_cef_history(const char* session_id,
   std::string message;
   int result = RunIntOnMain([&]() {
     BrowserSlot* slot = FindSlot(id);
-    if (!slot || !slot->browser || !slot->error.empty()) {
+    if (!slot || slot->closing || !slot->browser || !slot->error.empty()) {
       message = SlotUnavailableMessage(slot);
       if (slot) {
         slot->error = message;
@@ -945,8 +1003,8 @@ extern "C" int puffer_cef_close(const char* session_id,
       if (slot->container) {
         [slot->container setHidden:YES];
       }
-      CefRefPtr<CefBrowser> browser = slot->browser;
-      browser->GetHost()->CloseBrowser(true);
+      CefDebugLog("close-request", SlotSummary(slot));
+      RetireBrowserSlotLater(id);
       ScheduleMessagePumpWork(0);
       return 1;
     }
@@ -954,6 +1012,7 @@ extern "C" int puffer_cef_close(const char* session_id,
       if (slot->container) {
         [slot->container setHidden:YES];
       }
+      CefDebugLog("close-pending-create", SlotSummary(slot));
       ScheduleMessagePumpWork(0);
       return 1;
     }

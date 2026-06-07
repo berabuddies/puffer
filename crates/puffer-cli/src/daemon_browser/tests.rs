@@ -135,6 +135,105 @@ fn open_tab_skips_navigation_when_live_tab_already_has_requested_url() {
 }
 
 #[test]
+fn cef_remote_root_does_not_create_devtools_targets() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    let _guard = env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requested_paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let finished = Arc::new(AtomicBool::new(false));
+    let server_paths = Arc::clone(&requested_paths);
+    let server_finished = Arc::clone(&finished);
+    let server = std::thread::spawn(move || {
+        while !server_finished.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buffer = [0; 2048];
+                    let count = stream.read(&mut buffer).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..count]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    let list_count = {
+                        let mut paths = server_paths.lock().unwrap();
+                        paths.push(path.clone());
+                        paths
+                            .iter()
+                            .filter(|item| item.starts_with("/json/list"))
+                            .count()
+                    };
+                    let body = if path.starts_with("/json/version") {
+                        format!(
+                            r#"{{"webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/browser/root"}}"#
+                        )
+                    } else if path.starts_with("/json/list") && list_count == 1 {
+                        format!(
+                            r#"[{{"id":"target-1","type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/target-1"}}]"#
+                        )
+                    } else {
+                        "[]".to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let root = BrowserRootSession::spawn(
+        profile.path().to_path_buf(),
+        960,
+        720,
+        BrowserLaunchSettings::default(),
+    )
+    .unwrap();
+    assert_eq!(root.allocate_target().unwrap().target_id, "target-1");
+    assert!(root.allocate_target().is_err());
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+    finished.store(true, Ordering::SeqCst);
+    let _ = server.join();
+    let paths = requested_paths.lock().unwrap().clone();
+    assert!(
+        paths.iter().all(|path| !path.starts_with("/json/new")),
+        "remote CEF allocation unexpectedly requested /json/new: {paths:?}"
+    );
+}
+
+#[test]
 fn browser_recording_requires_agent_activity_window() {
     let mut recordings = recording::BrowserRecordingRegistry::default();
     let state = BrowserState {

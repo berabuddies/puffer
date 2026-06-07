@@ -261,6 +261,7 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
     // live by picking `workspace_cwd` — typically $HOME, but the UI's
     // WorkspacePicker can pass any path when the user switches workspaces.
     let mut cmd = Command::new(&binary);
+    let browser_debug = daemon_browser_debug_enabled();
     cmd.current_dir(&workspace_cwd)
         .arg("daemon")
         .arg("--bind")
@@ -271,6 +272,9 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
         .stderr(Stdio::piped());
     if std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT").is_none() {
         cmd.env("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333");
+    }
+    if browser_debug && std::env::var_os("PUFFER_BROWSER_DEBUG").is_none() {
+        cmd.env("PUFFER_BROWSER_DEBUG", "1");
     }
     if std::env::var_os("PUFFER_CEF_PROFILE_DIR").is_none() {
         if let Some(profile_dir) = default_cef_profile_dir() {
@@ -318,8 +322,12 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
         serde_json::from_str(line).context("parsing daemon handshake JSON")?;
     // Drop the reader — further daemon stdout just goes to /dev/null.
     drop(reader);
-    drain_daemon_stderr(stderr);
+    drain_daemon_stderr(stderr, browser_debug);
     Ok(DaemonChild::spawned(child, handshake))
+}
+
+fn daemon_browser_debug_enabled() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("PUFFER_BROWSER_DEBUG").is_some()
 }
 
 fn default_cef_profile_dir() -> Option<PathBuf> {
@@ -412,12 +420,16 @@ fn daemon_handshake_failure_message(
     format!("daemon exited before printing handshake{status}: {stderr_text}")
 }
 
-fn drain_daemon_stderr(stderr: Option<std::process::ChildStderr>) {
+fn drain_daemon_stderr(stderr: Option<std::process::ChildStderr>, forward: bool) {
     let Some(mut stderr) = stderr else {
         return;
     };
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        if forward {
+            let _ = std::io::copy(&mut stderr, &mut std::io::stderr());
+        } else {
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        }
     });
 }
 
