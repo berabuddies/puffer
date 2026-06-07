@@ -1189,6 +1189,27 @@ export class FakeDaemon {
         return {};
       case "pty_close":
         return this.closePty(String(request.params.ptyId ?? ""));
+      case "browser_backend_status":
+        return {
+          preferredRenderer: String(request.params.preferredRenderer ?? "screencast"),
+          activeRenderer: String(request.params.preferredRenderer ?? "screencast"),
+          fallbackReason: null,
+          cef: {
+            available: false,
+            root: null,
+            frameworkPath: null,
+            missing: [],
+            tintinChromium: {
+              executable: null,
+              appBundle: null,
+              isCefRuntime: false
+            },
+            buildHint: ""
+          },
+          screencast: {
+            chromiumExecutable: null
+          }
+        };
       case "browser_agent":
         return this.browserAgent(request.params);
       case "browser_open":

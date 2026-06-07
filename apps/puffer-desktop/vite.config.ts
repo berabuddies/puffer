@@ -17,6 +17,9 @@ export default defineConfig({
   ],
   clearScreen: false,
   envPrefix: ["VITE_", "TAURI_"],
+  optimizeDeps: {
+    entries: ["index.html"]
+  },
   server: {
     host,
     port: 1420,

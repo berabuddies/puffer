@@ -1674,7 +1674,6 @@
     if (disposed || activeRootSessionId !== rootSessionId || frame.rootSessionId !== rootSessionId) return;
     if (!frame.tabId) return;
     const existing = tabs.find((tab) => tab.id === frame.tabId);
-    if (!existing) return;
     const frameBackendSessionId = recordingBackendSessionId(frame);
     const nextFrame = frameFromRecording(frame);
     const nextUrl = frame.url || existing?.url || currentUrl || "about:blank";
@@ -1691,7 +1690,7 @@
       connected: true,
       favicon: faviconFor(nextUrl)
     };
-    const shouldActivate = frame.tabId === activeTabId;
+    const shouldActivate = !existing || frame.tabId === activeTabId;
     tabs = existing
       ? tabs.map((tab) => (tab.id === frame.tabId ? nextTab : tab))
       : [...tabs, nextTab];

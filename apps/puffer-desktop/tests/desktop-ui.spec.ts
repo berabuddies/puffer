@@ -758,7 +758,7 @@ test("late Browser devtools events do not leak into a switched agent", async ({ 
   await expect(page.getByText("late alpha console event")).toHaveCount(0);
 });
 
-test("Browser state errors disable controls and stop canvas input", async ({ page }) => {
+test("Browser state errors disable navigation controls and stop canvas input", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -777,7 +777,11 @@ test("Browser state errors disable controls and stop canvas input", async ({ pag
   });
 
   await expect(page.locator(".pf-browser-status")).toHaveText("Chrome error");
-  await expect(page.getByLabel("URL")).toBeDisabled();
+  const toolbar = page.locator(".pf-browser-toolbar");
+  await expect(toolbar.getByRole("button", { name: "Back" })).toBeDisabled();
+  await expect(toolbar.getByRole("button", { name: "Forward" })).toBeDisabled();
+  await expect(toolbar.getByRole("button", { name: "Reload" })).toBeDisabled();
+  await expect(page.getByLabel("URL")).toBeEnabled();
 
   const before = daemon.requests.length;
   await page.locator(".pf-browser-canvas").click({ position: { x: 20, y: 20 } });
