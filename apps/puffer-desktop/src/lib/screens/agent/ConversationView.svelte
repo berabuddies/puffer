@@ -9,6 +9,7 @@
   import DiffCard from "./DiffCard.svelte";
   import Approval from "./Approval.svelte";
   import QuestionPrompt from "./QuestionPrompt.svelte";
+  import CanvasOffer from "./CanvasOffer.svelte";
   import ModelPicker from "./ModelPicker.svelte";
   import AttachmentPreviewStrip from "./AttachmentPreviewStrip.svelte";
   import MessageAttachmentPreviewStrip from "./MessageAttachmentPreviewStrip.svelte";
@@ -2277,7 +2278,11 @@
                         <Approval item={p} disabled={isPermissionResolving(p)} onResolve={onResolvePermission} />
                       {/each}
                       {#each row.questions as q (q.id)}
-                        <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
+                        {#if q.metadata?.kind === "canvas-offer"}
+                          <CanvasOffer item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
+                        {:else}
+                          <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
+                        {/if}
                       {/each}
                     </div>
                   {/if}

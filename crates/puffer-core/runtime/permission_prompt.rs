@@ -84,6 +84,10 @@ pub enum PermissionPromptAction {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserQuestionPromptRequest {
     pub questions: Value,
+    /// Free-form marker carried from the tool input's `metadata`. Surfaced to
+    /// the frontend so a UI can specialize a question (e.g. `kind:"canvas-offer"`
+    /// reskins the prompt as a Canvas button). `Null` when absent.
+    pub metadata: Value,
 }
 
 /// Describes the answers collected for one `AskUserQuestion` request.

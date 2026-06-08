@@ -121,6 +121,8 @@ export type SessionStreamEvent =
       turnId: string;
       requestId: string;
       questions: unknown[];
+      /** Free-form marker from the tool's `metadata` (e.g. { kind: "canvas-offer" }). */
+      metadata?: Record<string, unknown> | null;
       browserSessionId?: string;
       browserTabId?: string;
       browserUrl?: string;

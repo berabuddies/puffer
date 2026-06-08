@@ -189,6 +189,7 @@ fn collect_secret(
             "header": "Secret",
             "secret": true
         }]),
+        metadata: serde_json::Value::Null,
     })
     .context("RequestSecret collect requires an active user question prompt")?;
     let value = collect_secret_answer(&response, &question)?;

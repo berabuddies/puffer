@@ -768,6 +768,7 @@ pub(super) fn execute_ask_user_question(
     if parsed.answers.is_empty() {
         if let Some(response) = prompt_for_user_question(UserQuestionPromptRequest {
             questions: serde_json::to_value(&parsed.questions)?,
+            metadata: serde_json::to_value(&parsed.metadata).unwrap_or(Value::Null),
         }) {
             parsed.answers = response.answers;
             for (key, value) in response.annotations {

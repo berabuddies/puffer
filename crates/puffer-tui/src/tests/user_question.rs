@@ -93,6 +93,7 @@ fn poll_pending_submit_opens_user_question_overlay() {
 
     let request = UserQuestionPromptRequest {
         questions: sample_question_payload(),
+        metadata: serde_json::Value::Null,
     };
     let (event_tx, event_rx) = mpsc::channel();
     let (response_tx, _response_rx) = mpsc::channel();

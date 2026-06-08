@@ -215,6 +215,8 @@ export type UserQuestionTimelineItem = TimelineBase & {
   status: string;
   questions: AskUserQuestionItem[];
   answers?: Record<string, string | string[]>;
+  /** Free-form marker from the tool's `metadata` (e.g. { kind: "canvas-offer" }). */
+  metadata?: Record<string, unknown>;
 };
 
 export type DiffTimelineItem = TimelineBase & {

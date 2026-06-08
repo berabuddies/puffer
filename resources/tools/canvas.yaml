@@ -37,6 +37,27 @@ description: |-
   action is a missed entry point. Do not emit decorative nodes with no evidence.
 
   The page is written under .puffer/canvas/ and opened in the default browser.
+
+  PROACTIVELY OFFERING CANVAS — when a final answer is long and structured
+  (multiple findings/sections, a review/dashboard/report, lots of code/diff),
+  don't dump it all as text: first OFFER Canvas via AskUserQuestion, then render
+  on a yes. The frontend reskins this specific question into a one-click Canvas
+  button, so it MUST follow this exact contract:
+    AskUserQuestion({
+      metadata: { kind: "canvas-offer" },
+      questions: [{
+        question: "用 Canvas 呈现这个结果?",   // your reason, one line
+        header: "Canvas",
+        options: [
+          { label: "用 Canvas 打开", description: "..." },  // [0] = affirmative
+          { label: "普通文字显示",   description: "..." }   // [1] = decline
+        ]
+      }]
+    })
+  metadata.kind MUST be "canvas-offer"; options[0] = use Canvas, options[1] =
+  decline. If the user picks options[0], call the Canvas tool with the composed
+  tree; if options[1], just give the plain text answer. Offer once, only for
+  answers that genuinely benefit — never for short replies.
 handler: runtime:workflow:canvas
 approval_policy: auto
 sandbox_policy: workspace-write
