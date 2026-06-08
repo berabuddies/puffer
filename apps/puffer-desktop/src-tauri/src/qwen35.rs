@@ -1,7 +1,7 @@
-//! MiniCPM5 local-model onboarding: detect whether to recommend the on-device
+//! Qwen3.5 local-model onboarding: detect whether to recommend the on-device
 //! model, and run its installer with streamed progress.
 //!
-//! The detection + install logic lives in `scripts/minicpm5-{recommend,install}.sh`
+//! The detection + install logic lives in `scripts/qwen35-{recommend,install}.sh`
 //! (single source of truth, also usable from a terminal). These commands just
 //! locate and run them, surfacing the result to the desktop onboarding card.
 
@@ -68,8 +68,8 @@ fn script_path(name: &str) -> Option<PathBuf> {
 /// Should puffer recommend installing the local model on this machine? Returns
 /// the recommend.sh JSON decision (recommend/false + reason/metadata).
 #[tauri::command]
-pub fn minicpm5_recommend() -> Value {
-    let Some(script) = script_path("minicpm5-recommend.sh") else {
+pub fn qwen35_recommend() -> Value {
+    let Some(script) = script_path("qwen35-recommend.sh") else {
         return json!({ "recommend": false, "reason": "installer scripts not found" });
     };
     match Command::new("/bin/bash").arg(&script).output() {
@@ -98,18 +98,18 @@ pub fn minicpm5_recommend() -> Value {
 }
 
 /// Run the installer in the background, streaming stdout/stderr lines as
-/// `minicpm5://install-log` events and a final `minicpm5://install-done`
+/// `qwen35://install-log` events and a final `qwen35://install-done`
 /// ({ success: bool }). Non-blocking so the UI stays responsive during the
 /// multi-minute weight download.
 #[tauri::command]
-pub fn minicpm5_install(app: AppHandle) -> Result<(), String> {
-    let script = script_path("minicpm5-install.sh").ok_or("installer script not found")?;
+pub fn qwen35_install(app: AppHandle) -> Result<(), String> {
+    let script = script_path("qwen35-install.sh").ok_or("installer script not found")?;
     // Reject a second concurrent install instead of racing two writers into
     // ~/.puffer. The UI also hides the button while installing; this is the
     // backend backstop.
     if INSTALLING.swap(true, Ordering::SeqCst) {
         let _ = app.emit(
-            "minicpm5://install-log",
+            "qwen35://install-log",
             "Install already in progress.".to_string(),
         );
         return Ok(());
@@ -125,7 +125,7 @@ pub fn minicpm5_install(app: AppHandle) -> Result<(), String> {
             Err(err) => {
                 INSTALLING.store(false, Ordering::SeqCst);
                 let _ = app.emit(
-                    "minicpm5://install-done",
+                    "qwen35://install-done",
                     json!({ "success": false, "error": err.to_string() }),
                 );
                 return;
@@ -139,13 +139,13 @@ pub fn minicpm5_install(app: AppHandle) -> Result<(), String> {
             let app = app.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    let _ = app.emit("minicpm5://install-log", line);
+                    let _ = app.emit("qwen35://install-log", line);
                 }
             })
         });
         if let Some(out) = child.stdout.take() {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
-                let _ = app.emit("minicpm5://install-log", line);
+                let _ = app.emit("qwen35://install-log", line);
             }
         }
 
@@ -154,7 +154,7 @@ pub fn minicpm5_install(app: AppHandle) -> Result<(), String> {
             let _ = handle.join();
         }
         INSTALLING.store(false, Ordering::SeqCst);
-        let _ = app.emit("minicpm5://install-done", json!({ "success": success }));
+        let _ = app.emit("qwen35://install-done", json!({ "success": success }));
     });
     Ok(())
 }

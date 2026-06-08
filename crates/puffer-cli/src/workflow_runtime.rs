@@ -734,15 +734,15 @@ mod tests {
     #[test]
     fn task_agent_default_leaves_non_family_provider_current_model() {
         let mut registry = ProviderRegistry::new();
-        registry.register(provider("minicpm5", "default_model"));
-        let mut state = app_state("minicpm5", Some("minicpm5/default_model"));
+        registry.register(provider("qwen35", "default_model"));
+        let mut state = app_state("qwen35", Some("qwen35/default_model"));
 
         apply_task_agent_model_default(&mut state, &registry);
 
-        assert_eq!(state.current_provider.as_deref(), Some("minicpm5"));
+        assert_eq!(state.current_provider.as_deref(), Some("qwen35"));
         assert_eq!(
             state.current_model.as_deref(),
-            Some("minicpm5/default_model")
+            Some("qwen35/default_model")
         );
     }
 

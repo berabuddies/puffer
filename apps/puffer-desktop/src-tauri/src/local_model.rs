@@ -13,16 +13,16 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const MINICPM5_ID: &str = "minicpm5";
-const MINICPM5_MODEL_ID: &str = "minicpm5-1b";
-const MINICPM5_DISPLAY_NAME: &str = "MiniCPM5-1B (local)";
-const MINICPM5_REPO: &str = "openbmb/MiniCPM5-1B-MLX";
-const MINICPM5_ENDPOINT: &str = "http://127.0.0.1:8088/v1";
-const MINICPM5_MODELS_URL: &str = "http://127.0.0.1:8088/v1/models";
-const MINICPM5_EVENT: &str = "local-model:minicpm5:event";
-const MINICPM5_SIZE: &str = "~589MB";
-const MINICPM5_SHIM: &str = include_str!("../../../../scripts/minicpm5_shim.py");
-const MINICPM5_PROVIDER: &str = include_str!("../../../../resources/providers/minicpm5.yaml");
+const QWEN35_ID: &str = "qwen35";
+const QWEN35_MODEL_ID: &str = "qwen3.5-0.8b";
+const QWEN35_DISPLAY_NAME: &str = "Qwen3.5-0.8B (local)";
+const QWEN35_REPO: &str = "mlx-community/Qwen3.5-0.8B-8bit";
+const QWEN35_ENDPOINT: &str = "http://127.0.0.1:8088/v1";
+const QWEN35_MODELS_URL: &str = "http://127.0.0.1:8088/v1/models";
+const QWEN35_EVENT: &str = "local-model:qwen35:event";
+const QWEN35_SIZE: &str = "~992MB";
+const QWEN35_SHIM: &str = include_str!("../../../../scripts/qwen35_shim.py");
+const QWEN35_PROVIDER: &str = include_str!("../../../../resources/providers/qwen35.yaml");
 
 #[derive(Clone)]
 pub(crate) struct LocalModelInstaller {
@@ -68,7 +68,7 @@ pub(crate) struct LocalModelInstallJob {
     status: LocalModelStatus,
 }
 
-struct MiniCpm5Paths {
+struct Qwen35Paths {
     puffer_home: PathBuf,
     venv: PathBuf,
     python: PathBuf,
@@ -81,7 +81,7 @@ struct MiniCpm5Paths {
     serve_log: PathBuf,
 }
 
-struct MiniCpm5Health {
+struct Qwen35Health {
     running: bool,
     detail: String,
 }
@@ -96,17 +96,17 @@ impl LocalModelInstaller {
 
     /// Returns the current installation and server status for a local model.
     pub(crate) fn status(&self, model_id: &str) -> Result<LocalModelStatus> {
-        ensure_minicpm5(model_id)?;
+        ensure_qwen35(model_id)?;
         Ok(build_status(self.installing.load(Ordering::SeqCst)))
     }
 
-    /// Starts the one-click MiniCPM5 installer or returns the active job state.
+    /// Starts the one-click Qwen3.5 installer or returns the active job state.
     pub(crate) fn install_or_start(
         &self,
         events: EventEmitter,
         model_id: &str,
     ) -> Result<LocalModelInstallJob> {
-        ensure_minicpm5(model_id)?;
+        ensure_qwen35(model_id)?;
         if self
             .installing
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -142,7 +142,7 @@ impl LocalModelInstaller {
     }
 
     fn run_install_job(&self, events: &EventEmitter, job_id: &str) -> Result<()> {
-        let paths = minicpm5_paths();
+        let paths = qwen35_paths();
         let status = build_status(true);
         if !status.supported {
             bail!(status.reason);
@@ -159,7 +159,7 @@ impl LocalModelInstaller {
             events,
             job_id,
             "checking",
-            "Checking local MiniCPM5 runtime".to_string(),
+            "Checking local Qwen3.5 runtime".to_string(),
             Some(status),
         );
 
@@ -219,7 +219,7 @@ impl LocalModelInstaller {
                 events,
                 job_id,
                 "download",
-                format!("Downloading {MINICPM5_REPO} ({MINICPM5_SIZE})"),
+                format!("Downloading {QWEN35_REPO} ({QWEN35_SIZE})"),
                 None,
             );
             fs::create_dir_all(&paths.model_dir).with_context(|| {
@@ -230,12 +230,12 @@ impl LocalModelInstaller {
                 path_str(&paths.python)?,
                 &[
                     "-c",
-                    "import os; from huggingface_hub import snapshot_download; snapshot_download(os.environ['MINICPM5_REPO'], local_dir=os.environ['MINICPM5_MODEL_DIR'])",
+                    "import os; from huggingface_hub import snapshot_download; snapshot_download(os.environ['QWEN35_REPO'], local_dir=os.environ['QWEN35_MODEL_DIR'])",
                 ],
                 &[
-                    ("MINICPM5_REPO", MINICPM5_REPO.to_string()),
+                    ("QWEN35_REPO", QWEN35_REPO.to_string()),
                     (
-                        "MINICPM5_MODEL_DIR",
+                        "QWEN35_MODEL_DIR",
                         paths.model_dir.display().to_string(),
                     ),
                 ],
@@ -261,43 +261,43 @@ impl LocalModelInstaller {
         fs::create_dir_all(&paths.bin_dir)
             .with_context(|| format!("failed to create {}", paths.bin_dir.display()))?;
         fs::create_dir_all(paths.provider.parent().unwrap_or(&paths.puffer_home))?;
-        fs::write(&paths.shim, MINICPM5_SHIM)
+        fs::write(&paths.shim, QWEN35_SHIM)
             .with_context(|| format!("failed to write {}", paths.shim.display()))?;
-        fs::write(&paths.provider, MINICPM5_PROVIDER)
+        fs::write(&paths.provider, QWEN35_PROVIDER)
             .with_context(|| format!("failed to write {}", paths.provider.display()))?;
 
         emit_model_event(
             events,
             job_id,
             "serve",
-            format!("Starting local server at {MINICPM5_ENDPOINT}"),
+            format!("Starting local server at {QWEN35_ENDPOINT}"),
             None,
         );
-        start_minicpm5_server(&paths)?;
-        wait_for_minicpm5_ready()?;
+        start_qwen35_server(&paths)?;
+        wait_for_qwen35_ready()?;
 
         emit_model_event(
             events,
             job_id,
             "done",
-            "MiniCPM5 is installed, registered, and running".to_string(),
+            "Qwen3.5 is installed, registered, and running".to_string(),
             Some(build_status(false)),
         );
         Ok(())
     }
 }
 
-fn ensure_minicpm5(model_id: &str) -> Result<()> {
+fn ensure_qwen35(model_id: &str) -> Result<()> {
     let normalized = model_id.trim();
-    if normalized.is_empty() || normalized == MINICPM5_ID || normalized == MINICPM5_MODEL_ID {
+    if normalized.is_empty() || normalized == QWEN35_ID || normalized == QWEN35_MODEL_ID {
         return Ok(());
     }
     bail!("unsupported local model `{normalized}`")
 }
 
 fn build_status(installing: bool) -> LocalModelStatus {
-    let paths = minicpm5_paths();
-    let supported = supports_minicpm5();
+    let paths = qwen35_paths();
+    let supported = supports_qwen35();
     let python_exists = paths.python.exists();
     let mlx_installed = python_exists && python_imports(&paths.python, "mlx_lm");
     let hub_installed = python_exists && python_imports(&paths.python, "huggingface_hub");
@@ -306,7 +306,7 @@ fn build_status(installing: bool) -> LocalModelStatus {
     let shim_present = paths.shim.exists();
     let installed = model_present && python_exists && deps_installed && shim_present;
     let configured = paths.provider.exists();
-    let health = minicpm5_health();
+    let health = qwen35_health();
     let running = health.running;
     let recommended = supported && !installed;
     let reason = if !supported {
@@ -335,9 +335,9 @@ fn build_status(installing: bool) -> LocalModelStatus {
     );
 
     LocalModelStatus {
-        id: MINICPM5_ID.to_string(),
-        model_id: MINICPM5_MODEL_ID.to_string(),
-        display_name: MINICPM5_DISPLAY_NAME.to_string(),
+        id: QWEN35_ID.to_string(),
+        model_id: QWEN35_MODEL_ID.to_string(),
+        display_name: QWEN35_DISPLAY_NAME.to_string(),
         checked_at_ms: now_ms(),
         supported,
         recommended,
@@ -346,8 +346,8 @@ fn build_status(installing: bool) -> LocalModelStatus {
         running,
         installing,
         reason,
-        endpoint: MINICPM5_ENDPOINT.to_string(),
-        size: MINICPM5_SIZE.to_string(),
+        endpoint: QWEN35_ENDPOINT.to_string(),
+        size: QWEN35_SIZE.to_string(),
         install_path: paths.model_dir.display().to_string(),
         provider_path: paths.provider.display().to_string(),
         log_path: paths.serve_log.display().to_string(),
@@ -359,7 +359,7 @@ fn build_status(installing: bool) -> LocalModelStatus {
 
 #[allow(clippy::too_many_arguments)]
 fn build_checks(
-    paths: &MiniCpm5Paths,
+    paths: &Qwen35Paths,
     supported: bool,
     python_exists: bool,
     mlx_installed: bool,
@@ -367,7 +367,7 @@ fn build_checks(
     model_present: bool,
     shim_present: bool,
     configured: bool,
-    health: &MiniCpm5Health,
+    health: &Qwen35Health,
 ) -> Vec<LocalModelCheck> {
     let mut checks = Vec::new();
     checks.push(check(
@@ -375,7 +375,7 @@ fn build_checks(
         if supported { "ok" } else { "error" },
         if supported {
             format!(
-                "{} {} supports MiniCPM5 MLX",
+                "{} {} supports Qwen3.5 MLX",
                 env::consts::OS,
                 env::consts::ARCH
             )
@@ -471,20 +471,20 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn minicpm5_paths() -> MiniCpm5Paths {
+fn qwen35_paths() -> Qwen35Paths {
     let puffer_home = env::var_os("PUFFER_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home_dir().join(".puffer"));
-    let venv = puffer_home.join("venvs/minicpm5");
+    let venv = puffer_home.join("venvs/qwen35");
     let python = venv.join("bin/python");
-    let model_dir = puffer_home.join("models/minicpm5-1b");
+    let model_dir = puffer_home.join("models/qwen3.5-0.8b");
     let model_config = model_dir.join("config.json");
     let bin_dir = puffer_home.join("bin");
-    let shim = bin_dir.join("minicpm5-shim.py");
-    let provider = puffer_home.join("resources/providers/minicpm5.yaml");
-    let install_log = puffer_home.join("minicpm5-install.log");
-    let serve_log = puffer_home.join("minicpm5-serve.log");
-    MiniCpm5Paths {
+    let shim = bin_dir.join("qwen35-shim.py");
+    let provider = puffer_home.join("resources/providers/qwen35.yaml");
+    let install_log = puffer_home.join("qwen35-install.log");
+    let serve_log = puffer_home.join("qwen35-serve.log");
+    Qwen35Paths {
         puffer_home,
         venv,
         python,
@@ -498,19 +498,19 @@ fn minicpm5_paths() -> MiniCpm5Paths {
     }
 }
 
-fn supports_minicpm5() -> bool {
+fn supports_qwen35() -> bool {
     env::consts::OS == "macos" && matches!(env::consts::ARCH, "aarch64" | "arm64")
 }
 
 fn unsupported_reason() -> String {
     if env::consts::OS != "macos" {
         return format!(
-            "MiniCPM5 MLX install requires macOS; detected {}",
+            "Qwen3.5 MLX install requires macOS; detected {}",
             env::consts::OS
         );
     }
     format!(
-        "MiniCPM5 MLX install requires Apple Silicon; detected {}",
+        "Qwen3.5 MLX install requires Apple Silicon; detected {}",
         env::consts::ARCH
     )
 }
@@ -583,8 +583,8 @@ fn run_logged(
     )
 }
 
-fn start_minicpm5_server(paths: &MiniCpm5Paths) -> Result<()> {
-    if minicpm5_running() {
+fn start_qwen35_server(paths: &Qwen35Paths) -> Result<()> {
+    if qwen35_running() {
         return Ok(());
     }
     if paths.serve_log.exists() {
@@ -600,7 +600,7 @@ fn start_minicpm5_server(paths: &MiniCpm5Paths) -> Result<()> {
     let stderr = stdout.try_clone()?;
     Command::new(&paths.python)
         .arg(&paths.shim)
-        .env("MINICPM5_MODEL", &paths.model_dir)
+        .env("QWEN35_MODEL", &paths.model_dir)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()
@@ -608,45 +608,45 @@ fn start_minicpm5_server(paths: &MiniCpm5Paths) -> Result<()> {
     Ok(())
 }
 
-fn wait_for_minicpm5_ready() -> Result<()> {
+fn wait_for_qwen35_ready() -> Result<()> {
     for _ in 0..90 {
-        if minicpm5_running() {
+        if qwen35_running() {
             return Ok(());
         }
         thread::sleep(Duration::from_secs(1));
     }
-    bail!("MiniCPM5 server did not become ready at {MINICPM5_ENDPOINT}")
+    bail!("Qwen3.5 server did not become ready at {QWEN35_ENDPOINT}")
 }
 
-fn minicpm5_running() -> bool {
-    minicpm5_health().running
+fn qwen35_running() -> bool {
+    qwen35_health().running
 }
 
-fn minicpm5_health() -> MiniCpm5Health {
+fn qwen35_health() -> Qwen35Health {
     let client = match Client::builder().timeout(Duration::from_secs(2)).build() {
         Ok(client) => client,
         Err(error) => {
-            return MiniCpm5Health {
+            return Qwen35Health {
                 running: false,
                 detail: format!("failed to build health client: {error}"),
             };
         }
     };
-    let response = match client.get(MINICPM5_MODELS_URL).send() {
+    let response = match client.get(QWEN35_MODELS_URL).send() {
         Ok(response) => response,
         Err(error) => {
-            return MiniCpm5Health {
+            return Qwen35Health {
                 running: false,
-                detail: format!("{MINICPM5_MODELS_URL} is not reachable: {error}"),
+                detail: format!("{QWEN35_MODELS_URL} is not reachable: {error}"),
             };
         }
     };
     let status = response.status();
     let body = response.text().unwrap_or_default();
     if !status.is_success() {
-        return MiniCpm5Health {
+        return Qwen35Health {
             running: false,
-            detail: format!("{MINICPM5_MODELS_URL} returned HTTP {status}"),
+            detail: format!("{QWEN35_MODELS_URL} returned HTTP {status}"),
         };
     }
     let model_advertised = serde_json::from_str::<Value>(&body)
@@ -657,20 +657,20 @@ fn minicpm5_health() -> MiniCpm5Health {
                 model
                     .get("id")
                     .and_then(Value::as_str)
-                    .map(|id| id == MINICPM5_MODEL_ID)
+                    .map(|id| id == QWEN35_MODEL_ID)
                     .unwrap_or(false)
             })
         })
         .unwrap_or(false);
     if model_advertised {
-        return MiniCpm5Health {
+        return Qwen35Health {
             running: true,
-            detail: format!("{MINICPM5_MODELS_URL} advertises {MINICPM5_MODEL_ID}"),
+            detail: format!("{QWEN35_MODELS_URL} advertises {QWEN35_MODEL_ID}"),
         };
     }
-    MiniCpm5Health {
+    Qwen35Health {
         running: false,
-        detail: format!("{MINICPM5_MODELS_URL} answered but did not advertise {MINICPM5_MODEL_ID}"),
+        detail: format!("{QWEN35_MODELS_URL} answered but did not advertise {QWEN35_MODEL_ID}"),
     }
 }
 
@@ -682,9 +682,9 @@ fn emit_model_event(
     status: Option<LocalModelStatus>,
 ) {
     events.emit(
-        MINICPM5_EVENT,
+        QWEN35_EVENT,
         json!({
-            "modelId": MINICPM5_MODEL_ID,
+            "modelId": QWEN35_MODEL_ID,
             "jobId": job_id,
             "phase": phase,
             "message": message,

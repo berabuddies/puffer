@@ -2760,7 +2760,7 @@ fn local_model_id_param(params: &Value) -> &str {
         .get("modelId")
         .or_else(|| params.get("model_id"))
         .and_then(Value::as_str)
-        .unwrap_or("minicpm5")
+        .unwrap_or("qwen35")
 }
 
 fn handle_local_model_status(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -5243,7 +5243,7 @@ mod tests {
     }
 
     #[test]
-    fn local_model_status_handler_returns_minicpm5_contract() {
+    fn local_model_status_handler_returns_qwen35_contract() {
         let _home_guard = PufferHomeEnvGuard::set();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -5258,11 +5258,11 @@ mod tests {
             .expect("daemon state");
 
         let status =
-            handle_local_model_status(&state, &json!({"modelId": "minicpm5"})).expect("status");
+            handle_local_model_status(&state, &json!({"modelId": "qwen35"})).expect("status");
 
-        assert_eq!(status["id"], "minicpm5");
-        assert_eq!(status["modelId"], "minicpm5-1b");
-        assert_eq!(status["displayName"], "MiniCPM5-1B (local)");
+        assert_eq!(status["id"], "qwen35");
+        assert_eq!(status["modelId"], "qwen3.5-0.8b");
+        assert_eq!(status["displayName"], "Qwen3.5-0.8B (local)");
         assert!(status["checks"]
             .as_array()
             .is_some_and(|checks| !checks.is_empty()));

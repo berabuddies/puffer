@@ -12,7 +12,7 @@ mod fs_watch;
 mod local_model;
 mod lsp;
 mod mini_window;
-mod minicpm5;
+mod qwen35;
 mod pty;
 mod remote_client;
 mod repo_actions;
@@ -57,8 +57,8 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "resolve_user_question",
     "cancel_turn",
     "summon_mini_window",
-    "minicpm5_recommend",
-    "minicpm5_install",
+    "qwen35_recommend",
+    "qwen35_install",
     "browser_cef_native_status",
     "browser_cef_native_open",
     "browser_cef_native_resize",
@@ -525,8 +525,8 @@ pub fn run() {
             resolve_user_question,
             cancel_turn,
             mini_window::summon_mini_window,
-            minicpm5::minicpm5_recommend,
-            minicpm5::minicpm5_install,
+            qwen35::qwen35_recommend,
+            qwen35::qwen35_install,
             cef_host::browser_cef_native_status,
             cef_host::browser_cef_native_open,
             cef_host::browser_cef_native_resize,

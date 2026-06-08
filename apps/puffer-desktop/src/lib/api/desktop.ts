@@ -2418,12 +2418,12 @@ export type ConfigPatch = {
   openaiBaseUrl?: string | null;
 };
 
-export async function localModelStatus(modelId = "minicpm5"): Promise<LocalModelStatus> {
+export async function localModelStatus(modelId = "qwen35"): Promise<LocalModelStatus> {
   const client = await ensureLocalDaemonClient();
   return client.request<LocalModelStatus>("local_model_status", { modelId });
 }
 
-export async function installLocalModel(modelId = "minicpm5"): Promise<LocalModelInstallJob> {
+export async function installLocalModel(modelId = "qwen35"): Promise<LocalModelInstallJob> {
   const client = await ensureLocalDaemonClient();
   return client.request<LocalModelInstallJob>("install_local_model", { modelId });
 }
@@ -2512,7 +2512,7 @@ export async function updateConfig(patch: ConfigPatch): Promise<SettingsSnapshot
   return client.request<SettingsSnapshot>("update_config", patch);
 }
 
-export type Minicpm5Recommendation = {
+export type Qwen35Recommendation = {
   recommend: boolean;
   reason?: string;
   display_name?: string;
@@ -2521,14 +2521,14 @@ export type Minicpm5Recommendation = {
   install_cmd?: string;
 };
 
-/** Ask the desktop backend whether to recommend the local MiniCPM5 model on
+/** Ask the desktop backend whether to recommend the local Qwen3.5 model on
  *  this machine (macOS + Apple Silicon + not yet installed). */
-export async function minicpm5Recommend(): Promise<Minicpm5Recommendation> {
-  return await invoke<Minicpm5Recommendation>("minicpm5_recommend");
+export async function qwen35Recommend(): Promise<Qwen35Recommendation> {
+  return await invoke<Qwen35Recommendation>("qwen35_recommend");
 }
 
-/** Kick off the local-model install. Progress streams as `minicpm5://install-log`
- *  events; completion arrives as `minicpm5://install-done` ({ success }). */
-export async function minicpm5Install(): Promise<void> {
-  await invoke("minicpm5_install");
+/** Kick off the local-model install. Progress streams as `qwen35://install-log`
+ *  events; completion arrives as `qwen35://install-done` ({ success }). */
+export async function qwen35Install(): Promise<void> {
+  await invoke("qwen35_install");
 }

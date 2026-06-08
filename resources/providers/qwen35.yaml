@@ -1,14 +1,14 @@
-id: minicpm5
-display_name: MiniCPM5 (Local)
+id: qwen35
+display_name: Qwen3.5 (Local)
 # Local, on-device model for macOS desktop users. Served by an OpenAI-compatible
-# mlx shim on 127.0.0.1:8088 (see scripts/minicpm5-serve). No API key needed.
+# mlx shim on 127.0.0.1:8088 (see scripts/qwen35-serve). No API key needed.
 base_url: http://127.0.0.1:8088/v1
 default_api: openai-completions
 auth_modes: []
 models:
-  - id: minicpm5-1b
-    display_name: MiniCPM5-1B (local)
-    provider: minicpm5
+  - id: qwen3.5-0.8b
+    display_name: Qwen3.5-0.8B (local)
+    provider: qwen35
     api: openai-completions
     context_window: 32768
     max_output_tokens: 8192

@@ -252,12 +252,12 @@ impl BackendState {
             }
             "local_model_status" => {
                 let model_id = optional_string_param(&params, &["modelId", "model_id"])
-                    .unwrap_or_else(|| "minicpm5".to_string());
+                    .unwrap_or_else(|| "qwen35".to_string());
                 serde_value(self.local_models.status(&model_id)?)
             }
             "install_local_model" => {
                 let model_id = optional_string_param(&params, &["modelId", "model_id"])
-                    .unwrap_or_else(|| "minicpm5".to_string());
+                    .unwrap_or_else(|| "qwen35".to_string());
                 serde_value(
                     self.local_models
                         .install_or_start(events.clone(), &model_id)?,

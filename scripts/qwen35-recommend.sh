@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# minicpm5-recommend.sh — should puffer recommend installing the local MiniCPM5
+# qwen35-recommend.sh — should puffer recommend installing the local Qwen3.5
 # model to this user? Emits a JSON decision the desktop onboarding can render as
 # a "You're on macOS — install a local model?" card. Pure detection, no install.
 #
 #   recommend=true  → macOS + Apple Silicon + not yet installed
 #   recommend=false → wrong OS/arch, or already installed (with a reason)
 #
-# Usage: ./scripts/minicpm5-recommend.sh        # prints JSON, exit 0 if recommend
+# Usage: ./scripts/qwen35-recommend.sh        # prints JSON, exit 0 if recommend
 # Env:   PUFFER_HOME (default ~/.puffer)
 
 PUFFER_HOME="${PUFFER_HOME:-$HOME/.puffer}"
-MODEL="$PUFFER_HOME/models/minicpm5-1b/config.json"
+MODEL="$PUFFER_HOME/models/qwen3.5-0.8b/config.json"
 
 emit() { # recommend reason
-  printf '{"recommend":%s,"reason":"%s","model":"minicpm5-1b","display_name":"MiniCPM5-1B (local)","why":"on-device user-behavior analysis — private, free, always-on","size":"~589MB","install_cmd":"scripts/minicpm5-install.sh"}\n' "$1" "$2"
+  printf '{"recommend":%s,"reason":"%s","model":"qwen3.5-0.8b","display_name":"Qwen3.5-0.8B (local)","why":"on-device user-behavior analysis — private, free, always-on","size":"~992MB","install_cmd":"scripts/qwen35-install.sh"}\n' "$1" "$2"
 }
 
 os="$(uname -s)"; arch="$(uname -m)"

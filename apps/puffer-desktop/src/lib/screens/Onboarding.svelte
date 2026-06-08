@@ -9,9 +9,9 @@
   import { providerIsAvailableForAgent } from "../providerIds";
   import { isDesktopMac } from "../shell/platform";
   import {
-    minicpm5Recommend,
-    minicpm5Install,
-    type Minicpm5Recommendation
+    qwen35Recommend,
+    qwen35Install,
+    type Qwen35Recommendation
   } from "../api/desktop";
   import { listen } from "@tauri-apps/api/event";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
@@ -46,9 +46,9 @@
   );
   let signedIn = $derived(agentProviderCount > 0);
 
-  // Local-model (MiniCPM5) recommend + install — macOS only. The backend
+  // Local-model (Qwen3.5) recommend + install — macOS only. The backend
   // decides eligibility (Apple Silicon, not already installed); we just ask.
-  let mcp = $state<Minicpm5Recommendation | null>(null);
+  let mcp = $state<Qwen35Recommendation | null>(null);
   let mcpInstalling = $state(false);
   let mcpDone = $state<boolean | null>(null);
   let mcpLog = $state("");
@@ -60,16 +60,16 @@
     let cancelled = false;
     let unlog: (() => void) | null = null;
     let undone: (() => void) | null = null;
-    void minicpm5Recommend()
+    void qwen35Recommend()
       .then((r) => {
         if (!cancelled) mcp = r;
       })
       .catch(() => {});
-    void listen<string>("minicpm5://install-log", (e) => (mcpLog = e.payload)).then((u) => {
+    void listen<string>("qwen35://install-log", (e) => (mcpLog = e.payload)).then((u) => {
       if (cancelled) u();
       else unlog = u;
     });
-    void listen<{ success: boolean }>("minicpm5://install-done", (e) => {
+    void listen<{ success: boolean }>("qwen35://install-done", (e) => {
       mcpInstalling = false;
       mcpDone = e.payload?.success ?? false;
       // The installer registered a new local provider — refresh the snapshot so
@@ -91,7 +91,7 @@
     mcpDone = null;
     mcpLog = "Starting…";
     try {
-      await minicpm5Install();
+      await qwen35Install();
     } catch (error) {
       mcpInstalling = false;
       mcpDone = false;
@@ -186,7 +186,7 @@
         <div class="pf-mcp-top">
           <span class="pf-mcp-dot"></span>
           <div class="pf-mcp-text">
-            <div class="pf-mcp-title">{mcp?.display_name ?? "MiniCPM5-1B (local)"}</div>
+            <div class="pf-mcp-title">{mcp?.display_name ?? "Qwen3.5-0.8B (local)"}</div>
             <div class="pf-mcp-sub">
               {mcp?.why ?? "on-device — private, free, always-on"}{mcp?.size
                 ? ` · ${mcp.size}`

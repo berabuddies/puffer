@@ -1963,7 +1963,7 @@ test("connector settings remain readable on narrow screens", async ({ page }) =>
   await expect(createDialog.getByLabel("Connector connection slug")).toBeVisible();
 });
 
-test("providers pane can install and start the local MiniCPM5 behavior model", async ({ page }) => {
+test("providers pane can install and start the local Qwen3.5 behavior model", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -1973,18 +1973,18 @@ test("providers pane can install and start the local MiniCPM5 behavior model", a
 
   const pane = page.locator(".pf-settings-pane");
   const card = pane.locator(".pf-local-model-card");
-  await expect(card.getByRole("heading", { name: "MiniCPM5 local model" })).toBeVisible();
-  await expect(card).toContainText("MiniCPM5-1B runs on-device");
+  await expect(card.getByRole("heading", { name: "Qwen3.5 local model" })).toBeVisible();
+  await expect(card).toContainText("Qwen3.5-0.8B runs on-device");
 
   await card.getByRole("button", { name: "Check status" }).click();
   await expect(card).toContainText("Status checked at");
   await expect(card).toContainText("Server health");
   await expect(card).toContainText("http://127.0.0.1:8088/v1/models");
 
-  await card.getByRole("button", { name: /Install MiniCPM5/ }).click();
+  await card.getByRole("button", { name: /Install Qwen3.5/ }).click();
   const install = await daemon.waitForRequest("install_local_model");
-  expect(install.params).toMatchObject({ modelId: "minicpm5" });
+  expect(install.params).toMatchObject({ modelId: "qwen35" });
 
-  await expect(card).toContainText("MiniCPM5 is installed, registered, and running");
-  await expect(card.getByRole("button", { name: /MiniCPM5 ready/ })).toBeDisabled();
+  await expect(card).toContainText("Qwen3.5 is installed, registered, and running");
+  await expect(card.getByRole("button", { name: /Qwen3.5 ready/ })).toBeDisabled();
 });

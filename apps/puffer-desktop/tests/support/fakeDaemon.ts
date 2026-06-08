@@ -309,9 +309,9 @@ export class FakeDaemon {
     tools: { bash: "ask" }
   };
   private localModelStatus: JsonRecord = {
-    id: "minicpm5",
-    modelId: "minicpm5-1b",
-    displayName: "MiniCPM5-1B (local)",
+    id: "qwen35",
+    modelId: "qwen3.5-0.8b",
+    displayName: "Qwen3.5-0.8B (local)",
     checkedAtMs: Date.now(),
     supported: true,
     recommended: true,
@@ -321,12 +321,12 @@ export class FakeDaemon {
     installing: false,
     reason: "macOS Apple Silicon, model not yet installed",
     endpoint: "http://127.0.0.1:8088/v1",
-    size: "~589MB",
-    installPath: "/tmp/puffer-home/models/minicpm5-1b",
-    providerPath: "/tmp/puffer-home/resources/providers/minicpm5.yaml",
-    logPath: "/tmp/puffer-home/minicpm5-serve.log",
-    installLogPath: "/tmp/puffer-home/minicpm5-install.log",
-    serveLogPath: "/tmp/puffer-home/minicpm5-serve.log",
+    size: "~992MB",
+    installPath: "/tmp/puffer-home/models/qwen3.5-0.8b",
+    providerPath: "/tmp/puffer-home/resources/providers/qwen35.yaml",
+    logPath: "/tmp/puffer-home/qwen35-serve.log",
+    installLogPath: "/tmp/puffer-home/qwen35-install.log",
+    serveLogPath: "/tmp/puffer-home/qwen35-serve.log",
     checks: []
   };
   private desktopPins: JsonRecord = {
@@ -1282,8 +1282,8 @@ export class FakeDaemon {
       reason: "installing"
     };
     setTimeout(() => {
-      this.emit("local-model:minicpm5:event", {
-        modelId: "minicpm5-1b",
+      this.emit("local-model:qwen35:event", {
+        modelId: "qwen3.5-0.8b",
         jobId: "fixture-job",
         phase: "configure",
         message: "Installing shim and registering the Puffer provider",
@@ -1300,11 +1300,11 @@ export class FakeDaemon {
         recommended: false,
         reason: "ready"
       };
-      this.emit("local-model:minicpm5:event", {
-        modelId: "minicpm5-1b",
+      this.emit("local-model:qwen35:event", {
+        modelId: "qwen3.5-0.8b",
         jobId: "fixture-job",
         phase: "done",
-        message: "MiniCPM5 is installed, registered, and running",
+        message: "Qwen3.5 is installed, registered, and running",
         status: this.localModelSnapshot()
       });
     }, 60);
@@ -1325,13 +1325,13 @@ export class FakeDaemon {
     const configured = this.localModelStatus.configured === true;
     const running = this.localModelStatus.running === true;
     return [
-      { label: "Platform", state: "ok", detail: "macos arm64 supports MiniCPM5 MLX" },
+      { label: "Platform", state: "ok", detail: "macos arm64 supports Qwen3.5 MLX" },
       {
         label: "Python venv",
         state: installed ? "ok" : "missing",
         detail: installed
-          ? "found /tmp/puffer-home/venvs/minicpm5/bin/python"
-          : "missing /tmp/puffer-home/venvs/minicpm5/bin/python"
+          ? "found /tmp/puffer-home/venvs/qwen35/bin/python"
+          : "missing /tmp/puffer-home/venvs/qwen35/bin/python"
       },
       {
         label: "Python deps",
@@ -1344,21 +1344,21 @@ export class FakeDaemon {
         label: "Model weights",
         state: installed ? "ok" : "missing",
         detail: installed
-          ? "config.json present in /tmp/puffer-home/models/minicpm5-1b"
-          : "missing /tmp/puffer-home/models/minicpm5-1b/config.json"
+          ? "config.json present in /tmp/puffer-home/models/qwen3.5-0.8b"
+          : "missing /tmp/puffer-home/models/qwen3.5-0.8b/config.json"
       },
       {
         label: "Provider YAML",
         state: configured ? "ok" : "missing",
         detail: configured
-          ? "provider registration present at /tmp/puffer-home/resources/providers/minicpm5.yaml"
-          : "provider registration missing at /tmp/puffer-home/resources/providers/minicpm5.yaml"
+          ? "provider registration present at /tmp/puffer-home/resources/providers/qwen35.yaml"
+          : "provider registration missing at /tmp/puffer-home/resources/providers/qwen35.yaml"
       },
       {
         label: "Server health",
         state: running ? "ok" : "warning",
         detail: running
-          ? "http://127.0.0.1:8088/v1/models advertises minicpm5-1b"
+          ? "http://127.0.0.1:8088/v1/models advertises qwen3.5-0.8b"
           : "http://127.0.0.1:8088/v1/models is not reachable"
       }
     ];
