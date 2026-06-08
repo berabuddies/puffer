@@ -10,7 +10,8 @@ OpenAI tool_calls / finish_reason="tool_calls". Supports stream + non-stream.
 Run:  python3 minicpm_shim.py            # serves on 127.0.0.1:8088
 Test: curl 127.0.0.1:8088/v1/chat/completions -d '{...}'
 """
-import json, re, time, os, http.server, pathlib, threading
+import ast, json, re, time, os, http.server, pathlib, threading
+import xml.etree.ElementTree as ET
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
 
@@ -22,24 +23,110 @@ MODEL, TOK = load(MD)
 LOCK = threading.Lock()  # mlx model is single-stream; serialize requests
 print("model ready", flush=True)
 
-CALL_RE = re.compile(r'<function\s+name="([^"]+)">(.*?)</function>', re.S)
-PARAM_RE = re.compile(r'<param\s+name="([^"]+)">(.*?)</param>', re.S)
+# Tool-call parser ported from the official MiniCPM5 adapters
+# (SGLang MiniCPM5Detector + vLLM minicpm5xml_tool_parser). The model emits
+# XML-style calls: <function name="f"><param name="k">v</param></function>.
+# Robustness this buys over a naive regex (all observed from small-model output):
+#   - single OR double quotes, and trailing attributes on tags
+#   - real XML parse (handles CDATA / multiline / nested), regex fallback
+#   - tokenizer artefacts: U+0120 (space), U+010A (newline), collapsed tags
+#   - schema-typed coercion: string args stay literal, others JSON-parsed
+#   - OpenAI-style wrapper params (<param name="properties">{...}</param>) unwrapped
+_FUNC_BLOCK_RE = re.compile(r"<function.*?</function>", re.S)
+_FUNC_NAME_RE = re.compile(r"<function\s+name=['\"]([^'\"]+)['\"][^>]*>")
+_PARAM_RE = re.compile(r"<param\s+name=['\"]([^'\"]+)['\"][^>]*>([\s\S]*?)</param>", re.S)
+_PARAM_NO_NAME_RE = re.compile(r"<param(?![^>]*\bname=)[^>]*>", re.S)
+_CDATA_RE = re.compile(r"^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$")
+_TOK_SPACE, _TOK_NL = "Ġ", "Ċ"
 
-def _coerce(v):
-    v = v.strip()
-    try: return json.loads(v)            # numbers/bools/json
-    except Exception: return v           # plain string
+def _normalize_output(text):
+    """Repair tokenizer artefacts before parsing (vLLM _normalize_model_output)."""
+    if (_TOK_SPACE not in text and _TOK_NL not in text
+            and "<functionname=" not in text and "<paramname=" not in text):
+        return text
+    return (text.replace(_TOK_SPACE, " ").replace(_TOK_NL, "\n")
+                .replace("<functionname=", "<function name=")
+                .replace("<paramname=", "<param name="))
 
-def parse_tool_calls(text, allow=None):
-    # allow = set of advertised tool names; drop any call the model invents that
-    # the request didn't offer (untrusted model/tool-output text can't fabricate
-    # calls to unadvertised tools).
+def _unwrap_cdata(v):
+    m = _CDATA_RE.match(v)
+    return m.group(1) if m else v
+
+def _coerce(val_text, ptype):
+    """Coerce a param value by its declared JSON-schema type. string -> literal
+    (never json.loads, so '0123'/'true'/'null' survive); others -> parsed."""
+    val = _unwrap_cdata(val_text)
+    if ptype == "string":
+        return val.strip()
+    val = val.strip()
+    try:
+        return json.loads(val)
+    except Exception:
+        try:
+            return ast.literal_eval(val)
+        except Exception:
+            return val
+
+def _params_from_block(block):
+    """Yield (key, raw_value) pairs from a <function> block. Prefers real XML
+    parsing; falls back to regex when the block isn't well-formed XML."""
+    try:
+        root = ET.fromstring(block)
+        if root.tag == "function":
+            for p in list(root):
+                if p.tag != "param":
+                    continue
+                key = p.attrib.get("name")
+                if key:
+                    yield key, (p.text or "")
+            return
+    except Exception:
+        pass
+    for m in _PARAM_RE.finditer(block):
+        yield m.group(1), m.group(2)
+
+def parse_tool_calls(text, allow=None, schemas=None):
+    """Parse XML tool calls into OpenAI tool_calls.
+    allow   = set of advertised tool names; calls to unadvertised tools are
+              dropped (untrusted model/tool text can't fabricate calls).
+    schemas = {tool_name: {param_name: json_type}} used for typed coercion.
+    """
+    text = _normalize_output(text)
+    schemas = schemas or {}
     calls = []
-    for i, m in enumerate(CALL_RE.finditer(text)):
-        name = m.group(1)
+    for i, block in enumerate(_FUNC_BLOCK_RE.findall(text)):
+        m = _FUNC_NAME_RE.search(block)
+        if not m:
+            continue
+        name = m.group(1).strip()
         if allow is not None and name not in allow:
             continue
-        args = {pn: _coerce(pv) for pn, pv in PARAM_RE.findall(m.group(2))}
+        ptypes = schemas.get(name, {})
+        allowed = set(ptypes.keys())
+        # A <param> with no name= means the model produced a malformed call;
+        # match the official parsers and drop it rather than emit junk args.
+        if _PARAM_NO_NAME_RE.search(block):
+            continue
+        args, seen, bad = {}, set(), False
+        for key, raw in _params_from_block(block):
+            # OpenAI-style wrapper: <param name="properties">{...}</param>.
+            if key in ("properties", "arguments") and allowed and key not in allowed:
+                wrapped = _coerce(raw, None)
+                if isinstance(wrapped, dict):
+                    for wk, wv in wrapped.items():
+                        if allowed and wk not in allowed:
+                            continue
+                        args[wk] = wv if not isinstance(wv, str) else _coerce(wv, ptypes.get(wk))
+                    continue
+            if allowed and key not in allowed:
+                continue  # ignore unknown params, keep the call
+            if key in seen:
+                bad = True
+                break
+            seen.add(key)
+            args[key] = _coerce(raw, ptypes.get(key))
+        if bad:
+            continue
         calls.append({"id": f"call_{int(time.time()*1000)}_{i}", "type": "function",
                       "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}})
     return calls
@@ -83,30 +170,59 @@ def _normalize(messages):
         out.append(nm)
     return out
 
+# Generous default so the model's thinking has room to finish AND still emit the
+# tool call. A small budget truncates mid-reasoning -> the <function> call never
+# lands -> the turn silently looks like "no tool call" (observed at 512 tokens).
+DEFAULT_MAX_TOKENS = 4096
+
+def _tool_fn(t):
+    """Normalize an OpenAI tool entry to the bare {name,description,parameters}."""
+    if isinstance(t, dict) and t.get("type") == "function":
+        return t.get("function", t)
+    return t
+
+def _schemas_from_tools(tools):
+    """Build {tool_name: {param_name: json_type}} for typed argument coercion."""
+    schemas = {}
+    for t in tools or []:
+        fn = _tool_fn(t)
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        props = ((fn.get("parameters") or {}).get("properties") or {})
+        if name:
+            schemas[name] = {k: (v or {}).get("type") for k, v in props.items()}
+    return schemas
+
 def run(messages, tools, temperature, max_tokens, enable_thinking=True):
     messages = _normalize(messages)
     kw = dict(add_generation_prompt=True, tokenize=False, enable_thinking=enable_thinking)
     if tools:
-        kw["tools"] = [t.get("function", t) if t.get("type") == "function" else t for t in tools]
-        # pi sends tools as {type:function, function:{name,description,parameters}};
-        # the template expects each tool object to have name/description/parameters
-        kw["tools"] = [(t["function"] if isinstance(t, dict) and t.get("type") == "function" else t) for t in tools]
+        kw["tools"] = [_tool_fn(t) for t in tools]
     text = TOK.apply_chat_template(messages, **kw)
-    sampler = make_sampler(temp=max(0.0, float(temperature or 0.0)))
+    # Follow the model card's recommended sampling instead of greedy decoding.
+    # MiniCPM5-1B is tuned for do_sample=True; temp=0 greedy collapses into
+    # repetition loops (the model rambles and never emits the tool call). When
+    # the caller doesn't pin a temperature, use the official defaults:
+    #   think mode -> temp 0.9, top_p 0.95 ; no-think -> temp 0.7, top_p 0.95.
+    temp = temperature if temperature is not None else (0.9 if enable_thinking else 0.7)
+    sampler = make_sampler(temp=max(0.0, float(temp)), top_p=0.95)
     with LOCK:
-        out = generate(MODEL, TOK, prompt=text, max_tokens=int(max_tokens or 512),
+        out = generate(MODEL, TOK, prompt=text,
+                       max_tokens=int(max_tokens or DEFAULT_MAX_TOKENS),
                        sampler=sampler, verbose=False)
-    # strip thinking for the surfaced content/parse (keep final segment)
-    final = out.split("</think>")[-1].strip() if "</think>" in out else out.strip()
-    allow = None
+    # Strip thinking for the surfaced content/parse (keep the final segment).
+    final = out.rsplit("</think>", 1)[-1].strip() if "</think>" in out else out.strip()
+    allow, schemas = None, None
     if tools:
-        allow = {(t.get("function", t) if isinstance(t, dict) else {}).get("name")
-                 for t in tools}
-        allow.discard(None)
-    calls = parse_tool_calls(final, allow) or parse_tool_calls(out, allow)
+        schemas = _schemas_from_tools(tools)
+        allow = set(schemas.keys())
+    # Parse the post-think segment first; fall back to the full output in case a
+    # call leaked into the thinking block.
+    calls = parse_tool_calls(final, allow, schemas) or parse_tool_calls(out, allow, schemas)
     if calls:
-        # content before the first <function> (often empty)
-        content = CALL_RE.split(final)[0].strip()
+        # Content before the first <function> tag (usually empty).
+        content = _FUNC_BLOCK_RE.split(_normalize_output(final))[0].strip()
         return {"role": "assistant", "content": content or None, "tool_calls": calls}, "tool_calls"
     return {"role": "assistant", "content": final}, "stop"
 
@@ -137,8 +253,11 @@ class H(http.server.BaseHTTPRequestHandler):
             think = body.get("enable_thinking")
             if think is None:
                 think = (body.get("chat_template_kwargs") or {}).get("enable_thinking", True)
+            # Pass temperature through as-is (None when unset) so run() can apply
+            # the model card's recommended default per think/no-think mode.
             msg, finish = run(body.get("messages", []), body.get("tools"),
-                              body.get("temperature", 0.0), body.get("max_tokens") or 2048,
+                              body.get("temperature"),
+                              body.get("max_tokens") or DEFAULT_MAX_TOKENS,
                               enable_thinking=bool(think))
         except Exception as e:
             import traceback; traceback.print_exc()
