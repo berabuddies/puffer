@@ -3,7 +3,10 @@
 
 use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::classify::{Classifier, ClassifyDecision, NullClassifier};
-use crate::history::{now_ms, WorkflowActionLog, WorkflowBindingRunStatus, WorkflowHistoryStore};
+use crate::history::{
+    now_ms, DedupDecision, WorkflowActionLog, WorkflowBindingRunStatus, WorkflowHistoryStore,
+    MAX_FAILED_ATTEMPTS,
+};
 use crate::spec::{
     filter_matches, ActionSpec, FilterSpec, WorkflowBindingSpec, WorkflowBindingStatus,
 };
@@ -811,7 +814,22 @@ fn event_dedup_key_seen(
     let Some(dedup_key) = envelope.event.dedup_key.as_deref() else {
         return false;
     };
-    history_store.contains_dedup_key(&spec.slug, dedup_key)
+    match history_store.dedup_decision(&spec.slug, dedup_key, MAX_FAILED_ATTEMPTS) {
+        DedupDecision::Allow => false,
+        DedupDecision::DuplicateOrInflight => true,
+        DedupDecision::BudgetExhausted => {
+            // Observability is essential here: without this, a genuinely
+            // long-failing message is dropped just as silently as the original
+            // bug. Surfaced via the durable telegram.log / daemon tracing.
+            tracing::warn!(
+                workflow_binding = %spec.slug,
+                dedup_key,
+                max_attempts = MAX_FAILED_ATTEMPTS,
+                "workflow message suppressed: retry budget exhausted (poisoned)"
+            );
+            true
+        }
+    }
 }
 
 fn monitor_binding_should_skip_event(spec: &WorkflowBindingSpec, payload: &Value) -> bool {

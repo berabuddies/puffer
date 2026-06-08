@@ -27,6 +27,22 @@ pub enum WorkflowBindingRunStatus {
     Failed,
 }
 
+/// How many times a (binding, dedup_key) may fail before it is treated as a
+/// poisoned message and dedup-suppressed for good. Keeps a permanently-failing
+/// trigger from re-running a full model turn on every redelivery forever.
+pub const MAX_FAILED_ATTEMPTS: usize = 3;
+
+/// Outcome of the dedup gate for one incoming event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DedupDecision {
+    /// Not seen (or only failed under the retry budget) — dispatch it.
+    Allow,
+    /// Already completed, or currently running — suppress (true duplicate).
+    DuplicateOrInflight,
+    /// Failed `MAX_FAILED_ATTEMPTS` times — suppress as poisoned.
+    BudgetExhausted,
+}
+
 /// One action log entry for a direct workflow run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowActionLog {
@@ -289,11 +305,90 @@ impl WorkflowHistoryStore {
     }
 
     /// Returns whether a binding has already recorded a trigger with `dedup_key`.
+    ///
+    /// A `Failed` run must NOT keep dedup-blocking its message: a failed or
+    /// never-completed trigger should be retryable on the next delivery,
+    /// otherwise a single transient failure permanently suppresses the
+    /// message (root cause A). `Running` (in-flight concurrency guard) and
+    /// `Completed` (success — must not be reprocessed) runs still suppress.
     pub fn contains_dedup_key(&self, workflow_slug: &str, dedup_key: &str) -> bool {
         self.inner.lock().unwrap().runs.iter().any(|run| {
-            run.workflow_slug == workflow_slug
+            run.status != WorkflowBindingRunStatus::Failed
+                && run.workflow_slug == workflow_slug
                 && run.trigger_info.get("dedup_key").and_then(Value::as_str) == Some(dedup_key)
         })
+    }
+
+    /// Status- and budget-aware dedup gate (single pass over history):
+    /// - `Completed` or `Running` for this key → `DuplicateOrInflight` (suppress;
+    ///   success must not re-run, in-flight guards against concurrent redelivery);
+    /// - otherwise count `Failed` runs for this key: `>= max_failed` →
+    ///   `BudgetExhausted` (poisoned, suppress); else `Allow` (retry).
+    ///
+    /// Note: a reclaimed orphan ([`expire_orphaned_running`]) becomes exactly one
+    /// `Failed` row, so a crash/boot-loop can consume at most one budget unit per
+    /// real delivery — it cannot unfairly exhaust the budget on its own.
+    pub fn dedup_decision(
+        &self,
+        workflow_slug: &str,
+        dedup_key: &str,
+        max_failed: usize,
+    ) -> DedupDecision {
+        let guard = self.inner.lock().unwrap();
+        let mut failed = 0usize;
+        for run in guard.runs.iter() {
+            if run.workflow_slug != workflow_slug {
+                continue;
+            }
+            if run.trigger_info.get("dedup_key").and_then(Value::as_str) != Some(dedup_key) {
+                continue;
+            }
+            match run.status {
+                WorkflowBindingRunStatus::Completed | WorkflowBindingRunStatus::Running => {
+                    return DedupDecision::DuplicateOrInflight;
+                }
+                WorkflowBindingRunStatus::Failed => failed += 1,
+            }
+        }
+        if failed >= max_failed {
+            DedupDecision::BudgetExhausted
+        } else {
+            DedupDecision::Allow
+        }
+    }
+
+    /// Reclaims orphaned `Running` runs left over from a previous process
+    /// (root cause D). Any run still `Running` whose `started_at_ms` predates
+    /// this process's start is, by definition, an orphan — its owning task
+    /// died (crash/kill) before `complete_action_result`. Flip it to `Failed`
+    /// (preserve history, never delete) so the status-aware dedup
+    /// ([`contains_dedup_key`]) lets the message re-trigger on the next
+    /// delivery. The `process_start_ms` boot fence ensures genuinely in-flight
+    /// runs created by the current process are never touched. Returns the
+    /// number of runs reclaimed.
+    pub fn expire_orphaned_running(&self, process_start_ms: i128) -> usize {
+        let mut guard = self.inner.lock().unwrap();
+        let mut reclaimed = 0;
+        for run in guard.runs.iter_mut() {
+            if run.status == WorkflowBindingRunStatus::Running
+                && run.started_at_ms < process_start_ms
+            {
+                run.status = WorkflowBindingRunStatus::Failed;
+                reclaimed += 1;
+            }
+        }
+        if reclaimed > 0 {
+            let _ = write_atomic(&self.path, &guard);
+        }
+        reclaimed
+    }
+
+    /// Convenience wrapper for the startup call site: uses the current time as
+    /// the boot fence. Call once during process startup, before any live event
+    /// is consumed, so only runs left `Running` by a previous process are
+    /// reclaimed.
+    pub fn reclaim_orphaned_running_on_boot(&self) -> usize {
+        self.expire_orphaned_running(now_ms())
     }
 
     /// Returns one run by numeric index.
@@ -427,6 +522,231 @@ mod tests {
         assert_eq!(run.status, WorkflowBindingRunStatus::Completed);
         assert_eq!(run.action_log[0].usage.unwrap().spent_tokens(), 9);
         assert_eq!(store.list_for("demo").len(), 1);
+    }
+
+    // Root cause A fix — dedup is status-aware.
+    fn triage() -> ActionSpec {
+        ActionSpec::TriageAgent {
+            prompt: "triage".into(),
+            model: None,
+        }
+    }
+
+    // Records `n` failed runs for the envelope's dedup_key ("d").
+    fn record_failures(store: &WorkflowHistoryStore, n: usize) {
+        for i in 0..n {
+            let started = store
+                .append_action_started(&binding(), &envelope(), &triage(), 10 + i as i128)
+                .unwrap();
+            let result = ActionResult {
+                success: false,
+                summary: "boom".into(),
+                usage: None,
+            };
+            store
+                .complete_action_result(started.idx, &triage(), &result, 10, 30)
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn dedup_decision_allows_until_budget_then_suppresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        record_failures(&store, MAX_FAILED_ATTEMPTS - 1);
+        assert_eq!(
+            store.dedup_decision("demo", "d", MAX_FAILED_ATTEMPTS),
+            DedupDecision::Allow,
+            "below budget: still retryable"
+        );
+        record_failures(&store, 1); // now at the budget
+        assert_eq!(
+            store.dedup_decision("demo", "d", MAX_FAILED_ATTEMPTS),
+            DedupDecision::BudgetExhausted,
+            "at budget: poisoned, suppress"
+        );
+    }
+
+    #[test]
+    fn dedup_decision_completed_and_running_are_duplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        // Running (in-flight)
+        store
+            .append_action_started(&binding(), &envelope(), &triage(), 10)
+            .unwrap();
+        assert_eq!(
+            store.dedup_decision("demo", "d", MAX_FAILED_ATTEMPTS),
+            DedupDecision::DuplicateOrInflight,
+            "running run is in-flight"
+        );
+        // Complete it successfully
+        let result = ActionResult { success: true, summary: "ok".into(), usage: None };
+        // idx 1 is the running run
+        store.complete_action_result(1, &triage(), &result, 10, 30).unwrap();
+        assert_eq!(
+            store.dedup_decision("demo", "d", MAX_FAILED_ATTEMPTS),
+            DedupDecision::DuplicateOrInflight,
+            "completed run must never be reprocessed"
+        );
+    }
+
+    #[test]
+    fn reclaimed_orphans_count_at_most_one_budget_each() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        // Three independent deliveries each crashed mid-Running (pre-boot).
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            store
+                .append_action_started(&binding(), &envelope(), &triage(), 100)
+                .unwrap();
+        }
+        // Boot reclamation flips them to Failed.
+        let reclaimed = store.expire_orphaned_running(1_000);
+        assert_eq!(reclaimed, MAX_FAILED_ATTEMPTS);
+        // Each orphan is exactly one Failed → budget exhausted, and reclaiming
+        // again is idempotent (no extra budget burned).
+        assert_eq!(store.expire_orphaned_running(1_000), 0);
+        assert_eq!(
+            store.dedup_decision("demo", "d", MAX_FAILED_ATTEMPTS),
+            DedupDecision::BudgetExhausted
+        );
+    }
+
+    #[test]
+    fn failed_run_does_not_dedup_block() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        let started = store
+            .append_action_started(&binding(), &envelope(), &triage(), 10)
+            .unwrap();
+        let result = ActionResult {
+            success: false,
+            summary: "triage_agent failed: endpoint down".into(),
+            usage: None,
+        };
+        store
+            .complete_action_result(started.idx, &triage(), &result, 10, 30)
+            .unwrap()
+            .unwrap();
+        // After the fix: a failed message is retryable on the next delivery.
+        assert!(
+            !store.contains_dedup_key("demo", "d"),
+            "failed run must NOT dedup-block (message must be retryable)"
+        );
+    }
+
+    #[test]
+    fn running_run_dedup_blocks_until_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        store
+            .append_action_started(&binding(), &envelope(), &triage(), 10)
+            .unwrap();
+        // In-flight: still blocked so a concurrent/quick re-delivery can't double-run.
+        assert!(
+            store.contains_dedup_key("demo", "d"),
+            "Running run must dedup-block (in-flight concurrency guard)"
+        );
+    }
+
+    #[test]
+    fn completed_run_still_dedup_blocks() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        let started = store
+            .append_action_started(&binding(), &envelope(), &triage(), 10)
+            .unwrap();
+        let result = ActionResult {
+            success: true,
+            summary: "created task".into(),
+            usage: None,
+        };
+        store
+            .complete_action_result(started.idx, &triage(), &result, 10, 30)
+            .unwrap()
+            .unwrap();
+        // Success must never be reprocessed.
+        assert!(
+            store.contains_dedup_key("demo", "d"),
+            "completed run must still dedup-block (no reprocessing of success)"
+        );
+    }
+
+    // Root cause D — startup reconciliation of orphaned Running runs.
+    #[test]
+    fn expire_orphaned_running_respects_boot_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+
+        // Orphan: a Running run started BEFORE this process began.
+        store
+            .append_action_started(&binding(), &envelope(), &triage(), 100)
+            .unwrap();
+        // In-flight: a Running run started AFTER the boot fence (current process).
+        let mut env2 = envelope();
+        env2.event.dedup_key = Some("inflight".into());
+        store
+            .append_action_started(&binding(), &env2, &triage(), 5_000)
+            .unwrap();
+
+        let process_start_ms = 1_000;
+        let reclaimed = store.expire_orphaned_running(process_start_ms);
+
+        assert_eq!(reclaimed, 1, "only the pre-boot orphan is reclaimed");
+        // The orphan is now Failed → dedup no longer blocks → message can re-trigger.
+        assert!(
+            !store.contains_dedup_key("demo", "d"),
+            "reclaimed orphan must unblock dedup"
+        );
+        // The genuinely in-flight run (started after boot) is untouched & still blocks.
+        assert!(
+            store.contains_dedup_key("demo", "inflight"),
+            "in-flight run must NOT be reclaimed (boot fence protects it)"
+        );
+    }
+
+    #[test]
+    fn expire_orphaned_running_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        store
+            .append_action_started(&binding(), &envelope(), &triage(), 100)
+            .unwrap();
+        assert_eq!(store.expire_orphaned_running(1_000), 1);
+        assert_eq!(
+            store.expire_orphaned_running(1_000),
+            0,
+            "second pass finds no orphans"
+        );
+    }
+
+    #[test]
+    fn expire_orphaned_running_leaves_completed_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        let started = store
+            .append_action_started(&binding(), &envelope(), &triage(), 100)
+            .unwrap();
+        let result = ActionResult {
+            success: true,
+            summary: "created task".into(),
+            usage: None,
+        };
+        store
+            .complete_action_result(started.idx, &triage(), &result, 100, 200)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.expire_orphaned_running(1_000),
+            0,
+            "completed runs are not orphans"
+        );
+        assert!(
+            store.contains_dedup_key("demo", "d"),
+            "completed run still dedup-blocks after reconciliation"
+        );
     }
 
     #[test]

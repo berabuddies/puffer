@@ -434,7 +434,17 @@ mod tests {
                 created_at_ms: 0,
             })
             .unwrap();
-        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
+        // A SUCCESSFUL action must dedup-suppress replays. (Previously this used
+        // BuiltinActionDispatcher, whose ForwardMessage fails with no outbound
+        // configured — which incidentally tested the buggy "failed run blocks
+        // forever" behavior. Dedup-on-replay is about successfully-handled events.)
+        struct OkDispatcher;
+        impl ActionDispatcher for OkDispatcher {
+            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+                ActionResult::success("forwarded")
+            }
+        }
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(OkDispatcher);
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
         let history_store = WorkflowHistoryStore::load(dir.path().join("history.json")).unwrap();
         let envelope = EventEnvelope {
@@ -464,6 +474,7 @@ mod tests {
             None,
         );
         assert!(first.matched);
+        assert_eq!(first.acted, 1);
         assert!(history_store.contains_dedup_key("monitor-telegram-user", "5174182590:3263257"));
 
         let mut replay = envelope.clone();
@@ -479,6 +490,100 @@ mod tests {
 
         assert!(!second.matched);
         assert_eq!(history_store.list_for("monitor-telegram-user").len(), 1);
+    }
+
+    // Root cause A fix (end-to-end through the router): a FAILED action must be
+    // retried on the next delivery instead of being dedup-blocked forever.
+    #[test]
+    fn failed_action_is_retried_on_redelivery() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+
+        // Fails on the first delivery, succeeds on the second (e.g. model endpoint
+        // recovered) — proving the message is re-triaged rather than lost.
+        struct FlakyDispatcher {
+            calls: Arc<AtomicUsize>,
+        }
+        impl ActionDispatcher for FlakyDispatcher {
+            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+                let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                if n == 0 {
+                    ActionResult::failure("triage_agent failed: endpoint down")
+                } else {
+                    ActionResult::success("created task")
+                }
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(FlakyDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let history_store = WorkflowHistoryStore::load(dir.path().join("history.json")).unwrap();
+        let envelope = EventEnvelope {
+            envelope_id: "env-original".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("5174182590:3263257".into()),
+                text: "remind me to file the Q3 report".into(),
+                payload: serde_json::json!({"chat_id": 1, "message_id": 2}),
+            },
+        };
+
+        // First delivery: matched but failed.
+        let first = process_envelope_result(
+            &envelope,
+            &store,
+            Some(&history_store),
+            &dispatcher,
+            &classifier,
+            None,
+        );
+        assert!(first.matched);
+        assert_eq!(first.failed, 1, "first delivery fails");
+        assert!(
+            !history_store.contains_dedup_key("monitor-telegram-user", "5174182590:3263257"),
+            "a failed run must NOT permanently dedup-block"
+        );
+
+        // Re-delivery of the same message: NOT skipped as dedup_seen; re-triaged and succeeds.
+        let mut replay = envelope.clone();
+        replay.envelope_id = "env-replay".into();
+        let second = process_envelope_result(
+            &replay,
+            &store,
+            Some(&history_store),
+            &dispatcher,
+            &classifier,
+            None,
+        );
+        assert!(second.matched, "failed message must be retried, not dedup-skipped");
+        assert_eq!(second.acted, 1, "retry succeeds and creates the task");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2, "dispatched twice");
+        // Now Completed → future replays are suppressed.
+        assert!(history_store.contains_dedup_key("monitor-telegram-user", "5174182590:3263257"));
     }
 
     #[tokio::test]

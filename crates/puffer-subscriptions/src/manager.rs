@@ -151,6 +151,16 @@ impl SubscriptionManagerBuilder {
         let connector_store = Arc::new(ConnectorCatalogStore::load(&self.connector_store_path)?);
         let connection_store = Arc::new(ConnectionStore::load(&self.connection_store_path)?);
         let history_store = Arc::new(WorkflowHistoryStore::load(&self.history_store_path)?);
+        // Root cause D: reclaim runs left `Running` by a previous process (crash/kill
+        // before completion) so their messages are no longer dedup-blocked forever.
+        // Must run before the router starts consuming live events.
+        let reclaimed = history_store.reclaim_orphaned_running_on_boot();
+        if reclaimed > 0 {
+            tracing::info!(
+                count = reclaimed,
+                "reclaimed orphaned Running workflow runs on startup"
+            );
+        }
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
