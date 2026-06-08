@@ -21,6 +21,7 @@
   import Workflows from "./lib/screens/Workflows.svelte";
   import Tasks from "./lib/screens/Tasks.svelte";
   import TelegramRelationships from "./lib/screens/TelegramRelationships.svelte";
+  import BuildBadge from "./lib/components/BuildBadge.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import Onboarding from "./lib/screens/Onboarding.svelte";
 
@@ -4439,6 +4440,8 @@
     {/if}
   </div>
 {/if}
+
+<BuildBadge />
 
 <style>
   .status-strip {
