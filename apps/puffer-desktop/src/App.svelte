@@ -20,6 +20,7 @@
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
   import Workflows from "./lib/screens/Workflows.svelte";
   import Tasks from "./lib/screens/Tasks.svelte";
+  import TelegramRelationships from "./lib/screens/TelegramRelationships.svelte";
   import Settings from "./lib/screens/Settings.svelte";
   import Onboarding from "./lib/screens/Onboarding.svelte";
 
@@ -4335,6 +4336,8 @@
             <Workflows onRunWorkflowCommand={runWorkflowCommand} />
           {:else if tweaks.screen === "tasks"}
             <Tasks onRunTaskCommand={runWorkflowCommand} />
+          {:else if tweaks.screen === "telegram-relationships"}
+            <TelegramRelationships />
           {:else if tweaks.screen === "settings"}
             <Settings
               snapshot={settingsSnapshot}
