@@ -28,6 +28,7 @@ pub(crate) fn handle_workflow_connection_delete(
         .cloned();
     if let Some(connection) = connection.as_ref() {
         clear_external_auth_for_connection(connection, &connections)?;
+        cleanup_wechat_container(connection);
     }
     manager.connection_store().delete(slug)?;
     delete_monitor_for_connection(paths, manager.as_ref(), slug)?;
@@ -65,6 +66,79 @@ fn external_auth_clear_commands(
 
 fn is_lark_connection(connection: &ConnectionRecord) -> bool {
     connection.connector_slug.starts_with("lark-")
+}
+
+/// Best-effort FULL teardown of a WeChat connection (container + data + state).
+///
+/// Each WeChat connection owns its own container (`puffer-wechat-<slug>`), so
+/// deleting the connection removes the container (`stop` then `rm` — the
+/// `--restart unless-stopped` policy could otherwise resurrect a bare `rm -f`),
+/// its named data volume (the login + chat data at `/config`), and the
+/// per-instance state files. Delete is a full reset: no account data is left
+/// behind and a later re-add starts fresh (new QR scan). Errors are logged.
+fn cleanup_wechat_container(connection: &ConnectionRecord) {
+    if !connection.connector_slug.starts_with("wechat-") {
+        return;
+    }
+    let bin = env_or("DOCKER_BIN", "docker");
+    let container = format!("puffer-wechat-{}", connection.slug);
+    // Stop first (ignore "not running"), then remove and capture the result.
+    let _ = Command::new(&bin)
+        .args(["stop", "-t", "3", &container])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match Command::new(&bin)
+        .args(["rm", "-f", &container])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(out) if !out.status.success() => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            // "No such container" is fine; anything else is worth surfacing.
+            if !err.contains("No such container") {
+                eprintln!("wechat cleanup: failed to remove `{container}`: {}", err.trim());
+            }
+        }
+        Err(error) => {
+            eprintln!("wechat cleanup: could not run docker rm for `{container}` (engine down?): {error}");
+        }
+        _ => {}
+    }
+    // Delete is a FULL wipe: remove the data volume too (the login session + all
+    // chat data live at /config). So a later re-add starts fresh (new QR scan),
+    // and no account data is left behind. (A plain stop/restart keeps the volume;
+    // only deleting the connection removes it.) Volume name == container name.
+    let _ = Command::new(&bin)
+        .args(["volume", "rm", "-f", &container])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Remove per-instance state files (config/policy/seen/lock + the cached DB keys).
+    if let Some(dir) = wechat_state_dir() {
+        for suffix in ["json", "policy.json", "seen.json", "policy.lock", "ui.lock", "dbkey"] {
+            let _ = std::fs::remove_file(dir.join(format!("{}.{suffix}", connection.slug)));
+        }
+    }
+}
+
+/// Resolves the connector's per-instance state dir (must match where the
+/// connector writes: `WECHAT_STATE_DIR`, else `~/.puffer/wechat`).
+fn wechat_state_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("WECHAT_STATE_DIR") {
+        if !dir.trim().is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    let home = std::env::var("PUFFER_HOME")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::env::var("HOME").ok())?;
+    Some(PathBuf::from(home).join(".puffer").join("wechat"))
 }
 
 fn run_external_auth_clear_command(command: &[String]) -> Result<()> {

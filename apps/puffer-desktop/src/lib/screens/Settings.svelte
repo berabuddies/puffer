@@ -20,6 +20,8 @@
   import {
     addMcpServer,
     cancelTurn,
+    createMonitor,
+    deleteMonitor,
     deleteWorkflowConnection,
     isDaemonReachable,
     listLambdaSkillLibraries,
@@ -203,6 +205,7 @@
   let connectorUnlisten: (() => void) | null = null;
   let connectorCancelledTurnIds = new Set<string>();
   let connectorDeleting = $state<string | null>(null);
+  let connectorMonitoring = $state<string | null>(null);
   let lastConnectorSlug = "";
 
   let lambdaSnapshot = $state<LambdaSkillLibrariesSnapshot | null>(null);
@@ -549,7 +552,7 @@
   }
 
   function activeConnectorSetupUsesBrowser(): boolean {
-    return ["gmail-browser", "gcal-browser"].includes(activeConnectorSetupSlug());
+    return ["gmail-browser", "gcal-browser", "wechat-login"].includes(activeConnectorSetupSlug());
   }
 
   function connectorQuestionStatusMessage(questions: ConnectorQuestion[]): string {
@@ -633,6 +636,15 @@
 
   function handleConnectorSessionEvent(event: SessionStreamEvent) {
     if (connectorTurnId && "turnId" in event && event.turnId !== connectorTurnId) return;
+    // Progress lines from long-running setups (e.g. WeChat container bringup /
+    // install) that block before the first question; keep the user informed.
+    const progress = event as unknown as { type?: string; status?: string };
+    if (progress.type === "connector-setup-status") {
+      if (typeof progress.status === "string" && progress.status.length > 0) {
+        connectorSaved = progress.status;
+      }
+      return;
+    }
     if (event.type === "user-question-request") {
       const questions = normalizeConnectorQuestions(event.questions);
       connectorQuestionRequest = {
@@ -757,6 +769,27 @@
       connectorError = (e as Error).message ?? String(e);
     } finally {
       connectorDeleting = null;
+    }
+  }
+
+  // Starts (or stops) a read-only monitor for a connection. Creating a monitor
+  // adds an enabled, no-auto-reply consumer, which is what actually spawns the
+  // connector's subscribe stream (a connection alone is authenticated but idle).
+  async function toggleConnectionMonitor(slug: string, active: boolean) {
+    if (!daemonReachable || !slug || connectorMonitoring) return;
+    connectorMonitoring = slug;
+    connectorError = null;
+    try {
+      const snap = active ? await deleteMonitor(`monitor-${slug}`) : await createMonitor(slug);
+      connectorSnapshot = snap;
+      ensureConnectorSelection(snap.connectors ?? []);
+      connectorSaved = active
+        ? `Stopped monitoring ${slug}.`
+        : `Started monitoring ${slug}. New incoming messages will be picked up.`;
+    } catch (e) {
+      connectorError = (e as Error).message ?? String(e);
+    } finally {
+      connectorMonitoring = null;
     }
   }
 
@@ -1652,7 +1685,9 @@
       {#if connectorError}
         <div class="pf-settings-note warn">{connectorError}</div>
       {:else if connectorSaved}
-        <div class="pf-settings-note">{connectorSaved}</div>
+        <div class="pf-settings-note" class:busy={connectorCreating} aria-live="polite" aria-busy={connectorCreating}>
+          {#if connectorCreating}<span class="pf-note-spinner" aria-hidden="true"></span>{/if}{connectorSaved}
+        </div>
       {:else if !daemonReachable}
         <div class="pf-settings-note">Preview mode - launch Puffer in the desktop app to configure connectors.</div>
       {:else if connectorLoading}
@@ -2031,6 +2066,24 @@
                   {connection.state}
                 </span>
                 <span class="pf-connector-source">{connection.connector_slug}</span>
+                <button
+                  type="button"
+                  class="sc-btn"
+                  data-variant="outline"
+                  data-size="sm"
+                  aria-label={connection.state === "active"
+                    ? `Stop monitoring ${connection.slug}`
+                    : `Start monitoring ${connection.slug}`}
+                  disabled={!daemonReachable || connectorMonitoring !== null || connection.state === "pending"}
+                  aria-busy={connectorMonitoring === connection.slug}
+                  onclick={() => void toggleConnectionMonitor(connection.slug, connection.state === "active")}
+                >
+                  <Icon name="eye" size={12} />{connectorMonitoring === connection.slug
+                    ? "Working..."
+                    : connection.state === "active"
+                      ? "Stop monitoring"
+                      : "Start monitoring"}
+                </button>
                 <button
                   type="button"
                   class="sc-btn"

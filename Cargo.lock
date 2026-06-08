@@ -4348,6 +4348,7 @@ dependencies = [
  "fslock",
  "futures",
  "indexmap 2.14.0",
+ "libc",
  "notify",
  "portable-pty",
  "puffer-config",
