@@ -129,16 +129,33 @@ fn read_claude_candidates(home: &Path) -> Result<Vec<ExternalImportCandidate>> {
 
 fn read_codex_candidates(home: &Path) -> Result<Vec<ExternalImportCandidate>> {
     let auth_path = home.join(".codex").join("auth.json");
-    if !auth_path.exists() {
-        return Ok(Vec::new());
+    let config_path = home.join(".codex").join("config.toml");
+    let imported_provider = read_codex_openai_import(&config_path)?;
+    let mut candidates = Vec::new();
+    if let Some(bearer_token) = imported_provider.experimental_bearer_token.as_deref() {
+        candidates.push(ExternalImportCandidate {
+            source: ExternalImportSource::Codex,
+            family: ExternalImportFamily::OpenAi,
+            description: "Import Codex experimental bearer token".to_string(),
+            source_path: config_path,
+            credential: StoredCredential::ApiKey {
+                key: bearer_token.to_string(),
+            },
+            openai_base_url: imported_provider.base_url,
+            openai_headers: imported_provider.headers,
+            openai_query_params: imported_provider.query_params,
+        });
+        return Ok(candidates);
     }
-    let imported_provider = read_codex_openai_import(&home.join(".codex").join("config.toml"))?;
+
+    if !auth_path.exists() {
+        return Ok(candidates);
+    }
     let raw = fs::read_to_string(&auth_path)
         .with_context(|| format!("failed to read {}", auth_path.display()))?;
     let auth: CodexAuthFile = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse {}", auth_path.display()))?;
 
-    let mut candidates = Vec::new();
     if let Some(api_key) = auth.openai_api_key.filter(|value| !value.trim().is_empty()) {
         candidates.push(ExternalImportCandidate {
             source: ExternalImportSource::Codex,
@@ -230,10 +247,17 @@ fn resolve_codex_openai_import(config: &CodexConfigToml) -> CodexOpenAiImport {
     let query_params = provider
         .and_then(|provider| provider.query_params.clone())
         .unwrap_or_default();
+    let experimental_bearer_token = provider
+        .and_then(|provider| provider.experimental_bearer_token.as_deref())
+        .or(config.experimental_bearer_token.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
     CodexOpenAiImport {
         base_url,
         headers,
         query_params,
+        experimental_bearer_token,
     }
 }
 
@@ -347,6 +371,8 @@ struct CodexConfigToml {
     #[serde(default)]
     openai_base_url: Option<String>,
     #[serde(default)]
+    experimental_bearer_token: Option<String>,
+    #[serde(default)]
     model_provider: Option<String>,
     #[serde(default)]
     model_providers: Option<BTreeMap<String, CodexModelProviderToml>>,
@@ -356,6 +382,8 @@ struct CodexConfigToml {
 struct CodexModelProviderToml {
     #[serde(default)]
     base_url: Option<String>,
+    #[serde(default)]
+    experimental_bearer_token: Option<String>,
     #[serde(default)]
     http_headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
@@ -369,6 +397,7 @@ struct CodexOpenAiImport {
     base_url: Option<String>,
     headers: BTreeMap<String, String>,
     query_params: BTreeMap<String, String>,
+    experimental_bearer_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -480,6 +509,89 @@ openai_base_url = "https://proxy.example/v1"
         assert!(candidates
             .iter()
             .all(|candidate| candidate.openai_query_params.is_empty()));
+    }
+
+    #[test]
+    fn detect_import_candidates_reads_codex_experimental_bearer_without_auth_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _lock = puffer_home_lock().lock().expect("lock");
+        let codex_dir = temp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("dir");
+        fs::write(
+            codex_dir.join("config.toml"),
+            r#"
+model_provider = "OpenAI"
+
+[model_providers.OpenAI]
+base_url = "https://proxy.example/v1"
+experimental_bearer_token = "  sk-experimental  "
+"#,
+        )
+        .expect("write");
+        let old_home = std::env::var_os("PUFFER_HOME");
+        std::env::set_var("PUFFER_HOME", temp.path());
+        let candidates =
+            detect_import_candidates(ExternalImportFamily::OpenAi).expect("candidates");
+        if let Some(value) = old_home {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = candidates.first().expect("candidate");
+        assert_eq!(candidate.source_path, codex_dir.join("config.toml"));
+        assert_eq!(
+            candidate.openai_base_url.as_deref(),
+            Some("https://proxy.example/v1")
+        );
+        assert!(matches!(
+            &candidate.credential,
+            StoredCredential::ApiKey { key } if key == "sk-experimental"
+        ));
+    }
+
+    #[test]
+    fn detect_import_candidates_prefers_codex_experimental_bearer_over_auth_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _lock = puffer_home_lock().lock().expect("lock");
+        let codex_dir = temp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("dir");
+        fs::write(
+            codex_dir.join("auth.json"),
+            serde_json::json!({
+                "OPENAI_API_KEY": "sk-auth-json",
+                "tokens": {
+                    "access_token": "acc",
+                    "refresh_token": "ref"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write");
+        fs::write(
+            codex_dir.join("config.toml"),
+            r#"
+openai_base_url = "https://proxy.example/v1"
+experimental_bearer_token = "sk-config"
+"#,
+        )
+        .expect("write");
+        let old_home = std::env::var_os("PUFFER_HOME");
+        std::env::set_var("PUFFER_HOME", temp.path());
+        let candidates =
+            detect_import_candidates(ExternalImportFamily::OpenAi).expect("candidates");
+        if let Some(value) = old_home {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            &candidates[0].credential,
+            StoredCredential::ApiKey { key } if key == "sk-config"
+        ));
     }
 
     #[test]
