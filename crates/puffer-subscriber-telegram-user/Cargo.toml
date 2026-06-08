@@ -25,3 +25,5 @@ thiserror.workspace = true
 time.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "fs"] }
 tracing = "0.1"
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true

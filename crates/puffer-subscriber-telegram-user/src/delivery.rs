@@ -6,8 +6,6 @@
 //! Telegram's live update delta alone.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -21,7 +19,6 @@ use crate::notifications::NotificationMuteCache;
 use crate::state::SkillEnv;
 
 const DELIVERY_SOURCE_LIVE: &str = "live";
-static MESSAGE_DIAGNOSTIC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct DeliveryCursor {
@@ -236,19 +233,7 @@ fn append_message_diagnostic(
         "is_outgoing": message.outgoing(),
         "text_prefix": truncate_text(message.text(), 200),
     });
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    let Ok(_guard) = MESSAGE_DIAGNOSTIC_LOCK.lock() else {
-        return;
-    };
-    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
-        return;
-    };
-    let _ = writeln!(file, "{record}");
+    crate::diagnostics::append_ndjson(&path, &record);
 }
 
 fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) {

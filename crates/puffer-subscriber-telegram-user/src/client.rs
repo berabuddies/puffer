@@ -51,9 +51,14 @@ enum RuntimeCommandOutcome {
 ///   concurrently with `tokio::select!`.
 pub async fn run() -> anyhow::Result<()> {
     let env = SkillEnv::from_env();
+    // Install tracing first so every log below is durably written to
+    // <state>/telegram.log. Held for the whole process: dropping the guard
+    // flushes and stops the non-blocking file writer.
+    let _log_guard = crate::logging::init(&env);
     info!(
         session = %env.session_path.display(),
         topic = %env.topic,
+        log = %env.state_dir.join("telegram.log").display(),
         "starting telegram-user subscriber"
     );
 
