@@ -941,6 +941,50 @@ export async function importChromeSecrets(): Promise<ChromeSecretsImportResult> 
   });
 }
 
+export interface TelegramRelationshipReport {
+  chatId: number;
+  name: string;
+  messageCount: number;
+  relationship: string | null;
+  closeness: number | null;
+  tone: string | null;
+  evidence: string | null;
+}
+
+export interface TelegramRelationshipsResult {
+  connectionSlug: string;
+  windowDays: number;
+  reports: TelegramRelationshipReport[];
+}
+
+/** Subscribe to live progress for the Telegram relationship ranking.
+ *  Phases: `ranking` | `ranked` | `analyzing` | `analyzed` | `done`.
+ *  Returns an unsubscribe function. */
+export async function subscribeTelegramRelationships(
+  handler: (event: { connectionSlug: string; phase: string; data: unknown }) => void
+): Promise<() => void> {
+  const client = await ensureLocalDaemonClient();
+  return client.on("telegram:relationships", handler);
+}
+
+/** Rank the top-5 Telegram contacts by recent chat frequency and analyze each
+ *  relationship with the local qwen35 model. Progress streams over the
+ *  `telegram:relationships` event channel (see subscribeTelegramRelationships).
+ *  `connectionSlug` is optional — the first connected account is used if omitted. */
+export async function rankTelegramRelationships(
+  connectionSlug?: string
+): Promise<TelegramRelationshipsResult> {
+  const params = connectionSlug ? { connectionSlug } : {};
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<TelegramRelationshipsResult>("telegram_rank_relationships", params);
+  }
+  return invoke<TelegramRelationshipsResult>("backend_request", {
+    method: "telegram_rank_relationships",
+    params
+  });
+}
+
 export async function testProxy(input: {
   proxyId?: string;
   endpoint?: DraftProxyEndpoint;

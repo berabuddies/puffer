@@ -42,6 +42,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Ui,
         ),
         cmd(
+            "telegram-relationships",
+            &["tg-rel"],
+            "Rank your top Telegram contacts by recent chat frequency and analyze each relationship",
+            Some("[connection-slug]"),
+            CommandKind::Ui,
+        ),
+        cmd(
             "autodream",
             &["dream"],
             "Consolidate durable project memory and suggest skill-worthy traces",

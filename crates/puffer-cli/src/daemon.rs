@@ -1007,6 +1007,9 @@ async fn dispatch_request(
         "save_proxy_settings" => respond!(detached!(|s, p| handle_save_proxy_settings(&s, &p))),
         "save_secret" => respond!(detached!(|s, p| handle_save_secret(&s, &p))),
         "delete_secret" => respond!(detached!(|s, p| handle_delete_secret(&s, &p))),
+        "telegram_rank_relationships" => {
+            respond!(detached!(|s, p| handle_telegram_rank_relationships(&s, &p)))
+        }
         "import_chrome_secrets" => {
             respond!(detached!(|s| handle_import_chrome_secrets(&s)))
         }
@@ -1598,6 +1601,52 @@ fn handle_save_secret(state: &DaemonState, params: &Value) -> Result<Value> {
 fn handle_delete_secret(state: &DaemonState, params: &Value) -> Result<Value> {
     let _ = crate::daemon_secrets::delete_secret(state.config_paths(), params)?;
     handle_load_settings_snapshot(state)
+}
+
+/// Ranks the top-5 Telegram contacts by recent chat frequency and runs a local
+/// qwen35 relationship analysis, pushing progress + result over the event bus.
+/// `params.connectionSlug` is optional — the first connected account is used
+/// when omitted.
+fn handle_telegram_rank_relationships(state: &DaemonState, params: &Value) -> Result<Value> {
+    let tg_root = state
+        .config_paths()
+        .user_config_dir
+        .join("telegram-accounts");
+    let slug = match params
+        .get("connectionSlug")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_string(),
+        None => first_telegram_account_slug(&tg_root).context(
+            "no connected Telegram account with message diagnostics found under telegram-accounts/",
+        )?,
+    };
+    let diagnostics = tg_root.join(&slug).join("message-diagnostics.ndjson");
+    if !diagnostics.exists() {
+        anyhow::bail!(
+            "no message diagnostics for telegram account `{slug}` at {}",
+            diagnostics.display()
+        );
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    crate::daemon_telegram_ranking::run(&diagnostics, &state.event_sender(), &slug, now_ms)
+}
+
+/// Picks a default Telegram account: the first sub-directory of
+/// `telegram-accounts/` that has a `message-diagnostics.ndjson`.
+fn first_telegram_account_slug(root: &std::path::Path) -> Option<String> {
+    let mut slugs: Vec<String> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().join("message-diagnostics.ndjson").exists())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    slugs.sort();
+    slugs.into_iter().next()
 }
 
 fn handle_import_chrome_secrets(state: &DaemonState) -> Result<Value> {
