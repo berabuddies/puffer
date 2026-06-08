@@ -1633,7 +1633,29 @@ fn handle_telegram_rank_relationships(state: &DaemonState, params: &Value) -> Re
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    crate::daemon_telegram_ranking::run(&diagnostics, &state.event_sender(), &slug, now_ms)
+
+    // Model backend: cloud (default — ~$0.002/run, better quality) or local
+    // qwen35 (privacy). Cloud reads the stored OpenAI key.
+    let use_local = params
+        .get("useLocal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let backend = if use_local {
+        crate::daemon_telegram_ranking::ModelBackend::local()
+    } else {
+        let auth_path = state.config_paths().user_config_dir.join("auth.json");
+        let auth_store =
+            AuthStore::load(&auth_path).context("load auth store for cloud model")?;
+        let key = match auth_store.providers.get("openai") {
+            Some(StoredCredential::ApiKey { key }) => key.clone(),
+            _ => anyhow::bail!(
+                "cloud analysis needs an OpenAI API key — connect OpenAI, or set useLocal: true to use the local qwen35 model"
+            ),
+        };
+        crate::daemon_telegram_ranking::ModelBackend::cloud(key)
+    };
+
+    crate::daemon_telegram_ranking::run(&diagnostics, &state.event_sender(), &slug, &backend, now_ms)
 }
 
 /// Picks a default Telegram account: the first sub-directory of

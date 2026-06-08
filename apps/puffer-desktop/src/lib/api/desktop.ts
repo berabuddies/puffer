@@ -968,13 +968,17 @@ export async function subscribeTelegramRelationships(
 }
 
 /** Rank the top-5 Telegram contacts by recent chat frequency and analyze each
- *  relationship with the local qwen35 model. Progress streams over the
- *  `telegram:relationships` event channel (see subscribeTelegramRelationships).
- *  `connectionSlug` is optional — the first connected account is used if omitted. */
+ *  relationship. Progress streams over the `telegram:relationships` event channel
+ *  (see subscribeTelegramRelationships).
+ *  - `connectionSlug` optional — the first connected account is used if omitted.
+ *  - `useLocal` picks the model: cloud gpt-5.4-mini (default, ~$0.002/run) or the
+ *    local qwen35 (privacy; needs the local model running). */
 export async function rankTelegramRelationships(
-  connectionSlug?: string
+  opts: { connectionSlug?: string; useLocal?: boolean } = {}
 ): Promise<TelegramRelationshipsResult> {
-  const params = connectionSlug ? { connectionSlug } : {};
+  const params: Record<string, unknown> = {};
+  if (opts.connectionSlug) params.connectionSlug = opts.connectionSlug;
+  if (opts.useLocal) params.useLocal = true;
   if (canReachDaemon()) {
     const client = await ensureLocalDaemonClient();
     return client.request<TelegramRelationshipsResult>("telegram_rank_relationships", params);

@@ -13,6 +13,7 @@
   let progress = $state("");
   let connectionSlug = $state<string | null>(null);
   let reports = $state<TelegramRelationshipReport[]>([]);
+  let useLocal = $state(false); // default cloud (gpt-5.4-mini, ~$0.002/run); local = privacy
   let unsubscribe: (() => void) | null = null;
 
   const PHASE_LABELS: Record<string, string> = {
@@ -60,7 +61,7 @@
     teardown();
     try {
       unsubscribe = await subscribeTelegramRelationships(onEvent);
-      const result: TelegramRelationshipsResult = await rankTelegramRelationships();
+      const result: TelegramRelationshipsResult = await rankTelegramRelationships({ useLocal });
       connectionSlug = result.connectionSlug;
       reports = result.reports;
       phase = "done";
@@ -89,9 +90,15 @@
         {#if connectionSlug}<span class="pf-tg-rel__slug">· {connectionSlug}</span>{/if}
       </p>
     </div>
-    <button class="pf-btn" onclick={analyze} disabled={loading}>
-      {loading ? "分析中…" : "分析关系"}
-    </button>
+    <div class="pf-tg-rel__actions">
+      <label class="pf-tg-rel__model" title="云端更准更便宜(~$0.002/次);本地完全私密,需本地模型在跑">
+        <input type="checkbox" bind:checked={useLocal} disabled={loading} />
+        本地模型(隐私)
+      </label>
+      <button class="pf-btn" onclick={analyze} disabled={loading}>
+        {loading ? "分析中…" : "分析关系"}
+      </button>
+    </div>
   </header>
 
   {#if loading}
@@ -156,6 +163,20 @@
   }
   .pf-tg-rel__slug {
     opacity: 0.6;
+  }
+  .pf-tg-rel__actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .pf-tg-rel__model {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.8rem;
+    opacity: 0.75;
+    white-space: nowrap;
+    cursor: pointer;
   }
   .pf-btn {
     padding: 8px 16px;

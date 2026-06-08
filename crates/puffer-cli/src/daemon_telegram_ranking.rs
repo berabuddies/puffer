@@ -16,17 +16,50 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use tokio::sync::broadcast;
 
 const WINDOW_DAYS: i64 = 90;
 const TOP_N: usize = 5;
-const MODEL_ID: &str = "qwen3.5-0.8b";
-const ENDPOINT: &str = "http://127.0.0.1:8088/v1/chat/completions";
 const EVENT_CHANNEL: &str = "telegram:relationships";
 /// Cap transcript length fed to the model to keep the prompt small.
 const MAX_TRANSCRIPT_MSGS: usize = 40;
+/// Hard cap on transcript characters per contact (~a few hundred tokens). Guards
+/// against flooders and keeps cloud cost trivial regardless of history size.
+const MAX_TRANSCRIPT_CHARS: usize = 2400;
+
+/// Which model backs the analysis. Cloud (default) is effectively free for this
+/// workload (~3k tokens/contact); local is the privacy option.
+pub(crate) struct ModelBackend {
+    pub endpoint: String,
+    pub model: String,
+    /// `Some` for cloud (sent as a Bearer token); `None` for the local shim.
+    pub api_key: Option<String>,
+    /// Local qwen reads `enable_thinking`; cloud APIs reject unknown fields.
+    pub local: bool,
+}
+
+impl ModelBackend {
+    pub fn local() -> Self {
+        Self {
+            endpoint: "http://127.0.0.1:8088/v1/chat/completions".into(),
+            model: "qwen3.5-0.8b".into(),
+            api_key: None,
+            local: true,
+        }
+    }
+
+    pub fn cloud(api_key: String) -> Self {
+        Self {
+            endpoint: "https://api.openai.com/v1/chat/completions".into(),
+            model: "gpt-5.4-mini".into(),
+            api_key: Some(api_key),
+            local: false,
+        }
+    }
+}
 
 /// One message extracted from the diagnostics log, minimal fields for ranking
 /// and transcript rendering.
@@ -109,7 +142,14 @@ fn rank_contacts(path: &Path, now_ms: i64, window_days: i64, top_n: usize) -> Re
             .get("text_prefix")
             .and_then(Value::as_str)
             .unwrap_or("")
+            .trim()
             .to_string();
+        // Default: ignore image/media-only messages. Telegram already maps
+        // stickers/emoji to an emoji in the text, so those still count; a
+        // caption-less photo has empty text and is skipped (no image analysis).
+        if text.is_empty() {
+            continue;
+        }
 
         let entry = by_chat.entry(chat_id).or_insert_with(|| ContactRank {
             chat_id,
@@ -145,44 +185,74 @@ fn latest(c: &ContactRank) -> i64 {
 }
 
 /// Renders the contact's recent conversation as a "用户:/对方:" transcript.
+/// Collapses flooder spam by dropping exact-duplicate message texts (hashed),
+/// keeps the most recent messages, and hard-caps total characters so a single
+/// contact can never blow up the prompt (or cloud cost).
 fn transcript(contact: &ContactRank) -> String {
     let mut msgs = contact.messages.clone();
     msgs.sort_by_key(|m| m.date_ms);
-    let start = msgs.len().saturating_sub(MAX_TRANSCRIPT_MSGS);
-    msgs[start..]
+
+    // De-dup identical texts (the "刷屏" case) by hash, keeping first occurrence.
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut deduped: Vec<&DiagMessage> = Vec::new();
+    for m in &msgs {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        m.text.hash(&mut h);
+        if seen.insert(h.finish()) {
+            deduped.push(m);
+        }
+    }
+
+    // Most-recent MAX_TRANSCRIPT_MSGS, then trim oldest lines until under the
+    // character cap.
+    let start = deduped.len().saturating_sub(MAX_TRANSCRIPT_MSGS);
+    let mut lines: Vec<String> = deduped[start..]
         .iter()
         .map(|m| {
             let who = if m.is_outgoing { "用户" } else { contact.name.as_str() };
             format!("{who}: {}", m.text)
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    while lines.len() > 1 && lines.iter().map(|l| l.chars().count() + 1).sum::<usize>() > MAX_TRANSCRIPT_CHARS {
+        lines.remove(0);
+    }
+    lines.join("\n")
 }
 
 const SYSTEM_PROMPT: &str = "你是关系分析助手。根据用户与某联系人的聊天记录，判断两人关系。\
 只输出一个 JSON 对象，字段：relationship(家人/恋人/朋友/同事或上司/商业服务/泛泛之交 其一)、\
 closeness(1-5 整数)、tone(语气,简短)、evidence(一句依据)。只输出 JSON。";
 
-/// Calls the local qwen35 model (no-think mode) to classify one relationship.
-fn analyze_contact(client: &reqwest::blocking::Client, contact: &ContactRank) -> RelationshipReport {
+/// Classifies one relationship via the chosen backend (local qwen no-think, or
+/// a cloud OpenAI-compatible endpoint with a Bearer key).
+fn analyze_contact(
+    client: &reqwest::blocking::Client,
+    backend: &ModelBackend,
+    contact: &ContactRank,
+) -> RelationshipReport {
     let user_prompt = format!(
         "联系人：{}\n消息数：{}\n\n聊天记录：\n{}",
         contact.name,
         contact.message_count,
         transcript(contact)
     );
-    let body = json!({
-        "model": MODEL_ID,
+    let mut body = json!({
+        "model": backend.model,
         "max_tokens": 2048,
-        "enable_thinking": false,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
     });
-    let parsed = client
-        .post(ENDPOINT)
-        .json(&body)
+    if backend.local {
+        // Only the local qwen shim consumes this; cloud APIs reject unknown fields.
+        body["enable_thinking"] = json!(false);
+    }
+    let mut req = client.post(&backend.endpoint).json(&body);
+    if let Some(key) = &backend.api_key {
+        req = req.bearer_auth(key);
+    }
+    let parsed = req
         .send()
         .and_then(|r| r.json::<Value>())
         .ok()
@@ -228,6 +298,7 @@ pub(crate) fn run(
     diagnostics_path: &Path,
     events: &broadcast::Sender<ServerEnvelope>,
     connection_slug: &str,
+    backend: &ModelBackend,
     now_ms: i64,
 ) -> Result<Value> {
     let emit = |phase: &str, payload: Value| {
@@ -241,7 +312,7 @@ pub(crate) fn run(
         });
     };
 
-    emit("ranking", json!({ "windowDays": WINDOW_DAYS }));
+    emit("ranking", json!({ "windowDays": WINDOW_DAYS, "model": backend.model }));
     let ranked = rank_contacts(diagnostics_path, now_ms, WINDOW_DAYS, TOP_N)?;
     emit(
         "ranked",
@@ -263,7 +334,7 @@ pub(crate) fn run(
             "analyzing",
             json!({ "index": idx + 1, "total": ranked.len(), "name": contact.name }),
         );
-        let report = analyze_contact(&client, contact);
+        let report = analyze_contact(&client, backend, contact);
         emit("analyzed", serde_json::to_value(&report).unwrap_or(Value::Null));
         reports.push(report);
     }
@@ -297,7 +368,39 @@ mod tests {
         })
     }
 
+    fn msg_text(chat_id: i64, text: &str, date_ms: i64) -> Value {
+        json!({
+            "stage": "emitted", "chat_kind": "user", "chat_id": chat_id, "chat_title": "Z",
+            "is_outgoing": false, "date_ms": date_ms, "text_prefix": text
+        })
+    }
+
     const DAY: i64 = 24 * 60 * 60 * 1000;
+
+    #[test]
+    fn skips_media_only_messages() {
+        let now = 1_000 * DAY;
+        let lines = vec![
+            msg_text(1, "hi", now - 1 * DAY),
+            msg_text(1, "", now - 1 * DAY),     // photo, no caption
+            msg_text(1, "   ", now - 1 * DAY),  // whitespace only
+        ];
+        let f = write_diag(&lines);
+        let ranked = rank_contacts(f.path(), now, 90, 5).unwrap();
+        assert_eq!(ranked[0].message_count, 1, "media/empty-text messages are ignored");
+    }
+
+    #[test]
+    fn transcript_dedups_flooder_spam() {
+        let now = 1_000 * DAY;
+        let mut lines: Vec<Value> = (0..30).map(|i| msg_text(1, "在吗", now - 30 * DAY + i)).collect();
+        lines.push(msg_text(1, "周末一起吃饭吧", now));
+        let f = write_diag(&lines);
+        let ranked = rank_contacts(f.path(), now, 90, 5).unwrap();
+        let t = transcript(&ranked[0]);
+        assert_eq!(t.matches("在吗").count(), 1, "repeated spam collapsed to one line");
+        assert!(t.contains("周末一起吃饭吧"), "unique message kept");
+    }
 
     #[test]
     fn ranks_one_on_one_by_recent_frequency() {
