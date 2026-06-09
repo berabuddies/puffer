@@ -313,6 +313,91 @@ pub(crate) async fn mark_read(
     })
 }
 
+/// Logs out of WeChat through the client UI (bottom-left ☰ menu → 退出登录 →
+/// confirm), KEEPING the container, the WeChat install and local data. This is
+/// distinct from REMOVING the connection (which wipes the container + data
+/// volume): after logout the same or a different account can log back in with a
+/// fresh QR scan, without recreating anything.
+pub(crate) async fn logout(
+    instance: &WechatInstance,
+    cfg: &InstanceConfig,
+    _input: &Value,
+    human: &Human,
+) -> Result<ActOutcome> {
+    instance.ensure_container(cfg).await?;
+    let _ = instance.ensure_screenshot_tool().await;
+    if !instance.is_logged_in().await.unwrap_or(false) {
+        return Ok(ActOutcome {
+            summary: format!("WeChat `{}` is already logged out", instance.name()),
+            output: json!({ "logged_out": true, "already": true }),
+        });
+    }
+
+    activate_window(instance).await?;
+    sleep(human.think_time()).await;
+    // Open the bottom-left "more" (☰) menu, then click 退出登录.
+    human_click(instance, more_menu_point(instance).await).await?;
+    sleep_ms(700).await;
+    let item = locate_menu_item(instance, "退出登录")
+        .await?
+        .ok_or_else(|| anyhow!("could not find 退出登录 in the WeChat menu (is it open?)"))?;
+    human_click(instance, item).await?;
+    sleep_ms(700).await;
+    // Confirm dialog (label is usually 退出登录, sometimes 退出); click if present.
+    let confirm = match locate_menu_item(instance, "退出登录").await? {
+        Some(p) => Some(p),
+        None => locate_menu_item(instance, "退出").await?,
+    };
+    if let Some(p) = confirm {
+        human_click(instance, p).await?;
+        sleep_ms(800).await;
+    }
+
+    Ok(ActOutcome {
+        summary: format!("Logged out of WeChat `{}` (container + data kept)", instance.name()),
+        output: json!({ "logged_out": true }),
+    })
+}
+
+/// Pixel point of the bottom-left ☰ "more" menu trigger, from the main window
+/// geometry (fallback: the 1280x800 capture's bottom-left rail).
+async fn more_menu_point(instance: &WechatInstance) -> (i32, i32) {
+    let geom = instance
+        .exec_bash(
+            "best=''; bestw=0; \
+             for w in $(xdotool search --onlyvisible --class '^wechat$' 2>/dev/null); do \
+               eval \"$(xdotool getwindowgeometry --shell \"$w\" 2>/dev/null)\"; \
+               if [ \"${WIDTH:-0}\" -gt \"$bestw\" ]; then bestw=${WIDTH:-0}; best=$w; fi; \
+             done; \
+             [ -n \"$best\" ] && eval \"$(xdotool getwindowgeometry --shell \"$best\")\" && \
+               echo \"$((X + 31)) $((Y + HEIGHT - 36))\"",
+        )
+        .await
+        .unwrap_or_default();
+    let mut it = geom.split_whitespace();
+    match (it.next().and_then(|v| v.parse().ok()), it.next().and_then(|v| v.parse().ok())) {
+        (Some(x), Some(y)) => (x, y),
+        _ => (31, 762),
+    }
+}
+
+/// Screenshots + vision-locates a menu/dialog item by label, with one retry.
+async fn locate_menu_item(instance: &WechatInstance, label: &str) -> Result<Option<(i32, i32)>> {
+    for _ in 0..2 {
+        sleep_ms(500).await;
+        let png = instance.screenshot_png().await.context("screenshot to locate menu item")?;
+        let want = label.to_string();
+        let coords = tokio::task::spawn_blocking(move || read::read_menu_item_coords(&png, &want))
+            .await
+            .map_err(|e| anyhow!("locate menu item task failed: {e}"))?
+            .context("locate menu item via vision")?;
+        if coords.is_some() {
+            return Ok(coords);
+        }
+    }
+    Ok(None)
+}
+
 /// Sends a 拍一拍 (pat / nudge) — WeChat's only lightweight per-person reaction
 /// (the Linux 4.x client has no per-message emoji reactions). RIGHT-clicks the
 /// target person's avatar and clicks the 拍一拍 menu item (a plain double-click
@@ -974,9 +1059,11 @@ fn validate_local_attachment_path(src: &str) -> Result<std::path::PathBuf> {
         bail!("attachment {} is not a regular file", path.display());
     }
 
-    let home = std::env::var("HOME")
+    // PUFFER_HOME first (matches the rest of the connector's state-path logic),
+    // then HOME.
+    let home = std::env::var("PUFFER_HOME")
         .ok()
-        .or_else(|| std::env::var("PUFFER_HOME").ok())
+        .or_else(|| std::env::var("HOME").ok())
         .filter(|h| !h.trim().is_empty());
 
     // Defense-in-depth denylist (the allow-root below is the primary control).

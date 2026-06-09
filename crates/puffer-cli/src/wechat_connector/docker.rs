@@ -104,10 +104,10 @@ impl WechatInstance {
 
     /// Ensures the WeChat image is present locally. Resolution order:
     /// 1. already present (`docker image inspect`),
-    /// 2. build it from a local context if `WECHAT_BUILD_CONTEXT` points at one
-    ///    (the WechatOnCloud `docker/` dir) — official images are NOT published
-    ///    to a registry, so building is the normal path,
-    /// 3. fall back to `docker pull` (for the day images are published).
+    /// 2. build from a local context if `WECHAT_BUILD_CONTEXT` points at one
+    ///    (the WechatOnCloud `docker/` dir) — used to override the default image,
+    /// 3. otherwise `docker pull` (the default image is published at
+    ///    `ghcr.io/gloridust/wechat-on-cloud:latest`).
     /// A clear, actionable error is returned when none succeed.
     async fn ensure_image(&self, cfg: &InstanceConfig) -> Result<()> {
         if self

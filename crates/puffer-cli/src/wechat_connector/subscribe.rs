@@ -49,16 +49,26 @@ const RISK_PAUSE_HOURS: u64 = 24;
 pub(crate) async fn run() -> Result<()> {
     let mut host_stdin = BufReader::new(tokio::io::stdin());
 
-    // 1. Subscribe command → connection slug → instance.
+    // 1. Subscribe command → connection slug → instance. EOF before any command
+    //    is a clean exit; a malformed/unexpected first line is a protocol error
+    //    (don't silently fall back to the default instance and monitor the wrong
+    //    container).
     let mut first_line = String::new();
-    host_stdin.read_line(&mut first_line).await?;
-    let connection = serde_json::from_str::<ConnectorSubscribeCommand>(first_line.trim())
-        .ok()
-        .and_then(|command| match command {
-            ConnectorSubscribeCommand::Subscribe { connection, .. } => Some(connection),
-            _ => None,
-        })
-        .unwrap_or_default();
+    if host_stdin.read_line(&mut first_line).await? == 0 {
+        return Ok(()); // host closed stdin before sending a subscribe command
+    }
+    let connection = match serde_json::from_str::<ConnectorSubscribeCommand>(first_line.trim()) {
+        Ok(ConnectorSubscribeCommand::Subscribe { connection, .. }) => connection,
+        _ => {
+            write_frame(&health(
+                "error",
+                "expected a `subscribe` command as the first line".to_string(),
+            ))
+            .await?;
+            drain_stdin(host_stdin).await;
+            return Ok(());
+        }
+    };
     let instance = WechatInstance::for_connection(&connection);
 
     // 2. Bring the container up and verify login + tooling. Any failure is a
@@ -469,8 +479,13 @@ mod tests {
 
     #[test]
     fn poll_interval_respects_floor() {
+        // Save/restore the process-global env so parallel tests aren't affected.
+        let prev = std::env::var("WECHAT_POLL_SECS").ok();
         std::env::remove_var("WECHAT_POLL_SECS");
         assert_eq!(poll_interval(), Duration::from_secs(DEFAULT_POLL_SECS));
+        if let Some(v) = prev {
+            std::env::set_var("WECHAT_POLL_SECS", v);
+        }
     }
 
     #[test]

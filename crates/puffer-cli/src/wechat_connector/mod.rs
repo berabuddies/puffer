@@ -207,7 +207,9 @@ async fn run_act(instance: &WechatInstance, action: &str) -> Result<()> {
         "send_message" | "send" | "reply" | "send_file" | "send_image" | "send_media"
         | "send_photo" | "send_document" | "mention" | "send_mention" | "react"
         | "send_reaction" | "pat" | "nudge" | "拍一拍" | "mark_read" | "open_chat"
-        | "read_chat" => Some(policy::UiLock::acquire(instance.name())),
+        | "read_chat" | "logout" | "sign_out" | "退出登录" => {
+            Some(policy::UiLock::acquire(instance.name()))
+        }
         _ => None,
     };
 
@@ -223,6 +225,7 @@ async fn run_act(instance: &WechatInstance, action: &str) -> Result<()> {
         "mark_read" | "open_chat" | "read_chat" => {
             act::mark_read(instance, &cfg, &input, &human).await
         }
+        "logout" | "sign_out" | "退出登录" => act::logout(instance, &cfg, &input, &human).await,
         "read_history" => read_history_action(instance, &input).await,
         other => Err(anyhow!("wechat connector does not support action `{other}`")),
     };

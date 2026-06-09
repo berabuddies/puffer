@@ -132,11 +132,9 @@ impl SetupFlow {
         self.status("Waiting for WeChat to start…");
         self.wait_for_window(&instance)?;
 
-        // 5. Show the QR. The in-app managed-Chromium pane is currently broken on
-        //    macOS (keychain prompt + about:blank), so it is OFF by default;
-        //    opt in with WECHAT_EMBED_PANE=1. By default we direct the user to
-        //    open the KasmVNC URL in their own browser — login detection works
-        //    regardless of how the QR is shown.
+        // 5. Show the QR in puffer's in-app browser pane (the KasmVNC desktop) —
+        //    ON by default. Set WECHAT_EMBED_PANE=0 to instead show the URL for an
+        //    external browser. Login detection works regardless of how it's shown.
         if embed_pane_enabled() {
             self.status("Opening the WeChat screen…");
             if let Err(error) = self.open_desktop(&cfg.kasm_url()) {
@@ -371,12 +369,13 @@ fn embed_pane_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Whether to reveal KasmVNC credentials to the user. Default ON for testing;
-/// set `WECHAT_SHOW_CREDS=0` in production so the random password is never shown.
+/// Whether to reveal the KasmVNC credentials in user-facing status. Default OFF
+/// (the random password is never shown); opt in with `WECHAT_SHOW_CREDS=1`. The
+/// in-app pane authenticates via the URL regardless, so this only gates display.
 fn show_creds() -> bool {
     std::env::var("WECHAT_SHOW_CREDS")
-        .map(|value| value.trim() != "0")
-        .unwrap_or(true)
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 /// Parses `wechat-login [<connection-name>]` into the connection slug.

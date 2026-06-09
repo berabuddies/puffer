@@ -372,6 +372,15 @@ fn wechat_actions() -> BTreeMap<String, ConnectorActionDefinition> {
             false,
         ),
         wechat_action_definition(
+            "logout",
+            "Log out of WeChat via the client UI, KEEPING the container and local \
+             data (distinct from deleting the connection, which wipes everything). \
+             Re-login is a fresh QR scan",
+            "external_account_profile",
+            "Log out of the external WeChat account (keep data)",
+            true,
+        ),
+        wechat_action_definition(
             "read_history",
             "Read the last N messages of a chat from the local DB (fields `chat`, `limit`); \
              read-only, requires the direct DB reader",
@@ -415,12 +424,12 @@ fn wechat_message_action_schema() -> Value {
             "to": { "description": "Recipient: a contact or group display name (also accepts target/contact/chat).", "type": "string" },
             "text": { "description": "Message text (alias: message). Optional when sending media-only.", "type": "string" },
             "caption": { "description": "Caption sent as a following text message with media.", "type": "string" },
-            "image": { "description": "Image to send inline: a local path or http(s) URL (or an array).", "oneOf": [{"type": "string"}, {"type": "array"}] },
-            "file": { "description": "File to send as a document card: a local path or http(s) URL (or an array).", "oneOf": [{"type": "string"}, {"type": "array"}] },
-            "media": { "description": "Image/file path(s) or URL(s); kind inferred by extension.", "oneOf": [{"type": "string"}, {"type": "object"}, {"type": "array"}] },
-            "files": { "description": "Array of media paths/URLs.", "type": "array" },
+            "image": { "description": "Image to send inline: a local path or http(s) URL (or an array).", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}] },
+            "file": { "description": "File to send as a document card: a local path or http(s) URL (or an array).", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}] },
+            "media": { "description": "Image/file path(s)/URL(s), or attachment object(s) {path|url, kind, caption}.", "oneOf": [{"type": "string"}, {"type": "object"}, {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object"}]}}] },
+            "files": { "description": "Array of media paths/URLs.", "type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object"}]} },
             "reply_to": { "description": "Quote/reply target = the quoted message TEXT (a snippet to locate on screen). WeChat has NO message ids; a numeric id is rejected. (alias: quote)", "type": "string" },
-            "mention": { "description": "For the `mention` action: a member name or array of names to @ in a group.", "oneOf": [{"type": "string"}, {"type": "array"}] },
+            "mention": { "description": "For the `mention` action: a member name or array of names to @ in a group.", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}] },
             "on": { "description": "For the `react` (拍一拍) action: which member to pat; defaults to the chat's other party.", "type": "string" },
             "chat": { "description": "For `read_history`: the chat (contact/group name or wxid/*@chatroom) to read.", "type": "string" },
             "limit": { "description": "For `read_history`: number of recent messages to return.", "type": "integer" }
