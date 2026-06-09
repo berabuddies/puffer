@@ -110,7 +110,7 @@ fn message_summary(payload: &Value, text: &str) -> String {
         ],
     )
     .unwrap_or_else(|| text.trim().to_string());
-    let cleaned = strip_source_prefixes(&normalize_inline_text(&candidate));
+    let cleaned = strip_leading_urls(&strip_source_prefixes(&normalize_inline_text(&candidate)));
     let preview = error_preview(&cleaned)
         .or_else(|| question_preview(&cleaned))
         .or_else(|| request_preview(&cleaned))
@@ -134,6 +134,33 @@ fn strip_source_prefixes(value: &str) -> String {
     current
 }
 
+fn strip_leading_urls(value: &str) -> String {
+    let original = value.trim();
+    let mut current = original;
+    while let Some(rest) = strip_one_leading_url(current) {
+        current = rest.trim_start_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ':' | '-' | ',' | '|' | ';')
+        });
+    }
+    if current.is_empty() {
+        original.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
+fn strip_one_leading_url(value: &str) -> Option<&str> {
+    let lower = value.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return None;
+    }
+    let end = value
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
+        .unwrap_or(value.len());
+    Some(&value[end..])
+}
+
 fn strip_one_source_prefix(value: &str) -> String {
     let text = value.trim();
     let lower = text.to_ascii_lowercase();
@@ -153,8 +180,8 @@ fn strip_one_source_prefix(value: &str) -> String {
 }
 
 fn strip_prefix_subject(value: &str) -> String {
-    let rest = value
-        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '-' | ','));
+    let rest =
+        value.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '-' | ','));
     if let Some((_, tail)) = rest.split_once(':') {
         return tail.trim().to_string();
     }
@@ -373,6 +400,18 @@ mod tests {
         assert_eq!(
             message_summary(&payload, ""),
             "This is a casual note with enough words that the preview should stay short and..."
+        );
+    }
+
+    #[test]
+    fn message_summary_skips_leading_urls() {
+        let payload = json!({
+            "message": "https://github.com/acme/repo/pull/42 task configure modal is ready for review"
+        });
+
+        assert_eq!(
+            message_summary(&payload, ""),
+            "task configure modal is ready for review"
         );
     }
 }
