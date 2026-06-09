@@ -17,8 +17,11 @@ test("tasks history shows received monitor messages and agent outcomes", async (
   const dialog = page.getByRole("dialog", { name: "Task history" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("Received messages").getByRole("button", {
-    name: /Telegram from Alice/
+    name: /deployment status\?/
   })).toBeVisible();
+  await expect(dialog.getByLabel("Received messages")).toContainText("telegram-user");
+  await expect(dialog.getByLabel("Received messages")).toContainText("Support");
+  await expect(dialog.getByLabel("Received messages")).toContainText("alice");
   await expect(dialog.getByLabel("Agent history")).toContainText("Triage agent");
   await expect(dialog.getByLabel("Agent history")).toContainText("Created monitor task monitor-1.");
   await expect(dialog.getByLabel("Agent history")).toContainText("38 tokens");
@@ -73,7 +76,7 @@ test("tasks history links ignored task analysis by monitor envelope", async ({ p
         received_at_ms: now - 21_000,
         topic: "telegram-user",
         kind: "message",
-        summary: "Telegram from bot: duplicate alert",
+        summary: "duplicate alert",
         text: "duplicate alert",
         payload: { chat_title: "Ops", sender_username: "bot", message: "duplicate alert" },
         action_log: [
@@ -120,7 +123,7 @@ test("tasks history shows monitor messages while triage is still processing", as
         received_at_ms: now - 2_000,
         topic: "telegram-user",
         kind: "message",
-        summary: "Telegram from Alice: can you check this?",
+        summary: "can you check this?",
         text: "can you check this?",
         payload: { chat_title: "Support", sender_username: "alice", message: "can you check this?" },
         action_log: [
@@ -146,7 +149,10 @@ test("tasks history shows monitor messages while triage is still processing", as
   await page.getByRole("button", { name: "History" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Task history" });
-  await expect(dialog.getByLabel("Received messages")).toContainText("Telegram from Alice");
+  await expect(dialog.getByLabel("Received messages")).toContainText("can you check this?");
+  await expect(dialog.getByLabel("Received messages")).toContainText("telegram-user");
+  await expect(dialog.getByLabel("Received messages")).toContainText("Support");
+  await expect(dialog.getByLabel("Received messages")).toContainText("alice");
   await expect(dialog.getByLabel("Agent history")).toContainText("processing · tokens n/a");
   await expect(dialog.getByLabel("Agent history")).toContainText("triage agent is processing this message.");
 });

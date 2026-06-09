@@ -587,6 +587,37 @@
     return message.connection_slug || message.connector_slug || message.topic || "monitor";
   }
 
+  function historyEventLabel(message: WorkflowMonitorHistoryMessage): string {
+    if (message.kind === "channel_post") return "Channel post";
+    if (message.kind === "event") return "Received event";
+    return "Received message";
+  }
+
+  function historySenderLabel(message: WorkflowMonitorHistoryMessage): string | null {
+    return firstPayloadString(message.payload, [
+      "sender_username",
+      "sender_name",
+      "author_handle",
+      "author_name",
+      "from_name",
+      "from_email",
+      "sender",
+      "user"
+    ]);
+  }
+
+  function historyScopeLabel(message: WorkflowMonitorHistoryMessage): string | null {
+    return firstPayloadString(message.payload, [
+      "chat_title",
+      "channel_name",
+      "room_name",
+      "group_name",
+      "thread_title",
+      "mailbox",
+      "calendar_name"
+    ]);
+  }
+
   function historyDeliveryLabel(message: WorkflowMonitorHistoryMessage): string | null {
     const source = message.payload?.delivery_source;
     if (source === "catch_up") return "catch-up";
@@ -608,6 +639,9 @@
 
   function historyMetaLabel(message: WorkflowMonitorHistoryMessage): string {
     return [
+      historySourceLabel(message),
+      historyScopeLabel(message),
+      historySenderLabel(message),
       message.kind ?? "message",
       historyDeliveryLabel(message),
       historyLagLabel(message),
@@ -618,6 +652,22 @@
   function numericPayloadValue(payload: Record<string, unknown> | null | undefined, key: string): number | null {
     const value = payload?.[key];
     return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  function stringPayloadValue(payload: Record<string, unknown> | null | undefined, key: string): string | null {
+    const value = payload?.[key];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function firstPayloadString(
+    payload: Record<string, unknown> | null | undefined,
+    keys: string[]
+  ): string | null {
+    for (const key of keys) {
+      const value = stringPayloadValue(payload, key);
+      if (value) return value;
+    }
+    return null;
   }
 
   function historyTriageActions(message: WorkflowMonitorHistoryMessage): WorkflowMonitorHistoryAction[] {
@@ -1278,7 +1328,7 @@
                   onclick={() => (selectedHistoryIdx = message.idx)}
                 >
                   <span class="pf-task-history-message-top">
-                    <strong>{historySourceLabel(message)}</strong>
+                    <strong>{historyEventLabel(message)}</strong>
                     <small>{historyWhen(message)}</small>
                   </span>
                   <span>{message.summary || message.text || "Received message"}</span>
@@ -1292,7 +1342,7 @@
             {#if selectedHistoryMessage}
               <div class="pf-task-history-selected">
                 <div>
-                  <span>{historySourceLabel(selectedHistoryMessage)} · {historyMetaLabel(selectedHistoryMessage)}</span>
+                  <span>{historyMetaLabel(selectedHistoryMessage)}</span>
                   <strong>{selectedHistoryMessage.summary || "Received message"}</strong>
                 </div>
                 <code>{selectedHistoryMessage.envelope_id ?? selectedHistoryMessage.run_id}</code>

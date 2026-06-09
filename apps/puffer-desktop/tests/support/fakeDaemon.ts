@@ -660,7 +660,7 @@ export class FakeDaemon {
         topic: "telegram-user",
         kind: "message",
         dedup_key: "msg-1",
-        summary: "Telegram from Alice: deployment status?",
+        summary: "deployment status?",
         text: "Alice asked whether the deployment is finished.",
         payload: {
           chat_title: "Support",
