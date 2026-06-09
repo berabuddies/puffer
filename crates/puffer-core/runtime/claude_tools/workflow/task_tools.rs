@@ -59,14 +59,24 @@ pub(super) fn execute_task_create(
         tasks_path(state.session.cwd.as_path(), &state.session.id)
     };
     let mut store = load_store::<TaskStore>(&tp)?;
+    let subject = if monitor_task {
+        sanitize_monitor_task_text(&parsed.subject)
+    } else {
+        parsed.subject
+    };
+    let description = if monitor_task {
+        sanitize_monitor_task_text(&parsed.description)
+    } else {
+        parsed.description
+    };
     let task = StoredTask {
         task_id: if monitor_task {
             next_monitor_task_id(&store.tasks)
         } else {
             next_task_id(&store.tasks)
         },
-        subject: parsed.subject,
-        description: parsed.description,
+        subject,
+        description,
         active_form: parsed.active_form.unwrap_or_else(|| "Working".to_string()),
         status: "pending".to_string(),
         owner: None,
@@ -94,6 +104,102 @@ pub(super) fn execute_task_create(
             "expiresAt": task.expires_at,
         }
     }))?)
+}
+
+fn sanitize_monitor_task_text(value: &str) -> String {
+    let without_prefix = strip_monitor_source_prefix(value.trim());
+    let without_judgment = remove_monitor_judgment_sentences(&without_prefix);
+    let without_terms = remove_monitor_source_terms(&without_judgment);
+    normalize_monitor_task_text(&without_terms)
+}
+
+fn strip_monitor_source_prefix(value: &str) -> String {
+    let mut text = value.trim();
+    loop {
+        let lowered = text.to_ascii_lowercase();
+        let mut matched = None;
+        for prefix in [
+            "personal telegram message asks:",
+            "personal telegram message ask:",
+            "telegram message asks:",
+            "telegram message ask:",
+            "personal message asks:",
+            "personal message ask:",
+            "message asks:",
+            "message ask:",
+            "telegram message from",
+            "incoming telegram message",
+            "telegram user sent",
+            "in telegram group",
+            "message from chat_id",
+        ] {
+            if lowered.starts_with(prefix) {
+                matched = Some(prefix.len());
+                break;
+            }
+        }
+        let Some(prefix_len) = matched else {
+            return text.to_string();
+        };
+        text = text[prefix_len..]
+            .trim_start_matches([' ', ':', '-', '>', '\t'])
+            .trim();
+    }
+}
+
+fn remove_monitor_judgment_sentences(value: &str) -> String {
+    value
+        .split_inclusive(['.', '!', '?'])
+        .filter(|sentence| {
+            let lowered = sentence.to_ascii_lowercase();
+            !lowered.contains("actionable request")
+                && !lowered.contains("actionable task")
+                && !lowered.contains("non-actionable")
+                && !lowered.contains("triage")
+        })
+        .collect::<String>()
+}
+
+fn remove_monitor_source_terms(value: &str) -> String {
+    let mut text = value.to_string();
+    for term in [
+        "personal telegram",
+        "telegram",
+        "message asks",
+        "message ask",
+        "actionable request",
+        "actionable task",
+    ] {
+        text = replace_ascii_case_insensitive(&text, term, "");
+    }
+    text
+}
+
+fn replace_ascii_case_insensitive(value: &str, needle: &str, replacement: &str) -> String {
+    let mut text = value.to_string();
+    loop {
+        let lowered = text.to_ascii_lowercase();
+        let Some(start) = lowered.find(needle) else {
+            return text;
+        };
+        let end = start + needle.len();
+        text.replace_range(start..end, replacement);
+    }
+}
+
+fn normalize_monitor_task_text(value: &str) -> String {
+    let mut out = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (from, to) in [
+        (" :", ":"),
+        (" .", "."),
+        (" ,", ","),
+        (" !", "!"),
+        (" ?", "?"),
+        ("  ", " "),
+    ] {
+        out = out.replace(from, to);
+    }
+    out.trim_matches([' ', ':', '-', '.']).trim().to_string()
 }
 
 /// Executes the live `TaskGet` workflow tool.
@@ -235,22 +341,42 @@ pub(super) fn execute_task_update(
     }
 
     let task = &mut store.tasks[index];
+    let updating_monitor_task = tp == monitor_tasks_path(&store_cwd)
+        || is_monitor_task_metadata(&task.metadata)
+        || parsed
+            .metadata
+            .as_ref()
+            .is_some_and(is_monitor_task_metadata);
     if let Some(metadata) = parsed.metadata.as_ref() {
-        let updating_monitor_task = tp == monitor_tasks_path(&store_cwd)
-            || is_monitor_task_metadata(&task.metadata)
-            || is_monitor_task_metadata(metadata);
         if updating_monitor_task {
             validate_monitor_task_metadata(metadata)?;
         }
     }
     let mut updated_fields = Vec::new();
     let mut status_change = None;
-    if let Some(subject) = parsed.subject.filter(|subject| *subject != task.subject) {
+    if let Some(subject) = parsed
+        .subject
+        .map(|subject| {
+            if updating_monitor_task {
+                sanitize_monitor_task_text(&subject)
+            } else {
+                subject
+            }
+        })
+        .filter(|subject| *subject != task.subject)
+    {
         task.subject = subject;
         updated_fields.push("subject");
     }
     if let Some(description) = parsed
         .description
+        .map(|description| {
+            if updating_monitor_task {
+                sanitize_monitor_task_text(&description)
+            } else {
+                description
+            }
+        })
         .filter(|description| *description != task.description)
     {
         task.description = description;

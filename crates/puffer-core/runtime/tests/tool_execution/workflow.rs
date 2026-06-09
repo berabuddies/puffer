@@ -6,6 +6,9 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
+#[path = "workflow_monitor_task.rs"]
+mod workflow_monitor_task;
+
 #[test]
 fn todo_write_rejects_multiple_in_progress_items() {
     let mut state = temp_state();
