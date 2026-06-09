@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 500;
-const SUMMARY_LIMIT: usize = 180;
+const SUMMARY_LIMIT: usize = 80;
 
 /// Returns recent monitor-triggered connector messages and agent outcomes.
 pub(crate) fn handle_monitor_history_list(_paths: &ConfigPaths, params: &Value) -> Result<Value> {
@@ -96,55 +96,283 @@ fn string_field(value: Option<&Value>) -> Option<String> {
 }
 
 fn message_summary(payload: &Value, text: &str) -> String {
-    if let Some(summary) = string_field(payload.get("summary")) {
-        return truncate_summary(&summary);
-    }
-    let subject = first_payload_string(payload, &["subject", "title", "event_title"]);
-    let sender = first_payload_string(
+    let candidate = first_payload_string(
         payload,
         &[
-            "from_email",
-            "sender_email",
-            "sender_username",
-            "author_handle",
-            "from",
-            "sender",
-            "author",
+            "message",
+            "snippet",
+            "text",
+            "body",
+            "subject",
+            "title",
+            "event_title",
+            "summary",
         ],
-    );
-    let scope = first_payload_string(
-        payload,
-        &[
-            "chat_title",
-            "chat_name",
-            "room_name",
-            "channel_name",
-            "calendar_id",
-            "mailbox",
-        ],
-    );
-    let body = first_payload_string(payload, &["message", "snippet", "text", "body"])
-        .unwrap_or_else(|| text.trim().to_string());
-    let combined = match (scope, sender, subject) {
-        (Some(scope), Some(sender), Some(subject)) => format!("{scope} from {sender}: {subject}"),
-        (Some(scope), Some(sender), None) => format!("{scope} from {sender}: {body}"),
-        (None, Some(sender), Some(subject)) => format!("{sender}: {subject}"),
-        (None, Some(sender), None) => format!("{sender}: {body}"),
-        (_, None, Some(subject)) => subject,
-        _ => body,
-    };
-    truncate_summary(&combined)
+    )
+    .unwrap_or_else(|| text.trim().to_string());
+    let cleaned = strip_source_prefixes(&normalize_inline_text(&candidate));
+    let preview = error_preview(&cleaned)
+        .or_else(|| question_preview(&cleaned))
+        .or_else(|| request_preview(&cleaned))
+        .unwrap_or(cleaned);
+    truncate_summary(&preview)
 }
 
 fn first_payload_string(payload: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| string_field(payload.get(*key)))
 }
 
+fn strip_source_prefixes(value: &str) -> String {
+    let mut current = value.trim().to_string();
+    for _ in 0..4 {
+        let next = strip_one_source_prefix(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+fn strip_one_source_prefix(value: &str) -> String {
+    let text = value.trim();
+    let lower = text.to_ascii_lowercase();
+    for prefix in [
+        "telegram message from ",
+        "incoming telegram message from ",
+        "incoming telegram message",
+        "telegram user sent",
+        "in telegram group ",
+        "message from chat_id ",
+    ] {
+        if lower.starts_with(prefix) {
+            return strip_prefix_subject(&text[prefix.len()..]);
+        }
+    }
+    strip_generic_colon_source(text).unwrap_or_else(|| text.to_string())
+}
+
+fn strip_prefix_subject(value: &str) -> String {
+    let rest = value
+        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '-' | ','));
+    if let Some((_, tail)) = rest.split_once(':') {
+        return tail.trim().to_string();
+    }
+    rest.trim().to_string()
+}
+
+fn strip_generic_colon_source(value: &str) -> Option<String> {
+    let (head, tail) = value.split_once(':')?;
+    if head.chars().count() > 80 {
+        return None;
+    }
+    let lower = head.to_ascii_lowercase();
+    let looks_like_source = [
+        "telegram", "slack", "discord", "lark", "email", "mail", "chat_id", "channel", "room",
+        "group", " from ",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    looks_like_source.then(|| tail.trim().to_string())
+}
+
+fn error_preview(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let mut earliest = None;
+    for marker in [
+        "error:",
+        "failed:",
+        "failure:",
+        "fatal:",
+        "panic:",
+        "exception:",
+        "traceback",
+        "could not ",
+        "cannot ",
+    ] {
+        if let Some(index) = lower.find(marker) {
+            earliest = Some(earliest.map_or(index, |current: usize| current.min(index)));
+        }
+    }
+    let index = earliest?;
+    let excerpt = first_sentence(&value[index..]);
+    let core = strip_error_label(&excerpt);
+    (!core.trim().is_empty()).then_some(core)
+}
+
+fn strip_error_label(value: &str) -> String {
+    let trimmed =
+        value.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, '-' | ':'));
+    if let Some((label, tail)) = trimmed.split_once(':') {
+        let lower = label.to_ascii_lowercase();
+        if label.chars().count() <= 48
+            && [
+                "error",
+                "failed",
+                "failure",
+                "fatal",
+                "panic",
+                "exception",
+                "traceback",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker))
+        {
+            return tail.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn question_preview(value: &str) -> Option<String> {
+    if let Some(index) = value.find('?') {
+        return Some(first_sentence(&value[..=index]));
+    }
+    let lower = value.to_ascii_lowercase();
+    [
+        "can you ",
+        "could you ",
+        "would you ",
+        "do you ",
+        "is there ",
+        "are there ",
+        "what ",
+        "why ",
+        "how ",
+        "when ",
+        "where ",
+        "should ",
+    ]
+    .iter()
+    .any(|marker| lower.starts_with(marker))
+    .then(|| first_sentence(value))
+}
+
+fn request_preview(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    for prefix in ["please ", "pls "] {
+        if lower.starts_with(prefix) {
+            return Some(first_sentence(value[prefix.len()..].trim()));
+        }
+    }
+    [
+        "need ",
+        "need you to ",
+        "restart ",
+        "fix ",
+        "check ",
+        "review ",
+        "send ",
+        "update ",
+        "create ",
+        "delete ",
+        "deploy ",
+    ]
+    .iter()
+    .any(|marker| lower.starts_with(marker))
+    .then(|| first_sentence(value))
+}
+
+fn first_sentence(value: &str) -> String {
+    for separator in [". ", "; ", " | "] {
+        if let Some((head, _)) = value.split_once(separator) {
+            return head.trim().to_string();
+        }
+    }
+    value.trim().to_string()
+}
+
+fn normalize_inline_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn truncate_summary(value: &str) -> String {
-    let mut summary = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let summary = normalize_inline_text(value);
     if summary.chars().count() <= SUMMARY_LIMIT {
         return summary;
     }
-    summary = summary.chars().take(SUMMARY_LIMIT).collect::<String>();
-    format!("{}...", summary.trim_end())
+    let truncated = summary.chars().take(SUMMARY_LIMIT).collect::<String>();
+    let trimmed = truncated
+        .rsplit_once(' ')
+        .map(|(head, _)| head)
+        .unwrap_or(truncated.as_str())
+        .trim_end();
+    format!("{trimmed}...")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_summary;
+    use serde_json::json;
+
+    #[test]
+    fn message_summary_prefers_body_over_source_fields() {
+        let payload = json!({
+            "chat_title": "Support",
+            "sender_username": "alice",
+            "message": "deployment status?"
+        });
+
+        assert_eq!(message_summary(&payload, ""), "deployment status?");
+    }
+
+    #[test]
+    fn message_summary_strips_telegram_source_prefixes() {
+        let payload = json!({
+            "summary": "Telegram message from Alice: deployment status?"
+        });
+
+        assert_eq!(message_summary(&payload, ""), "deployment status?");
+    }
+
+    #[test]
+    fn message_summary_extracts_core_error_text() {
+        let payload = json!({
+            "message": "Incoming Telegram message from Alice: Error: deployment failed in production"
+        });
+
+        assert_eq!(
+            message_summary(&payload, ""),
+            "deployment failed in production"
+        );
+    }
+
+    #[test]
+    fn message_summary_keeps_question_intent() {
+        let payload = json!({
+            "channel_name": "#ops",
+            "author_handle": "sam",
+            "text": "Can you check the failing deploy?"
+        });
+
+        assert_eq!(
+            message_summary(&payload, ""),
+            "Can you check the failing deploy?"
+        );
+    }
+
+    #[test]
+    fn message_summary_keeps_request_action() {
+        let payload = json!({
+            "from_email": "ops@example.com",
+            "body": "please restart the staging worker when the deploy is done"
+        });
+
+        assert_eq!(
+            message_summary(&payload, ""),
+            "restart the staging worker when the deploy is done"
+        );
+    }
+
+    #[test]
+    fn message_summary_falls_back_to_short_clean_content() {
+        let payload = json!({
+            "body": "This is a casual note with enough words that the preview should stay short and readable for the sidebar row."
+        });
+
+        assert_eq!(
+            message_summary(&payload, ""),
+            "This is a casual note with enough words that the preview should stay short and..."
+        );
+    }
 }
