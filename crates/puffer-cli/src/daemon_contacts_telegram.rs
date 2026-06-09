@@ -5,9 +5,7 @@ use super::{
 };
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
-use puffer_subscriptions::{
-    normalize_contact_id, ContactContext, TELEGRAM_CONTACT_PREFIX, TELEGRAM_USER_ID_CONTACT_PREFIX,
-};
+use puffer_subscriptions::{normalize_contact_id, ContactContext, TELEGRAM_CONTACT_PREFIX};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
@@ -113,7 +111,7 @@ fn read_telegram_messages(path: &Path) -> Result<Vec<TelegramDiagMessage>> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if chat_kind == "channel" {
+        if chat_kind != "user" {
             continue;
         }
         let Some(contact_id) = telegram_contact_id(&payload, &chat_kind) else {
@@ -282,29 +280,13 @@ pub(super) fn reply_index(
 }
 
 pub(super) fn telegram_contact_id(payload: &Value, chat_kind: &str) -> Option<String> {
-    if chat_kind == "user" {
-        if payload.get("chat_is_bot").and_then(Value::as_bool) == Some(true) {
-            return None;
-        }
-        if let Some(username) = payload.get("chat_username").and_then(Value::as_str) {
-            return telegram_prefixed_id(TELEGRAM_CONTACT_PREFIX, username);
-        }
-        if let Some(chat_id) = payload.get("chat_id").and_then(Value::as_i64) {
-            return telegram_prefixed_id(TELEGRAM_USER_ID_CONTACT_PREFIX, &chat_id.to_string());
-        }
+    if chat_kind != "user" || payload.get("chat_is_bot").and_then(Value::as_bool) == Some(true) {
+        return None;
     }
-    if chat_kind == "group" {
-        if payload.get("sender_is_bot").and_then(Value::as_bool) == Some(true) {
-            return None;
-        }
-        if let Some(username) = payload.get("sender_username").and_then(Value::as_str) {
-            return telegram_prefixed_id(TELEGRAM_CONTACT_PREFIX, username);
-        }
-        if let Some(sender_id) = payload.get("sender_id").and_then(Value::as_i64) {
-            return telegram_prefixed_id(TELEGRAM_USER_ID_CONTACT_PREFIX, &sender_id.to_string());
-        }
-    }
-    None
+    payload
+        .get("chat_username")
+        .and_then(Value::as_str)
+        .and_then(|username| telegram_prefixed_id(TELEGRAM_CONTACT_PREFIX, username))
 }
 
 fn telegram_prefixed_id(prefix: &str, suffix: &str) -> Option<String> {

@@ -1,6 +1,5 @@
 use super::daemon_contacts_telegram::{
-    reply_index, score_telegram_window, telegram_contact_id, telegram_contact_name,
-    TelegramDiagMessage,
+    reply_index, telegram_contact_id, telegram_contact_name, TelegramDiagMessage,
 };
 use super::*;
 use puffer_config::ConfigPaths;
@@ -27,113 +26,26 @@ fn save_contact_normalizes_ids() {
 }
 
 #[test]
-fn telegram_candidates_ignore_unanswered_group_senders() {
-    let base = json!({
-        "stage": "emitted",
-        "chat_kind": "group",
-        "chat_id": -1,
-        "sender_username": "noisy",
-        "sender_name": "Noisy",
-        "message_id": 1,
-        "date_ms": 1_700_000_000_000_i64,
-        "text_prefix": "generic promo ping"
-    });
-    let messages = vec![read_test_message(base)];
-
-    let ranked = score_telegram_window(&messages);
-
-    assert!(ranked.is_empty());
-}
-
-#[test]
-fn telegram_candidates_keep_replied_group_senders() {
-    let incoming = read_test_message(json!({
-        "stage": "emitted",
-        "chat_kind": "group",
-        "chat_id": -1,
-        "sender_username": "alice",
-        "sender_name": "Alice",
-        "message_id": 1,
-        "date_ms": 1_700_000_000_000_i64,
-        "text_prefix": "can you review the launch checklist"
-    }));
-    let outgoing = read_test_message(json!({
-        "stage": "emitted",
-        "chat_kind": "group",
-        "chat_id": -1,
-        "sender_username": "me",
-        "sender_name": "Me",
-        "message_id": 2,
-        "date_ms": 1_700_000_060_000_i64,
-        "is_outgoing": true,
-        "text_prefix": "@alice yes I will review the launch checklist"
-    }));
-
-    let ranked = score_telegram_window(&[incoming, outgoing]);
-
-    assert!(ranked.contains_key("telegram@alice"));
-}
-
-#[test]
-fn telegram_group_replies_must_stay_in_same_chat() {
-    let incoming = read_test_message(json!({
-        "stage": "emitted",
-        "chat_kind": "group",
-        "chat_id": -1,
-        "sender_username": "alice",
-        "sender_name": "Alice",
-        "message_id": 7,
-        "date_ms": 1_700_000_000_000_i64,
-        "text_prefix": "can someone review this deployment plan"
-    }));
-    let wrong_chat_reply = read_test_message(json!({
-        "stage": "emitted",
-        "chat_kind": "group",
-        "chat_id": -2,
-        "sender_username": "me",
-        "sender_name": "Me",
-        "message_id": 8,
-        "reply_to": {"message_id": 7},
-        "date_ms": 1_700_000_060_000_i64,
-        "is_outgoing": true,
-        "text_prefix": "@alice yes but this is in a different group"
-    }));
-    let messages = vec![incoming, wrong_chat_reply];
-    let by_id = messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| (message.message_id, index))
-        .collect::<HashMap<_, _>>();
-
-    assert_eq!(reply_index(&messages, &by_id, 0, &messages[0]), None);
-    assert!(score_telegram_window(&messages).is_empty());
-}
-
-#[test]
-fn telegram_candidates_use_numeric_ids_without_handles_and_ignore_bots() {
-    assert_eq!(
-        telegram_contact_id(
-            &json!({
-                "chat_kind": "group",
-                "chat_id": -1,
-                "sender_id": 42,
-                "sender_name": "Numeric Only"
-            }),
-            "group"
-        ),
-        Some("telegram-user-id@42".to_string())
-    );
+fn telegram_candidates_require_private_usernames_and_ignore_bots_groups() {
     assert_eq!(
         telegram_contact_id(
             &json!({
                 "chat_kind": "user",
-                "chat_id": 5229190700_i64,
-                "chat_title": "Direct Numeric"
+                "chat_username": "Alice"
             }),
             "user"
         ),
-        Some("telegram-user-id@5229190700".to_string())
+        Some("telegram@alice".to_string())
     );
+    assert!(telegram_contact_id(
+        &json!({
+            "chat_kind": "user",
+            "chat_id": 5229190700_i64,
+            "chat_title": "Direct Numeric"
+        }),
+        "user"
+    )
+    .is_none());
     assert!(telegram_contact_id(
         &json!({
             "chat_kind": "group",
@@ -151,6 +63,33 @@ fn telegram_candidates_use_numeric_ids_without_handles_and_ignore_bots() {
             "chat_is_bot": true
         }),
         "user"
+    )
+    .is_none());
+    assert!(telegram_contact_id(
+        &json!({
+            "chat_kind": "group",
+            "sender_username": "deploy"
+        }),
+        "group"
+    )
+    .is_none());
+    assert!(telegram_contact_id(
+        &json!({
+            "chat_kind": "group",
+            "chat_id": -1,
+            "sender_id": 42,
+            "sender_name": "Numeric Only"
+        }),
+        "group"
+    )
+    .is_none());
+    assert!(telegram_contact_id(
+        &json!({
+            "chat_kind": "channel",
+            "chat_id": -100,
+            "sender_username": "news"
+        }),
+        "channel"
     )
     .is_none());
     assert!(telegram_contact_id(
