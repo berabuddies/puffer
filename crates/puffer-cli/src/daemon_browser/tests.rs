@@ -1,6 +1,7 @@
 use super::agent::{key_text, scroll_delta};
 use super::command::BrowserCommand;
 use super::cursor::parse_cursor_response;
+use super::dom_inspect::dom_inspect_expression;
 use super::params::{parse_input_event, required_string_array};
 use super::ref_resolution::{
     checkable_state_expression, fill_expression, focus_expression, scroll_into_view_expression,
@@ -678,6 +679,15 @@ fn focus_expression_targets_focusable_elements() {
     .unwrap();
     assert!(expression.contains("targetEl.focus"));
     assert!(expression.contains("Target is not focusable"));
+}
+
+#[test]
+fn dom_inspect_expression_returns_bounded_selector_metadata() {
+    let expression = dom_inspect_expression("input[type=email]").unwrap();
+    assert!(expression.contains("document.querySelectorAll(selector)"));
+    assert!(expression.contains("all.slice(0, 25)"));
+    assert!(expression.contains("attributes: attrsOf(el)"));
+    assert!(dom_inspect_expression(" ").is_err());
 }
 
 #[test]

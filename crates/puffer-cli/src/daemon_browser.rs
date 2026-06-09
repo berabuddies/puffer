@@ -27,6 +27,7 @@ mod console;
 mod ct_runtime;
 mod cursor;
 mod devtools;
+mod dom_inspect;
 mod extension_seed;
 mod input;
 mod launch_settings;

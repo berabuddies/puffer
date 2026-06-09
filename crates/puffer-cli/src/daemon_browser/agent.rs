@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::daemon::{DaemonState, ServerEnvelope};
 
+use super::dom_inspect::dom_inspect_expression;
 use super::params::{optional_u32, required_string, required_string_array};
 use super::ref_resolution::{
     fill_expression, focus_expression, scroll_into_view_expression, select_expression,
@@ -147,6 +148,17 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
             state.browsers.arm_agent_recording(&backend_id);
             state.browsers.agent_snapshot(&backend_id)
+        }
+        "domInspect" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let query = required_string(params, "query")?;
+            Ok(state
+                .browsers
+                .get(&backend_id)?
+                .evaluate(dom_inspect_expression(&query)?)?
+                .value)
         }
         "consoleLogs" | "console" => {
             let (_, backend_id) =

@@ -142,6 +142,8 @@ fn request_secret(
         "name": secret.label,
         "label": secret.label,
         "description": secret.description,
+        "username": secret.username,
+        "origin": secret.origin,
     }))?)
 }
 
@@ -405,8 +407,8 @@ mod tests {
                 label: "Demo".to_string(),
                 description: None,
                 value: "raw-secret".to_string(),
-                username: None,
-                origin: None,
+                username: Some("demo@example.com".to_string()),
+                origin: Some("https://example.com/login".to_string()),
                 source: "manual".to_string(),
             })
             .unwrap();
@@ -416,6 +418,8 @@ mod tests {
         )
         .unwrap();
         assert!(output.contains("PUFFER_SECRET_"));
+        assert!(output.contains("demo@example.com"));
+        assert!(output.contains("https://example.com/login"));
         assert!(!output.contains("raw-secret"));
     }
 

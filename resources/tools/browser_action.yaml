@@ -10,9 +10,18 @@ description: |-
 
   For sign-in and login flows, search `RequestSecret` for the relevant site,
   domain, account, or username before using this browser tool for credential
-  fields. If no matching credential exists, use `RequestSecret` to collect a
-  reusable credential instead of asking the user to paste passwords, tokens, or
-  API keys into chat.
+  fields. Use non-secret `username` metadata from RequestSecret search/request
+  results for email, phone, username, or account fields. Use
+  `PUFFER_SECRET_...` placeholders only for password, token, API key, or other
+  secret-value fields. If no matching credential exists, use `RequestSecret` to
+  collect a reusable credential instead of asking the user to paste passwords,
+  tokens, or API keys into chat.
+
+  For editable controls, use `fill` when the desired final value is known.
+  `fill` replaces the control value and is the normal action for email,
+  username, password, search, and address fields. `type` and `insertText`
+  append text at the current cursor/selection and can duplicate existing field
+  contents when retried.
 
   For page readiness, use `open` or `navigate` followed by `snapshot`,
   `screenshot`, `domInspect`, or a targeted browser action. Do not wait for
@@ -90,7 +99,7 @@ input_schema:
       description: Exact option value or label text for select actions.
     text:
       type: string
-      description: Text for type, insertText, or fill actions.
+      description: Text for fill, type, or insertText. For form fields, prefer fill because it replaces the value; type and insertText append at the current cursor or selection.
     question:
       type: string
       description: Optional caller question preserved for screenshot-style verified skill contracts.

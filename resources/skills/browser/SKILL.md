@@ -27,8 +27,10 @@ Workflow:
      `RequestSecret` with `action: "search"` using the site name, domain,
      origin, visible username/email hint, or login URL.
    - If exactly one relevant credential is available, request it by id/name and
-     use the returned `PUFFER_SECRET_...` placeholder in the browser command
-     that fills the password or token field. Never print the secret value.
+     use the returned non-secret `username` metadata for email, phone,
+     username, or account fields. Use the returned `PUFFER_SECRET_...`
+     placeholder only in the browser command that fills the password, token, or
+     other secret-value field. Never print the secret value.
    - If multiple matches are available, choose only when the metadata is
      unambiguous; otherwise ask the user which stored credential to use.
    - If no matching credential exists and login cannot proceed without one,
@@ -55,8 +57,8 @@ Workflow:
 4. Act on refs.
    - `browser click @e3 --tab-id t1` clicks an element from the latest snapshot.
    - `browser focus @e3 --tab-id t1` focuses an element without clicking it.
-   - `browser fill @e5 "hello" --tab-id t1` replaces text in an editable control.
-   - `browser type "hello" --ref @e5 --tab-id t1` focuses a ref and inserts text.
+   - `browser fill @e5 "hello" --tab-id t1` replaces text in an editable control. Use this for known final values in email, username, password, search, and address fields.
+   - `browser type "hello" --ref @e5 --tab-id t1` focuses a ref and inserts/appends text. Do not use this to replace a field value.
    - `browser scroll-into-view @e5 --tab-id t1` centers a ref before interacting when needed.
    - `browser select @e6 "New York" --tab-id t1` chooses one native `<select>` option by exact value or label.
    - `browser upload @e9 ./file.pdf --tab-id t1` attaches one or more files to a file input.
@@ -111,8 +113,8 @@ Interaction commands:
 - `browser upload @e9 ./one.png ./two.png --tab-id t1`
 - `browser check @e7 --tab-id t1`
 - `browser uncheck @e7 --tab-id t1`
-- `browser type "hello" --tab-id t1`
-- `browser type "hello" --ref @e5 --tab-id t1`
+- `browser type "hello" --tab-id t1` appends text at the current cursor
+- `browser type "hello" --ref @e5 --tab-id t1` focuses the ref and appends text
 - `browser press Enter --tab-id t1` or `browser key Enter --tab-id t1`
 - `browser keydown Shift --tab-id t1`
 - `browser keyup Shift --tab-id t1`

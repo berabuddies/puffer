@@ -69,6 +69,10 @@ pub struct ResolvedSecret {
     pub label: String,
     /// Optional non-secret description for display and search.
     pub description: Option<String>,
+    /// Optional login username associated with the secret.
+    pub username: Option<String>,
+    /// Optional origin URL or domain associated with the secret.
+    pub origin: Option<String>,
     /// Decrypted secret value.
     pub value: String,
 }
@@ -286,6 +290,8 @@ impl SecretVault {
             id: record.id.clone(),
             label: record.label.clone(),
             description: record.description.clone(),
+            username: record.username.clone(),
+            origin: record.origin.clone(),
             value: self.decrypt(&record.encrypted)?,
         })
     }
@@ -605,6 +611,8 @@ mod tests {
             revealed.description.as_deref(),
             Some("GitHub personal access token")
         );
+        assert_eq!(revealed.username.as_deref(), Some("octo"));
+        assert_eq!(revealed.origin.as_deref(), Some("https://github.com"));
         assert_eq!(revealed.value, "ghp_secret");
     }
 
