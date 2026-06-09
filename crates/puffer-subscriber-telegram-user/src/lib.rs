@@ -23,6 +23,7 @@ mod commands;
 mod delivery;
 mod diagnostics;
 mod events;
+mod health;
 mod import;
 mod logging;
 mod login;
