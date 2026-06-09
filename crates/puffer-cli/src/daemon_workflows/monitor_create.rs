@@ -337,10 +337,32 @@ fn monitor_triage_prompt(
         contact_ids.join(", ")
     };
     format!(
-        "You are the background monitor triage agent for connection `{connection_slug}` ({connector_slug}). Connector description: {connector_description}. Contact scope: {contact_scope}\n\nFor every new connector event:\n1. Read `{}` if it exists and use it only as task-creation guidance.\n2. If the event matches ignore memory, do not create a task; briefly report that it was ignored. Do not edit memory or subscription filters.\n3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.\n4. Otherwise decide whether the event represents an ongoing actionable task based on the connector description, event text, and structured payload.\n5. Use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks.\n6. Every monitor TaskCreate MUST include `receivedAt` from the workflow trigger's RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.\n7. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, `monitor_memory_path: \"{}\"`, `monitor_contact_ids: {:?}`, and `monitor_envelope_id` copied from the workflow trigger's `envelope_id`.\n8. If the structured event payload contains stable scalar source identity fields, copy those exact key/value pairs into top-level task metadata using the original payload key names. Stable identity means durable scope fields such as `chat_id`, `channel_id`, `room_id`, `conversation_id`, `thread_id`, `mailbox_id`, or `project_id`, paired with durable actor/source fields such as `sender_id`, `sender_username`, `from_email`, `author_id`, `author_handle`, or `account_id`.\n9. Never infer source identity from unstructured text. Do not use per-event fields such as `message_id`, `event_id`, `dedup_key`, timestamps, message text, body, subject, content, or title as ignore identity metadata.\n10. Do not add any metadata field named `monitor_ignore_filter`, `event_ignore_filter`, or `ignore_filter`; ignore filter installation is daemon-owned.\n11. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.\n12. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.\n\nDo not send connector replies unless a selected action later asks for it.",
+        concat!(
+            "You are the background monitor triage agent for connection `{connection_slug}` ({connector_slug}). ",
+            "Connector description: {connector_description}. Contact scope: {contact_scope}\n\n",
+            "For every new connector event:\n",
+            "1. Read `{}` if it exists and use it only as task-creation guidance.\n",
+            "2. If the event matches ignore memory, do not create a task; briefly report that it was ignored. Do not edit memory or subscription filters.\n",
+            "3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.\n",
+            "4. Otherwise decide whether the event represents an ongoing actionable task based on the connector description, event text, and structured payload.\n",
+            "5. Use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks.\n",
+            "6. Every monitor TaskCreate MUST include `receivedAt` from the workflow trigger's RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.\n",
+            "7. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, `monitor_memory_path: \"{}\"`, `monitor_contact_ids: {:?}`, and `monitor_envelope_id` copied from the workflow trigger's `envelope_id`.\n",
+            "8. If the structured event payload contains stable scalar source identity fields, copy those exact key/value pairs into top-level task metadata using the original payload key names. Stable identity means durable scope fields such as `chat_id`, `channel_id`, `room_id`, `conversation_id`, `thread_id`, `mailbox_id`, or `project_id`, paired with durable actor/source fields such as `sender_id`, `sender_username`, `from_email`, `author_id`, `author_handle`, or `account_id`.\n",
+            "9. Never infer source identity from unstructured text. Do not use per-event fields such as `message_id`, `event_id`, `dedup_key`, timestamps, message text, body, subject, content, or title as ignore identity metadata.\n",
+            "10. Do not add any metadata field named `monitor_ignore_filter`, `event_ignore_filter`, or `ignore_filter`; ignore filter installation is daemon-owned.\n",
+            "11. Every monitor TaskCreate description MUST be content-first and must not include source-first prefixes such as `Telegram message from`, `Incoming Telegram message`, `Telegram user sent`, `In Telegram group`, or `message from chat_id`. If the message contains a clear error, use the core error as the description. If it is a question, describe the question intent. If it is a request, describe the requested action. If it is casual or incomplete but still requires a task, use the original content's first 20 characters. Source information belongs in metadata, not in the description.\n",
+            "12. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.\n",
+            "13. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.\n\n",
+            "Do not send connector replies unless a selected action later asks for it."
+        ),
         memory_path.display(),
         memory_path.display(),
-        contact_ids
+        contact_ids,
+        connection_slug = connection_slug,
+        connector_slug = connector_slug,
+        connector_description = connector_description,
+        contact_scope = contact_scope
     )
 }
 
@@ -432,6 +454,35 @@ mod tests {
         assert!(prompt.contains("Never infer source identity"));
         assert!(prompt.contains("Do not add any metadata field named"));
         assert!(!prompt.contains("Telegram monitoring handles"));
+    }
+
+    #[test]
+    fn monitor_prompt_constrains_task_description_previews() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let memory_path = tempdir.path().join("telegram-user.md");
+
+        let prompt = monitor_triage_prompt(
+            "telegram-user",
+            "telegram-login",
+            "Personal Telegram",
+            &memory_path,
+            &[],
+        );
+
+        assert!(prompt.contains("source-first prefixes"));
+        assert!(prompt.contains("Telegram message from"));
+        assert!(prompt.contains("Incoming Telegram message"));
+        assert!(prompt.contains("Telegram user sent"));
+        assert!(prompt.contains("In Telegram group"));
+        assert!(prompt.contains("message from chat_id"));
+        assert!(prompt.contains("clear error"));
+        assert!(prompt.contains("core error"));
+        assert!(prompt.contains("question"));
+        assert!(prompt.contains("intent"));
+        assert!(prompt.contains("request"));
+        assert!(prompt.contains("requested action"));
+        assert!(prompt.contains("first 20 characters"));
+        assert!(prompt.contains("Source information belongs in metadata"));
     }
 
     #[test]

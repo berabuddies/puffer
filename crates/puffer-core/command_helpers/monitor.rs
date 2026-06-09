@@ -364,9 +364,31 @@ fn monitor_triage_prompt(
     memory_path: &Path,
 ) -> String {
     format!(
-        "You are the background monitor triage agent for connection `{connection_slug}` ({connector_slug}). Connector description: {connector_description}\n\nYou are a persistent per-connection agent. New connector events may arrive as a single workflow trigger or as a workflow trigger batch. Process every trigger in the turn before finishing.\n\nFor every new connector event:\n1. Read `{}` if it exists and apply its ignore rules.\n2. If the event matches ignore memory, do not create a task; briefly report that it was ignored.\n3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.\n4. Decide whether the event is truly a task. Create or update a task only when the event contains an explicit request for the user to act, decide, reply, review, approve, investigate, implement, or follow up; an explicit schedule, deadline, meeting, invite, reminder, or time-bound commitment; or a service notification that clearly assigns work to the user or requests review/approval from the user.\n5. Do not create tasks for standalone greetings such as \"hi\", thanks, acknowledgements, reactions, FYI/status updates with no ask, generic bot summaries, newsletters, training logs, GitHub-style commits/comments/notifications, or repeated source updates unless they contain an explicit request, assignment, review request, approval request, or schedule for the user.\n6. Apply this same task standard to all connectors. The source connector alone never makes a message actionable. Useful information is not a task unless it has a clear next action for the user.\n7. If the current event is ambiguous, you may check available surrounding context such as recent messages, thread history, linked task context, or connector-provided event details before deciding. Context may confirm an explicit ask or schedule; context alone must not turn FYI/status information into a task.\n8. If the event is not clearly a task after any needed context check, do not call TaskList, TaskCreate, or TaskUpdate for it; briefly report that it was skipped as non-actionable. When unsure, do not create a task.\n9. For actionable candidate events, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks. You may create or update multiple tasks in one turn when a batch contains multiple actionable events.\n10. Every monitor TaskCreate MUST include `receivedAt` from that event's workflow trigger RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.\n11. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, and `monitor_memory_path: \"{}\"`.\n12. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.\n13. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.\n\nDo not send connector replies unless a selected action later asks for it.",
+        concat!(
+            "You are the background monitor triage agent for connection `{connection_slug}` ({connector_slug}). Connector description: {connector_description}\n\n",
+            "You are a persistent per-connection agent. New connector events may arrive as a single workflow trigger or as a workflow trigger batch. Process every trigger in the turn before finishing.\n\n",
+            "For every new connector event:\n",
+            "1. Read `{}` if it exists and apply its ignore rules.\n",
+            "2. If the event matches ignore memory, do not create a task; briefly report that it was ignored.\n",
+            "3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.\n",
+            "4. Decide whether the event is truly a task. Create or update a task only when the event contains an explicit request for the user to act, decide, reply, review, approve, investigate, implement, or follow up; an explicit schedule, deadline, meeting, invite, reminder, or time-bound commitment; or a service notification that clearly assigns work to the user or requests review/approval from the user.\n",
+            "5. Do not create tasks for standalone greetings such as \"hi\", thanks, acknowledgements, reactions, FYI/status updates with no ask, generic bot summaries, newsletters, training logs, GitHub-style commits/comments/notifications, or repeated source updates unless they contain an explicit request, assignment, review request, approval request, or schedule for the user.\n",
+            "6. Apply this same task standard to all connectors. The source connector alone never makes a message actionable. Useful information is not a task unless it has a clear next action for the user.\n",
+            "7. If the current event is ambiguous, you may check available surrounding context such as recent messages, thread history, linked task context, or connector-provided event details before deciding. Context may confirm an explicit ask or schedule; context alone must not turn FYI/status information into a task.\n",
+            "8. If the event is not clearly a task after any needed context check, do not call TaskList, TaskCreate, or TaskUpdate for it; briefly report that it was skipped as non-actionable. When unsure, do not create a task.\n",
+            "9. For actionable candidate events, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks. You may create or update multiple tasks in one turn when a batch contains multiple actionable events.\n",
+            "10. Every monitor TaskCreate MUST include `receivedAt` from that event's workflow trigger RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.\n",
+            "11. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, and `monitor_memory_path: \"{}\"`.\n",
+            "12. Every monitor TaskCreate description MUST be content-first and must not include source-first prefixes such as `Telegram message from`, `Incoming Telegram message`, `Telegram user sent`, `In Telegram group`, or `message from chat_id`. If the message contains a clear error, use the core error as the description. If it is a question, describe the question intent. If it is a request, describe the requested action. If it is casual or incomplete but still requires a task, use the original content's first 20 characters. Source information belongs in metadata, not in the description.\n",
+            "13. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.\n",
+            "14. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.\n\n",
+            "Do not send connector replies unless a selected action later asks for it."
+        ),
         memory_path.display(),
-        memory_path.display()
+        memory_path.display(),
+        connection_slug = connection_slug,
+        connector_slug = connector_slug,
+        connector_description = connector_description
     )
 }
 
@@ -480,6 +502,31 @@ mod tests {
         assert!(prompt.contains("notification_muted"));
         assert!(prompt.contains("receivedAt"));
         assert!(prompt.contains("expiresAt"));
+    }
+
+    #[test]
+    fn monitor_prompt_constrains_task_description_previews() {
+        let prompt = monitor_triage_prompt(
+            "telegram-user",
+            "telegram-login",
+            "Telegram",
+            Path::new("/tmp/memory.md"),
+        );
+
+        assert!(prompt.contains("source-first prefixes"));
+        assert!(prompt.contains("Telegram message from"));
+        assert!(prompt.contains("Incoming Telegram message"));
+        assert!(prompt.contains("Telegram user sent"));
+        assert!(prompt.contains("In Telegram group"));
+        assert!(prompt.contains("message from chat_id"));
+        assert!(prompt.contains("clear error"));
+        assert!(prompt.contains("core error"));
+        assert!(prompt.contains("question"));
+        assert!(prompt.contains("intent"));
+        assert!(prompt.contains("request"));
+        assert!(prompt.contains("requested action"));
+        assert!(prompt.contains("first 20 characters"));
+        assert!(prompt.contains("Source information belongs in metadata"));
     }
 
     #[test]
