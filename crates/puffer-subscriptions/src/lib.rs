@@ -59,7 +59,8 @@ pub use contacts::{
     contact_ids_for_connector, contact_ids_from_payload, normalize_contact_id,
     normalize_contact_ids, ConnectorContact, ContactContext, ContactProposal, SavedContact,
     DISCORD_CONTACT_PREFIX, GOOGLE_CONTACT_PREFIX, LARK_CONTACT_PREFIX, MATRIX_CONTACT_PREFIX,
-    SLACK_CONTACT_PREFIX, TELEGRAM_CONTACT_PREFIX,
+    SLACK_CONTACT_PREFIX, TELEGRAM_CHAT_ID_CONTACT_PREFIX, TELEGRAM_CONTACT_PREFIX,
+    TELEGRAM_USER_ID_CONTACT_PREFIX,
 };
 pub use history::{
     now_ms, WorkflowActionLog, WorkflowBindingRun, WorkflowBindingRunStatus, WorkflowHistoryStore,

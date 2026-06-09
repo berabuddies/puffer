@@ -110,12 +110,36 @@ fn telegram_group_replies_must_stay_in_same_chat() {
 }
 
 #[test]
-fn telegram_candidates_require_handle_and_ignore_bots() {
+fn telegram_candidates_use_numeric_ids_without_handles_and_ignore_bots() {
+    assert_eq!(
+        telegram_contact_id(
+            &json!({
+                "chat_kind": "group",
+                "chat_id": -1,
+                "sender_id": 42,
+                "sender_name": "Numeric Only"
+            }),
+            "group"
+        ),
+        Some("telegram-user-id@42".to_string())
+    );
+    assert_eq!(
+        telegram_contact_id(
+            &json!({
+                "chat_kind": "user",
+                "chat_id": 5229190700_i64,
+                "chat_title": "Direct Numeric"
+            }),
+            "user"
+        ),
+        Some("telegram-user-id@5229190700".to_string())
+    );
     assert!(telegram_contact_id(
         &json!({
             "chat_kind": "group",
+            "chat_id": -1,
             "sender_id": 42,
-            "sender_name": "Numeric Only"
+            "sender_is_bot": true
         }),
         "group"
     )

@@ -5,7 +5,9 @@ use super::{
 };
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
-use puffer_subscriptions::{normalize_contact_id, ContactContext};
+use puffer_subscriptions::{
+    normalize_contact_id, ContactContext, TELEGRAM_CONTACT_PREFIX, TELEGRAM_USER_ID_CONTACT_PREFIX,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
@@ -285,7 +287,10 @@ pub(super) fn telegram_contact_id(payload: &Value, chat_kind: &str) -> Option<St
             return None;
         }
         if let Some(username) = payload.get("chat_username").and_then(Value::as_str) {
-            return normalize_contact_id(&format!("telegram@{username}"));
+            return telegram_prefixed_id(TELEGRAM_CONTACT_PREFIX, username);
+        }
+        if let Some(chat_id) = payload.get("chat_id").and_then(Value::as_i64) {
+            return telegram_prefixed_id(TELEGRAM_USER_ID_CONTACT_PREFIX, &chat_id.to_string());
         }
     }
     if chat_kind == "group" {
@@ -293,10 +298,17 @@ pub(super) fn telegram_contact_id(payload: &Value, chat_kind: &str) -> Option<St
             return None;
         }
         if let Some(username) = payload.get("sender_username").and_then(Value::as_str) {
-            return normalize_contact_id(&format!("telegram@{username}"));
+            return telegram_prefixed_id(TELEGRAM_CONTACT_PREFIX, username);
+        }
+        if let Some(sender_id) = payload.get("sender_id").and_then(Value::as_i64) {
+            return telegram_prefixed_id(TELEGRAM_USER_ID_CONTACT_PREFIX, &sender_id.to_string());
         }
     }
     None
+}
+
+fn telegram_prefixed_id(prefix: &str, suffix: &str) -> Option<String> {
+    normalize_contact_id(&format!("{prefix}@{suffix}"))
 }
 
 pub(super) fn telegram_contact_name(payload: &Value, chat_kind: &str) -> Option<String> {
