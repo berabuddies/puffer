@@ -1155,6 +1155,9 @@ async fn dispatch_request(
         "monitor_task_ignore" | "task_monitor_ignore" => respond!(
             crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
         ),
+        "monitor_task_complete" | "task_monitor_complete" => respond!(
+            crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
+        ),
         "monitor_memory_save" | "task_monitor_memory_save" => respond!(
             crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
         ),
