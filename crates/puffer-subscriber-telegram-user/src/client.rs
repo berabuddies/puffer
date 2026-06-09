@@ -397,7 +397,7 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
     if !session.signed_in() {
         // Normal fresh-login path (no session yet, or it was cleared); not a
         // #570 anomaly, but recorded so the taken path is visible in logs.
-        crate::health::report_resume_failed(env, "not_signed_in", false, json!({}));
+        crate::health::report_resume_failed(env, "not_signed_in", false, "none", json!({}));
         return Ok(None);
     }
 
@@ -412,6 +412,7 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
                 env,
                 "credentials_unavailable",
                 true,
+                "config",
                 json!({ "error": error.to_string() }),
             );
             return Ok(None);
@@ -428,11 +429,13 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
         Ok(c) => c,
         Err(err) => {
             let detail = err.to_string();
+            let class = crate::health::classify_error(&detail);
             crate::health::report_resume_failed(
                 env,
                 "connect_failed",
                 true,
-                json!({ "class": crate::health::classify_error(&detail), "error": detail }),
+                class,
+                json!({ "error": detail }),
             );
             return Ok(None);
         }
@@ -443,16 +446,13 @@ async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
             // Connected, but the server reports the session is no longer
             // authorized: the key was invalidated server-side. This is the
             // core #570 "suddenly unauthenticated" case.
-            crate::health::report_resume_failed(env, "key_invalidated", true, json!({}));
+            crate::health::report_resume_failed(env, "key_invalidated", true, "auth", json!({}));
             Ok(None)
         }
         Err(err) => {
-            crate::health::report_resume_failed(
-                env,
-                "probe_failed",
-                true,
-                json!({ "error": err.to_string() }),
-            );
+            let detail = err.to_string();
+            let class = crate::health::classify_error(&detail);
+            crate::health::report_resume_failed(env, "probe_failed", true, class, json!({ "error": detail }));
             Ok(None)
         }
     }

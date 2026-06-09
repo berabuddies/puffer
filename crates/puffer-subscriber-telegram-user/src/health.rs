@@ -74,12 +74,22 @@ pub(crate) fn classify_error(error: &str) -> &'static str {
 /// `connect_failed` / `key_invalidated` / `probe_failed`). `anomaly` is `false`
 /// for the normal fresh-login path (`not_signed_in`) and `true` for the
 /// unexpected paths that indicate #570, so queries can ignore the benign case.
-pub(crate) fn report_resume_failed(env: &SkillEnv, reason: &str, anomaly: bool, detail: Value) {
+/// `class` is the same `auth`/`network`/`other` tag as [`classify_error`] (plus
+/// `config`/`none` for the non-error reasons) on EVERY record, so a single
+/// `select(.class=="auth")` catches every auth-class drop regardless of reason.
+pub(crate) fn report_resume_failed(
+    env: &SkillEnv,
+    reason: &str,
+    anomaly: bool,
+    class: &str,
+    detail: Value,
+) {
     let record = json!({
         "at_ms": now_unix_millis(),
         "event": "resume_failed",
         "reason": reason,
         "anomaly": anomaly,
+        "class": class,
         "detail": detail,
     });
     append_ndjson(&connection_diagnostics_path(env), &record);
