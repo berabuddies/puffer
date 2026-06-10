@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+tracing.workspace = true
 clap.workspace = true
 indexmap.workspace = true
 serde.workspace = true
@@ -22,6 +23,7 @@ uuid.workspace = true
 url = "2.5.7"
 puffer-config = { path = "../puffer-config" }
 puffer-core = { path = "../puffer-core" }
+puffer-logging = { path = "../puffer-logging" }
 puffer-mcp-oauth = { path = "../puffer-mcp-oauth" }
 puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }

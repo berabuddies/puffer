@@ -90,10 +90,14 @@ fn default_cef_profile_dir() -> Option<PathBuf> {
     )
 }
 
-/// Emits an opt-in browser backend diagnostic to daemon stderr.
+/// Emits a browser backend diagnostic. Always lands in the durable process log
+/// via tracing; additionally mirrored to stderr when `PUFFER_BROWSER_LOG` is
+/// set (the legacy opt-in behavior).
 pub(super) fn log_browser_backend(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    tracing::info!(target: "puffer::browser", "{message}");
     if std::env::var_os("PUFFER_BROWSER_LOG").is_some() {
-        eprintln!("puffer-browser: {}", message.as_ref());
+        eprintln!("puffer-browser: {message}");
     }
 }
 

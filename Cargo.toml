@@ -10,6 +10,7 @@ members = [
     "crates/puffer-connector-slack",
     "crates/puffer-connector-telegram",
     "crates/puffer-core",
+    "crates/puffer-logging",
     "crates/puffer-mcp-oauth",
     "crates/puffer-observability",
     "crates/puffer-provider-openai",

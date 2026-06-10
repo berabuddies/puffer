@@ -651,6 +651,29 @@ fn handle_command(
     foreground: bool,
     use_screencast: bool,
 ) {
+    // Browser action log: every executed command lands in the durable process
+    // log (~/.puffer/logs/puffer.log) with bounded, secret-free detail.
+    // Input/Cursor are demoted to debug: unthrottled pointermove streams from
+    // the screencast pane would otherwise write 100+ info lines/sec.
+    {
+        let (action, detail) = command.log_summary();
+        match command {
+            BrowserCommand::Input(_) | BrowserCommand::Cursor { .. } => tracing::debug!(
+                target: "puffer::browser",
+                channel = %channel_state,
+                action,
+                detail = %detail,
+                "browser command"
+            ),
+            _ => tracing::info!(
+                target: "puffer::browser",
+                channel = %channel_state,
+                action,
+                detail = %detail,
+                "browser command"
+            ),
+        }
+    }
     match command {
         BrowserCommand::Navigate(url) => {
             {

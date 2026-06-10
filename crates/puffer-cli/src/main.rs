@@ -126,6 +126,12 @@ fn main() -> Result<()> {
     let mut auth_store = AuthStore::load(&auth_path)?;
     let mut resources = load_resources(&paths, &puffer_runner_local::LocalToolRunner::new())?;
 
+    // Durable default logging: tracing events (connect/RPC/browser/errors)
+    // roll into ~/.puffer/logs/puffer.log so failures are debuggable after the
+    // fact. The telegram-user subscriber path returned earlier and keeps its
+    // own per-account log. The guard must live for the whole process.
+    let _log_guard = puffer_logging::init("puffer");
+
     // Observability: opt-in via OTEL_EXPORTER_OTLP_ENDPOINT (+ optional
     // LANGFUSE_PUBLIC_KEY/SECRET_KEY for Basic auth). When unset,
     // [`puffer_observability::ObservabilityHandle::try_init_from_env`]

@@ -4359,6 +4359,7 @@ dependencies = [
  "puffer-connector-slack",
  "puffer-connector-telegram",
  "puffer-core",
+ "puffer-logging",
  "puffer-mcp-oauth",
  "puffer-observability",
  "puffer-provider-openai",
@@ -4390,6 +4391,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower 0.5.3",
+ "tracing",
  "tungstenite 0.24.0",
  "url",
  "uuid",
@@ -4593,6 +4595,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "puffer-logging"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "tempfile",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]
