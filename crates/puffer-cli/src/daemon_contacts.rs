@@ -1,79 +1,53 @@
 //! Desktop contact RPCs and local contact persistence.
 
+use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
-use puffer_provider_registry::{AuthStore, StoredCredential};
 use puffer_subscriptions::{
-    connector_slug_accepts_contact_id, contact_id_prefix, contact_ids_from_payload,
-    normalize_contact_id, normalize_contact_ids, ConnectorContact, ContactContext, ContactProposal,
-    SavedContact,
+    connector_slug_accepts_contact_id, contact_display_name_from_payload, contact_id_prefix,
+    contact_ids_from_payload, normalize_contact_id, normalize_contact_ids, ConnectorContact,
+    ContactContext, SavedContact,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+#[path = "daemon_contacts_infer.rs"]
+mod daemon_contacts_infer;
+#[path = "daemon_contacts_params.rs"]
+mod daemon_contacts_params;
+#[path = "daemon_contacts_store.rs"]
+mod daemon_contacts_store;
 #[path = "daemon_contacts_telegram.rs"]
 mod daemon_contacts_telegram;
-use daemon_contacts_telegram::collect_telegram_candidates;
+#[path = "daemon_contacts_trace.rs"]
+mod daemon_contacts_trace;
+use daemon_contacts_infer::{candidate_trace_sample, contact_infer_system_prompt, infer_proposals};
+use daemon_contacts_params::{
+    ContactContextParams, ContactDeleteParams, ContactInferParams, ContactListParams,
+    ContactSaveParams,
+};
+use daemon_contacts_store::{
+    load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
+};
+use daemon_contacts_telegram::{
+    collect_telegram_candidates, read_telegram_peer_avatars, read_telegram_peer_names,
+};
+use daemon_contacts_trace::ContactInferTrace;
 
 const DEFAULT_LIMIT: usize = 30;
 const MAX_LIMIT: usize = 120;
 const TELEGRAM_CONTEXT_LIMIT: usize = 100;
+const MIN_CONTEXT_MESSAGES_PER_CANDIDATE: usize = 20;
+const TELEGRAM_RECENT_CONTEXT_LIMIT: usize = MIN_CONTEXT_MESSAGES_PER_CANDIDATE;
+const TELEGRAM_INTERACTION_CONTEXT_LIMIT: usize = 10;
 const GOOGLE_CONTEXT_LIMIT: usize = 10;
+const INFERENCE_CONTEXT_LIMIT: usize =
+    TELEGRAM_RECENT_CONTEXT_LIMIT + (TELEGRAM_INTERACTION_CONTEXT_LIMIT * 2);
+const HISTORY_CANDIDATE_LIMIT: usize = 1_000;
 const DAY_MS: i128 = 86_400_000;
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct ContactStoreFile {
-    #[serde(default)]
-    version: u32,
-    #[serde(default)]
-    contacts: Vec<SavedContact>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactListParams {
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    query: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactSaveParams {
-    #[serde(default)]
-    id: Option<String>,
-    name: String,
-    description: String,
-    #[serde(default)]
-    avatar: Option<String>,
-    #[serde(default)]
-    contact_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactDeleteParams {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactContextParams {
-    #[serde(default)]
-    contact_ids: Vec<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContactInferParams {
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    model: Option<String>,
-}
 
 #[derive(Debug, Clone)]
 struct Candidate {
@@ -82,6 +56,63 @@ struct Candidate {
     avatar: Option<String>,
     score: f64,
     context: Vec<ContactContext>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CandidateContextOptions {
+    telegram_limit: usize,
+    other_limit: usize,
+    include_payload: bool,
+    include_connector_commands: bool,
+}
+
+impl CandidateContextOptions {
+    fn none() -> Self {
+        Self {
+            telegram_limit: 0,
+            other_limit: 0,
+            include_payload: false,
+            include_connector_commands: false,
+        }
+    }
+
+    fn full() -> Self {
+        Self {
+            telegram_limit: TELEGRAM_CONTEXT_LIMIT,
+            other_limit: GOOGLE_CONTEXT_LIMIT,
+            include_payload: true,
+            include_connector_commands: true,
+        }
+    }
+
+    fn inference() -> Self {
+        Self {
+            telegram_limit: INFERENCE_CONTEXT_LIMIT,
+            other_limit: INFERENCE_CONTEXT_LIMIT,
+            include_payload: false,
+            include_connector_commands: false,
+        }
+    }
+
+    fn limit_for_id(self, id: &str) -> usize {
+        if id.starts_with("telegram@") {
+            self.telegram_limit
+        } else {
+            self.other_limit
+        }
+    }
+
+    fn payload(self, payload: &Value) -> Value {
+        if self.include_payload {
+            payload.clone()
+        } else {
+            Value::Null
+        }
+    }
+
+    fn uses_connector_commands(self) -> bool {
+        self.include_connector_commands
+    }
 }
 
 /// Lists saved contacts plus ranked connector candidates.
@@ -97,11 +128,14 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
         .as_deref()
         .map(str::trim)
         .filter(|q| !q.is_empty());
-    let saved = filtered_saved_contacts(load_store(paths)?.contacts, query);
+    let store = load_store(paths)?;
+    let mut saved = filtered_saved_contacts(store.contacts, query);
+    enrich_saved_contact_avatars(paths, &mut saved);
     let candidates = filtered_candidates(paths, limit, query)?;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
+        "proposals": store.proposals,
     }))
 }
 
@@ -118,11 +152,14 @@ pub(crate) fn handle_contacts_search(paths: &ConfigPaths, params: &Value) -> Res
         .as_deref()
         .map(str::trim)
         .filter(|q| !q.is_empty());
-    let saved = filtered_saved_contacts(load_store(paths)?.contacts, query);
+    let store = load_store(paths)?;
+    let mut saved = filtered_saved_contacts(store.contacts, query);
+    enrich_saved_contact_avatars(paths, &mut saved);
     let candidates = searched_candidates(paths, limit, query)?;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
+        "proposals": store.proposals,
     }))
 }
 
@@ -138,6 +175,7 @@ pub(crate) fn handle_contacts_save(paths: &ConfigPaths, params: &Value) -> Resul
     if contact_ids.is_empty() {
         anyhow::bail!("contact must contain at least one valid contact id");
     }
+    let mut contact_ids = contact_ids;
     let mut store = load_store(paths)?;
     let id = params
         .id
@@ -146,6 +184,11 @@ pub(crate) fn handle_contacts_save(paths: &ConfigPaths, params: &Value) -> Resul
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    contact_ids = merged_overlapping_contact_ids(&store.contacts, &id, contact_ids);
+    let saved_contact_ids = contact_ids.clone();
+    store.contacts.retain(|contact| {
+        contact.id != id && !contact_ids_overlap(&contact.contact_ids, &contact_ids)
+    });
     let saved = SavedContact {
         id: id.clone(),
         name: name.to_string(),
@@ -158,13 +201,13 @@ pub(crate) fn handle_contacts_save(paths: &ConfigPaths, params: &Value) -> Resul
             .map(ToOwned::to_owned),
         contact_ids,
     };
-    store.contacts.retain(|contact| contact.id != id);
     store.contacts.push(saved);
     store.contacts.sort_by(|left, right| {
         left.name
             .to_ascii_lowercase()
             .cmp(&right.name.to_ascii_lowercase())
     });
+    prune_proposals_for_contact_ids(&mut store, &saved_contact_ids);
     save_store(paths, &store)?;
     handle_contacts_list(paths, &json!({ "limit": DEFAULT_LIMIT }))
 }
@@ -173,11 +216,15 @@ pub(crate) fn handle_contacts_save(paths: &ConfigPaths, params: &Value) -> Resul
 pub(crate) fn handle_contacts_delete(paths: &ConfigPaths, params: &Value) -> Result<Value> {
     let params: ContactDeleteParams =
         serde_json::from_value(params.clone()).context("invalid contact delete params")?;
+    let id = params.id.trim();
+    if id.is_empty() {
+        anyhow::bail!("contact id must not be empty");
+    }
     let mut store = load_store(paths)?;
     let before = store.contacts.len();
-    store.contacts.retain(|contact| contact.id != params.id);
+    store.contacts.retain(|contact| contact.id != id);
     if store.contacts.len() == before {
-        anyhow::bail!("contact `{}` not found", params.id);
+        anyhow::bail!("contact `{}` not found", id);
     }
     save_store(paths, &store)?;
     handle_contacts_list(paths, &json!({ "limit": DEFAULT_LIMIT }))
@@ -197,18 +244,83 @@ pub(crate) fn handle_contacts_context(paths: &ConfigPaths, params: &Value) -> Re
 }
 
 /// Infers contact group proposals from top connector candidates.
-pub(crate) fn handle_contacts_infer(paths: &ConfigPaths, params: &Value) -> Result<Value> {
+pub(crate) fn handle_contacts_infer(state: &DaemonState, params: &Value) -> Result<Value> {
     let params: ContactInferParams =
         serde_json::from_value(params.clone()).unwrap_or(ContactInferParams {
             limit: Some(DEFAULT_LIMIT),
             model: None,
+            trace_id: None,
         });
     let limit = params
         .limit
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, DEFAULT_LIMIT);
-    let candidates = inference_candidates(paths)?;
-    let proposals = infer_proposals(paths, &candidates, limit, params.model.as_deref())?;
+    let paths = state.config_paths();
+    let trace = ContactInferTrace::new(state, params.trace_id.as_deref());
+    trace.message(
+        "assistant",
+        "Contact inference",
+        "Collecting ranked connector candidates before asking the model for contact proposals.",
+    );
+    trace.message("system", "System prompt", contact_infer_system_prompt());
+    let collect_call = trace.tool_id("CollectContacts");
+    trace.tool_event(
+        &collect_call,
+        "CollectContacts",
+        "running",
+        "Collecting ranked connector candidates.",
+        json!({
+            "limit": DEFAULT_LIMIT,
+            "context_limit": INFERENCE_CONTEXT_LIMIT,
+            "include_payload": false,
+            "live_connector_commands": false,
+        }),
+        Value::Null,
+    );
+    let candidates = match inference_candidates(paths) {
+        Ok(candidates) => {
+            trace.tool_event(
+                &collect_call,
+                "CollectContacts",
+                "completed",
+                "Collected ranked connector candidates.",
+                json!({
+                    "limit": DEFAULT_LIMIT,
+                    "context_limit": INFERENCE_CONTEXT_LIMIT,
+                    "include_payload": false,
+                    "live_connector_commands": false,
+                }),
+                json!({
+                    "candidate_count": candidates.len(),
+                    "sample": candidate_trace_sample(&candidates),
+                }),
+            );
+            candidates
+        }
+        Err(err) => {
+            trace.tool_event(
+                &collect_call,
+                "CollectContacts",
+                "failed",
+                "Failed to collect connector candidates.",
+                json!({
+                    "limit": DEFAULT_LIMIT,
+                    "context_limit": INFERENCE_CONTEXT_LIMIT,
+                    "include_payload": false,
+                    "live_connector_commands": false,
+                }),
+                json!({ "error": err.to_string() }),
+            );
+            return Err(err);
+        }
+    };
+    let proposals = infer_proposals(state, &candidates, limit, params.model.as_deref(), &trace)?;
+    let proposals = save_proposals(paths, proposals)?;
+    trace.message(
+        "assistant",
+        "Inference complete",
+        format!("Prepared {} contact proposal(s).", proposals.len()),
+    );
     Ok(json!({ "proposals": proposals, "candidates": candidates }))
 }
 
@@ -217,7 +329,7 @@ fn filtered_candidates(
     limit: usize,
     query: Option<&str>,
 ) -> Result<Vec<ConnectorContact>> {
-    let mut candidates = ranked_candidates(paths)?;
+    let mut candidates = ranked_candidates(paths, CandidateContextOptions::none())?;
     if let Some(query) = query {
         let query = query.to_ascii_lowercase();
         candidates.retain(|candidate| {
@@ -246,12 +358,16 @@ fn searched_candidates(
         return filtered_candidates(paths, limit, None);
     };
     let mut by_id: HashMap<String, Candidate> = HashMap::new();
-    collect_telegram_candidates(paths, &mut by_id)?;
-    collect_connector_method_search_candidates(&mut by_id, query, Some(limit));
-    collect_history_candidates(&mut by_id);
+    let context_options = CandidateContextOptions::none();
+    collect_telegram_candidates(paths, &mut by_id, context_options)?;
+    if context_options.uses_connector_commands() {
+        collect_connector_method_search_candidates(&mut by_id, query, Some(limit), context_options);
+    }
+    collect_history_candidates(paths, &mut by_id, context_options);
     let query = query.to_ascii_lowercase();
     let mut candidates = by_id
         .into_values()
+        .filter(|candidate| !candidate_is_bot_like(candidate))
         .filter(|candidate| {
             candidate.id.to_ascii_lowercase().contains(&query)
                 || candidate
@@ -295,12 +411,69 @@ fn filtered_saved_contacts(
     contacts
 }
 
-fn ranked_candidates(paths: &ConfigPaths) -> Result<Vec<Candidate>> {
+fn contact_ids_overlap(left: &[String], right: &[String]) -> bool {
+    let left = normalize_contact_ids(left);
+    let right = normalize_contact_ids(right);
+    left.iter().any(|id| right.contains(id))
+}
+
+fn merged_overlapping_contact_ids(
+    contacts: &[SavedContact],
+    saved_id: &str,
+    contact_ids: Vec<String>,
+) -> Vec<String> {
+    let mut merged = contact_ids.clone();
+    for contact in contacts {
+        if contact.id == saved_id || !contact_ids_overlap(&contact.contact_ids, &contact_ids) {
+            continue;
+        }
+        merged.extend(contact.contact_ids.iter().cloned());
+    }
+    normalize_contact_ids(merged)
+}
+
+fn enrich_saved_contact_avatars(paths: &ConfigPaths, contacts: &mut [SavedContact]) {
+    if contacts.iter().all(|contact| {
+        contact
+            .avatar
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    }) {
+        return;
+    }
+    let avatars = read_telegram_peer_avatars(paths);
+    if avatars.is_empty() {
+        return;
+    }
+    for contact in contacts {
+        if contact
+            .avatar
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        {
+            continue;
+        }
+        contact.avatar = contact
+            .contact_ids
+            .iter()
+            .find_map(|id| avatars.get(id).cloned());
+    }
+}
+
+fn ranked_candidates(
+    paths: &ConfigPaths,
+    context_options: CandidateContextOptions,
+) -> Result<Vec<Candidate>> {
     let mut by_id: HashMap<String, Candidate> = HashMap::new();
-    collect_telegram_candidates(paths, &mut by_id)?;
-    collect_connector_method_candidates(&mut by_id);
-    collect_history_candidates(&mut by_id);
+    collect_telegram_candidates(paths, &mut by_id, context_options)?;
+    if context_options.uses_connector_commands() {
+        collect_connector_method_candidates(&mut by_id, context_options);
+    }
+    collect_history_candidates(paths, &mut by_id, context_options);
     let mut candidates = by_id.into_values().collect::<Vec<_>>();
+    reject_bot_candidates(&mut candidates);
     candidates.sort_by(|left, right| {
         right
             .score
@@ -312,17 +485,21 @@ fn ranked_candidates(paths: &ConfigPaths) -> Result<Vec<Candidate>> {
 }
 
 fn inference_candidates(paths: &ConfigPaths) -> Result<Vec<ConnectorContact>> {
-    Ok(
-        sample_inference_candidates(ranked_candidates(paths)?, DEFAULT_LIMIT)
-            .into_iter()
-            .map(Candidate::into_contact)
-            .collect(),
+    Ok(sample_inference_candidates(
+        ranked_candidates(paths, CandidateContextOptions::inference())?,
+        DEFAULT_LIMIT,
     )
+    .into_iter()
+    .map(Candidate::into_contact)
+    .collect())
 }
 
 fn sample_inference_candidates(candidates: Vec<Candidate>, per_connector: usize) -> Vec<Candidate> {
     let mut buckets: HashMap<String, Vec<Candidate>> = HashMap::new();
     for candidate in candidates {
+        if candidate_is_bot_like(&candidate) {
+            continue;
+        }
         let prefix = contact_id_prefix(&candidate.id).unwrap_or("unknown");
         buckets
             .entry(prefix.to_string())
@@ -351,6 +528,7 @@ fn collect_connector_method_search_candidates(
     by_id: &mut HashMap<String, Candidate>,
     query: &str,
     limit: Option<usize>,
+    context_options: CandidateContextOptions,
 ) {
     let Ok(manager) = puffer_core::subscription_manager() else {
         return;
@@ -361,11 +539,14 @@ fn collect_connector_method_search_candidates(
         else {
             continue;
         };
-        merge_connector_contacts(by_id, &connection.connector_slug, contacts);
+        merge_connector_contacts(by_id, &connection.connector_slug, contacts, context_options);
     }
 }
 
-fn collect_connector_method_candidates(by_id: &mut HashMap<String, Candidate>) {
+fn collect_connector_method_candidates(
+    by_id: &mut HashMap<String, Candidate>,
+    context_options: CandidateContextOptions,
+) {
     let Ok(manager) = puffer_core::subscription_manager() else {
         return;
     };
@@ -375,7 +556,7 @@ fn collect_connector_method_candidates(by_id: &mut HashMap<String, Candidate>) {
         else {
             continue;
         };
-        merge_connector_contacts(by_id, &connection.connector_slug, contacts);
+        merge_connector_contacts(by_id, &connection.connector_slug, contacts, context_options);
     }
 }
 
@@ -383,6 +564,7 @@ fn merge_connector_contacts(
     by_id: &mut HashMap<String, Candidate>,
     connector_slug: &str,
     contacts: Vec<ConnectorContact>,
+    context_options: CandidateContextOptions,
 ) {
     for contact in contacts {
         let Some(id) = normalize_contact_id(&contact.id) else {
@@ -405,62 +587,259 @@ fn merge_connector_contacts(
         if entry.avatar.is_none() {
             entry.avatar = contact.avatar;
         }
-        for context in contact.context {
+        let context_limit = context_options.limit_for_id(&id);
+        if context_limit == 0 || candidate_has_enriched_telegram_context(entry) {
+            continue;
+        }
+        for mut context in contact.context {
+            if !context_options.include_payload {
+                context.payload = Value::Null;
+            }
+            push_context(entry, context, context_limit);
+        }
+    }
+}
+
+fn collect_history_candidates(
+    paths: &ConfigPaths,
+    by_id: &mut HashMap<String, Candidate>,
+    context_options: CandidateContextOptions,
+) {
+    let Ok(manager) = puffer_core::subscription_manager() else {
+        return;
+    };
+    let telegram_peer_names = read_telegram_peer_names(paths);
+    let telegram_peer_avatars = read_telegram_peer_avatars(paths);
+    manager
+        .history_store()
+        .visit_recent(HISTORY_CANDIDATE_LIMIT, |run| {
+            merge_history_candidate_run(
+                run,
+                by_id,
+                context_options,
+                &telegram_peer_names,
+                &telegram_peer_avatars,
+            );
+        });
+}
+
+fn merge_history_candidate_run(
+    run: &puffer_subscriptions::WorkflowBindingRun,
+    by_id: &mut HashMap<String, Candidate>,
+    context_options: CandidateContextOptions,
+    telegram_peer_names: &HashMap<String, String>,
+    telegram_peer_avatars: &HashMap<String, String>,
+) {
+    let payload = run.trigger_info.get("payload");
+    let text = run
+        .trigger_info
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if text.trim().is_empty() {
+        return;
+    }
+    let timestamp_ms = run
+        .trigger_info
+        .get("received_at_ms")
+        .and_then(Value::as_i64)
+        .map(i128::from);
+    let score = entropy_score(&text) / days_since(timestamp_ms.unwrap_or(run.started_at_ms));
+    for id in payload.map(contact_ids_from_payload).unwrap_or_default() {
+        if contact_id_is_bot_like(&id) || payload.is_some_and(payload_has_bot_flag) {
+            continue;
+        }
+        let candidate_name = history_candidate_name(&id, payload, telegram_peer_names);
+        let candidate_avatar = telegram_peer_avatars.get(&id).cloned();
+        let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
+            id: id.clone(),
+            name: candidate_name.clone().or_else(|| Some(id.clone())),
+            avatar: candidate_avatar.clone(),
+            score: 0.0,
+            context: Vec::new(),
+        });
+        merge_candidate_name(&mut entry.name, candidate_name.as_deref());
+        if entry.avatar.is_none() {
+            entry.avatar = candidate_avatar;
+        }
+        entry.score += score.max(0.01);
+        let context_limit = context_options.limit_for_id(&id);
+        if context_limit > 0 && !candidate_has_enriched_telegram_context(entry) {
             push_context(
                 entry,
-                context,
-                GOOGLE_CONTEXT_LIMIT.max(TELEGRAM_CONTEXT_LIMIT),
+                ContactContext {
+                    kind: "history_message".to_string(),
+                    text: history_context_text(payload, &text),
+                    timestamp_ms,
+                    payload: payload
+                        .map(|payload| context_options.payload(payload))
+                        .unwrap_or(Value::Null),
+                },
+                context_limit,
             );
         }
     }
 }
 
-fn collect_history_candidates(by_id: &mut HashMap<String, Candidate>) {
-    let Ok(manager) = puffer_core::subscription_manager() else {
-        return;
-    };
-    for run in manager.history_store().list() {
-        let payload = run
-            .trigger_info
-            .get("payload")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let text = run
-            .trigger_info
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if text.trim().is_empty() {
-            continue;
-        }
-        let timestamp_ms = run
-            .trigger_info
-            .get("received_at_ms")
-            .and_then(Value::as_i64)
-            .map(i128::from);
-        let score = entropy_score(&text) / days_since(timestamp_ms.unwrap_or(run.started_at_ms));
-        for id in contact_ids_from_payload(&payload) {
-            let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
-                id: id.clone(),
-                name: name_from_payload(&payload).or_else(|| Some(id.clone())),
-                avatar: None,
-                score: 0.0,
-                context: Vec::new(),
-            });
-            entry.score += score.max(0.01);
-            push_context(
-                entry,
-                ContactContext {
-                    kind: "message".to_string(),
-                    text: text.clone(),
-                    timestamp_ms,
-                    payload: payload.clone(),
-                },
-                GOOGLE_CONTEXT_LIMIT,
-            );
+fn history_candidate_name(
+    id: &str,
+    payload: Option<&Value>,
+    telegram_peer_names: &HashMap<String, String>,
+) -> Option<String> {
+    if id.starts_with("telegram@") {
+        if let Some(name) = telegram_peer_names
+            .get(id)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(name.to_string());
         }
     }
+    payload.and_then(name_from_payload)
+}
+
+fn history_context_text(payload: Option<&Value>, text: &str) -> String {
+    let Some(payload) = payload else {
+        return text.to_string();
+    };
+    if payload.get("chat_kind").and_then(Value::as_str).is_none() {
+        return text.to_string();
+    }
+    format!(
+        "[history][dest: {}][from: {}] {}",
+        history_destination_label(payload),
+        history_sender_label(payload),
+        text
+    )
+}
+
+fn history_destination_label(payload: &Value) -> String {
+    if payload.get("chat_kind").and_then(Value::as_str) == Some("user") {
+        if let Some(name) = name_from_payload(payload) {
+            return name;
+        }
+    }
+    history_payload_string(payload, "chat_title")
+        .or_else(|| {
+            history_payload_string(payload, "chat_username").map(|username| format!("@{username}"))
+        })
+        .or_else(|| {
+            payload
+                .get("chat_id")
+                .and_then(Value::as_i64)
+                .map(|id| format!("chat {id}"))
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn history_sender_label(payload: &Value) -> String {
+    if payload
+        .get("is_outgoing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return "user".to_string();
+    }
+    history_payload_string(payload, "sender_name")
+        .or_else(|| history_payload_string(payload, "chat_title"))
+        .or_else(|| {
+            history_payload_string(payload, "sender_username")
+                .map(|username| format!("@{username}"))
+        })
+        .unwrap_or_else(|| "contact".to_string())
+}
+
+fn history_payload_string(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn merge_candidate_name(existing: &mut Option<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if candidate_name_is_more_complete(existing.as_deref(), candidate) {
+        *existing = Some(candidate.to_string());
+    }
+}
+
+fn candidate_name_is_more_complete(existing: Option<&str>, candidate: &str) -> bool {
+    let Some(existing) = existing.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let existing_parts = existing.split_whitespace().count();
+    let candidate_parts = candidate.split_whitespace().count();
+    candidate_parts > existing_parts
+        || (candidate_parts == existing_parts && candidate.len() > existing.len())
+}
+
+fn reject_bot_candidates(candidates: &mut Vec<Candidate>) {
+    candidates.retain(|candidate| !candidate_is_bot_like(candidate));
+}
+
+fn candidate_has_enriched_telegram_context(candidate: &Candidate) -> bool {
+    candidate.id.starts_with("telegram@")
+        && candidate
+            .context
+            .iter()
+            .any(|context| context.kind.starts_with("telegram_"))
+}
+
+fn candidate_is_bot_like(candidate: &Candidate) -> bool {
+    contact_id_is_bot_like(&candidate.id)
+        || candidate.name.as_deref().is_some_and(name_is_bot_like)
+        || candidate
+            .context
+            .iter()
+            .any(|context| payload_has_bot_flag(&context.payload))
+}
+
+fn contact_id_is_bot_like(id: &str) -> bool {
+    let Some((prefix, suffix)) = id.split_once('@') else {
+        return false;
+    };
+    let prefix = prefix.to_ascii_lowercase();
+    let suffix = suffix.to_ascii_lowercase();
+    if prefix == "telegram" {
+        return suffix.ends_with("bot");
+    }
+    let local = suffix.split('@').next().unwrap_or(suffix.as_str());
+    has_bot_suffix(local) || has_bot_suffix(&suffix)
+}
+
+fn name_is_bot_like(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower == "bot"
+        || lower.ends_with(" bot")
+        || lower.contains(" support bot")
+        || lower.contains(" sales bot")
+        || lower.contains(" assistant bot")
+}
+
+fn payload_has_bot_flag(payload: &Value) -> bool {
+    for path in [
+        "/chat_is_bot",
+        "/sender_is_bot",
+        "/is_bot",
+        "/bot",
+        "/message/sender_is_bot",
+        "/message/is_bot",
+    ] {
+        if payload.pointer(path).and_then(Value::as_bool) == Some(true) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_bot_suffix(value: &str) -> bool {
+    value == "bot" || value.ends_with("-bot") || value.ends_with("_bot") || value.ends_with(".bot")
 }
 
 fn contact_contexts(
@@ -469,17 +848,27 @@ fn contact_contexts(
     limit: usize,
 ) -> Result<Vec<ContactContext>> {
     let wanted = contact_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut contexts = connector_method_contexts(contact_ids, limit);
-    for candidate in ranked_candidates(paths)? {
+    let mut contexts = Vec::new();
+    let mut enriched_ids = HashSet::new();
+    for candidate in ranked_candidates(paths, CandidateContextOptions::full())? {
         if wanted.is_empty() || wanted.contains(&candidate.id) {
             let cap = if candidate.id.starts_with("telegram@") {
                 TELEGRAM_CONTEXT_LIMIT.min(limit)
             } else {
                 GOOGLE_CONTEXT_LIMIT.min(limit)
             };
+            if !candidate.context.is_empty() {
+                enriched_ids.insert(candidate.id.clone());
+            }
             contexts.extend(candidate.context.into_iter().take(cap));
         }
     }
+    let connector_context_ids = contact_ids
+        .iter()
+        .filter(|id| !id.starts_with("telegram@") || !enriched_ids.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    contexts.extend(connector_method_contexts(&connector_context_ids, limit));
     contexts.sort_by(|left, right| right.timestamp_ms.cmp(&left.timestamp_ms));
     contexts.truncate(limit);
     Ok(contexts)
@@ -512,212 +901,10 @@ fn connector_method_contexts(contact_ids: &[String], limit: usize) -> Vec<Contac
     contexts
 }
 
-fn infer_proposals(
-    paths: &ConfigPaths,
-    candidates: &[ConnectorContact],
-    limit: usize,
-    model: Option<&str>,
-) -> Result<Vec<ContactProposal>> {
-    match openai_key(paths) {
-        Some(key) => {
-            let model = model
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("gpt-5.4-mini");
-            infer_with_openai(&key, model, candidates, limit)
-                .or_else(|_| Ok(heuristic_proposals(candidates, limit)))
-        }
-        None => Ok(heuristic_proposals(candidates, limit)),
-    }
-}
-
-fn infer_with_openai(
-    api_key: &str,
-    model: &str,
-    candidates: &[ConnectorContact],
-    limit: usize,
-) -> Result<Vec<ContactProposal>> {
-    let compact = candidates
-        .iter()
-        .map(|candidate| {
-            json!({
-                "id": candidate.id,
-                "name": candidate.name,
-                "score": candidate.score,
-                "context": candidate.context.iter().take(3).map(|ctx| &ctx.text).collect::<Vec<_>>(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let body = json!({
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You infer the user's important contacts from connector candidates. You may only call CreateContact JSON tool calls. Propose at most 30 contacts. Each description must be exactly two sentences explaining why this contact matters and why it is not spam."
-            },
-            {
-                "role": "user",
-                "content": serde_json::to_string(&compact)?
-            }
-        ],
-        "tools": [{
-            "type": "function",
-            "function": {
-                "name": "CreateContact",
-                "description": "Create one grouped contact proposal.",
-                "parameters": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "name": {"type": "string"},
-                        "description": {"type": "string"},
-                        "avatar": {"type": ["string", "null"]},
-                        "contact_ids": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        }
-                    },
-                    "required": ["name", "description", "contact_ids"]
-                }
-            }
-        }],
-        "tool_choice": "required"
-    });
-    let response = reqwest::blocking::Client::new()
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .context("send OpenAI contact inference request")?
-        .json::<Value>()
-        .context("parse OpenAI contact inference response")?;
-    let proposals = parse_openai_proposals(&response, limit);
-    if proposals.is_empty() {
-        anyhow::bail!("contact inference returned no CreateContact calls");
-    }
-    Ok(proposals)
-}
-
-fn parse_openai_proposals(response: &Value, limit: usize) -> Vec<ContactProposal> {
-    let mut proposals = Vec::new();
-    if let Some(calls) = response
-        .pointer("/choices/0/message/tool_calls")
-        .and_then(Value::as_array)
-    {
-        for call in calls {
-            let Some(args) = call
-                .pointer("/function/arguments")
-                .and_then(Value::as_str)
-                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            else {
-                continue;
-            };
-            if let Some(proposal) = proposal_from_value(args) {
-                proposals.push(proposal);
-            }
-        }
-    }
-    if proposals.is_empty() {
-        if let Some(content) = response
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .and_then(extract_json)
-        {
-            match content {
-                Value::Array(values) => {
-                    proposals.extend(values.into_iter().filter_map(proposal_from_value));
-                }
-                value => {
-                    if let Some(proposal) = proposal_from_value(value) {
-                        proposals.push(proposal);
-                    }
-                }
-            }
-        }
-    }
-    proposals.truncate(limit);
-    proposals
-}
-
-fn proposal_from_value(value: Value) -> Option<ContactProposal> {
-    let mut proposal = serde_json::from_value::<ContactProposal>(value).ok()?;
-    proposal.contact_ids = normalize_contact_ids(proposal.contact_ids);
-    (!proposal.name.trim().is_empty() && !proposal.contact_ids.is_empty()).then_some(proposal)
-}
-
-fn heuristic_proposals(candidates: &[ConnectorContact], limit: usize) -> Vec<ContactProposal> {
-    candidates
-        .iter()
-        .take(limit)
-        .map(|candidate| {
-            let name = candidate
-                .name
-                .as_deref()
-                .unwrap_or(candidate.id.as_str())
-                .to_string();
-            ContactProposal {
-                name,
-                description: format!(
-                    "{} appears repeatedly in recent connector context. The messages include direct, high-signal exchanges rather than broad broadcast spam.",
-                    candidate.id
-                ),
-                avatar: candidate.avatar.clone(),
-                contact_ids: vec![candidate.id.clone()],
-            }
-        })
-        .collect()
-}
-
-fn openai_key(paths: &ConfigPaths) -> Option<String> {
-    let path = paths.user_config_dir.join("auth.json");
-    let store = AuthStore::load(&path).ok()?;
-    match store.providers.get("openai") {
-        Some(StoredCredential::ApiKey { key }) => Some(key.clone()),
-        _ => None,
-    }
-}
-
-fn load_store(paths: &ConfigPaths) -> Result<ContactStoreFile> {
-    let path = contacts_path(paths);
-    if !path.exists() {
-        return Ok(ContactStoreFile::default());
-    }
-    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    if raw.trim().is_empty() {
-        return Ok(ContactStoreFile::default());
-    }
-    serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
-}
-
-fn save_store(paths: &ConfigPaths, store: &ContactStoreFile) -> Result<()> {
-    let path = contacts_path(paths);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(store)?)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
-}
-
-fn contacts_path(paths: &ConfigPaths) -> PathBuf {
-    paths
-        .workspace_config_dir
-        .join("runtime")
-        .join("contacts.json")
-}
-
 fn name_from_payload(payload: &Value) -> Option<String> {
-    for path in [
-        "/sender_name",
-        "/chat_title",
-        "/from",
-        "/message/sender",
-        "/event/title",
-    ] {
+    if payload.get("chat_kind").and_then(Value::as_str) == Some("user") {
         if let Some(value) = payload
-            .pointer(path)
+            .pointer("/chat_title")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -725,7 +912,7 @@ fn name_from_payload(payload: &Value) -> Option<String> {
             return Some(value.to_string());
         }
     }
-    None
+    contact_display_name_from_payload(payload)
 }
 
 fn push_context(candidate: &mut Candidate, context: ContactContext, limit: usize) {
@@ -783,14 +970,6 @@ fn days_since(timestamp_ms: i128) -> f64 {
     (delta as f64) / (DAY_MS as f64)
 }
 
-fn extract_json(content: &str) -> Option<Value> {
-    serde_json::from_str(content).ok().or_else(|| {
-        let start = content.find(['[', '{'])?;
-        let end = content.rfind([']', '}'])?;
-        serde_json::from_str(&content[start..=end]).ok()
-    })
-}
-
 impl Candidate {
     fn into_contact(self) -> ConnectorContact {
         ConnectorContact {
@@ -802,6 +981,14 @@ impl Candidate {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "daemon_contacts_delete_tests.rs"]
+mod delete_tests;
+
+#[cfg(test)]
+#[path = "daemon_contacts_save_tests.rs"]
+mod save_tests;
 
 #[cfg(test)]
 #[path = "daemon_contacts_tests.rs"]

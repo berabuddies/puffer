@@ -208,16 +208,8 @@ impl BrowserRegistry {
         self.close_stale_page_session(&session_id);
         let root_session_id = session_root_id(&session_id).to_string();
         let root = self.ensure_root_session(&root_session_id, width, height)?;
-        let session = BrowserSession::spawn(
-            events,
-            Arc::clone(&self.recordings),
-            Arc::clone(&self.console_logs),
-            session_id.clone(),
-            root,
-            width,
-            height,
-            foreground,
-        )?;
+        let session =
+            self.spawn_page_session(&events, &session_id, &root, width, height, foreground)?;
         let requested_url = normalized_url.as_deref().unwrap_or(DEFAULT_URL);
         if session.native_cef_session_id().is_none() || requested_url != DEFAULT_URL {
             session.navigate(requested_url.to_string())?;
@@ -434,6 +426,25 @@ impl BrowserRegistry {
     }
 
     /// Closes an existing browser tab for an agent session.
+    /// Registers a tab record directly in the registry (no live browser),
+    /// for tests that exercise registry-key lookups.
+    #[cfg(test)]
+    pub(crate) fn test_record_tab(&self, root_session_id: &str, tab_id: &str, url: &str, title: &str) {
+        self.tabs.lock().unwrap().record_opened_backend(
+            root_session_id,
+            tab_id,
+            backend_session_id(root_session_id, tab_id),
+            None,
+            BrowserState {
+                url: url.to_string(),
+                title: title.to_string(),
+                loading: false,
+                width: 1280,
+                height: 900,
+            },
+        );
+    }
+
     pub(crate) fn close_tab(
         &self,
         root_session_id: &str,
@@ -533,6 +544,92 @@ impl BrowserRegistry {
             .unwrap()
             .insert(GLOBAL_BROWSER_ROOT_ID.to_string(), root.clone());
         Ok(root)
+    }
+
+    /// Spawns a page worker for `session_id`, self-healing the native-CEF prewarm
+    /// pool on exhaustion (issue #603). The pool is a FIXED, globally-shared set of
+    /// prewarmed page targets; abandoned/long-idle page workers from earlier agent
+    /// sessions keep holding their slots, so over a long-lived daemon the pool can
+    /// drain to zero and `open`/`new` would hard-fail with "no available prewarmed
+    /// page targets". When that happens we reclaim the least-recently-active slot
+    /// and retry once, instead of forcing an app restart.
+    fn spawn_page_session(
+        &self,
+        events: &broadcast::Sender<ServerEnvelope>,
+        session_id: &str,
+        root: &BrowserRootSession,
+        width: u32,
+        height: u32,
+        foreground: bool,
+    ) -> Result<BrowserSession> {
+        match self.try_spawn_page_session(events, session_id, root, width, height, foreground) {
+            Ok(session) => Ok(session),
+            Err(error) => {
+                if root.reuses_fixed_target_pool()
+                    && self.reclaim_idle_fixed_pool_slot(session_id) > 0
+                {
+                    browser_debug("open.reclaim-retry", format!("session_id={session_id}"));
+                    self.try_spawn_page_session(events, session_id, root, width, height, foreground)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    fn try_spawn_page_session(
+        &self,
+        events: &broadcast::Sender<ServerEnvelope>,
+        session_id: &str,
+        root: &BrowserRootSession,
+        width: u32,
+        height: u32,
+        foreground: bool,
+    ) -> Result<BrowserSession> {
+        BrowserSession::spawn(
+            events.clone(),
+            Arc::clone(&self.recordings),
+            Arc::clone(&self.console_logs),
+            session_id.to_string(),
+            root.clone(),
+            width,
+            height,
+            foreground,
+        )
+    }
+
+    /// Closes the least-recently-active page worker sharing the fixed native-CEF
+    /// prewarm pool so its slot is reset and returned to the pool. Returns the
+    /// number of slots reclaimed (0 if there is nothing reclaimable). The active
+    /// flow's just-touched tabs are spared because the most-idle worker — which is
+    /// the leaked/abandoned one from a finished agent session — is chosen first.
+    fn reclaim_idle_fixed_pool_slot(&self, exclude_session_id: &str) -> usize {
+        let victim = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .iter()
+                .filter(|(id, session)| id.as_str() != exclude_session_id && session.is_alive())
+                .max_by_key(|(_, session)| session.idle_for())
+                .map(|(id, _)| id.clone())
+        };
+        let Some(victim) = victim else {
+            return 0;
+        };
+        let Some(session) = self.remove_page_session(&victim) else {
+            return 0;
+        };
+        if let Some((root_session_id, tab_id)) = parse_backend_session_id(&victim) {
+            self.tabs
+                .lock()
+                .unwrap()
+                .remove_backend(root_session_id, tab_id);
+        }
+        // Drive the worker to exit, which resets and returns its slot to the pool,
+        // then wait for the shutdown ack so the slot is available before we retry.
+        let acks = session.begin_close().into_iter().collect::<Vec<_>>();
+        wait_for_shutdown_acks(acks, Duration::from_secs(5));
+        browser_debug("open.reclaimed-slot", format!("victim={victim}"));
+        1
     }
 
     fn close_page_session(&self, session_id: &str, remove_tab_entry: bool) {
@@ -846,6 +943,9 @@ fn normalize_url(raw: &str) -> Result<String> {
     Url::parse(&with_scheme).with_context(|| format!("invalid browser URL `{raw}`"))?;
     Ok(with_scheme)
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests;

@@ -123,7 +123,7 @@
 
 .pf-tasks-summary span {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -159,7 +159,7 @@
 .pf-monitor-create label > span,
 .pf-monitor-create-empty {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   white-space: nowrap;
@@ -252,7 +252,7 @@
   justify-content: space-between;
   gap: 12px;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .pf-tasks-list-head strong {
@@ -335,7 +335,7 @@
   flex-shrink: 0;
   border-radius: 999px;
   padding: 2px 7px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -389,7 +389,7 @@
   align-items: center;
   gap: 8px;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
 }
 
@@ -404,7 +404,7 @@
   max-width: 180px;
   color: var(--foreground);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .pf-task-actions {
@@ -412,6 +412,16 @@
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.pf-task-lazy-sentinel {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
 }
 
 .pf-task-ignore {
@@ -538,7 +548,7 @@
 .pf-task-detail-section-head span,
 .pf-task-detail-usage {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .pf-task-detail-meta {
@@ -557,7 +567,7 @@
 
 .pf-task-detail-meta dt {
   color: var(--muted-foreground);
-  font-size: 10.5px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -575,7 +585,7 @@
 .pf-task-detail-meta code {
   color: inherit;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .pf-task-config-backdrop {
@@ -592,9 +602,10 @@
 
 .pf-task-config {
   width: min(760px, calc(100vw - 32px));
+  height: min(760px, calc(100vh - 32px));
   max-height: min(760px, calc(100vh - 32px));
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 16px;
   background: var(--background);
   box-shadow: var(--shadow-md);
   display: flex;
@@ -615,6 +626,7 @@
 }
 
 .pf-task-config-head {
+  flex: 0 0 auto;
   min-height: 54px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
@@ -699,7 +711,7 @@
 
 .pf-task-history-message small {
   color: var(--muted-foreground);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .pf-task-history-detail {
@@ -732,7 +744,7 @@
 .pf-task-history-agent-result span,
 .pf-task-history-agent-result small {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .pf-task-history-selected strong {
@@ -776,7 +788,7 @@
   white-space: pre-wrap;
   color: var(--muted-foreground);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -817,137 +829,351 @@
   font-size: 12px;
 }
 
-.pf-task-config-section {
-  padding: 14px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.pf-task-settings-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  background: var(--background);
 }
 
-.pf-task-config-section:last-child {
+.pf-task-settings-nav {
   min-height: 0;
-  border-bottom: 0;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: color-mix(in oklab, var(--background) 98%, var(--muted));
+}
+
+.pf-task-settings-nav-item {
+  all: unset;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  color: var(--foreground);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.pf-task-settings-nav-item:hover,
+.pf-task-settings-nav-item[data-active="true"] {
+  background: var(--pf-selected-bg);
+}
+
+.pf-task-settings-nav-item[data-active="true"] {
+  font-weight: 650;
+}
+
+.pf-task-settings-pane {
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
 }
 
-.pf-task-config-section-head {
+.pf-task-settings-section {
+  min-height: 100%;
+  padding: 16px;
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  flex-direction: column;
+  gap: 16px;
 }
 
+.pf-task-settings-section-head {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pf-task-settings-section-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pf-task-settings-section-head strong,
 .pf-task-config-section-head strong {
   font-size: 13px;
   font-weight: 650;
 }
 
-.pf-task-config-row {
-  display: flex;
-  align-items: flex-end;
+.pf-task-settings-section-head span,
+.pf-task-settings-field-label {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.pf-task-settings-monitor-form,
+.pf-task-settings-monitor-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
   gap: 10px;
 }
 
-.pf-task-contact-scope {
-  min-width: 0;
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
+.pf-task-settings-monitor-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
-.pf-task-contact-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.pf-task-settings-monitor-row[data-enabled="false"] {
+  color: var(--muted-foreground);
 }
 
-.pf-task-contact-all,
-.pf-task-contact-option {
+.pf-task-settings-monitor-form label,
+.pf-task-settings-monitor-row label,
+.pf-task-config-memory-select {
   min-width: 0;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  flex-direction: column;
+  gap: 5px;
 }
 
-.pf-task-contact-all {
+.pf-task-settings-monitor-form label > span,
+.pf-task-settings-monitor-row label > span,
+.pf-task-config-memory-select > span,
+.pf-task-settings-field-label {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 14px;
+}
+
+.pf-task-settings-primary-button.sc-btn {
+  height: 30px;
+  border: 0;
+  border-radius: 6px;
+  justify-content: center;
+  background: #111111;
+  color: #ffffff;
+}
+
+.pf-task-settings-primary-button.sc-btn:hover:not(:disabled) {
+  background: #111111;
+  color: #ffffff;
+}
+
+.pf-task-settings-primary-button.sc-btn:disabled {
+  opacity: 1;
+  background: #111111;
+  color: #ffffff;
+}
+
+.pf-task-settings-compact-button.sc-btn {
+  width: 48px;
+  min-width: 48px;
+  padding: 0;
+}
+
+.pf-task-settings-save-button.sc-btn {
+  width: 104px;
+  min-width: 104px;
+  padding: 0;
+}
+
+.pf-task-settings-icon-button {
+  width: 48px;
+  justify-content: center;
+}
+
+.pf-task-contact-table {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--background);
+}
+
+.pf-task-contact-table-head,
+.pf-task-contact-table-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(148px, 0.42fr) minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+}
+
+.pf-task-contact-table-head {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.pf-task-contact-table-head strong:last-child {
+  text-align: right;
+}
+
+.pf-task-contact-table-row {
+  border-top: 1px solid var(--border);
+  padding-block: 14px;
   color: var(--foreground);
   font-size: 12px;
 }
 
-.pf-task-contact-all input,
-.pf-task-contact-option input {
+.pf-task-contact-table-row[data-saved="true"],
+.pf-task-contact-table-row:hover {
+  background: color-mix(in oklab, var(--muted) 18%, var(--background));
+}
+
+.pf-task-contact-table-row .pf-task-contact-check > input[type="checkbox"] {
+  appearance: none;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid color-mix(in oklab, var(--border) 80%, var(--foreground));
+  border-radius: 4px;
+  background: var(--background);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+}
+
+.pf-task-contact-table-row .pf-task-contact-check > input[type="checkbox"]:checked {
+  border-color: #161616;
+  background: #161616;
+}
+
+.pf-task-contact-table-row .pf-task-contact-check > input[type="checkbox"]:checked::after {
+  content: "";
+  width: 8px;
+  height: 5px;
+  border-left: 1.7px solid #ffffff;
+  border-bottom: 1.7px solid #ffffff;
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+
+.pf-task-contact-table-row .pf-task-contact-check > input[type="checkbox"]:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--foreground) 32%, transparent);
+  outline-offset: 2px;
+}
+
+.pf-task-contact-check {
+  display: flex;
+  justify-content: center;
+}
+
+.pf-task-contact-person {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.pf-task-contact-avatar {
   flex: 0 0 auto;
-  width: 14px;
-  height: 14px;
-  margin: 1px 0 0;
-  accent-color: var(--puffer-accent);
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 650;
 }
 
-.pf-task-contact-options {
-  max-height: 180px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: color-mix(in oklab, var(--background) 98%, var(--muted));
-}
-
-.pf-task-contact-option {
-  padding: 8px;
-  border-bottom: 1px solid var(--border);
-}
-
-.pf-task-contact-option:last-child {
-  border-bottom: 0;
-}
-
-.pf-task-contact-option[data-saved="true"] {
-  background: color-mix(in oklab, var(--puffer-accent) 5%, transparent);
-}
-
-.pf-task-contact-option span {
+.pf-task-contact-person > span:last-child {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.pf-task-contact-option strong,
-.pf-task-contact-option small {
+.pf-task-contact-person strong,
+.pf-task-contact-person small,
+.pf-task-contact-description {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.pf-task-contact-person strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
   white-space: nowrap;
 }
 
-.pf-task-contact-option strong {
-  color: var(--foreground);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.pf-task-contact-option small {
+.pf-task-contact-person small,
+.pf-task-contact-description {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 16px;
 }
 
-.pf-task-config-row label,
-.pf-task-config-memory-select {
-  min-width: 0;
-  flex: 1;
+.pf-task-contact-description {
+  white-space: normal;
+}
+
+.pf-task-contact-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.pf-task-contact-edit-button {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 30px;
+  background: #f4f4f4;
+  color: #1f1f1f;
+}
+
+.pf-task-contact-edit-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.pf-task-contact-table-empty {
+  padding: 18px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.pf-task-settings-empty {
+  padding: 8px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.pf-task-settings-rules-block,
+.pf-task-settings-memory-block {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
 }
 
-.pf-task-config-row label > span,
-.pf-task-config-memory-select > span {
-  color: var(--muted-foreground);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+.pf-task-settings-add-rule,
+.pf-task-settings-rule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
 }
 
 .pf-task-config input,
@@ -972,11 +1198,11 @@
 }
 
 .pf-task-config textarea {
-  min-height: 260px;
+  min-height: 320px;
   resize: vertical;
   padding: 10px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -994,103 +1220,27 @@
   font-size: 12px;
 }
 
-.pf-task-config-memory-path {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.pf-task-monitor-list {
+.pf-task-settings-rule-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
-.pf-task-monitor-row {
+.pf-task-settings-rule-row {
   min-width: 0;
-  padding: 8px;
+  min-height: 30px;
+  padding-left: 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
 }
 
-.pf-task-monitor-row[data-enabled="false"] {
-  color: var(--muted-foreground);
-}
-
-.pf-task-monitor-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.pf-task-monitor-main strong {
+.pf-task-settings-rule-row span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--foreground);
   font-size: 12px;
-  font-weight: 650;
-}
-
-.pf-task-monitor-main span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.pf-task-monitor-actions {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.pf-task-filter-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  border-top: 1px solid var(--border);
-}
-
-.pf-task-filter-rule {
-  min-width: 0;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
-  gap: 10px;
-  align-items: baseline;
-}
-
-.pf-task-filter-rule span {
-  color: var(--muted-foreground);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.pf-task-filter-rule code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--foreground);
-  font-family: var(--font-mono);
-  font-size: 11px;
 }
 
 .pf-task-config-actions {
@@ -1191,6 +1341,7 @@
 
   .pf-task-config {
     width: 100%;
+    height: calc(100vh - 20px);
     max-height: calc(100vh - 20px);
   }
 
@@ -1209,17 +1360,46 @@
     border-bottom: 1px solid var(--border);
   }
 
-  .pf-task-config-row,
-  .pf-task-config-section-head,
-  .pf-task-config-actions,
-  .pf-task-monitor-row,
-  .pf-task-monitor-actions {
-    align-items: stretch;
-    flex-direction: column;
+  .pf-task-settings-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
-  .pf-task-filter-rule {
+  .pf-task-settings-nav {
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  .pf-task-settings-nav-item {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .pf-task-settings-monitor-form,
+  .pf-task-settings-monitor-row,
+  .pf-task-settings-add-rule,
+  .pf-task-settings-rule-row {
     grid-template-columns: minmax(0, 1fr);
-    gap: 4px;
+    align-items: stretch;
+  }
+
+  .pf-task-contact-table-head {
+    display: none;
+  }
+
+  .pf-task-contact-table-row {
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+  }
+
+  .pf-task-contact-description {
+    grid-column: 2 / -1;
+  }
+
+  .pf-task-config-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

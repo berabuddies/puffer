@@ -43,6 +43,11 @@ pub(crate) struct BrowserCurrentTabContext {
     pub(crate) host: Option<String>,
     pub(crate) port: Option<u16>,
     pub(crate) title: Option<String>,
+    /// Whether the backing CDP session is still alive. A registry entry can
+    /// outlive its browser (status stays `Available` from the recorded URL),
+    /// so URL presence alone must not be read as a usable tab.
+    #[serde(default)]
+    pub(crate) connected: bool,
 }
 
 /// Describes how much active-tab URL context the daemon could resolve.
@@ -304,6 +309,7 @@ impl BrowserCurrentTabContext {
             host: None,
             port: None,
             title: None,
+            connected: false,
         }
     }
 
@@ -320,6 +326,7 @@ impl BrowserCurrentTabContext {
                 host: None,
                 port: None,
                 title,
+                connected: tab.connected,
             };
         }
         if tab.url.eq_ignore_ascii_case("about:blank") {
@@ -331,6 +338,7 @@ impl BrowserCurrentTabContext {
                 host: None,
                 port: None,
                 title,
+                connected: tab.connected,
             };
         }
         let (origin, host, port) = parse_tab_url_fields(&tab.url);
@@ -342,6 +350,42 @@ impl BrowserCurrentTabContext {
             host,
             port,
             title,
+            connected: tab.connected,
+        }
+    }
+
+    /// Whether the registry currently tracks an active tab at all.
+    pub(crate) fn has_active_tab(&self) -> bool {
+        !matches!(self.status, BrowserCurrentTabStatus::NoActiveTab)
+    }
+
+    /// One-line agent-facing summary of the live tab state, injected into the
+    /// per-turn system reminder (issue #560). The no-tab and disconnected
+    /// variants explicitly call earlier transcript output stale — that is the
+    /// signal the model is missing after a daemon restart.
+    pub(crate) fn agent_status_line(&self) -> String {
+        if !self.has_active_tab() {
+            return "No browser tab is currently open in this session. Any browser state \
+                    reported earlier in the conversation is stale — that browser is gone. \
+                    Open the page again before relying on it."
+                .to_string();
+        }
+        let url = self.url.as_deref().unwrap_or("unknown URL");
+        if !self.connected {
+            return format!(
+                "The active browser tab ({url}) is disconnected — the underlying browser \
+                 is gone, so earlier browser output is stale. Open the page again before \
+                 relying on it."
+            );
+        }
+        match self.status {
+            BrowserCurrentTabStatus::EmptyUrl | BrowserCurrentTabStatus::AboutBlank => {
+                "A browser tab is open but no page is loaded yet.".to_string()
+            }
+            _ => match self.title.as_deref().filter(|title| !title.trim().is_empty()) {
+                Some(title) => format!("Active browser tab: {url} ({title})"),
+                None => format!("Active browser tab: {url}"),
+            },
         }
     }
 }
@@ -379,4 +423,61 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(url: &str, title: &str, connected: bool) -> BrowserTabInfo {
+        BrowserTabInfo {
+            tab_id: "t1".to_string(),
+            label: "Tab 1".to_string(),
+            url: url.to_string(),
+            title: title.to_string(),
+            loading: false,
+            connected,
+            active: true,
+            backend_session_id: "sess:browser:t1".to_string(),
+            native_cef_session_id: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn no_active_tab_status_line_marks_earlier_browser_state_stale() {
+        let context = BrowserCurrentTabContext::no_active_tab();
+        let line = context.agent_status_line();
+        assert!(line.contains("No browser tab"), "line: {line}");
+        assert!(line.contains("stale"), "line: {line}");
+    }
+
+    #[test]
+    fn available_tab_status_line_reports_url_and_title() {
+        let context =
+            BrowserCurrentTabContext::from_tab(&tab("https://example.com/checkout", "Checkout", true));
+        assert!(context.connected);
+        let line = context.agent_status_line();
+        assert!(line.contains("https://example.com/checkout"), "line: {line}");
+        assert!(line.contains("Checkout"), "line: {line}");
+        assert!(!line.contains("stale"), "line: {line}");
+    }
+
+    #[test]
+    fn disconnected_tab_status_line_marks_browser_gone() {
+        let context =
+            BrowserCurrentTabContext::from_tab(&tab("https://example.com", "Example", false));
+        assert!(!context.connected);
+        let line = context.agent_status_line();
+        assert!(line.contains("disconnected"), "line: {line}");
+        assert!(line.contains("stale"), "line: {line}");
+    }
+
+    #[test]
+    fn blank_tab_status_line_reports_no_page_loaded() {
+        let context = BrowserCurrentTabContext::from_tab(&tab("about:blank", "", true));
+        let line = context.agent_status_line();
+        assert!(line.contains("no page"), "line: {line}");
+    }
 }

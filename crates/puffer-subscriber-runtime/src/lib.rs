@@ -27,7 +27,7 @@ pub use command::{
     CommandSender, SendMediaAttachment, SendMediaKind, SubscriberCommand, TelegramPeerKind,
 };
 pub use event::{Event, EventEnvelope};
-pub use manifest::{Manifest, ManifestError, ManifestKind, StateSpec};
+pub use manifest::{EnvEntry, Manifest, ManifestError, ManifestKind, StateSpec};
 pub use supervisor::{
     resolve_manifest_program, SubscriberHandle, SubscriberSupervisor, SupervisorConfig,
 };

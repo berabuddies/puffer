@@ -55,8 +55,8 @@ pub use connection::{
 };
 pub use contacts::{
     connector_contacts_for_connector, connector_slug_accepts_contact_id,
-    connector_slugs_for_contact_id, contact_filter_matches, contact_id_prefix,
-    contact_ids_for_connector, contact_ids_from_payload, normalize_contact_id,
+    connector_slugs_for_contact_id, contact_display_name_from_payload, contact_filter_matches,
+    contact_id_prefix, contact_ids_for_connector, contact_ids_from_payload, normalize_contact_id,
     normalize_contact_ids, ConnectorContact, ContactContext, ContactProposal, SavedContact,
     DISCORD_CONTACT_PREFIX, GOOGLE_CONTACT_PREFIX, LARK_CONTACT_PREFIX, MATRIX_CONTACT_PREFIX,
     SLACK_CONTACT_PREFIX, TELEGRAM_CONTACT_PREFIX,

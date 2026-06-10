@@ -13,6 +13,9 @@ use tracing::{info, warn};
 
 use crate::delivery::{emit_message_if_new, DeliveryCursor};
 use crate::notifications::NotificationMuteCache;
+use crate::peer_cache::{
+    hydrate_chat_avatar, hydrate_contact_book, hydrate_saved_contact_usernames, TelegramPeerCache,
+};
 use crate::state::SkillEnv;
 
 const MAX_STARTUP_DIALOGS: usize = 2_000;
@@ -27,20 +30,57 @@ pub(crate) async fn hydrate_dialog_state(
     notification_mutes: &mut NotificationMuteCache,
 ) -> anyhow::Result<()> {
     let was_initialized = cursor.is_initialized();
+    let original_peer_cache = TelegramPeerCache::load(env).unwrap_or_default();
+    let mut peer_cache = original_peer_cache.clone();
+    if let Err(error) = hydrate_contact_book(client, &mut peer_cache).await {
+        warn!(
+            error = %error,
+            "failed to hydrate Telegram contact book into peer cache"
+        );
+    }
+    let saved_contact_usernames_resolved =
+        match hydrate_saved_contact_usernames(env, client, &mut peer_cache).await {
+            Ok(count) => count,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "failed to hydrate Telegram saved contact usernames into peer cache"
+                );
+                0
+            }
+        };
     let mut dialogs_seen = 0usize;
     let mut suppressed_seen = 0usize;
+    let mut avatars_hydrated = 0usize;
     let mut chats_backfilled = 0usize;
     let mut messages_emitted = 0usize;
     let mut iter = client.iter_dialogs();
     while dialogs_seen < MAX_STARTUP_DIALOGS {
-        let Some(dialog) = iter
-            .next()
-            .await
-            .with_context(|| "iter_dialogs failed during Telegram startup hydration")?
-        else {
-            break;
+        let dialog = match iter.next().await {
+            Ok(Some(dialog)) => dialog,
+            Ok(None) => break,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    dialogs_seen,
+                    "iter_dialogs failed during Telegram startup hydration; saving partial state"
+                );
+                break;
+            }
         };
         dialogs_seen += 1;
+        peer_cache.observe_chat(dialog.chat(), "dialog");
+        match hydrate_chat_avatar(client, &mut peer_cache, dialog.chat(), "dialog").await {
+            Ok(true) => avatars_hydrated += 1,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    chat = %dialog.chat().id(),
+                    error = %error,
+                    "failed to hydrate Telegram dialog avatar into peer cache"
+                );
+            }
+        }
         let suppressed = notification_mutes.observe_dialog(&dialog);
         if suppressed {
             suppressed_seen += 1;
@@ -92,10 +132,13 @@ pub(crate) async fn hydrate_dialog_state(
     if !was_initialized {
         cursor.mark_initialized();
     }
+    peer_cache.save_if_changed(env, &original_peer_cache)?;
     cursor.save(env)?;
     info!(
         dialogs_seen,
         suppressed_seen,
+        saved_contact_usernames_resolved,
+        avatars_hydrated,
         chats_backfilled,
         messages_emitted,
         initialized = was_initialized,

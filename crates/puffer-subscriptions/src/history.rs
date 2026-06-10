@@ -296,6 +296,17 @@ impl WorkflowHistoryStore {
         runs
     }
 
+    /// Visits up to `limit` recent workflow runs in newest-first append order.
+    pub fn visit_recent(&self, limit: usize, mut visitor: impl FnMut(&WorkflowBindingRun)) {
+        if limit == 0 {
+            return;
+        }
+        let guard = self.inner.lock().unwrap();
+        for run in guard.runs.iter().rev().take(limit) {
+            visitor(run);
+        }
+    }
+
     /// Returns direct workflow runs for one binding slug, newest first.
     pub fn list_for(&self, workflow_slug: &str) -> Vec<WorkflowBindingRun> {
         self.list()
@@ -523,6 +534,22 @@ mod tests {
         assert_eq!(run.status, WorkflowBindingRunStatus::Completed);
         assert_eq!(run.action_log[0].usage.unwrap().spent_tokens(), 9);
         assert_eq!(store.list_for("demo").len(), 1);
+    }
+
+    #[test]
+    fn visits_recent_runs_without_cloning_entire_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        for i in 0..5 {
+            store
+                .append_action_started(&binding(), &envelope(), &triage(), i)
+                .unwrap();
+        }
+
+        let mut seen = Vec::new();
+        store.visit_recent(3, |run| seen.push(run.idx));
+
+        assert_eq!(seen, vec![5, 4, 3]);
     }
 
     // Root cause A fix — dedup is status-aware.

@@ -310,10 +310,16 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
     params.get("corbinaBackend") ||
     params.get("backendUrl") ||
     params.get("backend") ||
+    params.get("pufferRemoteBackend") ||
+    params.get("corbinaRemoteBackend") ||
+    params.get("remoteBackendUrl") ||
+    params.get("remoteBackend") ||
     window.localStorage.getItem("puffer.backendUrl") ||
     window.localStorage.getItem("corbina.backendUrl") ||
     stringEnv(viteEnv?.VITE_PUFFER_DAEMON_URL) ||
     stringEnv(viteEnv?.VITE_CORBINA_DAEMON_URL) ||
+    stringEnv(viteEnv?.VITE_PUFFER_REMOTE_DAEMON_URL) ||
+    stringEnv(viteEnv?.VITE_CORBINA_REMOTE_DAEMON_URL) ||
     devBrowserBackendUrl(viteEnv);
 
   if (!url || (!url.startsWith("ws://") && !url.startsWith("wss://"))) return null;
@@ -324,14 +330,25 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
       params.get("pufferToken") ||
       params.get("corbinaToken") ||
       params.get("token") ||
+      params.get("pufferRemoteToken") ||
+      params.get("corbinaRemoteToken") ||
+      params.get("remoteToken") ||
       window.localStorage.getItem("puffer.backendToken") ||
       window.localStorage.getItem("corbina.backendToken") ||
       stringEnv(viteEnv?.VITE_PUFFER_DAEMON_TOKEN) ||
       stringEnv(viteEnv?.VITE_CORBINA_DAEMON_TOKEN) ||
+      stringEnv(viteEnv?.VITE_PUFFER_REMOTE_DAEMON_TOKEN) ||
+      stringEnv(viteEnv?.VITE_CORBINA_REMOTE_DAEMON_TOKEN) ||
       "dev",
-    protocolVersion: "1",
+    protocolVersion:
+      params.get("pufferRemoteProtocolVersion") ||
+      params.get("remoteProtocolVersion") ||
+      "1",
     workspaceRoot:
       params.get("workspaceRoot") ||
+      params.get("pufferRemoteWorkspaceRoot") ||
+      params.get("corbinaRemoteWorkspaceRoot") ||
+      params.get("remoteWorkspaceRoot") ||
       window.localStorage.getItem("puffer.workspaceRoot") ||
       window.localStorage.getItem("corbina.workspaceRoot") ||
       ""

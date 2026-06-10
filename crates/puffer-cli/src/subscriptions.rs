@@ -19,7 +19,9 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::install_subscription_manager;
 use puffer_provider_registry::{AuthStore, StoredCredential};
-use puffer_subscriber_runtime::{Manifest, SendMediaAttachment, SendMediaKind, SubscriberCommand};
+use puffer_subscriber_runtime::{
+    EnvEntry, Manifest, SendMediaAttachment, SendMediaKind, SubscriberCommand,
+};
 use puffer_subscriptions::{
     connection_subscriber_manifest, direct_subscriber_manifest, find_subscriber_manifest,
     install_connector_action_executor, install_outbound, ClassifyDecision, ConnectionRecord,
@@ -775,7 +777,8 @@ mod tests;
 fn autostart_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {
     for topic in autostart_topics(manager, paths) {
         match autostart_manifest(manager, paths, &topic) {
-            Ok(Some(manifest)) => {
+            Ok(Some(mut manifest)) => {
+                set_workspace_config_env(&mut manifest, paths);
                 if let Err(error) = manager.start_subscriber(manifest) {
                     eprintln!("subscription: failed to start subscriber `{topic}`: {error:#}");
                 }
@@ -932,12 +935,25 @@ fn start_connection_subscriber(
     connection: &ConnectionRecord,
     template: &ConnectorTemplate,
 ) -> Result<()> {
-    if let Some(manifest) =
+    if let Some(mut manifest) =
         connection_subscriber_manifest(&subscriber_manifest_roots(paths), connection, template)?
     {
+        set_workspace_config_env(&mut manifest, paths);
         manager.start_subscriber(manifest)?;
     }
     Ok(())
+}
+
+fn set_workspace_config_env(manifest: &mut Manifest, paths: &ConfigPaths) {
+    manifest
+        .spec
+        .run
+        .env
+        .retain(|entry| entry.name != "PUFFER_WORKSPACE_CONFIG_DIR");
+    manifest.spec.run.env.push(EnvEntry {
+        name: "PUFFER_WORKSPACE_CONFIG_DIR".to_string(),
+        value: paths.workspace_config_dir.to_string_lossy().to_string(),
+    });
 }
 
 fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {

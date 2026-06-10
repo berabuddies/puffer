@@ -28,6 +28,8 @@ pub struct SkillEnv {
     pub session_path: PathBuf,
     /// Event topic to stamp on outbound events. Defaults to `"telegram-user"`.
     pub topic: String,
+    /// Workspace `.puffer` directory supplied by the host process when known.
+    pub workspace_config_dir: Option<PathBuf>,
 }
 
 impl SkillEnv {
@@ -43,10 +45,14 @@ impl SkillEnv {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "telegram-user".to_string());
+        let workspace_config_dir = std::env::var_os("PUFFER_WORKSPACE_CONFIG_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
         Self {
             state_dir,
             session_path,
             topic,
+            workspace_config_dir,
         }
     }
 

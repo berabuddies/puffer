@@ -51,6 +51,9 @@
     ids: string[];
     saved: boolean;
   };
+  type TaskConfigTab = "monitor" | "contacts" | "rules";
+
+  const TASK_PAGE_SIZE = 40;
 
   let { onRunTaskCommand }: Props = $props();
 
@@ -75,6 +78,7 @@
   let commandRunningFor = $state<string | null>(null);
   let ignoreMenuTaskId = $state<string | null>(null);
   let showTaskConfig = $state(false);
+  let taskConfigTab = $state<TaskConfigTab>("monitor");
   let showTaskHistory = $state(false);
   let historyLoading = $state(false);
   let historyError = $state<string | null>(null);
@@ -93,9 +97,12 @@
   let taskModelOptions = $state<TaskModelOption[]>([]);
   let taskModelLoading = $state(false);
   let taskModelLoadError = $state<string | null>(null);
-  let contactSnapshot = $state<ContactsSnapshot>({ contacts: [], candidates: [] });
+  let contactSnapshot = $state<ContactsSnapshot>({ contacts: [], candidates: [], proposals: [] });
   let contactsLoading = $state(false);
   let selectedMonitorContactIds = $state<string[]>([]);
+  let visibleTaskCount = $state(TASK_PAGE_SIZE);
+  let taskListSentinel: HTMLDivElement | null = $state(null);
+  let taskWindowKey = "";
   let contactScopeBindingKey = "";
   let refreshGeneration = 0;
   let taskModelGeneration = 0;
@@ -113,6 +120,9 @@
     ).sort()
   ]);
   let visibleTasks = $derived(filteredTasks());
+  let renderedTasks = $derived(visibleTasks.slice(0, visibleTaskCount));
+  let hasMoreTasks = $derived(renderedTasks.length < visibleTasks.length);
+  let remainingTaskCount = $derived(Math.max(0, visibleTasks.length - renderedTasks.length));
   let selectedTask = $derived(selectedTaskValue());
   let nonIgnoredCount = $derived(tasks.filter((task) => !taskIgnored(task)).length);
   let agentCount = $derived(tasks.filter((task) => task.source === "agent" && !taskIgnored(task)).length);
@@ -152,6 +162,7 @@
     selectedHistoryMessage ? ignoreTasksForHistory(selectedHistoryMessage) : []
   );
   let contactChoices = $derived(contactScopeChoices());
+  const manualRuleBackendNeeded = "Manual ignore rule editing needs a daemon RPC for structured rule create/delete.";
 
   onMount(() => {
     void refresh();
@@ -205,6 +216,34 @@
     if (!statusOptions.includes(statusFilter)) {
       statusFilter = "all";
     }
+  });
+
+  $effect(() => {
+    const nextKey = taskRenderWindowKey(visibleTasks);
+    if (nextKey === taskWindowKey) return;
+    taskWindowKey = nextKey;
+    visibleTaskCount = initialTaskRenderCount();
+  });
+
+  $effect(() => {
+    const sentinel = taskListSentinel;
+    if (!sentinel || !hasMoreTasks || typeof IntersectionObserver === "undefined") return;
+    const root = sentinel.closest(".pf-tasks-list");
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadMoreTasks();
+        }
+      },
+      { root, rootMargin: "360px 0px", threshold: 0.01 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    if (visibleTaskCount <= visibleTasks.length) return;
+    visibleTaskCount = Math.max(TASK_PAGE_SIZE, visibleTasks.length);
   });
 
   $effect(() => {
@@ -336,6 +375,27 @@
         .toLowerCase();
       return searchTerms.every((term) => haystack.includes(term));
     });
+  }
+
+  function taskRenderWindowKey(rows: WorkflowTask[]): string {
+    return [
+      sourceFilter,
+      statusFilter,
+      searchTerms.join("\u0001"),
+      rows.map(taskKey).join("\u0001")
+    ].join("\u0002");
+  }
+
+  function initialTaskRenderCount(): number {
+    const selectedIndex = selectedTaskKey
+      ? visibleTasks.findIndex((task) => taskKey(task) === selectedTaskKey)
+      : -1;
+    const minimum = selectedIndex >= 0 ? selectedIndex + 1 : TASK_PAGE_SIZE;
+    return Math.min(Math.max(TASK_PAGE_SIZE, minimum), visibleTasks.length);
+  }
+
+  function loadMoreTasks() {
+    visibleTaskCount = Math.min(visibleTasks.length, visibleTaskCount + TASK_PAGE_SIZE);
   }
 
   function taskKey(task: WorkflowTask): string {
@@ -663,31 +723,17 @@
     return `${spent.toLocaleString()} tokens`;
   }
 
-  function memorySummary(memory: WorkflowMonitorMemory): string {
-    const ignored = memory.content.match(/^## Ignored Task:/gm)?.length ?? 0;
-    return ignored === 1 ? "1 ignored example" : `${ignored} ignored examples`;
+  function monitorMemoryForBinding(binding: WorkflowBinding | null): WorkflowMonitorMemory | null {
+    if (!binding) return selectedConfigMemory;
+    return monitorMemories.find((memory) => memory.connection_slug === binding.connection_slug) ?? selectedConfigMemory;
   }
 
-  function bindingFilterSummary(binding: WorkflowBinding): string {
-    const ignoreCount = binding.ignore_filters?.length ?? 0;
-    const triggerCount = binding.filter_pattern ? 1 : 0;
-    const count = ignoreCount + triggerCount;
-    return count === 1 ? "1 rule" : `${count} rules`;
-  }
-
-  function bindingFilterLabel(binding: WorkflowBinding): string {
-    const status = binding.enabled ? "active" : "paused";
-    return `${binding.connection_slug} - ${bindingFilterSummary(binding)} - ${monitorContactScopeLabel(binding.contact_ids ?? [])} (${status})`;
-  }
-
-  function monitorCountLabel(count: number): string {
-    return count === 1 ? "1 configured monitor" : `${count} configured monitors`;
-  }
-
-  function monitorRowSummary(binding: WorkflowBinding): string {
-    const connector = binding.connector_slug?.trim() || "connector";
-    const status = binding.enabled ? "active" : "paused";
-    return `${connector} - ${monitorModelLabel(binding)} - ${bindingFilterSummary(binding)} - ${monitorContactScopeLabel(binding.contact_ids ?? [])} - ${status}`;
+  function onRulesMonitorChange(event: Event) {
+    const slug = (event.currentTarget as HTMLSelectElement).value;
+    selectedFilterBindingSlug = slug;
+    const binding = monitorFilterBindings.find((item) => item.slug === slug) ?? null;
+    const memory = monitorMemoryForBinding(binding);
+    if (memory) chooseConfigMemory(memory.path);
   }
 
   function contactScopeChoices(): ContactChoice[] {
@@ -789,6 +835,7 @@
 
   function openTaskConfig() {
     showTaskConfig = true;
+    taskConfigTab = "monitor";
     confirmDeleteMonitorSlug = null;
     contactScopeBindingKey = "";
     if (taskModelOptions.length === 0) {
@@ -812,10 +859,6 @@
     configMemoryPath = path;
     const memory = monitorMemories.find((item) => item.path === path) ?? null;
     memoryDraft = memory?.content ?? "";
-  }
-
-  function onConfigMemoryChange(event: Event) {
-    chooseConfigMemory((event.currentTarget as HTMLSelectElement).value);
   }
 
   async function saveConfiguredMemory(event: SubmitEvent) {
@@ -1056,7 +1099,7 @@
             {tasks.length === 0 ? "No agent or monitor tasks yet." : sourceFilter === "ignored" ? "No ignored tasks." : "No tasks match the current filters."}
           </div>
         {:else}
-          {#each visibleTasks as task (taskKey(task))}
+          {#each renderedTasks as task (taskKey(task))}
             <article
               class="pf-task-row"
               data-source={task.source}
@@ -1144,6 +1187,19 @@
               </div>
             </article>
           {/each}
+          {#if hasMoreTasks}
+            <div class="pf-task-lazy-sentinel" bind:this={taskListSentinel}>
+              <button
+                type="button"
+                class="sc-btn"
+                data-variant="outline"
+                data-size="sm"
+                onclick={loadMoreTasks}
+              >
+                Load {remainingTaskCount} more task{remainingTaskCount === 1 ? "" : "s"}
+              </button>
+            </div>
+          {/if}
         {/if}
       </div>
     </section>
@@ -1370,8 +1426,8 @@
       >
         <header class="pf-task-config-head">
           <div>
-            <h2 id="pf-task-config-title">Task configuration</h2>
-            <span>Monitors, filter rules, and memory</span>
+            <h2 id="pf-task-config-title">Task settings</h2>
+            <span>Watch messages, ignore noise, and remember context.</span>
           </div>
           <button
             type="button"
@@ -1386,271 +1442,359 @@
           </button>
         </header>
 
-        <form class="pf-task-config-section" onsubmit={(event) => void createSelectedMonitor(event)}>
-          <div class="pf-task-config-section-head">
-            <strong>Monitor agent</strong>
-            <span>Create or update the task agent for a trigger-ready connection.</span>
-          </div>
-          <div class="pf-task-config-row">
-            <label>
-              <span>Connection</span>
-              <select
-                bind:value={selectedMonitorConnection}
-                aria-label="Connection to monitor"
-                disabled={monitorConnections.length === 0 || creatingMonitor}
-              >
-                {#each monitorConnections as connection (connection.slug)}
-                  <option value={connection.slug} disabled={connectionNeedsRepair(connection)}>
-                    {monitorConnectionLabel(connection)} ({connection.connector_slug}, {monitorConnectionStateLabel(connection)})
-                  </option>
-                {/each}
-              </select>
-            </label>
-            <label>
-              <span>Model</span>
-              <input
-                list="pf-task-model-options"
-                bind:value={selectedMonitorModel}
-                aria-label="Task agent model"
-                placeholder={taskModelLoading ? "Loading models" : "default model"}
-                disabled={creatingMonitor}
-                spellcheck="false"
-              />
-              <datalist id="pf-task-model-options">
-                {#each taskModelOptions as option (option.selector)}
-                  <option value={option.selector}>{option.label}</option>
-                {/each}
-              </datalist>
-            </label>
+        <div class="pf-task-settings-body">
+          <nav class="pf-task-settings-nav" aria-label="Task settings sections">
             <button
-              type="submit"
-              class="sc-btn"
-              data-variant="solid"
-              data-size="sm"
-              disabled={!selectedMonitorConnection || selectedMonitorNeedsRepair || creatingMonitor}
+              type="button"
+              class="pf-task-settings-nav-item"
+              data-active={taskConfigTab === "monitor"}
+              onclick={() => (taskConfigTab = "monitor")}
             >
-              <Icon name={selectedMonitorBinding ? "check" : "plus"} size={12} />
-              {creatingMonitor ? (selectedMonitorBinding ? "Updating" : "Creating") : (selectedMonitorBinding ? "Update" : "Create")}
+              Monitor
             </button>
-          </div>
-          {#if monitorConnections.length === 0}
-            <p>No trigger-ready connections.</p>
-          {/if}
-          {#if selectedMonitorBinding}
-            <p>Current model: {monitorModelLabel(selectedMonitorBinding)}</p>
-          {/if}
-          {#if taskModelLoadError}
-            <p>{taskModelLoadError}</p>
-          {/if}
-          <div class="pf-task-contact-scope">
-            <div class="pf-task-config-section-head">
-              <strong>Contacts</strong>
-              <span>{monitorContactScopeLabel(selectedMonitorContactIds)}</span>
-            </div>
-            <div class="pf-task-contact-actions">
-              <label class="pf-task-contact-all">
-                <input
-                  type="checkbox"
-                  checked={selectedMonitorContactIds.length === 0}
-                  onchange={(event) => {
-                    if ((event.currentTarget as HTMLInputElement).checked) clearContactScope();
-                  }}
-                />
-                <span>All contacts</span>
-              </label>
-              <button
-                type="button"
-                class="sc-btn"
-                data-variant="ghost"
-                data-size="sm"
-                disabled={contactsLoading}
-                onclick={() => void loadContactScopeOptions()}
-              >
-                <Icon name="refresh" size={12} />{contactsLoading ? "Loading" : "Reload"}
-              </button>
-            </div>
-            {#if contactsLoading && contactChoices.length === 0}
-              <p>Loading contacts...</p>
-            {:else if contactChoices.length === 0}
-              <p>No saved contacts or connector candidates are available.</p>
-            {:else}
-              <div class="pf-task-contact-options">
-                {#each contactChoices as choice (choice.key)}
-                  <label class="pf-task-contact-option" data-saved={choice.saved}>
-                    <input
-                      type="checkbox"
-                      checked={contactChoiceSelected(choice)}
-                      onchange={(event) => toggleContactChoice(choice, (event.currentTarget as HTMLInputElement).checked)}
-                    />
-                    <span>
-                      <strong>{choice.label}</strong>
-                      <small>{choice.description}</small>
-                    </span>
+            <button
+              type="button"
+              class="pf-task-settings-nav-item"
+              data-active={taskConfigTab === "contacts"}
+              onclick={() => (taskConfigTab = "contacts")}
+            >
+              Contacts
+            </button>
+            <button
+              type="button"
+              class="pf-task-settings-nav-item"
+              data-active={taskConfigTab === "rules"}
+              onclick={() => (taskConfigTab = "rules")}
+            >
+              Rules and memory
+            </button>
+          </nav>
+
+          <div class="pf-task-settings-pane">
+            {#if taskConfigTab === "monitor"}
+              <form class="pf-task-settings-section" onsubmit={(event) => void createSelectedMonitor(event)}>
+                <div class="pf-task-settings-section-head">
+                  <strong>Monitor</strong>
+                  <span>Choose which message source can start tasks.</span>
+                </div>
+
+                <div class="pf-task-settings-monitor-form">
+                  <label>
+                    <span>Account</span>
+                    <select
+                      bind:value={selectedMonitorConnection}
+                      aria-label="Connection to monitor"
+                      disabled={monitorConnections.length === 0 || creatingMonitor}
+                    >
+                      {#if monitorConnections.length === 0}
+                        <option value="">Choose an account</option>
+                      {:else}
+                        {#each monitorConnections as connection (connection.slug)}
+                          <option value={connection.slug} disabled={connectionNeedsRepair(connection)}>
+                            {monitorConnectionLabel(connection)}
+                          </option>
+                        {/each}
+                      {/if}
+                    </select>
                   </label>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        </form>
+                  <label>
+                    <span>Model</span>
+                    <input
+                      list="pf-task-model-options"
+                      bind:value={selectedMonitorModel}
+                      aria-label="Task agent model"
+                      placeholder={taskModelLoading ? "Loading models" : "Choose a model"}
+                      disabled={creatingMonitor}
+                      spellcheck="false"
+                    />
+                    <datalist id="pf-task-model-options">
+                      {#each taskModelOptions as option (option.selector)}
+                        <option value={option.selector}>{option.label}</option>
+                      {/each}
+                    </datalist>
+                  </label>
+                  <button
+                    type="submit"
+                    class="sc-btn pf-task-settings-primary-button pf-task-settings-compact-button"
+                    data-variant="solid"
+                    data-size="sm"
+                    disabled={!selectedMonitorConnection || selectedMonitorNeedsRepair || creatingMonitor}
+                  >
+                    {creatingMonitor ? (selectedMonitorBinding ? "Updating" : "Adding") : (selectedMonitorBinding ? "Update" : "Add")}
+                  </button>
+                </div>
 
-        <section class="pf-task-config-section">
-          <div class="pf-task-config-section-head">
-            <strong>Active monitors</strong>
-            <span>{monitorCountLabel(monitorFilterBindings.length)}</span>
-          </div>
-          {#if monitorFilterBindings.length > 0}
-            <div class="pf-task-monitor-list">
-              {#each monitorFilterBindings as binding (binding.slug)}
-                <div class="pf-task-monitor-row" data-enabled={binding.enabled}>
-                  <div class="pf-task-monitor-main">
-                    <strong>{binding.connection_slug}</strong>
-                    <span>{monitorRowSummary(binding)}</span>
+                {#if monitorConnections.length === 0}
+                  <p>No trigger-ready accounts.</p>
+                {/if}
+                {#if taskModelLoadError}
+                  <p>{taskModelLoadError}</p>
+                {/if}
+
+                <div class="pf-task-settings-monitor-list" aria-label="Configured monitors">
+                  {#if monitorFilterBindings.length > 0}
+                    {#each monitorFilterBindings as binding (binding.slug)}
+                      <div class="pf-task-settings-monitor-row" data-enabled={binding.enabled}>
+                        <label>
+                          <span>Account</span>
+                          <select
+                            value={binding.connection_slug}
+                            aria-label={`Account for ${binding.connection_slug}`}
+                            disabled
+                          >
+                            <option>{binding.connection_slug}</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>Model</span>
+                          <input
+                            value={monitorModelLabel(binding)}
+                            aria-label={`Model for ${binding.connection_slug}`}
+                            disabled
+                          />
+                        </label>
+                        {#if confirmDeleteMonitorSlug === binding.slug}
+                          <button
+                            type="button"
+                            class="sc-btn"
+                            data-variant="ghost"
+                            data-size="sm"
+                            disabled={deletingMonitorSlug === binding.slug}
+                            onclick={() => (confirmDeleteMonitorSlug = null)}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            class="sc-btn"
+                            data-variant="destructive"
+                            data-size="sm"
+                            disabled={creatingMonitor || savingMemoryPath !== null || deletingMonitorSlug !== null}
+                            onclick={() => void deleteConfiguredMonitor(binding)}
+                          >
+                            {deletingMonitorSlug === binding.slug ? "Deleting" : "Confirm"}
+                          </button>
+                        {:else}
+                          <button
+                            type="button"
+                            class="sc-btn pf-task-settings-icon-button"
+                            data-variant="ghost"
+                            data-size="sm"
+                            aria-label={`Delete monitor for ${binding.connection_slug}`}
+                            disabled={creatingMonitor || savingMemoryPath !== null || deletingMonitorSlug !== null}
+                            onclick={() => requestDeleteMonitor(binding)}
+                          >
+                            <Icon name="x" size={14} />
+                          </button>
+                        {/if}
+                      </div>
+                    {/each}
+                  {:else}
+                    <p>No active monitors.</p>
+                  {/if}
+                </div>
+              </form>
+            {:else if taskConfigTab === "contacts"}
+              <section class="pf-task-settings-section">
+                <div class="pf-task-settings-section-toolbar">
+                  <div class="pf-task-settings-section-head">
+                    <strong>Contacts</strong>
+                    <span>Choose which contact can trigger tasks.</span>
                   </div>
-                  <div class="pf-task-monitor-actions">
-                    {#if confirmDeleteMonitorSlug === binding.slug}
-                      <button
-                        type="button"
-                        class="sc-btn"
-                        data-variant="ghost"
-                        data-size="sm"
-                        disabled={deletingMonitorSlug === binding.slug}
-                        onclick={() => (confirmDeleteMonitorSlug = null)}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        class="sc-btn"
-                        data-variant="destructive"
-                        data-size="sm"
-                        disabled={creatingMonitor || savingMemoryPath !== null || deletingMonitorSlug !== null}
-                        onclick={() => void deleteConfiguredMonitor(binding)}
-                      >
-                        <Icon name="trash" size={12} />{deletingMonitorSlug === binding.slug ? "Deleting" : "Confirm"}
-                      </button>
+                  <button
+                    type="button"
+                    class="sc-btn"
+                    data-variant="ghost"
+                    data-size="sm"
+                    disabled={contactsLoading}
+                    onclick={() => void loadContactScopeOptions()}
+                  >
+                    <Icon name="refresh" size={14} />{contactsLoading ? "Loading" : "Refresh"}
+                  </button>
+                </div>
+
+                <div class="pf-task-contact-table" aria-label="Monitor contacts">
+                  <div class="pf-task-contact-table-head">
+                    <span aria-hidden="true"></span>
+                    <strong>Contact</strong>
+                    <strong>Description</strong>
+                    <strong>Action</strong>
+                  </div>
+                  <label class="pf-task-contact-table-row">
+                    <span class="pf-task-contact-check">
+                      <input
+                        type="checkbox"
+                        checked={selectedMonitorContactIds.length === 0}
+                        onchange={(event) => {
+                          if ((event.currentTarget as HTMLInputElement).checked) clearContactScope();
+                        }}
+                      />
+                    </span>
+                    <span class="pf-task-contact-person">
+                      <span class="pf-task-contact-avatar">All</span>
+                      <span>
+                        <strong>All contacts</strong>
+                        <small>{selectedMonitorConnection || "monitor account"}</small>
+                      </span>
+                    </span>
+                    <span class="pf-task-contact-description">Allow any contact from the selected monitor source to trigger tasks.</span>
+                    <span class="pf-task-contact-action" aria-hidden="true"></span>
+                  </label>
+                  {#if contactsLoading && contactChoices.length === 0}
+                    <div class="pf-task-contact-table-empty">Loading contacts...</div>
+                  {:else if contactChoices.length === 0}
+                    <div class="pf-task-contact-table-empty">No saved contacts or connector candidates are available.</div>
+                  {:else}
+                    {#each contactChoices as choice (choice.key)}
+                      <label class="pf-task-contact-table-row" data-saved={choice.saved}>
+                        <span class="pf-task-contact-check">
+                          <input
+                            type="checkbox"
+                            checked={contactChoiceSelected(choice)}
+                            onchange={(event) => toggleContactChoice(choice, (event.currentTarget as HTMLInputElement).checked)}
+                          />
+                        </span>
+                        <span class="pf-task-contact-person">
+                          <span class="pf-task-contact-avatar">{choice.label.slice(0, 2).toUpperCase()}</span>
+                          <span>
+                            <strong>{choice.label}</strong>
+                            <small>{choice.ids[0] ?? choice.key}</small>
+                          </span>
+                        </span>
+                        <span class="pf-task-contact-description">{choice.description}</span>
+                        <span class="pf-task-contact-action">
+                          <button
+                            type="button"
+                            class="pf-task-contact-edit-button"
+                            aria-label={`Edit ${choice.label}`}
+                            disabled
+                          >
+                            <Icon name="edit" size={15} />
+                          </button>
+                        </span>
+                      </label>
+                    {/each}
+                  {/if}
+                </div>
+              </section>
+            {:else}
+              <form class="pf-task-settings-section" onsubmit={(event) => void saveConfiguredMemory(event)}>
+                <div class="pf-task-settings-section-head">
+                  <strong>Monitor rules</strong>
+                  <span>Rules, notes, and priorities this monitor uses before creating tasks.</span>
+                </div>
+
+                <label class="pf-task-config-memory-select">
+                  <span>Monitor</span>
+                  <select
+                    value={selectedFilterBindingSlug}
+                    aria-label="Monitor rules"
+                    onchange={onRulesMonitorChange}
+                  >
+                    {#if monitorFilterBindings.length === 0}
+                      <option value="">No active monitors</option>
                     {:else}
+                      {#each monitorFilterBindings as binding (binding.slug)}
+                        <option value={binding.slug}>{binding.connection_slug}</option>
+                      {/each}
+                    {/if}
+                  </select>
+                </label>
+
+                <div class="pf-task-settings-rules-block">
+                  <span class="pf-task-settings-field-label">Ignore rules</span>
+                  <div class="pf-task-settings-add-rule">
+                    <input
+                      value=""
+                      aria-label="New ignore rule keywords"
+                      placeholder="Enter keywords"
+                      disabled
+                      title={manualRuleBackendNeeded}
+                    />
+                    <button
+                      type="button"
+                      class="sc-btn pf-task-settings-primary-button pf-task-settings-compact-button"
+                      data-variant="solid"
+                      data-size="sm"
+                      disabled
+                      title={manualRuleBackendNeeded}
+                    >
+                      Add
+                    </button>
+                  </div>
+                  {#if selectedFilterBinding}
+                    <div class="pf-task-settings-rule-list">
+                      {#if selectedFilterBinding.filter_pattern}
+                        <div class="pf-task-settings-rule-row">
+                          <span>trigger contains: {selectedFilterBinding.filter_pattern}</span>
+                        </div>
+                      {/if}
+                      {#each selectedFilterBinding.ignore_filters ?? [] as rule, index (`${selectedFilterBinding.slug}:${index}`)}
+                        <div class="pf-task-settings-rule-row">
+                          <span>{filterRuleTitle(rule).toLowerCase()}: {filterRuleSummary(rule)}</span>
+                          <button
+                            type="button"
+                            class="sc-btn pf-task-settings-icon-button"
+                            data-variant="ghost"
+                            data-size="sm"
+                            aria-label={`Remove ignore rule ${index + 1}`}
+                            disabled
+                            title={manualRuleBackendNeeded}
+                          >
+                            <Icon name="x" size={13} />
+                          </button>
+                        </div>
+                      {/each}
+                      {#if !selectedFilterBinding.filter_pattern && (selectedFilterBinding.ignore_filters?.length ?? 0) === 0}
+                        <p>No installed ignore rules for {selectedFilterBinding.connection_slug}.</p>
+                      {/if}
+                    </div>
+                  {:else}
+                    <p>No monitor rules yet.</p>
+                  {/if}
+                </div>
+
+                <div class="pf-task-settings-memory-block">
+                  <span class="pf-task-settings-field-label">Rules and memory</span>
+                  {#if monitorMemories.length > 0 && selectedConfigMemory}
+                    <textarea
+                      aria-label={`Edit monitor memory for ${selectedConfigMemory.connection_slug}`}
+                      bind:value={memoryDraft}
+                      disabled={selectedConfigMemory.truncated || savingMemoryPath !== null}
+                      spellcheck="false"
+                    ></textarea>
+                    {#if selectedConfigMemory.truncated}
+                      <p>Snapshot truncated. Open the file directly to edit safely.</p>
+                    {/if}
+                    <div class="pf-task-config-actions">
                       <button
                         type="button"
                         class="sc-btn"
                         data-variant="ghost"
                         data-size="sm"
-                        aria-label={`Delete monitor for ${binding.connection_slug}`}
-                        disabled={creatingMonitor || savingMemoryPath !== null || deletingMonitorSlug !== null}
-                        onclick={() => requestDeleteMonitor(binding)}
+                        disabled={savingMemoryPath !== null}
+                        onclick={() => chooseConfigMemory(selectedConfigMemory.path)}
                       >
-                        <Icon name="trash" size={12} />Delete
+                        Reset
                       </button>
-                    {/if}
-                  </div>
+                      <button
+                        type="submit"
+                        class="sc-btn pf-task-settings-primary-button pf-task-settings-save-button"
+                        data-variant="solid"
+                        data-size="sm"
+                        disabled={selectedConfigMemory.truncated || savingMemoryPath !== null}
+                      >
+                        {savingMemoryPath === selectedConfigMemory.path ? "Saving" : "Save memory"}
+                      </button>
+                    </div>
+                  {:else}
+                    <div class="pf-task-settings-empty">No monitor memory files yet.</div>
+                  {/if}
                 </div>
-              {/each}
-            </div>
-          {:else}
-            <p>No active monitors.</p>
-          {/if}
-        </section>
-
-        <section class="pf-task-config-section">
-          <div class="pf-task-config-section-head">
-            <strong>Filter rules</strong>
-            <span>Check installed trigger and ignore rules.</span>
-          </div>
-          {#if monitorFilterBindings.length > 0 && selectedFilterBinding}
-            <label class="pf-task-config-memory-select">
-              <span>Monitor</span>
-              <select
-                bind:value={selectedFilterBindingSlug}
-                aria-label="Monitor filter rules"
-              >
-                {#each monitorFilterBindings as binding (binding.slug)}
-                  <option value={binding.slug}>{bindingFilterLabel(binding)}</option>
-                {/each}
-              </select>
-            </label>
-            <div class="pf-task-filter-list">
-              <div class="pf-task-filter-rule">
-                <span>Model</span>
-                <code>{monitorModelLabel(selectedFilterBinding)}</code>
-              </div>
-              <div class="pf-task-filter-rule">
-                <span>Contacts</span>
-                <code>{monitorContactScopeLabel(selectedFilterBinding.contact_ids ?? [])}</code>
-              </div>
-              {#if selectedFilterBinding.filter_pattern}
-                <div class="pf-task-filter-rule">
-                  <span>Trigger</span>
-                  <code>{selectedFilterBinding.filter_pattern}</code>
-                </div>
-              {/if}
-              {#each selectedFilterBinding.ignore_filters ?? [] as rule, index (`${selectedFilterBinding.slug}:${index}`)}
-                <div class="pf-task-filter-rule">
-                  <span>Ignore {index + 1} - {filterRuleTitle(rule)}</span>
-                  <code>{filterRuleSummary(rule)}</code>
-                </div>
-              {/each}
-              {#if !selectedFilterBinding.filter_pattern && (selectedFilterBinding.ignore_filters?.length ?? 0) === 0}
-                <p>No filter rules installed for {selectedFilterBinding.connection_slug}.</p>
-              {/if}
-            </div>
-          {:else}
-            <p>No monitor filter rules yet.</p>
-          {/if}
-        </section>
-
-        <form class="pf-task-config-section" onsubmit={(event) => void saveConfiguredMemory(event)}>
-          <div class="pf-task-config-section-head">
-            <strong>Monitor memory</strong>
-            <span>Edit the ignore context used before monitor tasks are created.</span>
-          </div>
-          {#if monitorMemories.length > 0 && selectedConfigMemory}
-            <label class="pf-task-config-memory-select">
-              <span>Memory</span>
-              <select
-                value={configMemoryPath}
-                aria-label="Monitor memory file"
-                disabled={savingMemoryPath !== null}
-                onchange={onConfigMemoryChange}
-              >
-                {#each monitorMemories as memory (memory.path)}
-                  <option value={memory.path}>{memory.connection_slug} - {memorySummary(memory)}</option>
-                {/each}
-              </select>
-            </label>
-            <code class="pf-task-config-memory-path">{selectedConfigMemory.path}</code>
-            <textarea
-              aria-label={`Edit monitor memory for ${selectedConfigMemory.connection_slug}`}
-              bind:value={memoryDraft}
-              disabled={selectedConfigMemory.truncated || savingMemoryPath !== null}
-              spellcheck="false"
-            ></textarea>
-            {#if selectedConfigMemory.truncated}
-              <p>Snapshot truncated. Open the file directly to edit safely.</p>
+              </form>
             {/if}
-            <div class="pf-task-config-actions">
-              <button
-                type="button"
-                class="sc-btn"
-                data-variant="ghost"
-                data-size="sm"
-                disabled={savingMemoryPath !== null}
-                onclick={() => chooseConfigMemory(selectedConfigMemory.path)}
-              >
-                Reset
-              </button>
-              <button
-                type="submit"
-                class="sc-btn"
-                data-variant="solid"
-                data-size="sm"
-                disabled={selectedConfigMemory.truncated || savingMemoryPath !== null || memoryDraft === selectedConfigMemory.content}
-              >
-                <Icon name="check" size={12} />{savingMemoryPath === selectedConfigMemory.path ? "Saving" : "Save memory"}
-              </button>
-            </div>
-          {:else}
-            <p>No monitor memory files yet.</p>
-          {/if}
-        </form>
+          </div>
+        </div>
       </div>
     </div>
   {/if}

@@ -68,7 +68,7 @@ use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
@@ -293,9 +293,20 @@ pub(crate) struct DaemonState {
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
     /// `RECENT_EVENT_CAPACITY` (oldest evicted) to keep memory bounded.
     recent_events: Arc<Mutex<VecDeque<ServerEnvelope>>>,
+    /// Number of live WebSocket clients. When this drops to zero the
+    /// disconnect watchdog cancels orphaned interactive turns after a grace
+    /// window so a runaway browser checkout can't keep running once the user's
+    /// app has gone away (issue #600).
+    live_connections: Arc<AtomicUsize>,
 }
 
 const RECENT_EVENT_CAPACITY: usize = 500;
+
+/// Grace window after the last WebSocket client disconnects before orphaned
+/// interactive turns are cancelled. Long enough to ride out an app reload /
+/// transient network blip (the UI reconnects and replays the ring buffer),
+/// short enough to stop a runaway checkout promptly (issue #600).
+const DISCONNECT_CANCEL_GRACE: Duration = Duration::from_secs(15);
 
 impl DaemonState {
     /// The daemon's working directory — used as one of the allowed roots
@@ -401,6 +412,7 @@ impl DaemonState {
             disable_auto_title,
             yolo,
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
+            live_connections: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -442,6 +454,7 @@ fn is_replay_channel(event: &str) -> bool {
         || event.starts_with("workspace:")
         || event.starts_with("clone:")
         || event.starts_with("workflow:")
+        || event.starts_with("contacts:infer:")
         || event.starts_with("connector-setup:")
 }
 
@@ -450,7 +463,8 @@ impl DaemonState {
         self.build_runtime_inputs_with_discovery(true)
     }
 
-    fn build_runtime_inputs_without_discovery(&self) -> Result<RuntimeInputs> {
+    /// Builds runtime inputs from local cache without refreshing model discovery.
+    pub(crate) fn build_runtime_inputs_without_discovery(&self) -> Result<RuntimeInputs> {
         self.build_runtime_inputs_with_discovery(false)
     }
 
@@ -509,11 +523,12 @@ impl DaemonState {
     }
 }
 
-struct RuntimeInputs {
-    resources: LoadedResources,
-    providers: ProviderRegistry,
-    auth_store: AuthStore,
-    session_store: SessionStore,
+/// Runtime dependencies loaded from config, resources, auth, and session stores.
+pub(crate) struct RuntimeInputs {
+    pub(crate) resources: LoadedResources,
+    pub(crate) providers: ProviderRegistry,
+    pub(crate) auth_store: AuthStore,
+    pub(crate) session_store: SessionStore,
 }
 
 fn proxy_discovery_client(
@@ -726,6 +741,9 @@ fn lambda_gate_stream_phase(payload: &Value) -> LambdaGateStreamPhase {
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
+    // Count this client for the lifetime of the connection; on drop (any exit
+    // path) the watchdog is armed if it was the last one (issue #600).
+    let _connection = ConnectionGuard::new(state.clone());
     let (ws_tx, mut ws_rx) = socket.split();
     let tx = Arc::new(AsyncMutex::new(ws_tx));
     let subscriptions = Arc::new(AsyncMutex::new(HashSet::<String>::new()));
@@ -1034,7 +1052,7 @@ async fn dispatch_request(
         }
         "contacts_infer" => {
             respond!(detached!(|s, p| {
-                crate::daemon_contacts::handle_contacts_infer(s.config_paths(), &p)
+                crate::daemon_contacts::handle_contacts_infer(&s, &p)
             }))
         }
         "telegram_rank_relationships" => {
@@ -1139,6 +1157,9 @@ async fn dispatch_request(
         ),
         "monitor_task_ignore" | "task_monitor_ignore" => respond!(
             crate::daemon_workflows::handle_monitor_task_ignore(&state.paths, &params)
+        ),
+        "monitor_task_complete" | "task_monitor_complete" => respond!(
+            crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
         ),
         "monitor_memory_save" | "task_monitor_memory_save" => respond!(
             crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
@@ -3300,16 +3321,33 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
         .or_else(|| params.get("turn_id"))
         .and_then(|v| v.as_str())
         .context("missing turnId")?;
+    if cancel_turn_by_id(state, turn_id) {
+        Ok(json!({"ok": true}))
+    } else {
+        Ok(json!({"ok": false, "error": "turn not found"}))
+    }
+}
+
+/// Cancels one running turn by id: flips its cancel token, denies any pending
+/// permission/question prompts, reports the cancellation to listeners, and
+/// removes it from the registry. Returns whether a turn with this id existed.
+/// Shared by the `cancel_turn` RPC and the client-disconnect watchdog (#600).
+fn cancel_turn_by_id(state: &DaemonState, turn_id: &str) -> bool {
     let handle = {
         let turns = state.turns.lock().unwrap();
         turns.get(turn_id).cloned()
     };
-    if let Some(handle) = handle {
-        handle.cancel.cancel();
+    let Some(handle) = handle else {
+        return false;
+    };
+    handle.cancel.cancel();
+    {
         let mut pending = handle.pending.lock().unwrap();
         for (_, tx) in pending.drain() {
             let _ = tx.send(PermissionPromptAction::Deny);
         }
+    }
+    {
         let mut pending_questions = handle.pending_questions.lock().unwrap();
         for (_, tx) in pending_questions.drain() {
             let _ = tx.send(UserQuestionPromptResponse {
@@ -3317,34 +3355,90 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 annotations: serde_json::Map::new(),
             });
         }
-        if let (Some(session_uuid), Some(session_id)) =
-            (handle.session_uuid, handle.session_id.as_deref())
-        {
-            report_cancelled_turn(
-                state,
-                session_uuid,
-                session_id,
-                &handle.channel,
-                turn_id,
-                &handle.message,
-                &handle.attachments,
-                &handle.cancel_reported,
-                &handle.user_prompt_persisted,
-                &handle.progress,
-            )?;
-        } else {
-            report_cancelled_sessionless_turn(
-                state,
-                &handle.channel,
-                turn_id,
-                &handle.cancel_reported,
+    }
+    // Cancellation cleanup is best-effort: never let a failed report block the
+    // cancel (especially on the disconnect path, where no client is waiting).
+    if let (Some(session_uuid), Some(session_id)) =
+        (handle.session_uuid, handle.session_id.as_deref())
+    {
+        let _ = report_cancelled_turn(
+            state,
+            session_uuid,
+            session_id,
+            &handle.channel,
+            turn_id,
+            &handle.message,
+            &handle.attachments,
+            &handle.cancel_reported,
+            &handle.user_prompt_persisted,
+            &handle.progress,
+        );
+    } else {
+        report_cancelled_sessionless_turn(state, &handle.channel, turn_id, &handle.cancel_reported);
+    }
+    state.turns.lock().unwrap().remove(turn_id);
+    true
+}
+
+/// Cancels every running turn in the registry. Only WS-initiated interactive
+/// turns live here (`start_turn` / slash-command / connector-setup) — Telegram
+/// monitor / connector-message turns run outside this registry — so this is
+/// safe to call when the last UI client disconnects without affecting
+/// background work (issue #600).
+fn cancel_all_active_turns(state: &DaemonState) -> usize {
+    let turn_ids: Vec<String> = state.turns.lock().unwrap().keys().cloned().collect();
+    turn_ids
+        .iter()
+        .filter(|turn_id| cancel_turn_by_id(state, turn_id))
+        .count()
+}
+
+/// Tracks a live WebSocket client. On drop (client disconnect) it decrements
+/// the live-connection count and, when the last client goes away, arms the
+/// disconnect watchdog so orphaned interactive turns get cancelled after a
+/// grace window (issue #600).
+struct ConnectionGuard {
+    state: Arc<DaemonState>,
+}
+
+impl ConnectionGuard {
+    fn new(state: Arc<DaemonState>) -> Self {
+        state.live_connections.fetch_add(1, Ordering::SeqCst);
+        Self { state }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let remaining = self
+            .state
+            .live_connections
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        if remaining == 0 {
+            arm_disconnect_cancel_watchdog(self.state.clone());
+        }
+    }
+}
+
+/// After the last client disconnects, wait out the grace window; if no client
+/// has reconnected, cancel orphaned interactive turns (issue #600).
+fn arm_disconnect_cancel_watchdog(state: Arc<DaemonState>) {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(DISCONNECT_CANCEL_GRACE).await;
+        if state.live_connections.load(Ordering::SeqCst) != 0 {
+            return; // a client reconnected during the grace window
+        }
+        let cancelled = cancel_all_active_turns(&state);
+        if cancelled > 0 {
+            eprintln!(
+                "cancelled {cancelled} orphaned interactive turn(s) after the last UI client disconnected"
             );
         }
-        state.turns.lock().unwrap().remove(turn_id);
-        Ok(json!({"ok": true}))
-    } else {
-        Ok(json!({"ok": false, "error": "turn not found"}))
-    }
+    });
 }
 
 const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
@@ -3631,6 +3725,90 @@ async fn recover_stale_turn(state: Arc<DaemonState>, params: Value) -> Result<Va
     }
 }
 
+/// Returns true when a replayed transcript shows this session already used
+/// the browser — either through the Browser/BrowserAction tools or through
+/// Bash running the `browser ...` CLI (the browser skill's documented path).
+fn session_used_browser_tool(events: &[TranscriptEvent]) -> bool {
+    events.iter().any(|event| {
+        let TranscriptEvent::ToolInvocation { tool_id, input, .. } = event else {
+            return false;
+        };
+        if tool_id.eq_ignore_ascii_case("browser") || tool_id.eq_ignore_ascii_case("browseraction")
+        {
+            return true;
+        }
+        if !tool_id.eq_ignore_ascii_case("bash") {
+            return false;
+        }
+        let Ok(parsed) = serde_json::from_str::<Value>(input) else {
+            return false;
+        };
+        parsed
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(bash_command_invokes_browser_cli)
+    })
+}
+
+/// True when one Bash command line actually invokes the browser CLI. Matched
+/// per shell segment on the leading token, so compound or env-prefixed
+/// invocations (`cd x && browser open ...`, `FOO=1 browser snapshot`) count
+/// while commands that merely mention the strings (grep/echo in coding
+/// sessions) do not.
+fn bash_command_invokes_browser_cli(command: &str) -> bool {
+    command.split(['\n', ';', '|', '&']).any(|segment| {
+        let mut tokens = segment
+            .split_whitespace()
+            .skip_while(|token| token.contains('=') && !token.starts_with('-'));
+        let Some(first) = tokens.next() else {
+            return false;
+        };
+        if first == "browser" {
+            return true;
+        }
+        (first == "puffer" || first.ends_with("/puffer"))
+            && tokens.next() == Some("internal-tool")
+            && tokens.next() == Some("browser")
+    })
+}
+
+/// Computes the live browser status line for the per-turn system reminder
+/// (issue #560). Injected only when the transcript already used the browser
+/// or a live tab exists, so pure coding sessions stay free of browser noise.
+/// The no-active-tab line is the core fix: after a daemon restart the tab
+/// registry is empty while the replayed transcript still claims
+/// `connected:true`, and without this the model keeps trusting it.
+fn browser_status_for_turn(
+    context: &crate::daemon_browser::BrowserCurrentTabContext,
+    session_used_browser: bool,
+) -> Option<String> {
+    (session_used_browser || context.has_active_tab()).then(|| context.agent_status_line())
+}
+
+/// Resolves the live tab context for a turn. Tabs live under two registry
+/// keyspaces: the chat root session UUID (typed Browser/BrowserAction tools)
+/// and the workspace-stable cli-browser id (Bash `browser ...` commands, the
+/// browser skill's documented path). Checking only the UUID would report live
+/// CLI tabs as gone — the inverse of the #560 bug.
+fn turn_browser_tab_context(
+    state: &DaemonState,
+    browser_root_session_id: &str,
+) -> crate::daemon_browser::BrowserCurrentTabContext {
+    let primary = state.browsers.current_tab_context(browser_root_session_id);
+    if primary.has_active_tab() {
+        return primary;
+    }
+    let Ok(cli_session_id) = crate::daemon_browser::default_cli_session_id(&state.paths) else {
+        return primary;
+    };
+    let cli = state.browsers.current_tab_context(&cli_session_id);
+    if cli.has_active_tab() {
+        cli
+    } else {
+        primary
+    }
+}
+
 async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let session_id = params
         .get("sessionId")
@@ -3781,6 +3959,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .events
             .iter()
             .any(|event| matches!(event, TranscriptEvent::UserMessage { .. }));
+        let session_used_browser = session_used_browser_tool(&record.events);
+        // Browser panes key off the root session (mirrors
+        // AppState::browser_root_session_id, which is core-private).
+        let browser_root_session_id = record
+            .metadata
+            .parent_session_id
+            .unwrap_or(session_uuid)
+            .to_string();
         let auto_title = if crate::daemon_title::should_generate_title_for_turn(
             &inputs.resources,
             record.metadata.display_name.as_deref(),
@@ -3837,6 +4023,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         }
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
+        // Issue #560: reconcile the model's view of the browser with the real
+        // tab registry every turn, instead of letting it trust stale
+        // `connected:true` tool output replayed from the transcript.
+        app_state.browser_status = browser_status_for_turn(
+            &turn_browser_tab_context(&setup_state, &browser_root_session_id),
+            session_used_browser,
+        );
         if let Err(err) =
             apply_turn_request_options(&mut app_state, &inputs.providers, &effective_turn_options)
         {
@@ -4409,7 +4602,19 @@ async fn start_slash_command_turn(state: Arc<DaemonState>, params: Value) -> Res
             }
         };
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
+        // Issue #560: slash-command turns run the same agent loop, so they
+        // need the same browser-state reconciliation as start_turn.
+        let session_used_browser = session_used_browser_tool(&record.events);
+        let browser_root_session_id = record
+            .metadata
+            .parent_session_id
+            .unwrap_or(session_uuid)
+            .to_string();
         let mut app_state = AppState::from_session_record(cfg_for_turn, record);
+        app_state.browser_status = browser_status_for_turn(
+            &turn_browser_tab_context(&setup_state, &browser_root_session_id),
+            session_used_browser,
+        );
         let stream_actor = app_state.assistant_actor();
 
         let question_state = setup_state.clone();
@@ -5155,16 +5360,19 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        browser_permission_payload_json, connector_setup_connect_args, connector_setup_id,
-        desktop_latency_ms, handle_create_openai_realtime_client_secret, handle_create_session,
-        handle_import_external_credential, handle_list_lambda_skill_libraries,
-        handle_list_permissions, handle_list_provider_models, handle_local_model_status,
-        handle_login_with_api_key, handle_logout_provider, handle_remove_lambda_skill_library,
-        handle_save_lambda_skill_library, handle_save_permissions, handle_save_proxy_settings,
-        handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled, model_descriptor_dto,
-        permission_review_payload_json, realtime_session_config_from_params, report_cancelled_turn,
-        requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
-        start_connector_setup_turn, DaemonState, ServerEnvelope, TurnProgress, TurnRequestOptions,
+        browser_permission_payload_json, cancel_all_active_turns, connector_setup_connect_args,
+        connector_setup_id, desktop_latency_ms, handle_create_openai_realtime_client_secret,
+        handle_create_session, handle_import_external_credential,
+        handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
+        handle_local_model_status, handle_login_with_api_key, handle_logout_provider,
+        handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
+        handle_save_permissions, handle_save_proxy_settings, handle_set_lambda_skill_approval,
+        handle_set_lambda_skill_enabled, model_descriptor_dto, permission_review_payload_json,
+        realtime_session_config_from_params, report_cancelled_turn, requires_explicit_subscription,
+        browser_status_for_turn, resolve_create_session_model_id, run_off_runtime,
+        session_used_browser_tool, start_connector_setup_turn, turn_browser_tab_context,
+        CancelToken, ConnectionGuard, DaemonState, ServerEnvelope, TurnHandle, TurnProgress,
+        TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{
@@ -5177,7 +5385,8 @@ mod tests {
     };
     use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
     use serde_json::json;
-    use std::sync::atomic::AtomicBool;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use uuid::Uuid;
@@ -5333,6 +5542,281 @@ mod tests {
                 None => std::env::remove_var("PUFFER_HOME"),
             }
         }
+    }
+
+    /// End-to-end through the real `browser_open` RPC handler + a real
+    /// `DaemonState`: native-CEF pool exhaustion (issue #603) must self-heal by
+    /// reclaiming a slot, not hard-fail. Backs the daemon-RPC verification.
+    #[test]
+    fn browser_open_rpc_self_heals_native_cef_pool_exhaustion() {
+        use crate::daemon_browser::test_support::{cef_env_lock, FakeCefDevtools};
+
+        let _cef_guard = cef_env_lock().lock().unwrap();
+        let _home_guard = PufferHomeEnvGuard::set();
+        let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+        let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+        // Fake native CEF with exactly two prewarmed page slots.
+        let cef = FakeCefDevtools::spawn(2);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+        std::env::set_var(
+            "PUFFER_CEF_PROFILE_DIR",
+            paths.user_config_dir.join("cef-profile"),
+        );
+
+        let state = Arc::new(
+            DaemonState::load(workspace_root, paths, "token".into(), false, false, false)
+                .expect("daemon state"),
+        );
+        let open = |session_id: &str| {
+            crate::daemon_browser::handle_browser_open(&state, &json!({ "sessionId": session_id }))
+        };
+
+        open("sess-a:browser:t1").expect("browser_open A allocates the first prewarm slot");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        open("sess-b:browser:t1").expect("browser_open B allocates the second prewarm slot");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+
+        // Pool exhausted: the third browser_open RPC must self-heal by reclaiming
+        // the least-recently-active slot instead of returning "no available
+        // prewarmed page targets".
+        let third = open("sess-c:browser:t1");
+
+        match previous_port {
+            Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+            None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+        }
+        match previous_profile {
+            Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+            None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+        }
+
+        assert!(
+            third.is_ok(),
+            "third browser_open RPC should self-heal native-CEF pool exhaustion, got {:?}",
+            third.err()
+        );
+    }
+
+    fn empty_turn_handle(cancel: CancelToken) -> TurnHandle {
+        TurnHandle {
+            session_id: None,
+            session_uuid: None,
+            channel: "agent".to_string(),
+            message: String::new(),
+            attachments: Vec::new(),
+            cancel,
+            cancel_reported: Arc::new(AtomicBool::new(false)),
+            user_prompt_persisted: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_questions: Arc::new(Mutex::new(HashMap::new())),
+            progress: Arc::new(Mutex::new(TurnProgress::default())),
+        }
+    }
+
+    fn test_daemon_state() -> DaemonState {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state")
+    }
+
+    fn bash_invocation(command: &str) -> TranscriptEvent {
+        TranscriptEvent::ToolInvocation {
+            call_id: "c1".to_string(),
+            tool_id: "Bash".to_string(),
+            input: json!({ "command": command }).to_string(),
+            output: "ok".to_string(),
+            success: true,
+            metadata: None,
+            actor: None,
+            subject: None,
+        }
+    }
+
+    /// Gate signal for issue #560: replayed transcripts reveal browser usage
+    /// either through the Browser/BrowserAction tools or through Bash running
+    /// the `browser ...` CLI (the browser skill's documented path).
+    #[test]
+    fn session_used_browser_tool_detects_browser_usage_in_transcript() {
+        assert!(session_used_browser_tool(&[bash_invocation(
+            "browser open https://example.com --label docs"
+        )]));
+        assert!(session_used_browser_tool(&[bash_invocation(
+            "browser --json snapshot --tab-id t1"
+        )]));
+        assert!(session_used_browser_tool(&[bash_invocation(
+            "puffer internal-tool browser list"
+        )]));
+        let typed_tool = TranscriptEvent::ToolInvocation {
+            call_id: "c2".to_string(),
+            tool_id: "BrowserAction".to_string(),
+            input: "{}".to_string(),
+            output: "ok".to_string(),
+            success: true,
+            metadata: None,
+            actor: None,
+            subject: None,
+        };
+        assert!(session_used_browser_tool(&[typed_tool]));
+
+        assert!(!session_used_browser_tool(&[bash_invocation("ls -la")]));
+        assert!(!session_used_browser_tool(&[bash_invocation(
+            "git branch --list"
+        )]));
+        assert!(!session_used_browser_tool(&[TranscriptEvent::UserMessage {
+            text: "please open the browser".to_string(),
+            attachments: Vec::new(),
+            actor: None,
+        }]));
+    }
+
+    /// The gate must parse per shell segment: compound/env-prefixed commands
+    /// that really invoke the browser CLI count, while commands that merely
+    /// mention the strings (grep/echo in coding sessions) must not.
+    #[test]
+    fn session_used_browser_tool_parses_bash_per_segment() {
+        assert!(session_used_browser_tool(&[bash_invocation(
+            "cd /tmp && browser open https://example.com"
+        )]));
+        assert!(session_used_browser_tool(&[bash_invocation(
+            "FOO=1 browser snapshot --tab-id t1"
+        )]));
+        assert!(session_used_browser_tool(&[bash_invocation(
+            "/usr/local/bin/puffer internal-tool browser list"
+        )]));
+        assert!(session_used_browser_tool(&[bash_invocation(
+            "browser list; git status"
+        )]));
+
+        assert!(!session_used_browser_tool(&[bash_invocation(
+            "grep -rn 'internal-tool browser' crates/"
+        )]));
+        assert!(!session_used_browser_tool(&[bash_invocation(
+            "echo \"use internal-tool browser for tabs\""
+        )]));
+        assert!(!session_used_browser_tool(&[bash_invocation(
+            "cat docs/browser.md"
+        )]));
+    }
+
+    /// Bash `browser ...` CLI tabs register under the workspace-stable
+    /// cli-browser id, not the chat session UUID. The turn lookup must check
+    /// both keyspaces or live CLI tabs get reported as "browser is gone".
+    #[test]
+    fn turn_browser_tab_context_falls_back_to_workspace_cli_keyspace() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let state = test_daemon_state();
+        let chat_root = Uuid::new_v4().to_string();
+
+        let empty = turn_browser_tab_context(&state, &chat_root);
+        assert!(!empty.has_active_tab(), "fresh registry has no tab");
+
+        let cli_id =
+            crate::daemon_browser::default_cli_session_id(&state.paths).expect("cli session id");
+        state
+            .browsers
+            .test_record_tab(&cli_id, "t1", "https://example.com/cart", "Cart");
+
+        let context = turn_browser_tab_context(&state, &chat_root);
+        assert!(
+            context.has_active_tab(),
+            "live CLI tab must be visible through the chat-session lookup"
+        );
+        assert_eq!(context.url.as_deref(), Some("https://example.com/cart"));
+    }
+
+    /// Issue #560: a restarted daemon has an empty tab registry, so a resumed
+    /// session whose transcript used the browser must get a stale-state
+    /// reminder; sessions that never touched the browser stay clean.
+    #[test]
+    fn browser_status_for_turn_gates_on_history_and_live_tab() {
+        use crate::daemon_browser::{BrowserCurrentTabContext, BrowserTabInfo};
+
+        let no_tab = BrowserCurrentTabContext::no_active_tab();
+        assert_eq!(browser_status_for_turn(&no_tab, false), None);
+
+        let stale = browser_status_for_turn(&no_tab, true).expect("inject for browser session");
+        assert!(stale.contains("No browser tab"), "status: {stale}");
+
+        let live_tab = BrowserTabInfo {
+            tab_id: "t1".to_string(),
+            label: "Tab 1".to_string(),
+            url: "https://example.com/cart".to_string(),
+            title: "Cart".to_string(),
+            loading: false,
+            connected: true,
+            active: true,
+            backend_session_id: "sess:browser:t1".to_string(),
+            native_cef_session_id: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let live = BrowserCurrentTabContext::from_tab(&live_tab);
+        let status =
+            browser_status_for_turn(&live, false).expect("live tab injects even without history");
+        assert!(status.contains("https://example.com/cart"), "status: {status}");
+    }
+
+    /// Core of the client-disconnect watchdog (issue #600): orphaned interactive
+    /// turns in the registry get their cancel token flipped and are removed.
+    #[test]
+    fn cancel_all_active_turns_cancels_orphaned_interactive_turns() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let state = test_daemon_state();
+
+        let cancel = CancelToken::new();
+        let observer = cancel.clone();
+        state
+            .turns
+            .lock()
+            .unwrap()
+            .insert("turn-1".to_string(), empty_turn_handle(cancel));
+
+        assert!(!observer.is_cancelled());
+        let cancelled = cancel_all_active_turns(&state);
+
+        assert_eq!(cancelled, 1, "the orphaned interactive turn is cancelled");
+        assert!(observer.is_cancelled(), "its cancel token must be flipped");
+        assert!(
+            state.turns.lock().unwrap().is_empty(),
+            "cancelled turns are removed from the registry"
+        );
+    }
+
+    /// The live-client counter that arms the watchdog (issue #600): it tracks
+    /// open connections and dropping the last guard returns cleanly even without
+    /// a Tokio runtime (the watchdog is simply not armed).
+    #[test]
+    fn connection_guard_tracks_live_client_count() {
+        let _home_guard = PufferHomeEnvGuard::set();
+        let state = Arc::new(test_daemon_state());
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 0);
+
+        let first = ConnectionGuard::new(state.clone());
+        let second = ConnectionGuard::new(state.clone());
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 2);
+
+        drop(second);
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 1);
+        drop(first); // last client gone — decrements to 0 without panicking
+        assert_eq!(state.live_connections.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn default_cli_session_id_is_stable_for_one_workspace() {
         let temp = tempdir().unwrap();
-        let paths = ConfigPaths::discover(temp.path());
+        let paths = test_config_paths(temp.path());
         let left = default_cli_session_id(&paths).unwrap();
         let right = default_cli_session_id(&paths).unwrap();
         assert_eq!(left, right);
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn invalid_browser_session_id_is_regenerated() {
         let temp = tempdir().unwrap();
-        let paths = ConfigPaths::discover(temp.path());
+        let paths = test_config_paths(temp.path());
         ensure_workspace_dirs(&paths).unwrap();
         let path = browser_session_id_path(&paths);
         std::fs::write(&path, "bad:browser:root\n").unwrap();
@@ -287,5 +287,14 @@ mod tests {
             candidates[0],
             paths.workspace_config_dir.join("daemon.handshake")
         );
+    }
+
+    fn test_config_paths(root: &Path) -> ConfigPaths {
+        ConfigPaths {
+            workspace_root: root.to_path_buf(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join("user-puffer"),
+            builtin_resources_dir: root.join("resources"),
+        }
     }
 }

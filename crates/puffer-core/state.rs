@@ -252,6 +252,13 @@ pub struct AppState {
     /// evaluation and worker/UI round-trips.
     pub(crate) session_permission_state: SessionPermissionState,
     browser_url_cache: HashMap<BrowserUrlCacheKey, String>,
+    /// Live browser-tab status line injected into the per-turn system
+    /// reminder. Set by the daemon before each turn from the real tab
+    /// registry; `None` keeps the reminder free of browser noise for
+    /// sessions that never touched the browser (issue #560 — without this
+    /// the model trusts stale `connected:true` tool output replayed from
+    /// the transcript after a daemon restart).
+    pub browser_status: Option<String>,
     pub(crate) native_structured_output_unsupported: HashSet<String>,
     pub(crate) status_line_signature: Option<String>,
     pending_query_prompt: Option<String>,
@@ -366,6 +373,7 @@ impl AppState {
             claude_read_state: HashMap::new(),
             session_permission_state: SessionPermissionState::default(),
             browser_url_cache: HashMap::new(),
+            browser_status: None,
             native_structured_output_unsupported: HashSet::new(),
             status_line_signature: None,
             pending_query_prompt: None,

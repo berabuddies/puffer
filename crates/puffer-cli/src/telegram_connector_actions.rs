@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use puffer_config::ConfigPaths;
-use puffer_subscriber_runtime::{EventEnvelope, Manifest, StateSpec, SubscriberCommand};
+use puffer_subscriber_runtime::{EnvEntry, EventEnvelope, Manifest, StateSpec, SubscriberCommand};
 use puffer_subscriptions::{
     find_subscriber_manifest, ConnectionAuthChecker, ConnectorTemplate, SubscriberManifestRoots,
     SubscriptionManager,
@@ -211,7 +211,20 @@ fn telegram_connection_manifest(paths: &ConfigPaths, connection_slug: &str) -> R
             .to_string_lossy()
             .to_string(),
     });
+    set_workspace_config_env(&mut manifest, paths);
     Ok(manifest)
+}
+
+fn set_workspace_config_env(manifest: &mut Manifest, paths: &ConfigPaths) {
+    manifest
+        .spec
+        .run
+        .env
+        .retain(|entry| entry.name != "PUFFER_WORKSPACE_CONFIG_DIR");
+    manifest.spec.run.env.push(EnvEntry {
+        name: "PUFFER_WORKSPACE_CONFIG_DIR".to_string(),
+        value: paths.workspace_config_dir.to_string_lossy().to_string(),
+    });
 }
 
 fn telegram_action_event_summary(

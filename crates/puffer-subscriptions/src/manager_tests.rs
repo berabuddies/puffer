@@ -238,6 +238,46 @@ fn connector_stream_restarts_when_contact_scope_changes() {
 }
 
 #[test]
+fn connector_stream_does_not_start_for_empty_owned_contact_scope() {
+    let temp = tempdir().unwrap();
+    let (script, log) = write_stream_logger(temp.path());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+        .build(runtime.handle().clone())
+        .unwrap();
+    manager
+        .connector_store()
+        .upsert(stream_connector_template(&script, &log))
+        .unwrap();
+    manager
+        .connection_store()
+        .create(ConnectionRecord::authenticated(
+            "chat",
+            "telegram-login",
+            "test chat",
+        ))
+        .unwrap();
+
+    manager
+        .store()
+        .upsert(test_binding(
+            "chat-monitor",
+            "chat",
+            vec!["google@alice@example.com".into()],
+        ))
+        .unwrap();
+    manager.refresh_connection_consumers().unwrap();
+
+    assert!(read_subscribe_commands(&log).is_empty());
+
+    manager.shutdown();
+}
+
+#[test]
 fn no_command_connector_contacts_fall_back_to_history() {
     let temp = tempdir().unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -305,6 +345,7 @@ fn no_command_connector_contacts_fall_back_to_history() {
         .unwrap()
         .unwrap();
     assert_eq!(contacts[0].id, "google@alice@example.com");
+    assert_eq!(contacts[0].name.as_deref(), Some("Alice"));
     let searched = manager
         .search_connector_contacts("work-gmail", "checklist".into(), Some(10))
         .unwrap()

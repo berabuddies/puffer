@@ -62,6 +62,8 @@ type WorkflowSnapshotFixture = {
   workflow_binding_error?: string | null;
   monitor_tasks?: JsonRecord[];
   monitor_task_error?: string | null;
+  monitor_memories?: JsonRecord[];
+  monitor_memory_error?: string | null;
 };
 
 type MonitorHistoryFixture = {
@@ -71,6 +73,7 @@ type MonitorHistoryFixture = {
 type ContactsSnapshotFixture = {
   contacts: JsonRecord[];
   candidates: JsonRecord[];
+  proposals?: JsonRecord[];
 };
 
 type ConnectorSetupQuestionFixture = {
@@ -118,6 +121,42 @@ const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
 const now = Date.now();
+const CONTACT_ID_PREFIXES = new Set(["telegram", "google", "slack", "discord", "matrix", "lark"]);
+
+function normalizedContactId(value: unknown): string | null {
+  const trimmed = String(value).trim();
+  const atIndex = trimmed.indexOf("@");
+  if (atIndex <= 0) return null;
+  const prefix = trimmed.slice(0, atIndex).trim().toLowerCase();
+  if (!CONTACT_ID_PREFIXES.has(prefix)) return null;
+  let suffix = trimmed.slice(atIndex + 1).trim().replace(/^@+/, "");
+  if (!suffix || /[\s\x00-\x1f\x7f]/.test(suffix)) return null;
+  if (prefix === "telegram") {
+    suffix = suffix.toLowerCase();
+    if (/^\d+$/.test(suffix) || !/^[a-z0-9_]+$/.test(suffix)) return null;
+  }
+  if (prefix === "google") suffix = suffix.toLowerCase();
+  return `${prefix}@${suffix}`;
+}
+
+function normalizedContactIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map(normalizedContactId).filter((id): id is string => id !== null))).sort();
+}
+
+function overlapsContactIds(record: JsonRecord, contactIds: string[]): boolean {
+  const saved = new Set(contactIds);
+  return normalizedContactIds(record.contact_ids).some((id) => saved.has(id));
+}
+
+function mergedOverlappingContactIds(contacts: JsonRecord[], savedId: string, contactIds: string[]): string[] {
+  const merged = [...contactIds];
+  for (const contact of contacts) {
+    if (String(contact.id ?? "") === savedId || !overlapsContactIds(contact, contactIds)) continue;
+    merged.push(...normalizedContactIds(contact.contact_ids));
+  }
+  return Array.from(new Set(merged)).sort();
+}
 
 const session = {
   sessionId: "session-browser",
@@ -727,7 +766,8 @@ export class FakeDaemon {
           }
         ]
       }
-    ]
+    ],
+    proposals: []
   };
   private nextTab = 2;
   private nextPty = 1;
@@ -895,7 +935,9 @@ export class FakeDaemon {
       workflow_bindings: snapshot.workflow_bindings?.map((binding) => ({ ...binding })),
       workflow_binding_error: snapshot.workflow_binding_error ?? null,
       monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
-      monitor_task_error: snapshot.monitor_task_error ?? null
+      monitor_task_error: snapshot.monitor_task_error ?? null,
+      monitor_memories: snapshot.monitor_memories?.map((memory) => ({ ...memory })),
+      monitor_memory_error: snapshot.monitor_memory_error ?? null
     };
   }
 
@@ -908,7 +950,8 @@ export class FakeDaemon {
   setContactsSnapshot(snapshot: ContactsSnapshotFixture): void {
     this.contactsSnapshot = {
       contacts: snapshot.contacts.map((contact) => ({ ...contact })),
-      candidates: snapshot.candidates.map((candidate) => ({ ...candidate }))
+      candidates: snapshot.candidates.map((candidate) => ({ ...candidate })),
+      proposals: snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? []
     };
   }
 
@@ -1315,6 +1358,8 @@ export class FakeDaemon {
         return this.deleteWorkflowBinding(request.params);
       case "task_monitor_create":
         return this.createMonitor(request.params);
+      case "task_monitor_memory_save":
+        return this.saveMonitorMemory(request.params);
       case "workflow_toggle":
         return this.toggleWorkflow(request.params);
       case "contacts_list":
@@ -1448,7 +1493,9 @@ export class FakeDaemon {
       workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => ({ ...binding })) ?? [],
       workflow_binding_error: this.workflowSnapshot.workflow_binding_error ?? null,
       monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
-      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
+      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null,
+      monitor_memories: this.workflowSnapshot.monitor_memories?.map((memory) => ({ ...memory })) ?? [],
+      monitor_memory_error: this.workflowSnapshot.monitor_memory_error ?? null
     };
   }
 
@@ -1551,23 +1598,49 @@ export class FakeDaemon {
     return this.workflowListResponse();
   }
 
+  private saveMonitorMemory(params: JsonRecord): JsonRecord {
+    const connectionSlug = String(params.connection_slug ?? "").trim();
+    const content = String(params.content ?? "");
+    if (!connectionSlug) throw new Error("missing monitor memory connection slug");
+    const path = `/tmp/${connectionSlug}.md`;
+    const existing = this.workflowSnapshot.monitor_memories ?? [];
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      monitor_memories: [
+        ...existing.filter((memory) => String(memory.connection_slug ?? "") !== connectionSlug),
+        {
+          connection_slug: connectionSlug,
+          path,
+          content,
+          truncated: false
+        }
+      ].sort((a, b) => String(a.connection_slug ?? "").localeCompare(String(b.connection_slug ?? "")))
+    };
+    return this.workflowListResponse();
+  }
+
   private contactsList(params: JsonRecord): JsonRecord {
     const query = String(params.query ?? "").trim().toLowerCase();
     const limit = Math.max(1, Number(params.limit ?? 60) || 60);
     const matches = (record: JsonRecord) => !query || JSON.stringify(record).toLowerCase().includes(query);
     return {
       contacts: this.contactsSnapshot.contacts.filter(matches).slice(0, limit).map((contact) => ({ ...contact })),
-      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate }))
+      candidates: this.contactsSnapshot.candidates.filter(matches).slice(0, limit).map((candidate) => ({ ...candidate })),
+      proposals: this.contactsSnapshot.proposals.map((proposal) => ({ ...proposal }))
     };
   }
 
   private saveContact(params: JsonRecord): JsonRecord {
     const name = String(params.name ?? "").trim();
     if (!name) throw new Error("missing contact name");
-    const id = String(params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`);
-    const contactIds = Array.isArray(params.contact_ids)
-      ? Array.from(new Set(params.contact_ids.map((item) => String(item).trim()).filter(Boolean))).sort()
-      : [];
+    const id = String(
+      params.id ?? `contact-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom"}`
+    ).trim();
+    const contactIds = mergedOverlappingContactIds(
+      this.contactsSnapshot.contacts,
+      id,
+      normalizedContactIds(params.contact_ids)
+    );
     if (contactIds.length === 0) throw new Error("missing contact ids");
     const contact = {
       id,
@@ -1579,15 +1652,19 @@ export class FakeDaemon {
     this.contactsSnapshot = {
       ...this.contactsSnapshot,
       contacts: [
-        ...this.contactsSnapshot.contacts.filter((candidate) => candidate.id !== id),
+        ...this.contactsSnapshot.contacts.filter((candidate) =>
+          candidate.id !== id && !overlapsContactIds(candidate, contactIds)
+        ),
         contact
-      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
+      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
+      proposals: this.contactsSnapshot.proposals.filter((proposal) => !overlapsContactIds(proposal, contactIds))
     };
     return this.contactsList({});
   }
 
   private deleteContact(params: JsonRecord): JsonRecord {
-    const id = String(params.id ?? "");
+    const id = String(params.id ?? "").trim();
+    if (!id) throw new Error("missing contact id");
     this.contactsSnapshot = {
       ...this.contactsSnapshot,
       contacts: this.contactsSnapshot.contacts.filter((contact) => contact.id !== id)
@@ -1597,13 +1674,23 @@ export class FakeDaemon {
 
   private inferContacts(params: JsonRecord): JsonRecord {
     const limit = Math.max(1, Number(params.limit ?? 30) || 30);
+    const savedContactIds = normalizedContactIds(
+      this.contactsSnapshot.contacts.flatMap((contact) =>
+        Array.isArray(contact.contact_ids) ? contact.contact_ids : []
+      )
+    );
+    const proposals = this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
+      name: String(candidate.name ?? candidate.id ?? "Contact"),
+      description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
+      avatar: candidate.avatar ?? null,
+      contact_ids: [String(candidate.id ?? "")]
+    })).filter((proposal) => proposal.contact_ids[0] && !overlapsContactIds(proposal, savedContactIds));
+    this.contactsSnapshot = {
+      ...this.contactsSnapshot,
+      proposals
+    };
     return {
-      proposals: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
-        name: String(candidate.name ?? candidate.id ?? "Contact"),
-        description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
-        avatar: candidate.avatar ?? null,
-        contact_ids: [String(candidate.id ?? "")]
-      })).filter((proposal) => proposal.contact_ids[0]),
+      proposals: proposals.map((proposal) => ({ ...proposal })),
       candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
     };
   }

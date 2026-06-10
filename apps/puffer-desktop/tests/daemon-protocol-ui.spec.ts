@@ -66,6 +66,33 @@ test("desktop client speaks the real daemon WebSocket protocol", async ({ page }
   await expect(page.getByText("Real daemon completion arrived.")).toBeVisible();
 });
 
+test("desktop client accepts remote params as the active browser daemon", async ({ page }) => {
+  const daemon = new FakeDaemon({ protocol: "real", workspaceRoot: "/tmp/puffer-remote" });
+  await daemon.install(page);
+
+  const params = new URLSearchParams({
+    skipOnboarding: "1",
+    pufferRemoteBackend: daemon.url,
+    pufferRemoteToken: "remote-token",
+    pufferRemoteWorkspaceRoot: "/tmp/puffer-remote"
+  });
+  await page.goto(`/?${params.toString()}`);
+
+  await expect.poll(() => daemon.socketUrls.length).toBeGreaterThan(0);
+  expect(daemon.socketUrls[0]).toContain("token=remote-token");
+
+  const handshake = await page.evaluate(async () => {
+    const mod = await import("/src/lib/api/daemonClient.ts");
+    const client = await mod.ensureLocalDaemonClient();
+    return client.handshake;
+  });
+  expect(handshake).toMatchObject({
+    url: daemon.url,
+    token: "remote-token",
+    workspaceRoot: "/tmp/puffer-remote"
+  });
+});
+
 test("streams intermediate assistant messages inside agent activity", async ({ page }) => {
   const daemon = new FakeDaemon({ protocol: "real" });
   daemon.setSessionTimeline("session-browser", []);

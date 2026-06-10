@@ -178,7 +178,7 @@ fn normalize_reason(reason: Option<&str>) -> String {
         .replace(['\n', '\r'], " ")
 }
 
-fn monitor_tasks_path(paths: &ConfigPaths) -> PathBuf {
+pub(super) fn monitor_tasks_path(paths: &ConfigPaths) -> PathBuf {
     paths
         .workspace_config_dir
         .join("runtime")
@@ -186,7 +186,7 @@ fn monitor_tasks_path(paths: &ConfigPaths) -> PathBuf {
         .join("monitor_tasks.json")
 }
 
-fn task_id_matches(task: &Value, task_id: &str) -> bool {
+pub(super) fn task_id_matches(task: &Value, task_id: &str) -> bool {
     task_string(task, &["task_id", "taskId", "id"]).as_deref() == Some(task_id)
 }
 

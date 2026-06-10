@@ -160,7 +160,10 @@ fn flip_nopecha_force_base_api(background_js: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    let patched = content.replace(NOPECHA_FORCE_BASE_API_ANCHOR, NOPECHA_FORCE_BASE_API_FLIPPED);
+    let patched = content.replace(
+        NOPECHA_FORCE_BASE_API_ANCHOR,
+        NOPECHA_FORCE_BASE_API_FLIPPED,
+    );
     fs::write(background_js, patched).with_context(|| {
         format!(
             "write patched NopeCHA background.js {}",

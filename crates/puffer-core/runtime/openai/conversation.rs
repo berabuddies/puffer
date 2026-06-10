@@ -1187,6 +1187,16 @@ pub(crate) fn build_system_reminder(state: &AppState, git_status: &str) -> Strin
     if !git_status.is_empty() {
         reminder.push_str(&format!("\n\n# gitStatus\n{git_status}"));
     }
+    // Real browser-tab state from the daemon (issue #560). Without this the
+    // model's only browser signal is tool output replayed from the
+    // transcript, which still claims `connected:true` after a restart.
+    if let Some(browser_status) = state
+        .browser_status
+        .as_deref()
+        .filter(|status| !status.trim().is_empty())
+    {
+        reminder.push_str(&format!("\n\n# browserStatus\n{browser_status}"));
+    }
     if let Some(project_memory) = crate::memory::project_memory_skill_reminder(state) {
         reminder.push_str("\n\n");
         reminder.push_str(&project_memory);
@@ -1831,6 +1841,27 @@ mod tests {
         assert!(reminder.contains("projectMemory"));
         assert!(reminder.contains("skill: \"project-memory\""));
         assert!(reminder.contains("/tmp/MEMORY.md"));
+    }
+
+    #[test]
+    fn build_system_reminder_includes_browser_status_when_set() {
+        // Issue #560: after a daemon restart the transcript still carries old
+        // browser tool output (connected:true), so the per-turn reminder must
+        // surface the daemon's real browser state.
+        let mut state = crate::runtime::tests::state();
+        state.browser_status =
+            Some("No browser tab is currently open in this session.".to_string());
+        let reminder = build_system_reminder(&state, "");
+        assert!(reminder.contains("# browserStatus"));
+        assert!(reminder.contains("No browser tab is currently open in this session."));
+    }
+
+    #[test]
+    fn build_system_reminder_omits_browser_status_when_unset() {
+        // Pure coding sessions never set browser_status — no block emitted.
+        let state = crate::runtime::tests::state();
+        let reminder = build_system_reminder(&state, "");
+        assert!(!reminder.contains("browserStatus"));
     }
 
     #[test]

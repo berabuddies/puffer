@@ -119,10 +119,19 @@ pub(crate) async fn emit_message_if_new(
     }
     let notification_muted = notification_mutes.message_chat_muted(message);
     let notification_silent = message.silent();
-    if message_notifications_suppressed(notification_muted, notification_silent) {
+    let is_outgoing = message.outgoing();
+    if should_suppress_message(is_outgoing, notification_muted, notification_silent) {
+        // Outgoing (self-sent) messages are recorded as seen but never emitted
+        // into the triage pipeline: otherwise the user's own messages spin up a
+        // triage turn (burning credits) and can be misread as incoming tasks.
+        let stage = if is_outgoing {
+            "suppressed_outgoing"
+        } else {
+            "suppressed"
+        };
         append_message_diagnostic(
             env,
-            "suppressed",
+            stage,
             message,
             delivery_source,
             source_received_at_ms,
@@ -134,9 +143,10 @@ pub(crate) async fn emit_message_if_new(
         info!(
             chat = %message.chat().id(),
             message_id = message.id(),
+            is_outgoing,
             notification_muted,
             notification_silent,
-            "skipped suppressed Telegram message"
+            "skipped Telegram message (outgoing or muted/silent)"
         );
         return Ok(false);
     }
@@ -185,6 +195,18 @@ fn message_notifications_suppressed(notification_muted: bool, notification_silen
     notification_muted || notification_silent
 }
 
+/// Whether a message should be recorded as seen but NOT emitted into the triage
+/// pipeline. Outgoing (self-sent) messages are always suppressed so the user's
+/// own messages never trigger a triage turn (the #569 credit-burn bug); muted /
+/// silent chats are suppressed per the user's notification settings.
+fn should_suppress_message(
+    is_outgoing: bool,
+    notification_muted: bool,
+    notification_silent: bool,
+) -> bool {
+    is_outgoing || message_notifications_suppressed(notification_muted, notification_silent)
+}
+
 fn message_chat_key(message: &Message) -> String {
     message.chat().id().to_string()
 }
@@ -208,11 +230,14 @@ fn append_message_diagnostic(
         Some(sender) => (
             Some(sender.id()),
             sender.username().map(|value| value.to_string()),
-            Some(sender.name().to_string()),
+            Some(chat_display_name(&sender)),
             telegram_chat_is_bot(&sender),
         ),
         None => (None, None, None, false),
     };
+    if chat_is_bot || sender_is_bot {
+        return;
+    }
     let record = json!({
         "at_ms": now_ms,
         "stage": stage,
@@ -244,7 +269,7 @@ fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) 
     match chat {
         Chat::User(_) => (
             "user",
-            Some(chat.name().to_string()),
+            Some(chat_display_name(chat)),
             chat.username().map(|value| value.to_string()),
         ),
         Chat::Group(_) => (
@@ -260,8 +285,22 @@ fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) 
     }
 }
 
+fn chat_display_name(chat: &Chat) -> String {
+    match chat {
+        Chat::User(user) => user.full_name(),
+        Chat::Group(_) | Chat::Channel(_) => chat.name().to_string(),
+    }
+}
+
 fn telegram_chat_is_bot(chat: &Chat) -> bool {
     matches!(chat, Chat::User(user) if user.raw.bot)
+        || chat
+            .username()
+            .is_some_and(telegram_username_looks_like_bot)
+}
+
+fn telegram_username_looks_like_bot(username: &str) -> bool {
+    username.to_ascii_lowercase().ends_with("bot")
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {
@@ -296,5 +335,18 @@ mod tests {
         assert!(message_notifications_suppressed(false, true));
         assert!(message_notifications_suppressed(true, true));
         assert!(!message_notifications_suppressed(false, false));
+    }
+
+    #[test]
+    fn outgoing_messages_are_suppressed() {
+        // #569: the user's own (outgoing) messages must be suppressed from the
+        // triage pipeline even when the chat is not muted/silent.
+        assert!(should_suppress_message(true, false, false));
+        assert!(should_suppress_message(true, true, false));
+        assert!(should_suppress_message(true, false, true));
+        // Incoming messages still follow the notification-suppression rules.
+        assert!(!should_suppress_message(false, false, false));
+        assert!(should_suppress_message(false, true, false));
+        assert!(should_suppress_message(false, false, true));
     }
 }

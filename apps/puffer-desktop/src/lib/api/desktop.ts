@@ -960,12 +960,43 @@ export async function deleteContact(id: string): Promise<ContactsSnapshot> {
   return client.request<ContactsSnapshot>("contacts_delete", { id });
 }
 
-export async function inferContacts(limit = 30): Promise<{
+export type ContactInferTracePayload =
+  | {
+      type: "message";
+      id: string;
+      role: "user" | "assistant" | "system";
+      title: string;
+      body: string;
+      createdAtMs?: number | null;
+    }
+  | {
+      type: "tool";
+      id: string;
+      toolName: string;
+      status: string;
+      title: string;
+      summary: string;
+      input: unknown;
+      output: unknown;
+      createdAtMs?: number | null;
+    };
+
+export async function inferContacts(limit = 30, traceId?: string): Promise<{
   proposals: ContactProposal[];
   candidates: ContactsSnapshot["candidates"];
 }> {
   const client = await ensureLocalDaemonClient();
-  return client.request("contacts_infer", { limit });
+  return client.request("contacts_infer", { limit, trace_id: traceId });
+}
+
+export async function subscribeContactInferEvents(
+  traceId: string,
+  handler: (event: ContactInferTracePayload) => void
+): Promise<() => void> {
+  const client = await ensureLocalDaemonClient();
+  return client.on(`contacts:infer:${traceId}:event`, (payload) => {
+    handler(payload as ContactInferTracePayload);
+  });
 }
 
 export async function loadContactContext(contactIds: string[], limit = 100): Promise<{

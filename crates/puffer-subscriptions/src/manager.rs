@@ -37,6 +37,12 @@ const COMMAND_RESTART_RESENDS: usize = 2;
 
 mod contact_methods;
 
+enum ConnectionContactScope {
+    All,
+    Filter(Vec<String>),
+    None,
+}
+
 /// Host-provided auth checker for built-in connectors whose credentials are
 /// owned by the embedding process instead of a connector subprocess.
 pub trait ConnectionAuthChecker: Send + Sync {
@@ -328,7 +334,26 @@ impl SubscriptionManager {
                 continue;
             }
             let contact_ids = if should_stream && stream_supported {
-                self.contact_ids_for_connection(&connection.slug)
+                match self.contact_scope_for_connection(&connection.slug) {
+                    ConnectionContactScope::All => Vec::new(),
+                    ConnectionContactScope::Filter(contact_ids) => contact_ids,
+                    ConnectionContactScope::None => {
+                        if is_running {
+                            if let Some(handle) = self
+                                .connector_streams
+                                .lock()
+                                .unwrap()
+                                .remove(&connection.slug)
+                            {
+                                block_on_manager_handle(&self.handle, async move {
+                                    handle.shutdown().await;
+                                    Ok(())
+                                })?;
+                            }
+                        }
+                        continue;
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -427,24 +452,32 @@ impl SubscriptionManager {
         Ok(())
     }
 
-    fn contact_ids_for_connection(&self, connection_slug: &str) -> Vec<String> {
+    fn contact_scope_for_connection(&self, connection_slug: &str) -> ConnectionContactScope {
+        if self.proxy_store.has_enabled_consumer(connection_slug) {
+            return ConnectionContactScope::All;
+        }
         let Some(connection) = self.connection_store.get(connection_slug) else {
-            return Vec::new();
+            return ConnectionContactScope::None;
         };
         let mut contact_ids = std::collections::BTreeSet::new();
+        let mut saw_workflow_consumer = false;
         for binding in self.store.list().into_iter().filter(|binding| {
             binding.status == crate::spec::WorkflowBindingStatus::Enabled
                 && binding.connection_slug == connection_slug
         }) {
+            saw_workflow_consumer = true;
             if binding.contact_ids.is_empty() {
-                return Vec::new();
+                return ConnectionContactScope::All;
             }
             contact_ids.extend(contact_ids_for_connector(
                 &connection.connector_slug,
                 &binding.contact_ids,
             ));
         }
-        contact_ids.into_iter().collect()
+        if !saw_workflow_consumer || contact_ids.is_empty() {
+            return ConnectionContactScope::None;
+        }
+        ConnectionContactScope::Filter(contact_ids.into_iter().collect())
     }
 
     /// Runs auth checks for connections whose connector template exposes a

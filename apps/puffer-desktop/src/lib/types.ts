@@ -779,6 +779,7 @@ export type ContactProposal = {
 export type ContactsSnapshot = {
   contacts: SavedContact[];
   candidates: ConnectorContact[];
+  proposals: ContactProposal[];
 };
 
 export type WorkflowBindingCreateRequest = {

@@ -1,8 +1,8 @@
 //! History-backed contact methods for subscriber-backed connectors.
 
 use crate::contacts::{
-    connector_slug_accepts_contact_id, contact_ids_for_connector, contact_ids_from_payload,
-    ConnectorContact, ContactContext,
+    connector_slug_accepts_contact_id, contact_display_name_from_payload,
+    contact_ids_for_connector, contact_ids_from_payload, ConnectorContact, ContactContext,
 };
 use crate::history::{now_ms, WorkflowBindingRun, WorkflowHistoryStore};
 use serde_json::Value;
@@ -161,28 +161,7 @@ fn contact_matches_query(id: &str, contact: &HistoryContact, query: &str) -> boo
 }
 
 fn name_from_payload(payload: &Value) -> Option<String> {
-    for path in [
-        "/sender_name",
-        "/chat_title",
-        "/from",
-        "/from_email",
-        "/sender_email",
-        "/organizer_email",
-        "/message/sender",
-        "/message/from",
-        "/event/title",
-        "/event/summary",
-    ] {
-        if let Some(value) = payload
-            .pointer(path)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(value.to_string());
-        }
-    }
-    None
+    contact_display_name_from_payload(payload)
 }
 
 fn push_context(contact: &mut HistoryContact, context: ContactContext, limit: usize) {

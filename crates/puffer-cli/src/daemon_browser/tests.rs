@@ -12,6 +12,7 @@ use super::screenshot::{
     BrowserScreenshotFormat,
 };
 use super::selection::parse_copy_selection_response;
+use super::test_support::{cef_env_lock, FakeCefDevtools};
 use super::upload::parse_upload_handle_response;
 use super::*;
 use crate::daemon_browser::tabs::BrowserCurrentTabStatus;
@@ -141,14 +142,9 @@ fn cef_remote_root_does_not_create_devtools_targets() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    let _guard = env_lock().lock().unwrap();
+    let _guard = cef_env_lock().lock().unwrap();
     let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
     let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -232,6 +228,201 @@ fn cef_remote_root_does_not_create_devtools_targets() {
     assert!(
         paths.iter().all(|path| !path.starts_with("/json/new")),
         "remote CEF allocation unexpectedly requested /json/new: {paths:?}"
+    );
+}
+
+/// Reproduces issue #603: the native-CEF browser uses a FIXED pool of prewarmed
+/// page targets shared across every agent session. When prior/abandoned page
+/// workers keep holding their slots, opening a new tab used to hard-fail with
+/// "no available prewarmed page targets". The registry must instead reclaim the
+/// least-recently-active slot and reuse it, so a new open keeps working.
+#[test]
+fn native_cef_pool_reclaims_idle_session_when_slots_exhausted() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // Fake CEF with exactly two prewarmed page slots.
+    let cef = FakeCefDevtools::spawn(2);
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+
+    let session_a = "sess-a:browser:t1";
+    let session_b = "sess-b:browser:t1";
+    let session_c = "sess-c:browser:t1";
+
+    registry
+        .open(events.clone(), session_a.to_string(), None, 800, 600, false)
+        .expect("open A should allocate the first prewarmed slot");
+    std::thread::sleep(Duration::from_millis(40));
+    registry
+        .open(events.clone(), session_b.to_string(), None, 800, 600, false)
+        .expect("open B should allocate the second prewarmed slot");
+    std::thread::sleep(Duration::from_millis(40));
+
+    // Both prewarmed slots are now in use. Opening a third tab must NOT hard-fail
+    // with "no available prewarmed page targets": the registry should reclaim the
+    // least-recently-active slot (session A) and reuse it for session C.
+    let third = registry.open(events.clone(), session_c.to_string(), None, 800, 600, false);
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        third.is_ok(),
+        "third open should self-heal by reclaiming the most-idle CEF slot, got {:?}",
+        third.err()
+    );
+    assert!(
+        registry.live_session(session_a).is_none(),
+        "most-idle session A should have been reclaimed to free its prewarm slot"
+    );
+    assert!(
+        registry.live_session(session_b).is_some(),
+        "session B should remain live"
+    );
+    assert!(
+        registry.live_session(session_c).is_some(),
+        "session C should be live on the reclaimed slot"
+    );
+}
+
+/// Reproduces the slot-leak half of issue #585: a wedged page that never answers
+/// the CDP reset must NOT permanently leak its native-CEF prewarm slot. Closing
+/// such a page has to return its slot to the shared pool (best-effort reset) so a
+/// single unresponsive page can't poison the whole browser tree.
+#[test]
+fn native_cef_slot_returns_to_pool_when_hung_page_reset_fails() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // A single prewarmed slot whose page is wedged (accepts the CDP socket but
+    // never answers), so the reset-on-release will time out.
+    let cef = FakeCefDevtools::spawn_with_hung_slots(1, vec![0]);
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+
+    let session_a = "sess-a:browser:t1";
+    let session_b = "sess-b:browser:t1";
+
+    registry
+        .open(events.clone(), session_a.to_string(), None, 800, 600, false)
+        .expect("open A should allocate the only prewarmed slot");
+    // Closing the wedged page runs a CDP reset that times out; its slot must still
+    // come back to the pool instead of being permanently leaked.
+    registry.close(session_a).expect("close A");
+
+    let reopened = registry.open(events.clone(), session_b.to_string(), None, 800, 600, false);
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        reopened.is_ok(),
+        "a wedged page's slot must return to the pool after close, got {:?}",
+        reopened.err()
+    );
+}
+
+/// Full issue #585 cascade: when every prewarm slot is held by a WEDGED page
+/// (worker alive, page won't answer CDP), opening a new tab must still recover.
+/// The registry reclaims the least-recently-active wedged slot (issue #603) and
+/// that slot returns to the pool despite the failed reset (the #585 slot-leak
+/// fix), so one frozen checkout page no longer poisons the whole browser tree.
+#[test]
+fn native_cef_recovers_when_all_slots_held_by_wedged_pages() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // Two prewarm slots, both wedged.
+    let cef = FakeCefDevtools::spawn_with_hung_slots(2, vec![0, 1]);
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+
+    registry
+        .open(
+            events.clone(),
+            "sess-a:browser:t1".to_string(),
+            None,
+            800,
+            600,
+            false,
+        )
+        .expect("open A");
+    std::thread::sleep(Duration::from_millis(40));
+    registry
+        .open(
+            events.clone(),
+            "sess-b:browser:t1".to_string(),
+            None,
+            800,
+            600,
+            false,
+        )
+        .expect("open B");
+    std::thread::sleep(Duration::from_millis(40));
+
+    // Both wedged slots are in use; the new tab must recover by reclaiming one.
+    let third = registry.open(
+        events.clone(),
+        "sess-c:browser:t1".to_string(),
+        None,
+        800,
+        600,
+        false,
+    );
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        third.is_ok(),
+        "a new tab must recover even when all slots are held by wedged pages, got {:?}",
+        third.err()
     );
 }
 

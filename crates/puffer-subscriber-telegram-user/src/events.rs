@@ -72,7 +72,7 @@ pub fn build_message_event(
         Some(s) => (
             Some(s.id()),
             s.username().map(|u| u.to_string()),
-            Some(s.name().to_string()),
+            Some(chat_display_name(&s)),
             telegram_chat_is_bot(&s),
         ),
         None => (None, None, None, false),
@@ -167,7 +167,7 @@ fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) 
     match chat {
         Chat::User(_) => (
             "user",
-            Some(chat.name().to_string()),
+            Some(chat_display_name(chat)),
             chat.username().map(|u| u.to_string()),
         ),
         Chat::Group(_) => (
@@ -183,6 +183,20 @@ fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) 
     }
 }
 
+fn chat_display_name(chat: &Chat) -> String {
+    match chat {
+        Chat::User(user) => user.full_name(),
+        Chat::Group(_) | Chat::Channel(_) => chat.name().to_string(),
+    }
+}
+
 fn telegram_chat_is_bot(chat: &Chat) -> bool {
     matches!(chat, Chat::User(user) if user.raw.bot)
+        || chat
+            .username()
+            .is_some_and(telegram_username_looks_like_bot)
+}
+
+fn telegram_username_looks_like_bot(username: &str) -> bool {
+    username.to_ascii_lowercase().ends_with("bot")
 }

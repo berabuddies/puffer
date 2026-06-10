@@ -45,6 +45,13 @@ pub(super) fn execute_tool_batch(
     tool_calls: &[ToolCallRequest],
     parent_span_ctx: Option<&puffer_observability::OtelContext>,
 ) -> Result<Vec<ToolInvocation>> {
+    // Cancel boundary (issue #600): if the turn was cancelled before this batch
+    // begins, do NOT dispatch any tool — a runaway browser checkout must not run
+    // after Stop. Every requested call still gets a cancelled result so the
+    // transcript stays consistent (one output per FunctionCall).
+    if inputs.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+        return Ok(tool_calls.iter().map(cancelled_invocation).collect());
+    }
     if inputs.state.lambda_gate.is_some() || tool_calls.iter().any(|tc| tc.tool_id == "Skill") {
         return execute_tool_batch_serial(inputs, session, cwd, tool_calls, parent_span_ctx);
     }
@@ -357,6 +364,15 @@ fn execute_tool_batch_serial(
     let mut invocations = Vec::with_capacity(tool_calls.len());
 
     for call in tool_calls {
+        // Honor cancellation between tools in a batch (issue #600): once Stop is
+        // pressed, skip dispatching this and every remaining call, recording a
+        // cancelled result for each so the loop terminates cleanly at its next
+        // boundary instead of finishing the whole batch (e.g. clicking "Place
+        // Order" after the user already cancelled).
+        if inputs.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+            invocations.push(cancelled_invocation(call));
+            continue;
+        }
         let mut tool_span = if let Some(handle) = inputs.observability.as_ref() {
             let mut span = puffer_observability::start_tool_span(
                 Some(handle),
@@ -467,6 +483,21 @@ fn execute_tool_batch_serial(
     Ok(invocations)
 }
 
+/// Builds the result recorded for a tool call that was skipped because the turn
+/// was cancelled mid-batch (issue #600). Keeps the one-output-per-FunctionCall
+/// invariant so the conversation transcript stays consistent.
+fn cancelled_invocation(call: &ToolCallRequest) -> ToolInvocation {
+    ToolInvocation {
+        call_id: call.call_id.clone(),
+        tool_id: call.tool_id.clone(),
+        input: call.input.clone(),
+        output: "Interrupted by user.".to_string(),
+        success: false,
+        metadata: Value::Null,
+        terminate: false,
+    }
+}
+
 fn extract_terminate(metadata: &Value) -> bool {
     metadata
         .get("terminate")
@@ -516,8 +547,27 @@ fn _unused_def_marker(_d: &ToolDefinition) {}
 
 #[cfg(test)]
 mod terminate_tests {
-    use super::extract_terminate;
+    use super::{cancelled_invocation, extract_terminate};
+    use crate::ToolCallRequest;
     use serde_json::json;
+
+    /// Issue #600: a tool call skipped because the turn was cancelled mid-batch
+    /// still yields a failed result (one output per FunctionCall) marked
+    /// "Interrupted by user." so the transcript stays consistent.
+    #[test]
+    fn cancelled_invocation_records_interrupted_failure() {
+        let call = ToolCallRequest {
+            call_id: "call-1".to_string(),
+            tool_id: "BrowserAction".to_string(),
+            input: "{}".to_string(),
+        };
+        let inv = cancelled_invocation(&call);
+        assert_eq!(inv.call_id, "call-1");
+        assert_eq!(inv.tool_id, "BrowserAction");
+        assert!(!inv.success);
+        assert!(!inv.terminate);
+        assert_eq!(inv.output, "Interrupted by user.");
+    }
 
     #[test]
     fn missing_metadata_field_returns_false() {

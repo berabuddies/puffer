@@ -80,6 +80,7 @@ fn run_telegram_repl(paths: &ConfigPaths, connection_slug: &str) -> Result<()> {
         session_path: state_dir.join("telegram.session"),
         state_dir,
         topic: connection_slug.to_string(),
+        workspace_config_dir: Some(paths.workspace_config_dir.clone()),
     };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

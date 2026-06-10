@@ -4347,6 +4347,7 @@ dependencies = [
  "ctrlc",
  "fslock",
  "futures",
+ "grammers-session",
  "indexmap 2.14.0",
  "notify",
  "portable-pty",

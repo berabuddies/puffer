@@ -1,10 +1,13 @@
 //! Root Chrome ownership and per-page CDP worker sessions.
+
+mod pending;
+
 use super::chrome::{
     close_page_target, create_page_target, ensure_chrome_executable, initial_page_target,
     read_devtools_ws_url, read_remote_devtools_ws_url, wait_for_initial_page_targets,
     ChromePageTarget,
 };
-use super::command::{BrowserCommand, UploadReply};
+use super::command::BrowserCommand;
 use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
 use super::devtools::{devtools_event_payload, emit_devtools_payload};
@@ -15,7 +18,7 @@ use super::network_idle::BrowserNetworkState;
 use super::recording::BrowserRecordingRegistry;
 use super::screenshot::{
     capture_screenshot_command_params, parse_capture_screenshot_response,
-    BrowserCaptureScreenshotOptions, BrowserCapturedScreenshot, BrowserScreenshotFormat,
+    BrowserCaptureScreenshotOptions, BrowserCapturedScreenshot,
 };
 use super::selection::{parse_copy_selection_response, selection_eval_expression};
 use super::session_launch::{
@@ -51,6 +54,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
+
+use pending::PendingKind;
+
 const CEF_REMOTE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone)]
@@ -207,7 +213,16 @@ impl BrowserRootSession {
             (inner.browser_ws.clone(), inner.owns_targets)
         };
         if !owns_targets && !target.close_on_release {
-            super::chrome::reset_reusable_page_target(target)?;
+            // Reset is best-effort: a wedged/unresponsive page (issue #585) may
+            // never answer the CDP reset, but we MUST still return the slot to the
+            // pool. Dropping it here would permanently shrink the fixed native-CEF
+            // prewarm pool, so one hung page could poison the whole browser tree.
+            if let Err(error) = super::chrome::reset_reusable_page_target(target) {
+                log_browser_backend(format!(
+                    "reusable native CEF slot {} reset failed ({error}); returning it to the pool anyway",
+                    target.target_id
+                ));
+            }
             let mut inner = self.inner.lock().unwrap();
             inner.last_active = Instant::now();
             inner.reusable_targets.push(target.clone());
@@ -244,6 +259,14 @@ impl BrowserRootSession {
 
     pub(super) fn idle_for(&self) -> Duration {
         self.inner.lock().unwrap().last_active.elapsed()
+    }
+
+    /// Reports whether this root hands out a FIXED pool of prewarmed page targets
+    /// (native CEF, `owns_targets == false`) that cannot be grown on demand. When
+    /// true, an exhausted pool must be replenished by reclaiming an existing page
+    /// worker's slot rather than creating a new target.
+    pub(super) fn reuses_fixed_target_pool(&self) -> bool {
+        !self.inner.lock().unwrap().owns_targets
     }
 
     pub(super) fn is_alive(&self) -> bool {
@@ -483,6 +506,12 @@ impl BrowserSession {
         self.alive.load(Ordering::SeqCst)
     }
 
+    /// Time since this page worker last serviced an action. Used to pick the
+    /// least-recently-active worker when reclaiming a native-CEF prewarm slot.
+    pub(super) fn idle_for(&self) -> Duration {
+        self.last_active.lock().unwrap().elapsed()
+    }
+
     fn send(&self, command: BrowserCommand) -> Result<()> {
         self.touch();
         self.tx
@@ -493,40 +522,6 @@ impl BrowserSession {
                 error
             })
     }
-}
-
-enum PendingKind {
-    StateEval,
-    CopySelection {
-        reply: Sender<std::result::Result<BrowserCopySelection, String>>,
-    },
-    Cursor {
-        reply: Sender<std::result::Result<BrowserCursor, String>>,
-    },
-    Evaluate {
-        reply: Sender<std::result::Result<BrowserEvaluation, String>>,
-    },
-    CaptureScreenshot {
-        format: BrowserScreenshotFormat,
-        reply: Sender<std::result::Result<BrowserCapturedScreenshot, String>>,
-    },
-    UploadResolve {
-        files: Vec<String>,
-        reply: UploadReply,
-    },
-    UploadPrepare {
-        object_id: String,
-        files: Vec<String>,
-        reply: UploadReply,
-    },
-    UploadSetFiles {
-        object_id: String,
-        reply: UploadReply,
-    },
-    UploadFinalize {
-        object_id: String,
-        reply: UploadReply,
-    },
 }
 
 fn run_cdp_worker(
