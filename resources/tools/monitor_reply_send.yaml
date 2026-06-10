@@ -1,0 +1,29 @@
+id: MonitorReplySend
+name: MonitorReplySend
+description: |-
+  Send a reply for a monitored connector task to the task's recorded source.
+
+  Use this tool when acting on a Telegram monitor task that has a sourceContext
+  and completionPolicy.mode = "send_to_source". Do not choose or infer a
+  recipient yourself. This tool reads the task source context, sends the
+  message to that exact recorded Telegram chat, writes a delivery receipt, and
+  marks the task completed.
+
+  If the task does not have a stable sourceContext delivery target, ask the
+  user before sending anywhere.
+handler: runtime:workflow:monitor_reply_send
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    taskId:
+      type: string
+      description: The monitor task id to complete after the reply is sent.
+    message:
+      type: string
+      description: The exact message text to send to the task source chat.
+  required:
+    - taskId
+    - message
+  additionalProperties: false

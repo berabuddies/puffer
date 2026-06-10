@@ -10,6 +10,8 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const RESEARCH_ACTION_PROMPT_GUIDANCE: &str = "\n\nResearch action prompt guidance:\n- For any Research action, actionPrompt must define the specific research question, include source chat/contact context, cap web research to at most 3 web searches and 8 total research/tool steps, avoid repeated equivalent queries, prefer official or primary sources, and tell the action agent to stop once it has enough evidence for a concise reply.";
+
 #[derive(Debug, Deserialize)]
 struct MonitorCreateParams {
     #[serde(alias = "connectionSlug")]
@@ -336,12 +338,14 @@ fn monitor_triage_prompt(
     } else {
         contact_ids.join(", ")
     };
-    format!(
-        "You are the background monitor triage agent for connection `{connection_slug}` ({connector_slug}). Connector description: {connector_description}. Contact scope: {contact_scope}\n\nFor every new connector event:\n1. Read `{}` if it exists and use it only as task-creation guidance.\n2. If the event matches ignore memory, do not create a task; briefly report that it was ignored. Do not edit memory or subscription filters.\n3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.\n4. Otherwise decide whether the event represents an ongoing actionable task based on the connector description, event text, and structured payload.\n5. Use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks.\n6. Every monitor TaskCreate MUST include `receivedAt` from the workflow trigger's RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.\n7. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, `monitor_memory_path: \"{}\"`, `monitor_contact_ids: {:?}`, and `monitor_envelope_id` copied from the workflow trigger's `envelope_id`.\n8. If the structured event payload contains stable scalar source identity fields, copy those exact key/value pairs into top-level task metadata using the original payload key names. Stable identity means durable scope fields such as `chat_id`, `channel_id`, `room_id`, `conversation_id`, `thread_id`, `mailbox_id`, or `project_id`, paired with durable actor/source fields such as `sender_id`, `sender_username`, `from_email`, `author_id`, `author_handle`, or `account_id`.\n9. Never infer source identity from unstructured text. Do not use per-event fields such as `message_id`, `event_id`, `dedup_key`, timestamps, message text, body, subject, content, or title as ignore identity metadata.\n10. Do not add any metadata field named `monitor_ignore_filter`, `event_ignore_filter`, or `ignore_filter`; ignore filter installation is daemon-owned.\n11. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.\n12. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.\n\nDo not send connector replies unless a selected action later asks for it.",
+    let mut prompt = format!(
+        "You are my personal information triage assistant.\nYour job is NOT to summarize messages.\nYour job is to determine what I should pay attention to, what requires action from me, and what could materially affect my responsibilities, plans, commitments, or goals.\nYou will review messages from Telegram, Gmail, Lark, and other communication channels.\n\nConnection context: `{connection_slug}` ({connector_slug}). Connector description: {connector_description}. Contact scope: {contact_scope}.\n\nGroup Chat Gate (MVP)\nFor group chats, only process messages where I am explicitly mentioned (@mention).\nIf I am not mentioned, ignore the message entirely.\nDo not summarize it.\nDo not score it.\nDo not infer relevance.\nDo not create tasks from it.\nDo not include it in the final output.\nTreat all non-mentioned group chat messages as noise.\n\nCore Principle\nDo NOT surface information simply because it exists.\nOnly surface information that is relevant to me.\nIf a message does not require my attention, action, response, approval, decision, or awareness, ignore it.\n\nHigh Priority Signals\nSurface information when:\nAction Required\n- Someone asks me a question.\n- Someone requests something from me.\n- Someone expects a response from me.\n- Someone assigns work or responsibility to me.\n- Someone needs my approval, review, feedback, or decision.\n\nAwareness Required\n- A deadline changes.\n- A meeting changes.\n- A commitment changes.\n- A risk, blocker, incident, or escalation appears.\n- A financial, travel, legal, or personal matter requires attention.\n- An important update could affect my plans or responsibilities.\n\nDirect Relevance\n- I am explicitly mentioned.\n- The message is directed at me.\n- The message creates a task, decision, responsibility, risk, or opportunity relevant to me.\n\nIgnore or Heavily Deprioritize\n- Greetings.\n- Small talk.\n- Casual conversations.\n- Memes, jokes, stickers, GIFs, emojis, and reactions.\n- Discussions that do not require my involvement.\n- Status updates with no action required.\n- Duplicate information.\n- Long conversations that contain no actionable outcome.\n\nScoring\nScore every candidate item:\n5 = Immediate action required\n4 = Important awareness or follow-up likely needed\n3 = Relevant but can wait\n2 = Background information\n1 = Noise\n\nOnly surface items scored 4 or 5.\n\nPuffer task creation protocol\n1. Read `{}` if it exists and use it only as task-creation guidance.\n2. If the event matches ignore memory, do not create a task. Do not edit memory or subscription filters.\n3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.\n4. For candidate items scored 1, 2, or 3, do not call TaskList, TaskCreate, or TaskUpdate.\n5. For candidate items scored 4 or 5, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks.\n6. Every monitor TaskCreate MUST include `receivedAt` from the workflow trigger's RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.\n7. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, `monitor_memory_path: \"{}\"`, `monitor_contact_ids: {:?}`, and `monitor_envelope_id` copied from the workflow trigger's `envelope_id`.\n8. If the structured event payload contains stable scalar source identity fields, copy those exact key/value pairs into top-level task metadata using the original payload key names. Stable identity means durable scope fields such as `chat_id`, `channel_id`, `room_id`, `conversation_id`, `thread_id`, `mailbox_id`, or `project_id`, paired with durable actor/source fields such as `sender_id`, `sender_username`, `from_email`, `author_id`, `author_handle`, or `account_id`.\n9. Never infer source identity from unstructured text. Do not use per-event fields such as `message_id`, `event_id`, `dedup_key`, timestamps, message text, body, subject, content, or title as ignore identity metadata.\n10. Do not add any metadata field named `monitor_ignore_filter`, `event_ignore_filter`, or `ignore_filter`; ignore filter installation is daemon-owned.\n11. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.\n12. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.\n\nDo not send connector replies unless a selected action later asks for it.",
         memory_path.display(),
         memory_path.display(),
         contact_ids
-    )
+    );
+    prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
+    prompt
 }
 
 #[cfg(test)]
@@ -423,6 +427,12 @@ mod tests {
             &["telegram@alice".to_string()],
         );
 
+        assert!(prompt.contains("You are my personal information triage assistant"));
+        assert!(prompt.contains("Group Chat Gate (MVP)"));
+        assert!(prompt.contains("Only surface items scored 4 or 5"));
+        assert!(prompt.contains("Someone needs my approval, review, feedback, or decision"));
+        assert!(prompt.contains("Status updates with no action required"));
+        assert!(prompt.contains("For candidate items scored 1, 2, or 3"));
         assert!(prompt.contains("TaskCreate MUST include metadata"));
         assert!(prompt.contains("monitor_connection: \"telegram-user\""));
         assert!(prompt.contains("monitor_connector: \"telegram-login\""));
@@ -431,6 +441,8 @@ mod tests {
         assert!(prompt.contains("monitor_envelope_id"));
         assert!(prompt.contains("Never infer source identity"));
         assert!(prompt.contains("Do not add any metadata field named"));
+        assert!(prompt.contains("Research action prompt guidance"));
+        assert!(prompt.contains("avoid repeated equivalent queries"));
         assert!(!prompt.contains("Telegram monitoring handles"));
     }
 

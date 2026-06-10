@@ -298,7 +298,9 @@ fn monitor_tasks_offer_actions_and_ignore_choices() {
                 "_monitor": true,
                 "monitor_connection": "telegram-user",
                 "monitor_connector": "telegram-login",
-                "monitor_memory_path": memory_path.display().to_string()
+                "monitor_memory_path": memory_path.display().to_string(),
+                "chat_id": "8759047281",
+                "sender_id": "8759047281"
             }
         }),
     )
@@ -313,6 +315,9 @@ fn monitor_tasks_offer_actions_and_ignore_choices() {
             .command
             .starts_with("Act on monitored task monitor-1:")
             && entry.command.contains("Draft a concise reply to Alice")
+            && entry.command.contains("chat_id=8759047281")
+            && entry.command.contains("only authorized reply target")
+            && entry.command.contains("MonitorReplySend")
     }));
 
     dispatch_command(

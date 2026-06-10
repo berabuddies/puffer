@@ -149,9 +149,22 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         model: Option<&str>,
         triggers: Vec<serde_json::Value>,
     ) -> Result<WorkflowActionOutput> {
-        let prompt = render_triage_batch_prompt(prompt, &triggers)?;
-        let session_key = triage_session_key(model, &triggers);
-        self.run_task_agent_prompt_for_session(prompt, model, &session_key)
+        let mut summaries = Vec::new();
+        let mut usage = None;
+        for trigger in triggers {
+            let triggers = vec![trigger];
+            let prompt = render_triage_batch_prompt(prompt, &triggers)?;
+            let session_key = triage_session_key(model, &triggers);
+            let output = self.run_task_agent_prompt_for_session(prompt, model, &session_key)?;
+            summaries.push(output.summary);
+            if let Some(next_usage) = output.usage {
+                merge_usage(&mut usage, next_usage);
+            }
+        }
+        Ok(WorkflowActionOutput::with_usage(
+            summaries.join("\n"),
+            usage,
+        ))
     }
 
     fn ignore_analysis_agent(
@@ -287,16 +300,15 @@ fn merge_usage(total: &mut Option<ActionUsage>, next: ActionUsage) {
 }
 
 fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> Result<String> {
-    if triggers.len() == 1 {
-        let trigger = serde_json::to_string_pretty(&triggers[0])?;
-        return Ok(format!(
-            "{prompt}\n\nWorkflow trigger:\n```json\n{trigger}\n```"
-        ));
+    if triggers.len() != 1 {
+        anyhow::bail!(
+            "monitor triage prompt rendering is single-envelope only; got {} triggers",
+            triggers.len()
+        );
     }
-    let trigger_batch = serde_json::to_string_pretty(triggers)?;
+    let trigger = serde_json::to_string_pretty(&triggers[0])?;
     Ok(format!(
-        "{prompt}\n\nThis turn contains {} new connector events for the same connection. Process them together in one pass. You may call TaskCreate and TaskUpdate multiple times before finishing.\n\nWorkflow trigger batch:\n```json\n{trigger_batch}\n```",
-        triggers.len()
+        "{prompt}\n\nWorkflow trigger:\n```json\n{trigger}\n```"
     ))
 }
 
@@ -645,18 +657,25 @@ mod tests {
     }
 
     #[test]
-    fn render_triage_batch_prompt_keeps_all_triggers_in_one_turn() {
+    fn render_triage_batch_prompt_rejects_multiple_triggers() {
         let triggers = vec![
             json!({"connection_id": "telegram-user", "text": "first"}),
             json!({"connection_id": "telegram-user", "text": "second"}),
         ];
 
+        let error = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap_err();
+
+        assert!(error.to_string().contains("single-envelope only"));
+    }
+
+    #[test]
+    fn render_triage_batch_prompt_renders_one_trigger() {
+        let triggers = vec![json!({"connection_id": "telegram-user", "text": "first"})];
+
         let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
 
-        assert!(prompt.contains("This turn contains 2 new connector events"));
-        assert!(prompt.contains("Workflow trigger batch"));
+        assert!(prompt.contains("Workflow trigger:"));
         assert!(prompt.contains("\"first\""));
-        assert!(prompt.contains("\"second\""));
     }
 
     #[test]

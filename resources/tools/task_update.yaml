@@ -49,6 +49,13 @@ description: |-
 
   Make sure to read a task's latest state using `TaskGet` before updating it.
 
+  ## Monitor Tasks
+
+  Do not mark a monitor task completed with TaskUpdate when its
+  completionPolicy.mode is "send_to_source". For those tasks, use
+  MonitorReplySend so the reply is sent to the recorded source and the task is
+  completed with a delivery receipt.
+
   ## Examples
 
   Mark task as in progress when starting work:

@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const RESEARCH_ACTION_PROMPT_GUIDANCE: &str = "\n\nResearch action prompt guidance:\n- For any Research action, actionPrompt must define the specific research question, include source chat/contact context, cap web research to at most 3 web searches and 8 total research/tool steps, avoid repeated equivalent queries, prefer official or primary sources, and tell the action agent to stop once it has enough evidence for a concise reply.";
+
 /// Creates monitor workflows for one or more connector connections.
 pub(crate) fn handle_monitor_command(
     state: &mut AppState,
@@ -363,11 +365,88 @@ fn monitor_triage_prompt(
     connector_description: &str,
     memory_path: &Path,
 ) -> String {
-    format!(
-        "You are the background monitor triage agent for connection `{connection_slug}` ({connector_slug}). Connector description: {connector_description}\n\nYou are a persistent per-connection agent. New connector events may arrive as a single workflow trigger or as a workflow trigger batch. Process every trigger in the turn before finishing.\n\nFor every new connector event:\n1. Read `{}` if it exists and apply its ignore rules.\n2. If the event matches ignore memory, do not create a task; briefly report that it was ignored.\n3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.\n4. Decide whether the event is truly a task. Create or update a task only when the event contains an explicit request for the user to act, decide, reply, review, approve, investigate, implement, or follow up; an explicit schedule, deadline, meeting, invite, reminder, or time-bound commitment; or a service notification that clearly assigns work to the user or requests review/approval from the user.\n5. Do not create tasks for standalone greetings such as \"hi\", thanks, acknowledgements, reactions, FYI/status updates with no ask, generic bot summaries, newsletters, training logs, GitHub-style commits/comments/notifications, or repeated source updates unless they contain an explicit request, assignment, review request, approval request, or schedule for the user.\n6. Apply this same task standard to all connectors. The source connector alone never makes a message actionable. Useful information is not a task unless it has a clear next action for the user.\n7. If the current event is ambiguous, you may check available surrounding context such as recent messages, thread history, linked task context, or connector-provided event details before deciding. Context may confirm an explicit ask or schedule; context alone must not turn FYI/status information into a task.\n8. If the event is not clearly a task after any needed context check, do not call TaskList, TaskCreate, or TaskUpdate for it; briefly report that it was skipped as non-actionable. When unsure, do not create a task.\n9. For actionable candidate events, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks. You may create or update multiple tasks in one turn when a batch contains multiple actionable events.\n10. Every monitor TaskCreate MUST include `receivedAt` from that event's workflow trigger RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.\n11. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, and `monitor_memory_path: \"{}\"`.\n12. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.\n13. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.\n\nDo not send connector replies unless a selected action later asks for it.",
+    let mut prompt = format!(
+        r#"You are my personal information triage assistant.
+Your job is NOT to summarize messages.
+Your job is to determine what I should pay attention to, what requires action from me, and what could materially affect my responsibilities, plans, commitments, or goals.
+You will review messages from Telegram, Gmail, Lark, and other communication channels.
+
+Connection context: `{connection_slug}` ({connector_slug}). Connector description: {connector_description}.
+
+Group Chat Gate (MVP)
+For group chats, only process messages where I am explicitly mentioned (@mention).
+If I am not mentioned, ignore the message entirely.
+Do not summarize it.
+Do not score it.
+Do not infer relevance.
+Do not create tasks from it.
+Do not include it in the final output.
+Treat all non-mentioned group chat messages as noise.
+
+Core Principle
+Do NOT surface information simply because it exists.
+Only surface information that is relevant to me.
+If a message does not require my attention, action, response, approval, decision, or awareness, ignore it.
+
+High Priority Signals
+Surface information when:
+Action Required
+- Someone asks me a question.
+- Someone requests something from me.
+- Someone expects a response from me.
+- Someone assigns work or responsibility to me.
+- Someone needs my approval, review, feedback, or decision.
+
+Awareness Required
+- A deadline changes.
+- A meeting changes.
+- A commitment changes.
+- A risk, blocker, incident, or escalation appears.
+- A financial, travel, legal, or personal matter requires attention.
+- An important update could affect my plans or responsibilities.
+
+Direct Relevance
+- I am explicitly mentioned.
+- The message is directed at me.
+- The message creates a task, decision, responsibility, risk, or opportunity relevant to me.
+
+Ignore or Heavily Deprioritize
+- Greetings.
+- Small talk.
+- Casual conversations.
+- Memes, jokes, stickers, GIFs, emojis, and reactions.
+- Discussions that do not require my involvement.
+- Status updates with no action required.
+- Duplicate information.
+- Long conversations that contain no actionable outcome.
+
+Scoring
+Score every candidate item:
+5 = Immediate action required
+4 = Important awareness or follow-up likely needed
+3 = Relevant but can wait
+2 = Background information
+1 = Noise
+
+Only surface items scored 4 or 5.
+
+Puffer task creation protocol
+1. Read `{}` if it exists and use it only as task-creation guidance.
+2. If the event matches ignore memory, do not create a task. Do not edit memory or subscription filters.
+3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.
+4. For candidate items scored 1, 2, or 3, do not call TaskList, TaskCreate, or TaskUpdate.
+5. For candidate items scored 4 or 5, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks.
+6. Every monitor TaskCreate MUST include `receivedAt` from the workflow trigger's RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.
+7. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: "{connection_slug}"`, `monitor_connector: "{connector_slug}"`, and `monitor_memory_path: "{}"`.
+8. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.
+9. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.
+
+Do not send connector replies unless a selected action later asks for it."#,
         memory_path.display(),
         memory_path.display()
-    )
+    );
+    prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
+    prompt
 }
 
 fn maybe_spawn_backfill_agent(
@@ -387,11 +466,26 @@ fn maybe_spawn_backfill_agent(
     } else {
         "Use Slack list_conversations and read_messages with the exact connection_slug named above to inspect recent messages."
     };
-    let prompt = format!(
-        "Backfill monitor tasks for connection `{connection_slug}` ({connector_slug}). Every connector lookup tool call MUST pass `connection_slug: \"{connection_slug}\"`.\n\n{backfill_hint}\n\nRead monitor memory `{}` first and skip ignored examples. Skip muted or silent notifications. Only create a task when a current event contains an explicit request for the user to act, decide, reply, review, approve, investigate, implement, or follow up; an explicit schedule, deadline, meeting, invite, reminder, or time-bound commitment; or a service notification that clearly assigns work to the user or requests review/approval from the user. Do not create tasks for standalone greetings, thanks, acknowledgements, FYI/status-only updates, generic bot summaries, newsletters, training logs, GitHub-style commits/comments/notifications, or repeated source updates without an explicit request, assignment, review request, approval request, or schedule for the user. You may check surrounding context such as recent messages, thread history, linked task context, or connector-provided event details when a current event is ambiguous, but context alone must not turn FYI/status information into a task. Useful information is not a task unless it has a clear next action for the user. When unsure, do not create a task.\n\nFor actionable current work, create monitor tasks using TaskCreate with RFC3339 `receivedAt`, RFC3339 `expiresAt`, metadata `_monitor: true`, `monitor_connection: \"{connection_slug}\"`, `monitor_connector: \"{connector_slug}\"`, and `monitor_memory_path: \"{}\"`. Include `actions` and `possibleIgnoreReasons` for each task. Avoid duplicates by calling TaskList first.",
+    let mut prompt = format!(
+        r#"Backfill monitor tasks for connection `{connection_slug}` ({connector_slug}). Every connector lookup tool call MUST pass `connection_slug: "{connection_slug}"`.
+
+{backfill_hint}
+
+Apply this personal triage policy to historical messages:
+- Do NOT summarize messages.
+- Surface only information that requires my attention, action, response, approval, decision, or awareness.
+- For group chats, only process messages where I am explicitly mentioned (@mention). Treat non-mentioned group chat messages as noise.
+- Ignore greetings, small talk, casual conversations, memes, jokes, stickers, GIFs, emojis, reactions, status updates with no action required, duplicate information, and long conversations with no actionable outcome.
+- Score every candidate item: 5 = immediate action required; 4 = important awareness or follow-up likely needed; 3 = relevant but can wait; 2 = background information; 1 = noise.
+- Only create or update tasks for items scored 4 or 5. For items scored 1, 2, or 3, do not call TaskCreate or TaskUpdate.
+
+Read monitor memory `{}` first and skip ignored examples. Skip muted or silent notifications. Avoid duplicates by calling TaskList first.
+
+For scored 4 or 5 current work, create monitor tasks using TaskCreate with RFC3339 `receivedAt`, RFC3339 `expiresAt`, metadata `_monitor: true`, `monitor_connection: "{connection_slug}"`, `monitor_connector: "{connector_slug}"`, and `monitor_memory_path: "{}"`. Include `actions` and `possibleIgnoreReasons` for each task."#,
         memory_path.display(),
         memory_path.display()
     );
+    prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
     let output = crate::runtime::execute_agent_tool_once(
         state,
         resources,
@@ -468,18 +562,18 @@ mod tests {
         );
         assert!(prompt.contains("TaskCreate MUST include metadata"));
         assert!(prompt.contains("possibleIgnoreReasons"));
-        assert!(prompt.contains("explicit request for the user to act"));
-        assert!(prompt.contains("explicit schedule, deadline, meeting"));
-        assert!(prompt.contains("standalone greetings such as \"hi\""));
-        assert!(prompt.contains("GitHub-style commits/comments/notifications"));
-        assert!(prompt.contains("source connector alone never makes a message actionable"));
-        assert!(prompt.contains("you may check available surrounding context"));
-        assert!(prompt.contains("context alone must not turn FYI/status information into a task"));
-        assert!(prompt.contains("When unsure, do not create a task"));
+        assert!(prompt.contains("You are my personal information triage assistant"));
+        assert!(prompt.contains("Group Chat Gate (MVP)"));
+        assert!(prompt.contains("Only surface items scored 4 or 5"));
+        assert!(prompt.contains("Someone needs my approval, review, feedback, or decision"));
+        assert!(prompt.contains("Status updates with no action required"));
+        assert!(prompt.contains("For candidate items scored 1, 2, or 3"));
         assert!(prompt.contains("do not call TaskList, TaskCreate, or TaskUpdate"));
         assert!(prompt.contains("notification_muted"));
         assert!(prompt.contains("receivedAt"));
         assert!(prompt.contains("expiresAt"));
+        assert!(prompt.contains("Research action prompt guidance"));
+        assert!(prompt.contains("avoid repeated equivalent queries"));
     }
 
     #[test]

@@ -202,6 +202,8 @@ fn task_json(task: TaskSnapshotRecord, source: &str, scope: &str, scope_label: &
             &["monitor_envelope_id", "monitorEnvelopeId"],
             &["envelope_id", "envelopeId"]
         ),
+        "source_context": monitor_source_context(&task.metadata),
+        "completion_policy": monitor_completion_policy(&task.metadata),
         "ignore_reason": metadata_string(
             &task.metadata,
             &["ignore_reason", "ignoreReason"],
@@ -375,6 +377,76 @@ fn monitor_actions(metadata: &Map<String, Value>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
+    metadata
+        .get("source_context")
+        .or_else(|| metadata.get("sourceContext"))
+        .cloned()
+        .or_else(|| derived_monitor_source_context(metadata))
+}
+
+fn derived_monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
+    let connector_slug = metadata_string(
+        metadata,
+        &["monitor_connector", "monitorConnector"],
+        &["connector", "connector_slug", "connectorSlug"],
+    )?;
+    if !connector_slug.contains("telegram") {
+        return None;
+    }
+    let chat_id = metadata_string(metadata, &["chat_id", "chatId"], &["chat_id", "chatId"])?;
+    let connection_slug = metadata_string(
+        metadata,
+        &["monitor_connection", "monitorConnection"],
+        &["connection", "connection_slug", "connectionSlug"],
+    );
+    let sender_id = metadata_string(
+        metadata,
+        &["sender_id", "senderId"],
+        &["sender_id", "senderId"],
+    );
+    let sender_username = metadata_string(
+        metadata,
+        &["sender_username", "senderUsername"],
+        &["sender_username", "senderUsername"],
+    );
+    let mut sender = Map::new();
+    if let Some(sender_id) = sender_id {
+        sender.insert("id".to_string(), Value::String(sender_id));
+    }
+    if let Some(sender_username) = sender_username {
+        sender.insert("username".to_string(), Value::String(sender_username));
+    }
+    Some(json!({
+        "kind": "telegram_direct_message",
+        "connection_slug": connection_slug,
+        "connector_slug": connector_slug,
+        "summary": format!("Telegram direct message from chat_id {chat_id}"),
+        "delivery_target": {
+            "type": "telegram_chat",
+            "chat_id": chat_id,
+        },
+        "sender": sender,
+    }))
+}
+
+fn monitor_completion_policy(metadata: &Map<String, Value>) -> Option<Value> {
+    metadata
+        .get("completion_policy")
+        .or_else(|| metadata.get("completionPolicy"))
+        .cloned()
+        .or_else(|| {
+            monitor_source_context(metadata)
+                .and_then(|context| {
+                    context
+                        .get("delivery_target")
+                        .or_else(|| context.get("deliveryTarget"))
+                        .cloned()
+                })
+                .map(|_| json!({"mode": "send_to_source", "requires_receipt": true}))
+        })
+}
+
 fn monitor_ignore_reasons(metadata: &Map<String, Value>) -> Vec<Value> {
     metadata
         .get("possible_ignore_reasons")
@@ -459,7 +531,10 @@ mod tests {
                     "metadata": {
                         "_monitor": true,
                         "monitor_connection": "telegram-user",
+                        "monitor_connector": "telegram-login",
                         "monitor_envelope_id": "env-monitor-1",
+                        "chat_id": "8759047281",
+                        "sender_id": "8759047281",
                         "ignore_analysis_result": "filter looks scoped",
                         "ignore_analysis_usage": {
                             "input_tokens": 12,
@@ -500,7 +575,17 @@ mod tests {
             .unwrap();
         assert_eq!(monitor_task["source"], "monitor");
         assert_eq!(monitor_task["monitor_connection"], "telegram-user");
+        assert_eq!(monitor_task["monitor_connector"], "telegram-login");
         assert_eq!(monitor_task["monitor_envelope_id"], "env-monitor-1");
+        assert_eq!(
+            monitor_task["source_context"]["kind"],
+            "telegram_direct_message"
+        );
+        assert_eq!(
+            monitor_task["source_context"]["delivery_target"]["chat_id"],
+            "8759047281"
+        );
+        assert_eq!(monitor_task["completion_policy"]["mode"], "send_to_source");
         assert_eq!(
             monitor_task["ignore_analysis_result"],
             "filter looks scoped"

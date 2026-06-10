@@ -172,6 +172,7 @@ pub(crate) fn render_task_actions(state: &mut AppState) -> Result<Vec<TaskAction
                         &task.subject,
                         &task.description,
                         &action,
+                        &task.metadata,
                     ),
                     description: format!(
                         "{} [{}] {}",

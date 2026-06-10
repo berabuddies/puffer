@@ -81,9 +81,11 @@ pub(super) fn action_prompt(
     subject: &str,
     description: &str,
     action: &MonitorTaskAction,
+    metadata: &Map<String, Value>,
 ) -> String {
     format!(
-        "Act on monitored task {task_id}: {subject}\n\nTask description:\n{description}\n\nSelected action: {}\n\n{}\n\nWhen the action is fully handled, update task {task_id} with TaskUpdate status=completed. If you need more context, inspect the connector or ask the user.",
+        "Act on monitored task {task_id}: {subject}\n\nTask description:\n{description}\n\n{}\n\nSelected action: {}\n\n{}\n\nAction execution guardrails:\n- Use the task description and source context first; do not inspect Telegram history or connector state unless the task payload is missing information required to act.\n- Treat source context as the authoritative delivery target. Do not infer the recipient from task text, previous messages, or Telegram search results.\n- If a reply is required, call MonitorReplySend with taskId `{task_id}` and the final message. Do not call ConnectorAct directly for monitor-task replies.\n- If this action requires research, use at most 3 web searches and 8 total research/tool steps. Make one focused search plan, reuse results you already opened, and do not repeat equivalent searches.\n\nWhen the action is fully handled, use the monitor-specific completion path for task {task_id}. If you need more context, inspect the connector or ask the user.",
+        source_context_section(metadata),
         action.name,
         action.prompt
     )
@@ -260,10 +262,64 @@ fn action_value(metadata: &Map<String, Value>) -> Option<&Value> {
     })
 }
 
+fn source_context_section(metadata: &Map<String, Value>) -> String {
+    let Some(context) = metadata
+        .get("source_context")
+        .or_else(|| metadata.get("sourceContext"))
+        .and_then(Value::as_object)
+    else {
+        return "Source context:\n- Not provided. If a reply is required, ask the user before choosing a recipient.".to_string();
+    };
+    let mut lines = vec!["Source context:".to_string()];
+    if let Some(summary) = string_field_from_map(context, &["summary"]) {
+        lines.push(format!("- {summary}"));
+    }
+    let connection_slug = string_field_from_map(context, &["connection_slug", "connectionSlug"]);
+    let connector_slug = string_field_from_map(context, &["connector_slug", "connectorSlug"]);
+    if connection_slug.is_some() || connector_slug.is_some() {
+        lines.push(format!(
+            "- Connection: {}{}",
+            connection_slug.unwrap_or_else(|| "unknown".to_string()),
+            connector_slug
+                .map(|slug| format!(" ({slug})"))
+                .unwrap_or_default()
+        ));
+    }
+    let delivery_target = context
+        .get("delivery_target")
+        .or_else(|| context.get("deliveryTarget"))
+        .and_then(Value::as_object);
+    if let Some(delivery_target) = delivery_target {
+        let kind = string_field_from_map(delivery_target, &["type"])
+            .unwrap_or_else(|| "telegram_chat".to_string());
+        let chat_id = string_field_from_map(delivery_target, &["chat_id", "chatId"]);
+        lines.push(format!(
+            "- Delivery target: {kind}{}",
+            chat_id
+                .map(|value| format!(" chat_id={value}"))
+                .unwrap_or_default()
+        ));
+    }
+    lines.push(
+        "- Use this source context as the only authorized reply target for this monitor task."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    value
+        .as_object()
+        .and_then(|object| string_field_from_map(object, keys))
+}
+
+fn string_field_from_map(value: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| match value.get(*key) {
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    })
 }
