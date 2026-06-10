@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 
 mod act;
+mod atspi;
 mod config;
 mod dbread;
 mod docker;
@@ -206,10 +207,8 @@ async fn run_act(instance: &WechatInstance, action: &str) -> Result<()> {
     let _ui_guard = match action {
         "send_message" | "send" | "reply" | "send_file" | "send_image" | "send_media"
         | "send_photo" | "send_document" | "mention" | "send_mention" | "react"
-        | "send_reaction" | "pat" | "nudge" | "拍一拍" | "mark_read" | "open_chat"
-        | "read_chat" | "logout" | "sign_out" | "退出登录" => {
-            Some(policy::UiLock::acquire(instance.name()))
-        }
+        | "send_reaction" | "pat" | "nudge" | "mark_read" | "open_chat" | "read_chat"
+        | "logout" | "sign_out" => Some(policy::UiLock::acquire(instance.name())),
         _ => None,
     };
 
@@ -219,13 +218,13 @@ async fn run_act(instance: &WechatInstance, action: &str) -> Result<()> {
             act::send_message(instance, &cfg, &input, &human).await
         }
         "mention" | "send_mention" => act::mention(instance, &cfg, &input, &human).await,
-        "react" | "send_reaction" | "pat" | "nudge" | "拍一拍" => {
+        "react" | "send_reaction" | "pat" | "nudge" => {
             act::react(instance, &cfg, &input, &human).await
         }
         "mark_read" | "open_chat" | "read_chat" => {
             act::mark_read(instance, &cfg, &input, &human).await
         }
-        "logout" | "sign_out" | "退出登录" => act::logout(instance, &cfg, &input, &human).await,
+        "logout" | "sign_out" => act::logout(instance, &cfg, &input, &human).await,
         "read_history" => read_history_action(instance, &input).await,
         other => Err(anyhow!("wechat connector does not support action `{other}`")),
     };
@@ -275,8 +274,9 @@ fn forbidden_reason(action: &str, input: &Value) -> Option<String> {
     }
     // Money-solicitation CONTENT is also blocked. Only HIGH-SIGNAL terms (bare
     // English pay/transfer/money over-match benign text). Body is normalized
-    // (lowercase, separators/whitespace/zero-width stripped) so `红 包` / `red-packet`
-    // collapse to a keyword — keywords therefore carry no separators.
+    // (lowercase, separators/whitespace/zero-width stripped) so spaced-out or
+    // `red-packet`-style evasions collapse to a keyword — so keywords carry no
+    // separators. The zh-CN terms below are matched as-is.
     const MONEY_CONTENT: &[&str] = &["redpacket", "hongbao", "收款", "转账", "红包", "付款"];
     let body_normalized: String = ["text", "message", "caption"]
         .iter()

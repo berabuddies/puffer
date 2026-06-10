@@ -65,8 +65,16 @@ pub(crate) struct WechatMessage {
     pub(crate) text: String,
 }
 
-/// Timeout for a single vision completion.
-const VISION_TIMEOUT: Duration = Duration::from_secs(90);
+/// Timeout for a single vision completion. Default 90s; raise it for a slow
+/// backend (e.g. a local codex reverse-proxy) via `WECHAT_VISION_TIMEOUT` (secs).
+fn vision_timeout() -> Duration {
+    let secs = std::env::var("WECHAT_VISION_TIMEOUT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(90);
+    Duration::from_secs(secs)
+}
 
 const SYSTEM_PROMPT: &str = "You are reading a screenshot of the WeChat desktop client to detect \
 NEW incoming messages. Return a JSON array of objects, each with three string fields: \
@@ -171,7 +179,7 @@ fn vision_complete(system: &str, user: &str, png: &[u8]) -> Result<String> {
         ]
     });
     let client = reqwest::blocking::Client::builder()
-        .timeout(VISION_TIMEOUT)
+        .timeout(vision_timeout())
         .build()
         .context("build vision http client")?;
     let url = format!("{base_url}/chat/completions");
@@ -226,7 +234,7 @@ side is blank/splash), respond with exactly NONE.",
 /// Confirms (visually) that the conversation OPEN in the right pane is the chat
 /// for `recipient`. More robust than transcription for DECORATIVE/stylized
 /// display names: the model compares the header against the reference characters
-/// rather than transcribing them first (transcription misreads e.g. 乌→与).
+/// rather than transcribing them first (transcription misreads lookalike glyphs).
 /// Returns `true` only on an explicit YES; "no chat" / unsure answers NO
 /// (fail-closed). BLOCKING.
 pub(crate) fn confirm_open_chat_is(png: &[u8], recipient: &str) -> Result<bool> {
@@ -284,9 +292,8 @@ fn one_shot_text(png: &[u8], system: &str, user: &str) -> Result<Option<String>>
 }
 
 /// Locates the pixel (x,y) of the search-dropdown row that opens the chat with
-/// `recipient` — preferring a contact/group/feature result over the "搜索网络
-/// 结果" (web search) rows. Returns `Ok(None)` if no local result is found.
-/// BLOCKING.
+/// `recipient` — preferring a contact/group/feature result over the web-search
+/// rows. Returns `Ok(None)` if no local result is found. BLOCKING.
 pub(crate) fn read_result_coords(png: &[u8], recipient: &str) -> Result<Option<(i32, i32)>> {
     let system = "You are looking at a WeChat desktop search dropdown (left side). It lists rows. \
 Some rows are under 搜索网络结果 (web search — a magnifier icon) and MUST be ignored. Other rows are \
@@ -335,7 +342,7 @@ Respond with ONLY compact JSON {\"x\":<int>,\"y\":<int>} = the pixel center of t
 }
 
 /// Locates the pixel center of a right-click context-menu item labeled `label`
-/// (e.g. `引用`, `转发`, `撤回`). Returns `None` if not present. BLOCKING.
+/// (e.g. quote, forward, recall). Returns `None` if not present. BLOCKING.
 pub(crate) fn read_menu_item_coords(png: &[u8], label: &str) -> Result<Option<(i32, i32)>> {
     let system = "A small right-click context menu is open in the WeChat desktop client (a vertical \
 list of short text items such as 复制 / 转发 / 收藏 / 引用 / 删除). Find the menu item whose label \
@@ -350,7 +357,7 @@ of that item, or {\"found\":false} if the menu has no such item.";
 }
 
 /// Locates the pixel center of the AVATAR (square profile icon beside a bubble)
-/// of the most recent message from `who`, for a 拍一拍 (double-click pat).
+/// of the most recent message from `who`, for a pat (right-click the avatar).
 /// Returns `None` if not found. BLOCKING.
 pub(crate) fn read_avatar_coords(png: &[u8], who: &str) -> Result<Option<(i32, i32)>> {
     let system = "You are looking at the WeChat desktop. IGNORE the conversation LIST on the far \

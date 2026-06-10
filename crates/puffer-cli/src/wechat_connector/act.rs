@@ -23,6 +23,26 @@ use super::human::Human;
 use super::policy::Policy;
 use super::read;
 
+/// Literal labels from the zh-CN WeChat client that the connector matches in the
+/// accessibility tree or via OCR. These are WeChat's own UI strings (the client
+/// runs in Chinese), so they are kept verbatim — translating them would break the
+/// match. Isolated here so the rest of the module reads in English.
+mod ui {
+    /// Context-menu item: quote / reply to a message.
+    pub(super) const QUOTE: &str = "引用";
+    /// Context-menu item: pat / nudge a member.
+    pub(super) const PAT: &str = "拍一拍";
+    /// Account-menu item: log out (keeps local data).
+    pub(super) const LOG_OUT: &str = "退出登录";
+    /// Confirmation button shown as a plain "exit" on some builds.
+    pub(super) const EXIT: &str = "退出";
+    /// Main-window title, for the xdotool `--name` fallback (the WM_CLASS
+    /// `wechat` lookup is tried first).
+    pub(super) const WINDOW_NAMES: &str = "微信|WeChat|Weixin";
+    /// zh-CN phrasings for "@everyone" (broadcast), blocked by the @all guard.
+    pub(super) const AT_ALL: &[&str] = &["所有人", "全体成员", "全体"];
+}
+
 /// Result of a successful `act` command, surfaced back to the host.
 pub(crate) struct ActOutcome {
     /// Human-readable one-line summary.
@@ -218,7 +238,7 @@ async fn perform_sends(
             sleep(human.think_time()).await;
         }
         if let Some(snippet) = quoting {
-            // Quote the target message first (right-click → 引用). WeChat focuses
+            // Quote the target message first (right-click -> quote). WeChat focuses
             // the input automatically afterwards, leaving it empty, so we skip the
             // focus-click + select-all the plain path uses (a misclick could
             // dismiss the quote bar).
@@ -256,7 +276,7 @@ pub(crate) async fn mention(
     // Reject @all unless explicitly allowed (it broadcasts to everyone).
     let at_all_allowed = std::env::var("WECHAT_ALLOW_AT_ALL").map(|v| v.trim() == "1").unwrap_or(false);
     if names.iter().any(|n| is_at_all(n)) && !at_all_allowed {
-        bail!("@all/@所有人 is a broadcast and is blocked (set WECHAT_ALLOW_AT_ALL=1 to override)");
+        bail!("@all (broadcast to all members) is blocked (set WECHAT_ALLOW_AT_ALL=1 to override)");
     }
     let body = first_str(input, &["text", "message", "caption"]).unwrap_or_default();
 
@@ -313,8 +333,8 @@ pub(crate) async fn mark_read(
     })
 }
 
-/// Logs out of WeChat through the client UI (bottom-left ☰ menu → 退出登录 →
-/// confirm), KEEPING the container, the WeChat install and local data. This is
+/// Logs out of WeChat through the client UI (bottom-left "more" menu -> log out
+/// -> confirm), KEEPING the container, the WeChat install and local data. This is
 /// distinct from REMOVING the connection (which wipes the container + data
 /// volume): after logout the same or a different account can log back in with a
 /// fresh QR scan, without recreating anything.
@@ -335,18 +355,18 @@ pub(crate) async fn logout(
 
     activate_window(instance).await?;
     sleep(human.think_time()).await;
-    // Open the bottom-left "more" (☰) menu, then click 退出登录.
+    // Open the bottom-left "more" menu, then click the log-out item.
     human_click(instance, more_menu_point(instance).await).await?;
     sleep_ms(700).await;
-    let item = locate_menu_item(instance, "退出登录")
+    let item = locate_menu_item(instance, ui::LOG_OUT)
         .await?
-        .ok_or_else(|| anyhow!("could not find 退出登录 in the WeChat menu (is it open?)"))?;
+        .ok_or_else(|| anyhow!("could not find the log-out item in the WeChat menu (is it open?)"))?;
     human_click(instance, item).await?;
     sleep_ms(700).await;
-    // Confirm dialog (label is usually 退出登录, sometimes 退出); click if present.
-    let confirm = match locate_menu_item(instance, "退出登录").await? {
+    // Confirm dialog (button is usually the same log-out label, sometimes "exit").
+    let confirm = match locate_menu_item(instance, ui::LOG_OUT).await? {
         Some(p) => Some(p),
-        None => locate_menu_item(instance, "退出").await?,
+        None => locate_menu_item(instance, ui::EXIT).await?,
     };
     if let Some(p) = confirm {
         human_click(instance, p).await?;
@@ -398,11 +418,12 @@ async fn locate_menu_item(instance: &WechatInstance, label: &str) -> Result<Opti
     Ok(None)
 }
 
-/// Sends a 拍一拍 (pat / nudge) — WeChat's only lightweight per-person reaction
-/// (the Linux 4.x client has no per-message emoji reactions). RIGHT-clicks the
-/// target person's avatar and clicks the 拍一拍 menu item (a plain double-click
-/// just opens their chat), which posts "你拍了拍 X". `on`/`member` selects whom to
-/// pat (defaults to the chat's other party). Policy-gated.
+/// Sends a pat / nudge — WeChat's only lightweight per-person reaction (the Linux
+/// 4.x client has no per-message emoji reactions). RIGHT-clicks the target
+/// person's avatar and clicks the pat menu item (a plain double-click just opens
+/// their chat). `on`/`member` selects whom to pat (defaults to the chat's other
+/// party). Policy-gated. This action reads the screen (vision) to find the
+/// avatar, which the accessibility tree does not expose.
 pub(crate) async fn react(
     instance: &WechatInstance,
     cfg: &InstanceConfig,
@@ -419,7 +440,7 @@ pub(crate) async fn react(
     // duplicate-content block doesn't stop legitimate repeat pats — even two in
     // the same second (a plain seconds label would collide).
     let mut policy = Policy::load(instance.name());
-    let pat_label = format!("[拍一拍 -> {who} @{}]", send_nonce());
+    let pat_label = format!("[pat -> {who} @{}]", send_nonce());
     if let Err(block) = policy.check_send(&recipient, &pat_label) {
         bail!("blocked by anti-ban policy: {block}");
     }
@@ -430,39 +451,63 @@ pub(crate) async fn react(
 
     let point = locate_avatar(instance, &who).await?.ok_or_else(|| {
         anyhow!(
-            "could not find {who}'s avatar on screen to 拍一拍; open a chat showing a recent \
+            "could not find {who}'s avatar on screen to pat; open a chat showing a recent \
              message from them"
         )
     })?;
-    // 拍一拍 is RIGHT-click avatar → click the 拍一拍 menu item (the Linux 4.x
-    // client opens the contact's chat on a plain double-click, so that doesn't pat).
+    // Right-click the avatar, then click the pat menu item (a plain double-click
+    // just opens the contact's chat). The avatar is located by reading the screen
+    // (vision) because the accessibility tree does not expose it as an element.
     human_right_click(instance, point).await?;
     sleep_ms(700).await;
     let png = instance
         .screenshot_png()
         .await
-        .context("screenshot the avatar 拍一拍 menu")?;
-    let coords = tokio::task::spawn_blocking(move || read::read_menu_item_coords(&png, "拍一拍"))
+        .context("screenshot the avatar pat menu")?;
+    let coords = tokio::task::spawn_blocking(move || read::read_menu_item_coords(&png, ui::PAT))
         .await
-        .map_err(|e| anyhow!("拍一拍 menu task failed: {e}"))?
-        .context("read the 拍一拍 menu item")?;
+        .map_err(|e| anyhow!("pat menu task failed: {e}"))?
+        .context("read the pat menu item")?;
     let pat_point = coords.ok_or_else(|| {
-        anyhow!("the 拍一拍 item was not found in the avatar menu (this WeChat build may not support it)")
+        anyhow!("the pat item was not found in the avatar menu (this WeChat build may not support it)")
     })?;
     human_click(instance, pat_point).await?;
     sleep_ms(800).await;
 
     policy.record_send(&recipient, &pat_label)?;
     Ok(ActOutcome {
-        summary: format!("Sent a 拍一拍 (pat) to {who} in WeChat chat {recipient}"),
+        summary: format!("Sent a pat to {who} in WeChat chat {recipient}"),
         output: json!({ "recipient": recipient, "patted": who, "action": "pat" }),
     })
 }
 
-/// Quotes (引用) the message matching `snippet` in the open chat: vision-locate
-/// the bubble, right-click it, then click the 引用 menu item. Leaves the input
-/// focused with the quote bar attached, ready for the reply body.
+/// Quotes the message matching `snippet` in the open chat: locate the bubble,
+/// right-click it, then click the quote menu item. Leaves the input focused with
+/// the quote bar attached, ready for the reply body.
 async fn quote_message(instance: &WechatInstance, snippet: &str, human: &Human) -> Result<()> {
+    // Preferred path: locate the message bubble in the accessibility tree,
+    // right-click it (the row is full-width; the bubble is left for incoming /
+    // right for outgoing, so try both), then click the quote menu item.
+    if super::atspi::available(instance).await {
+        if let Some((x, y, w, h)) = super::atspi::message_bounds(instance, snippet).await? {
+            let cy = y + h / 2;
+            for rx in [x + 70, x + w - 90] {
+                human_right_click(instance, (rx, cy)).await?;
+                sleep_ms(700).await;
+                if let Some(p) = super::atspi::menu_item(instance, ui::QUOTE).await? {
+                    human_click(instance, p).await?;
+                    sleep(human.think_time()).await;
+                    return Ok(());
+                }
+                key(instance, "Escape").await?; // dismiss the empty/wrong menu, retry
+                sleep_ms(200).await;
+            }
+            // Both positions missed: make sure no menu is left open before vision.
+            key(instance, "Escape").await?;
+        }
+        // Fall through to reading the screen if the accessibility path missed.
+    }
+    // Fallback: read the screen (vision) to locate the bubble and the menu item.
     let point = locate_message(instance, snippet).await?.ok_or_else(|| {
         anyhow!(
             "could not find a visible message matching `{snippet}` to quote; it may need to be \
@@ -476,12 +521,12 @@ async fn quote_message(instance: &WechatInstance, snippet: &str, human: &Human) 
         .screenshot_png()
         .await
         .context("screenshot the quote context menu")?;
-    let coords = tokio::task::spawn_blocking(move || read::read_menu_item_coords(&png, "引用"))
+    let coords = tokio::task::spawn_blocking(move || read::read_menu_item_coords(&png, ui::QUOTE))
         .await
         .map_err(|e| anyhow!("quote menu task failed: {e}"))?
-        .context("read the 引用 menu item")?;
+        .context("read the quote menu item")?;
     let menu_point =
-        coords.ok_or_else(|| anyhow!("the 引用 (quote) item was not found in the menu"))?;
+        coords.ok_or_else(|| anyhow!("the quote item was not found in the menu"))?;
     human_click(instance, menu_point).await?;
     sleep(human.think_time()).await;
     Ok(())
@@ -561,21 +606,39 @@ async fn ensure_ready(instance: &WechatInstance, cfg: &InstanceConfig) -> Result
 /// Activates WeChat, opens search, and navigates to `recipient`'s chat.
 ///
 /// IMPORTANT (validated live on WeChat 4.x): pressing Enter in the search box
-/// opens the "搜一搜" WEB search, not the first local result, and the local
+/// opens WeChat's in-app web search, not the first local result, and the local
 /// chat row sits AFTER a variable number of web-suggestion rows — so neither
-/// Enter nor Down-counting works. We must CLICK the contact/chat row, located
-/// via vision. A leading Escape clears any stale search/popup.
+/// Enter nor Down-counting works. We must CLICK the contact/chat row. A leading
+/// Escape clears any stale search/popup.
 async fn open_chat(instance: &WechatInstance, recipient: &str, human: &Human) -> Result<()> {
     activate_window(instance).await?;
-    key(instance, "Escape").await?; // dismiss any open search/popup
+    // Dismiss any leftover popup/context-menu/search before navigating. Two
+    // Escapes clear nested state (e.g. a context menu over a search box) so a
+    // prior action can't block the next chat from opening.
+    key(instance, "Escape").await?;
+    sleep_ms(150).await;
+    key(instance, "Escape").await?;
     sleep(human.think_time()).await;
+    // Preferred path: click the recipient's row in the LEFT conversation list
+    // directly via the accessibility tree — no search box, so no web-result row
+    // can hijack the window (clicking one opens a full-window web view). Falls
+    // through to the search + screen-reading path if the chat isn't in the
+    // visible list.
+    if super::atspi::available(instance).await {
+        if let Some(point) = super::atspi::conversation_row(instance, recipient).await? {
+            human_click(instance, point).await?;
+            sleep(human.think_time()).await;
+            return Ok(());
+        }
+    }
     key(instance, "ctrl+f").await?;
     sleep(human.think_time()).await;
     key(instance, "ctrl+a").await?; // clear any stale search text
     paste(instance, recipient).await?;
 
-    // Locate the local (non-web) result row via vision and click it. Retried so
-    // a not-yet-rendered dropdown (slow first paint) doesn't read as "no result".
+    // Read the screen to locate the local (non-web) result row, then click it.
+    // Retried so a not-yet-rendered dropdown (slow first paint) doesn't read as
+    // "no result".
     match locate_result(instance, recipient).await? {
         Some(point) => human_click(instance, point).await?,
         None => bail!(
@@ -587,9 +650,15 @@ async fn open_chat(instance: &WechatInstance, recipient: &str, human: &Human) ->
     Ok(())
 }
 
-/// Screenshots the search dropdown and asks vision for the contact row's
-/// coordinates, waiting for the results to render and retrying once.
+/// Reads the screen to find the contact's search-result row. Used as the fallback
+/// when the accessibility tree doesn't expose the chat (open_chat tries that
+/// first via `atspi::conversation_row`).
 async fn locate_result(instance: &WechatInstance, recipient: &str) -> Result<Option<(i32, i32)>> {
+    // NB: open_chat opens chats via the conversation list (no search box, so no
+    // web-result row can be clicked). This function is the screen-reading fallback
+    // for the search dropdown — used only when the chat isn't in the visible
+    // conversation list. It must NOT click the search dropdown's exact-name row,
+    // which is a web-search suggestion that hijacks the window.
     for _ in 0..2 {
         sleep_ms(1500).await; // let the results dropdown render/settle
         let png = instance
@@ -615,7 +684,7 @@ async fn human_click(instance: &WechatInstance, target: (i32, i32)) -> Result<()
 }
 
 /// Like [`human_click`] but right-clicks (button 3) — opens the message context
-/// menu (复制/转发/引用/…).
+/// menu (copy / forward / quote / ...).
 async fn human_right_click(instance: &WechatInstance, target: (i32, i32)) -> Result<()> {
     human_click_action(instance, target, "click --clearmodifiers 3").await
 }
@@ -644,8 +713,8 @@ async fn human_click_action(
 
 /// Clicks the message input box of the main WeChat window so a subsequent paste
 /// lands there. The point is derived from the main window geometry (lower-center,
-/// inside the text area and clear of the toolbar icons and 发送 button), falling
-/// back to a fixed point in the 1280x800 capture if geometry can't be read.
+/// inside the text area and clear of the toolbar icons and the Send button),
+/// falling back to a fixed point in the 1280x800 capture if geometry can't be read.
 async fn focus_message_input(instance: &WechatInstance, human: &Human) -> Result<()> {
     let geom = instance
         .exec_bash(
@@ -678,6 +747,15 @@ async fn focus_message_input(instance: &WechatInstance, human: &Human) -> Result
 /// `WECHAT_VERIFY_RECIPIENT=0` (then it is skipped entirely).
 async fn verify_open_chat(instance: &WechatInstance, recipient: &str) -> Result<()> {
     if std::env::var("WECHAT_VERIFY_RECIPIENT").map(|v| v.trim() == "0").unwrap_or(false) {
+        return Ok(());
+    }
+    // Verify via the accessibility tree: the open chat's header label carries the
+    // recipient name (right pane). On a match we're done; otherwise (e.g. a
+    // decorative display name the tree exposes differently) fall through to the
+    // screen-reading check below.
+    if super::atspi::available(instance).await
+        && super::atspi::open_chat_is(instance, recipient).await.unwrap_or(false)
+    {
         return Ok(());
     }
     // Fast path: transcribe the header and substring-match. This works for plain
@@ -750,6 +828,14 @@ async fn confirm_delivery(instance: &WechatInstance, body: &str) -> Result<()> {
     if std::env::var("WECHAT_VERIFY_DELIVERY").map(|v| v.trim() == "0").unwrap_or(false) {
         return Ok(());
     }
+    // Confirm via the accessibility tree: the sent body appears as a message
+    // bubble in the chat history. On a match we're done; otherwise fall through to
+    // the screen-reading last-outgoing check.
+    if super::atspi::available(instance).await
+        && super::atspi::body_in_history(instance, body).await.unwrap_or(false)
+    {
+        return Ok(());
+    }
     let png = match instance.screenshot_png().await {
         Ok(png) => png,
         Err(_) => return Ok(()),
@@ -770,19 +856,22 @@ async fn confirm_delivery(instance: &WechatInstance, body: &str) -> Result<()> {
 }
 
 /// Activates the MAIN WeChat window (WM_CLASS `wechat`, the widest one) and
-/// brings it to the front — NOT a `WeChatAppEx` window (the embedded browser
-/// used by 搜一搜 / mini-programs), which can otherwise steal focus and swallow
-/// our keystrokes. Falls back to a name match if the class lookup finds nothing.
+/// brings it to the front — NOT a `WeChatAppEx` window (the embedded browser used
+/// by the in-app web search / mini-programs), which can otherwise steal focus and
+/// swallow our keystrokes. Falls back to a name match if the class lookup finds
+/// nothing.
 async fn activate_window(instance: &WechatInstance) -> Result<()> {
     instance
         .exec_bash(
+            &format!(
             "best=''; bestw=0; \
              for w in $(xdotool search --onlyvisible --class '^wechat$' 2>/dev/null); do \
                eval \"$(xdotool getwindowgeometry --shell \"$w\" 2>/dev/null)\"; \
-               if [ \"${WIDTH:-0}\" -gt \"$bestw\" ]; then bestw=${WIDTH:-0}; best=$w; fi; \
+               if [ \"${{WIDTH:-0}}\" -gt \"$bestw\" ]; then bestw=${{WIDTH:-0}}; best=$w; fi; \
              done; \
-             [ -z \"$best\" ] && best=$(xdotool search --onlyvisible --name '微信|WeChat|Weixin' 2>/dev/null | head -1); \
+             [ -z \"$best\" ] && best=$(xdotool search --onlyvisible --name '{names}' 2>/dev/null | head -1); \
              [ -n \"$best\" ] && xdotool windowactivate --sync \"$best\" || true",
+            names = ui::WINDOW_NAMES),
         )
         .await
         .map(|_| ())
@@ -848,9 +937,10 @@ fn mention_names(input: &Value) -> Vec<String> {
     Vec::new()
 }
 
-/// Whether a mention name is the broadcast "@everyone". Strips a leading `@` and
-/// ALL whitespace (incl. full-width U+3000) and casefolds, so `所 有 人` /
-/// `every one` / `@所有人` evasions are still caught.
+/// Whether a mention name is the broadcast "@everyone" (English or the zh-CN
+/// phrasings in [`ui::AT_ALL`]). Strips a leading `@` and ALL whitespace (incl.
+/// full-width U+3000) and casefolds, so spaced-out / English / @-prefixed
+/// evasions are still caught.
 fn is_at_all(name: &str) -> bool {
     let n: String = name
         .trim_start_matches('@')
@@ -862,7 +952,7 @@ fn is_at_all(name: &str) -> bool {
         })
         .flat_map(char::to_lowercase)
         .collect();
-    n == "所有人" || n == "全体成员" || n == "全体" || n == "all" || n == "everyone"
+    n == "all" || n == "everyone" || ui::AT_ALL.contains(&n.as_str())
 }
 
 /// Sleeps for `ms` milliseconds (skips the await when zero).
@@ -1365,8 +1455,8 @@ mod tests {
     fn recipient_resolves_from_aliases() {
         assert_eq!(resolve_recipient(&json!({"to": "Alice"})).unwrap(), "Alice");
         assert_eq!(
-            resolve_recipient(&json!({"contact": "文件传输助手"})).unwrap(),
-            "文件传输助手"
+            resolve_recipient(&json!({"contact": "Carol"})).unwrap(),
+            "Carol"
         );
         assert_eq!(
             resolve_recipient(&json!({"target": "  Bob  "})).unwrap(),
@@ -1397,7 +1487,7 @@ mod tests {
         assert_eq!(sanitize_filename("/tmp/a/report.pdf"), "report.pdf");
         assert_eq!(sanitize_filename("..\\..\\evil.txt"), "evil.txt");
         assert_eq!(sanitize_filename("na'me;rm -rf.doc"), "na_me_rm_-rf.doc");
-        assert_eq!(sanitize_filename("中文文件.txt"), "中文文件.txt");
+        assert_eq!(sanitize_filename("café.txt"), "café.txt");
         assert_eq!(sanitize_filename("..."), "file");
         assert_eq!(sanitize_filename(""), "file");
     }

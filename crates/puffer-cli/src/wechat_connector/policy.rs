@@ -104,8 +104,9 @@ struct PolicyState {
 #[derive(Debug, Clone)]
 struct PolicyConfig {
     tz_offset_hours: i64,
-    active_start: u32,
-    active_end: u32,
+    /// Active-hours window `(start, end)`. `None` = NO time restriction (the
+    /// default); only enforced when `WECHAT_ACTIVE_HOURS` is explicitly set.
+    active_hours: Option<(u32, u32)>,
     per_minute_cap: u32,
     day_cap_steady: u32,
     min_gap_ms: (u64, u64),
@@ -118,15 +119,16 @@ struct PolicyConfig {
 
 impl PolicyConfig {
     fn from_env() -> Self {
-        let (active_start, active_end) =
-            parse_hours_env("WECHAT_ACTIVE_HOURS").unwrap_or((8, 22));
         Self {
             tz_offset_hours: env_i64("WECHAT_TZ_OFFSET", 8),
-            active_start,
-            active_end,
-            per_minute_cap: env_u32("WECHAT_MAX_PER_MIN", 3),
-            day_cap_steady: env_u32("WECHAT_MAX_PER_DAY", 300),
-            min_gap_ms: parse_range_env("WECHAT_MIN_GAP_MS").unwrap_or((8000, 25000)),
+            // No time restriction by default; opt in via WECHAT_ACTIVE_HOURS.
+            active_hours: parse_hours_env("WECHAT_ACTIVE_HOURS"),
+            // Relaxed, human-but-not-slow defaults: a few seconds between sends,
+            // and a daily budget sized at ~8h x 1/min. No time-of-day window is
+            // enforced (active_hours is opt-in above). All env-tunable.
+            per_minute_cap: env_u32("WECHAT_MAX_PER_MIN", 20),
+            day_cap_steady: env_u32("WECHAT_MAX_PER_DAY", 480),
+            min_gap_ms: parse_range_env("WECHAT_MIN_GAP_MS").unwrap_or((3000, 8000)),
             reply_probability: env_f64("WECHAT_REPLY_PROB", 0.9),
             warmup: std::env::var("WECHAT_WARMUP").map(|v| v.trim() == "1").unwrap_or(false),
             recent_content_window: env_u32("WECHAT_CONTENT_WINDOW", 8) as usize,
@@ -324,14 +326,17 @@ impl Policy {
     }
 
     fn in_active_hours(&self, hour: u32) -> bool {
-        if self.cfg.active_start == self.cfg.active_end {
-            return true; // disabled (e.g. 0-0 or equal bounds)
+        let (start, end) = match self.cfg.active_hours {
+            None => return true,        // no time restriction (default)
+            Some(window) => window,
+        };
+        if start == end {
+            return true; // disabled (equal bounds)
         }
-        if self.cfg.active_start < self.cfg.active_end {
-            hour >= self.cfg.active_start && hour < self.cfg.active_end
+        if start < end {
+            hour >= start && hour < end
         } else {
-            // Wraps midnight (e.g. 22-6).
-            hour >= self.cfg.active_start || hour < self.cfg.active_end
+            hour >= start || hour < end // wraps midnight (e.g. 22-6)
         }
     }
 
@@ -585,8 +590,7 @@ mod tests {
     fn base_cfg() -> PolicyConfig {
         PolicyConfig {
             tz_offset_hours: 8,
-            active_start: 0,
-            active_end: 0, // disabled for deterministic tests
+            active_hours: None, // no time restriction (deterministic tests)
             per_minute_cap: 3,
             day_cap_steady: 300,
             min_gap_ms: (8000, 25000),
@@ -594,7 +598,7 @@ mod tests {
             warmup: false,
             recent_content_window: 4,
             distinct_recipients_per_hour: 20,
-            sensitive_words: vec!["转账".to_string()],
+            sensitive_words: vec!["transfer".to_string()],
         }
     }
 
@@ -618,8 +622,8 @@ mod tests {
     #[test]
     fn blocks_sensitive_content() {
         let mut p = test_policy(base_cfg());
-        match p.check_send("x", "请转账给我") {
-            Err(PolicyBlock::SensitiveContent { word }) => assert_eq!(word, "转账"),
+        match p.check_send("x", "please transfer me money") {
+            Err(PolicyBlock::SensitiveContent { word }) => assert_eq!(word, "transfer"),
             other => panic!("expected sensitive block, got {other:?}"),
         }
     }
@@ -679,10 +683,17 @@ mod tests {
     }
 
     #[test]
-    fn active_hours_window() {
+    fn active_hours_unrestricted_by_default() {
         let mut cfg = base_cfg();
-        cfg.active_start = 8;
-        cfg.active_end = 22;
+        cfg.active_hours = None; // default: no time restriction
+        let p = test_policy(cfg);
+        assert!(p.in_active_hours(0) && p.in_active_hours(3) && p.in_active_hours(22));
+    }
+
+    #[test]
+    fn active_hours_window_when_set() {
+        let mut cfg = base_cfg();
+        cfg.active_hours = Some((8, 22));
         let p = test_policy(cfg);
         assert!(p.in_active_hours(8) && p.in_active_hours(21));
         assert!(!p.in_active_hours(7) && !p.in_active_hours(22) && !p.in_active_hours(3));
@@ -691,8 +702,7 @@ mod tests {
     #[test]
     fn active_hours_wrapping_midnight() {
         let mut cfg = base_cfg();
-        cfg.active_start = 22;
-        cfg.active_end = 6;
+        cfg.active_hours = Some((22, 6));
         let p = test_policy(cfg);
         assert!(p.in_active_hours(23) && p.in_active_hours(2));
         assert!(!p.in_active_hours(12));
