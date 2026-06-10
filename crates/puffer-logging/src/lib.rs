@@ -45,7 +45,12 @@ pub fn init(component: &str) -> Option<WorkerGuard> {
     let stderr_layer = std::env::var("PUFFER_LOG_STDERR")
         .map(|v| v == "1")
         .unwrap_or(false)
-        .then(|| fmt::layer().with_writer(std::io::stderr).with_ansi(false).compact());
+        .then(|| {
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .compact()
+        });
 
     let (file_layer, guard) = match log_dir() {
         Some(dir) => {

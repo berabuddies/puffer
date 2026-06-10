@@ -95,7 +95,7 @@ impl CandidateContextOptions {
     }
 
     fn limit_for_id(self, id: &str) -> usize {
-        if id.starts_with("telegram@") {
+        if id.starts_with("telegram@") || id.starts_with("telegram-user-id@") {
             self.telegram_limit
         } else {
             self.other_limit

@@ -16,13 +16,15 @@
 //! Wire protocol for Telegram (newline-delimited JSON on stdin/stdout):
 //!
 //! Stdin:
+//!   {"action":"login_qr","api_id":<i32?>,"api_hash":<str?>}
+//!   {"action":"login_qr_wait","timeout_seconds":<u64?>}
 //!   {"action":"login_start","phone":"+1...","api_id":<i32?>,"api_hash":<str?>}
 //!   {"action":"submit_code","code":"12345"}
 //!   {"action":"submit_password","password":"..."}
 //!   {"action":"exit"}
 //!
 //! Stdout: control events emitted by `puffer-subscriber-telegram-user`
-//! (kinds `login_awaiting_code`, `login_awaiting_password`,
+//! (kinds `login_qr`, `login_awaiting_code`, `login_awaiting_password`,
 //! `login_complete`, `login_error`) plus any malformed-input errors as
 //! `kind:"connect_error"` events.
 
@@ -32,8 +34,8 @@ use puffer_config::ConfigPaths;
 use puffer_subscriber_email::{save_email_config, EmailConfig};
 use puffer_subscriber_runtime::Event;
 use puffer_subscriber_telegram_user::{
-    login_start, login_submit_code, login_submit_password, Client, CodeSubmitOutcome, LoginState,
-    SkillEnv,
+    login_start, login_submit_code, login_submit_password, qr_login_start, qr_login_wait, Client,
+    CodeSubmitOutcome, LoginState, QrLoginOutcome, QrLoginState, SkillEnv,
 };
 use puffer_subscriptions::{ConnectionRecord, ConnectionStore};
 use serde::Deserialize;
@@ -56,6 +58,16 @@ pub(crate) fn run_connect_command(paths: &ConfigPaths, command: ConnectCommand) 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum TelegramAction {
+    LoginQr {
+        #[serde(default)]
+        api_id: Option<i32>,
+        #[serde(default)]
+        api_hash: Option<String>,
+    },
+    LoginQrWait {
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
     LoginStart {
         phone: String,
         #[serde(default)]
@@ -93,6 +105,7 @@ fn run_telegram_repl(paths: &ConfigPaths, connection_slug: &str) -> Result<()> {
 
 async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
     let mut state = LoginState::new();
+    let mut qr_state: Option<QrLoginState> = None;
     let mut client: Option<Client> = None;
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -117,15 +130,43 @@ async fn telegram_repl_loop(env: SkillEnv, paths: ConfigPaths) -> Result<()> {
             }
         };
         match parsed {
+            TelegramAction::LoginQr { api_id, api_hash } => {
+                client = None;
+                match qr_login_start(&env, &mut state, &mut qr_state, api_id, api_hash).await {
+                    Ok(QrLoginOutcome::Pending) => {}
+                    Ok(QrLoginOutcome::AwaitingPassword(c)) => client = Some(c),
+                    Ok(QrLoginOutcome::Complete(_c)) => {
+                        register_telegram_connection(&paths, &env.topic)?;
+                        break;
+                    }
+                    Err(err) => emit_local_error(&env.topic, &format!("login_qr error: {err}"))?,
+                }
+            }
+            TelegramAction::LoginQrWait { timeout_seconds } => {
+                match qr_login_wait(&env, &mut state, &mut qr_state, timeout_seconds).await {
+                    Ok(QrLoginOutcome::Pending) => {}
+                    Ok(QrLoginOutcome::AwaitingPassword(c)) => client = Some(c),
+                    Ok(QrLoginOutcome::Complete(_c)) => {
+                        register_telegram_connection(&paths, &env.topic)?;
+                        break;
+                    }
+                    Err(err) => {
+                        emit_local_error(&env.topic, &format!("login_qr_wait error: {err}"))?
+                    }
+                }
+            }
             TelegramAction::LoginStart {
                 phone,
                 api_id,
                 api_hash,
-            } => match login_start(&env, &mut state, phone, api_id, api_hash).await {
-                Ok(Some(c)) => client = Some(c),
-                Ok(None) => client = None,
-                Err(err) => emit_local_error(&env.topic, &format!("login_start error: {err}"))?,
-            },
+            } => {
+                qr_state = None;
+                match login_start(&env, &mut state, phone, api_id, api_hash).await {
+                    Ok(Some(c)) => client = Some(c),
+                    Ok(None) => client = None,
+                    Err(err) => emit_local_error(&env.topic, &format!("login_start error: {err}"))?,
+                }
+            }
             TelegramAction::SubmitCode { code } => {
                 let Some(c) = client.as_ref() else {
                     emit_local_error(&env.topic, "no active client; send login_start first")?;
@@ -336,6 +377,29 @@ mod tests {
             telegram_state_dir(&paths, "tg-alt"),
             paths.user_config_dir.join("telegram-accounts/tg-alt")
         );
+    }
+
+    #[test]
+    fn telegram_repl_parses_qr_login_actions() {
+        let start: TelegramAction =
+            serde_json::from_str(r#"{"action":"login_qr","api_id":123,"api_hash":"hash"}"#)
+                .unwrap();
+        match start {
+            TelegramAction::LoginQr { api_id, api_hash } => {
+                assert_eq!(api_id, Some(123));
+                assert_eq!(api_hash.as_deref(), Some("hash"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let wait: TelegramAction =
+            serde_json::from_str(r#"{"action":"login_qr_wait","timeout_seconds":10}"#).unwrap();
+        match wait {
+            TelegramAction::LoginQrWait { timeout_seconds } => {
+                assert_eq!(timeout_seconds, Some(10));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     fn paths(root: &std::path::Path) -> ConfigPaths {

@@ -209,6 +209,20 @@ pub(crate) async fn hydrate_contact_book(
     Ok(())
 }
 
+/// Hydrates and saves the durable peer cache from Telegram's contact book.
+///
+/// This is intentionally narrower than subscriber startup hydration: callers
+/// that only need contact-pickers can populate direct-user metadata without
+/// starting the live update subscriber or monitor pipeline.
+pub async fn hydrate_contact_book_cache(env: &SkillEnv, client: &Client) -> anyhow::Result<bool> {
+    let original = TelegramPeerCache::load(env).unwrap_or_default();
+    let mut cache = original.clone();
+    hydrate_contact_book(client, &mut cache).await?;
+    let changed = cache != original;
+    cache.save_if_changed(env, &original)?;
+    Ok(changed)
+}
+
 /// Resolves saved `telegram@username` contact ids into cached Telegram peers.
 pub(crate) async fn hydrate_saved_contact_usernames(
     env: &SkillEnv,
