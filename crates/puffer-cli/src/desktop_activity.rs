@@ -60,6 +60,7 @@ fn latest_action_requires_permission(events: &[TranscriptEvent]) -> bool {
             | TranscriptEvent::CommandInvoked { .. }
             | TranscriptEvent::GitDiffSnapshot { .. } => return false,
             TranscriptEvent::SessionRenamed { .. }
+            | TranscriptEvent::TurnBoundary { .. }
             | TranscriptEvent::TranscriptRewritten { .. }
             | TranscriptEvent::StateSnapshot { .. } => {}
         }
@@ -78,6 +79,7 @@ fn latest_action_is_unanswered(events: &[TranscriptEvent]) -> bool {
             | TranscriptEvent::ToolInvocation { .. }
             | TranscriptEvent::GitDiffSnapshot { .. } => return false,
             TranscriptEvent::SessionRenamed { .. }
+            | TranscriptEvent::TurnBoundary { .. }
             | TranscriptEvent::TranscriptRewritten { .. }
             | TranscriptEvent::StateSnapshot { .. } => {}
         }

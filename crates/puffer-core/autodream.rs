@@ -676,7 +676,9 @@ fn event_snippet(event: &TranscriptEvent) -> Option<String> {
         TranscriptEvent::SessionRenamed { name } => {
             Some(format!("renamed: {}", safe_snippet(name)))
         }
-        TranscriptEvent::TranscriptRewritten { .. } | TranscriptEvent::StateSnapshot { .. } => None,
+        TranscriptEvent::TurnBoundary { .. }
+        | TranscriptEvent::TranscriptRewritten { .. }
+        | TranscriptEvent::StateSnapshot { .. } => None,
     }
 }
 

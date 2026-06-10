@@ -432,22 +432,25 @@ impl BackendState {
         for (idx, event) in record.events.iter().enumerate() {
             let id = format!("event-{idx}");
             match event {
-                StoredEvent::User { text, .. } => items.push(TimelineItemDto::UserMessage {
+                StoredEvent::User { text, turn_id, .. } => items.push(TimelineItemDto::UserMessage {
                     id,
                     text: text.clone(),
                     attachments: Vec::new(),
+                    turn_id: turn_id.clone(),
                     actor: None,
                 }),
-                StoredEvent::Assistant { text, .. } => {
+                StoredEvent::Assistant { text, turn_id, .. } => {
                     items.push(TimelineItemDto::AssistantMessage {
                         id,
                         text: text.clone(),
+                        turn_id: turn_id.clone(),
                         actor: None,
                     })
                 }
-                StoredEvent::System { text, .. } => items.push(TimelineItemDto::SystemMessage {
+                StoredEvent::System { text, turn_id, .. } => items.push(TimelineItemDto::SystemMessage {
                     id,
                     text: text.clone(),
+                    turn_id: turn_id.clone(),
                     actor: None,
                 }),
                 StoredEvent::Tool {
@@ -455,6 +458,7 @@ impl BackendState {
                     input,
                     output,
                     success,
+                    turn_id,
                     ..
                 } => items.push(TimelineItemDto::ToolCall {
                     id,
@@ -464,6 +468,7 @@ impl BackendState {
                     input_text: input.clone(),
                     input_json: serde_json::from_str(input).ok(),
                     output_text: output.clone(),
+                    turn_id: turn_id.clone(),
                     actor: None,
                     subject: None,
                 }),
@@ -473,6 +478,7 @@ impl BackendState {
             items.push(TimelineItemDto::DiffSnapshot {
                 id: "current-diff".to_string(),
                 snapshot,
+                turn_id: None,
             });
         }
         items
@@ -1176,11 +1182,15 @@ fn run_agent_turn_thread(
     }
 }
 
-fn persist_codex_outcome(session_id: &str, outcome: CodexTurnOutcome) -> Result<String> {
+fn persist_codex_outcome(
+    session_id: &str,
+    turn_id: &str,
+    outcome: CodexTurnOutcome,
+) -> Result<String> {
     let assistant_text = outcome.assistant_text.clone();
     if outcome.events.is_empty() {
         for tool in outcome.tools {
-            append_codex_tool_event(session_id, tool)?;
+            append_codex_tool_event(session_id, turn_id, tool)?;
         }
         let assistant_messages = if outcome.assistant_messages.is_empty() {
             vec![assistant_text.clone()]
@@ -1188,15 +1198,17 @@ fn persist_codex_outcome(session_id: &str, outcome: CodexTurnOutcome) -> Result<
             outcome.assistant_messages
         };
         for text in assistant_messages {
-            append_codex_assistant_event(session_id, text)?;
+            append_codex_assistant_event(session_id, turn_id, text)?;
         }
         return Ok(assistant_text);
     }
 
     for event in outcome.events {
         match event {
-            CapturedTurnEvent::Assistant(text) => append_codex_assistant_event(session_id, text)?,
-            CapturedTurnEvent::Tool(tool) => append_codex_tool_event(session_id, tool)?,
+            CapturedTurnEvent::Assistant(text) => {
+                append_codex_assistant_event(session_id, turn_id, text)?
+            }
+            CapturedTurnEvent::Tool(tool) => append_codex_tool_event(session_id, turn_id, tool)?,
         }
     }
     Ok(assistant_text)
@@ -1204,6 +1216,7 @@ fn persist_codex_outcome(session_id: &str, outcome: CodexTurnOutcome) -> Result<
 
 fn append_codex_tool_event(
     session_id: &str,
+    turn_id: &str,
     tool: codex_app_server::CapturedToolEvent,
 ) -> Result<()> {
     append_event(
@@ -1214,11 +1227,12 @@ fn append_codex_tool_event(
             input: tool.input,
             output: tool.output,
             success: tool.success,
+            turn_id: Some(turn_id.to_string()),
         },
     )
 }
 
-fn append_codex_assistant_event(session_id: &str, text: String) -> Result<()> {
+fn append_codex_assistant_event(session_id: &str, turn_id: &str, text: String) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
@@ -1227,6 +1241,7 @@ fn append_codex_assistant_event(session_id: &str, text: String) -> Result<()> {
         StoredEvent::Assistant {
             at_ms: now_ms(),
             text,
+            turn_id: Some(turn_id.to_string()),
         },
     )
 }
@@ -1248,6 +1263,7 @@ fn run_agent_turn_inner(
         StoredEvent::User {
             at_ms: now_ms(),
             text: message.to_string(),
+            turn_id: Some(turn_id.to_string()),
         },
     )?;
 
@@ -1309,7 +1325,7 @@ fn run_agent_turn_inner(
                 cancel,
             },
         )?;
-        let assistant_text = persist_codex_outcome(session_id, outcome)?;
+        let assistant_text = persist_codex_outcome(session_id, turn_id, outcome)?;
         return Ok(assistant_text);
     }
     let launch =
@@ -1448,6 +1464,7 @@ fn run_agent_turn_inner(
                     launch.label,
                     stderr_text.trim()
                 ),
+                turn_id: Some(turn_id.to_string()),
             },
         )?;
         bail!(
@@ -1463,6 +1480,7 @@ fn run_agent_turn_inner(
         StoredEvent::Assistant {
             at_ms: now_ms(),
             text: assistant_text.clone(),
+            turn_id: Some(turn_id.to_string()),
         },
     )?;
     Ok(assistant_text)
@@ -2110,6 +2128,7 @@ mod tests {
             vec![StoredEvent::User {
                 at_ms: 1,
                 text: "hello".to_string(),
+                turn_id: None,
             }],
         );
         let config = StoredConfig {
@@ -2153,6 +2172,7 @@ mod tests {
             vec![StoredEvent::User {
                 at_ms: 1,
                 text: "hello".to_string(),
+                turn_id: None,
             }],
         );
 
@@ -2959,14 +2979,20 @@ enum StoredEvent {
     User {
         at_ms: u64,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
     Assistant {
         at_ms: u64,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
     System {
         at_ms: u64,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
     Tool {
         at_ms: u64,
@@ -2974,6 +3000,8 @@ enum StoredEvent {
         input: String,
         output: String,
         success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
 }
 

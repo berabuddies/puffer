@@ -462,6 +462,7 @@ impl AppState {
                     state.session.display_name = Some(name);
                 }
                 TranscriptEvent::GitDiffSnapshot { .. } => {}
+                TranscriptEvent::TurnBoundary { .. } => {}
                 TranscriptEvent::TranscriptRewritten { rewrite } => {
                     state.apply_transcript_rewrite(&rewrite);
                 }

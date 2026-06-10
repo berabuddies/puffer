@@ -504,6 +504,7 @@
     | {
         key: string;
         kind: "agent";
+        turnId: string | null;
         item: MessageTimelineItem | null;
         children: ActivityChild[];
         approvals: PermissionTimelineItem[];
@@ -719,20 +720,33 @@
     return `${base}:${count}`;
   }
 
+  function timelineTurnId(item: TimelineItem): string | null {
+    const turnId = item.turnId?.trim();
+    return turnId ? turnId : null;
+  }
+
   function buildRows(items: TimelineItem[]): RowKind[] {
     const rows: RowKind[] = [];
     const keyCounts = new Map<string, number>();
     let lastUserKey: string | null = null;
+    const userKeyByTurnId = new Map<string, string>();
+    const agentByTurnId = new Map<string, Extract<RowKind, { kind: "agent" }>>();
     let current:
       | Extract<RowKind, { kind: "agent" }>
       | null = null;
 
-    const startAgentRow = (seed: TimelineItem): Extract<RowKind, { kind: "agent" }> => ({
+    const startAgentRow = (
+      seed: TimelineItem,
+      turnId: string | null = timelineTurnId(seed)
+    ): Extract<RowKind, { kind: "agent" }> => ({
       key: nextRowKey(
-        lastUserKey ? `agent-after:${lastUserKey}` : `agent:${timelineItemKeyBase(seed)}`,
+        turnId
+          ? `agent-turn:${turnId}`
+          : lastUserKey ? `agent-after:${lastUserKey}` : `agent:${timelineItemKeyBase(seed)}`,
         keyCounts
       ),
       kind: "agent",
+      turnId,
       item: null,
       children: [],
       approvals: [],
@@ -741,11 +755,70 @@
 
     const flushCurrent = () => {
       if (!current) return;
-      current.children = normalizeLegacyActivityOrder(current.children);
-      const hasActionChildren = current.children.some((child) => !isActivityMessage(child));
+      rows.push(current);
+      current = null;
+    };
+
+    const insertAgentRowForTurn = (
+      row: Extract<RowKind, { kind: "agent" }>,
+      turnId: string
+    ) => {
+      const userKey = userKeyByTurnId.get(turnId);
+      if (!userKey) {
+        rows.push(row);
+        return;
+      }
+      const userIndex = rows.findIndex((candidate) => candidate.key === userKey);
+      if (userIndex < 0) {
+        rows.push(row);
+        return;
+      }
+      let insertIndex = userIndex + 1;
+      while (rows[insertIndex]?.kind === "agent") insertIndex += 1;
+      rows.splice(insertIndex, 0, row);
+    };
+
+    const rowForTurn = (
+      turnId: string,
+      seed: TimelineItem
+    ): Extract<RowKind, { kind: "agent" }> => {
+      const existing = agentByTurnId.get(turnId);
+      if (existing) return existing;
+      const row = startAgentRow(seed, turnId);
+      agentByTurnId.set(turnId, row);
+      insertAgentRowForTurn(row, turnId);
+      return row;
+    };
+
+    const rowForActivity = (item: TimelineItem): Extract<RowKind, { kind: "agent" }> => {
+      const turnId = timelineTurnId(item);
+      if (turnId) {
+        flushCurrent();
+        return rowForTurn(turnId, item);
+      }
+      if (!current) current = startAgentRow(item, null);
+      return current;
+    };
+
+    const orderedChildren = (row: Extract<RowKind, { kind: "agent" }>): ActivityChild[] => {
+      if (!row.turnId) return normalizeLegacyActivityOrder(row.children);
+      return row.children
+        .map((child, index) => ({ child, index, createdAtMs: activityCreatedAtMs(child) }))
+        .sort((a, b) => {
+          if (a.createdAtMs !== null && b.createdAtMs !== null && a.createdAtMs !== b.createdAtMs) {
+            return a.createdAtMs - b.createdAtMs;
+          }
+          return a.index - b.index;
+        })
+        .map(({ child }) => child);
+    };
+
+    const finalizeAgentRow = (row: Extract<RowKind, { kind: "agent" }>) => {
+      row.children = orderedChildren(row);
+      const hasActionChildren = row.children.some((child) => !isActivityMessage(child));
       let finalIndex = -1;
-      for (let index = current.children.length - 1; index >= 0; index -= 1) {
-        const child = current.children[index];
+      for (let index = row.children.length - 1; index >= 0; index -= 1) {
+        const child = row.children[index];
         if (isActivityMessage(child)) {
           if (hasActionChildren && isLiveStreamingAssistant(child)) continue;
           finalIndex = index;
@@ -753,22 +826,21 @@
         }
       }
       if (finalIndex >= 0) {
-        current.item = current.children[finalIndex] as MessageTimelineItem;
-        current.children = current.children.filter((_, index) => index !== finalIndex);
+        row.item = row.children[finalIndex] as MessageTimelineItem;
+        row.children = row.children.filter((_, index) => index !== finalIndex);
       }
-      rows.push(current);
-      current = null;
     };
 
     for (const item of items) {
+      const turnId = timelineTurnId(item);
       if (item.kind === "user") {
         flushCurrent();
         lastUserKey = nextRowKey(timelineItemKeyBase(item), keyCounts);
+        if (turnId) userKeyByTurnId.set(turnId, lastUserKey);
         rows.push({ key: lastUserKey, kind: "user", item: item as MessageTimelineItem });
       } else if (item.kind === "system") {
         if (isVerifiedSkillGateItem(item)) {
-          if (!current) current = startAgentRow(item);
-          current.children.push(item as MessageTimelineItem);
+          rowForActivity(item).children.push(item as MessageTimelineItem);
         } else {
           flushCurrent();
           rows.push({
@@ -778,20 +850,19 @@
           });
         }
       } else if (item.kind === "assistant" || item.kind === "command") {
-        if (!current) current = startAgentRow(item);
-        current.children.push(item as MessageTimelineItem);
+        rowForActivity(item).children.push(item as MessageTimelineItem);
       } else if (item.kind === "tool") {
-        if (!current) current = startAgentRow(item);
-        current.children.push(item as ToolTimelineItem);
+        rowForActivity(item).children.push(item as ToolTimelineItem);
       } else if (item.kind === "diff") {
-        if (!current) current = startAgentRow(item);
-        current.children.push(item as DiffTimelineItem);
+        rowForActivity(item).children.push(item as DiffTimelineItem);
       } else if (item.kind === "question") {
-        if (!current) current = startAgentRow(item);
-        current.questions.push(item as UserQuestionTimelineItem);
+        rowForActivity(item).questions.push(item as UserQuestionTimelineItem);
       }
     }
     flushCurrent();
+    for (const row of rows) {
+      if (row.kind === "agent") finalizeAgentRow(row);
+    }
     return rows;
   }
 
@@ -1329,6 +1400,7 @@
       out.push({
         key: "agent-pending-prompts",
         kind: "agent",
+        turnId: null,
         item: null,
         children: [],
         approvals: [...pendingPermissions],

@@ -146,11 +146,15 @@ pub(crate) enum TimelineItemDto {
         text: String,
         attachments: Vec<ChatAttachmentDto>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
     AssistantMessage {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -158,12 +162,16 @@ pub(crate) enum TimelineItemDto {
         id: String,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
     Command {
         id: String,
         command_name: String,
         command_args: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
@@ -175,6 +183,8 @@ pub(crate) enum TimelineItemDto {
         input_text: String,
         input_json: Option<Value>,
         output_text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,11 +198,15 @@ pub(crate) enum TimelineItemDto {
         reason: String,
         input_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
     },
     DiffSnapshot {
         id: String,
         snapshot: DiffSummaryDto,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
 }
 

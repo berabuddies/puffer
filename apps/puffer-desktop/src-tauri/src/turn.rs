@@ -25,7 +25,7 @@ use puffer_core::{
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::load_resources;
-use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
+use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent, TurnBoundaryState};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -74,6 +74,65 @@ impl TurnRegistry {
 
     fn with<R>(&self, turn_id: &str, f: impl FnOnce(&TurnEntry) -> R) -> Option<R> {
         self.inner.lock().unwrap().get(turn_id).map(f)
+    }
+}
+
+fn append_turn_boundary(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    turn_id: &str,
+    state: TurnBoundaryState,
+) -> Result<()> {
+    session_store.append_event(
+        session_uuid,
+        TranscriptEvent::TurnBoundary {
+            turn_id: turn_id.to_string(),
+            state,
+        },
+    )
+}
+
+struct TranscriptTurnGuard<'a> {
+    session_store: &'a SessionStore,
+    session_uuid: Uuid,
+    turn_id: &'a str,
+    finished: bool,
+}
+
+impl<'a> TranscriptTurnGuard<'a> {
+    fn start(session_store: &'a SessionStore, session_uuid: Uuid, turn_id: &'a str) -> Result<Self> {
+        append_turn_boundary(session_store, session_uuid, turn_id, TurnBoundaryState::Started)?;
+        Ok(Self {
+            session_store,
+            session_uuid,
+            turn_id,
+            finished: false,
+        })
+    }
+
+    fn finish(mut self) -> Result<()> {
+        append_turn_boundary(
+            self.session_store,
+            self.session_uuid,
+            self.turn_id,
+            TurnBoundaryState::Finished,
+        )?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for TranscriptTurnGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let _ = append_turn_boundary(
+            self.session_store,
+            self.session_uuid,
+            self.turn_id,
+            TurnBoundaryState::Finished,
+        );
     }
 }
 
@@ -363,6 +422,7 @@ fn drive_turn(
     // starts so the UI can reload and still see it even if the turn crashes.
     state.push_message(MessageRole::User, message.clone());
     let session_uuid = state.session.id;
+    let turn_guard = TranscriptTurnGuard::start(&session_store, session_uuid, &turn_id)?;
     session_store.append_event(
         session_uuid,
         TranscriptEvent::UserMessage {
@@ -581,6 +641,7 @@ fn drive_turn(
             trace,
         )?;
     }
+    turn_guard.finish()?;
 
     Ok(outcome.assistant_text)
 }

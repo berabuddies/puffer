@@ -8,7 +8,7 @@ use puffer_resources::LoadedResources;
 use puffer_secrets::{SecretSummary, SecretVault};
 use puffer_session_store::{
     GitDiffSnapshot, MessageActor, SessionRecord, SessionStore, SessionSummary, TranscriptEvent,
-    TranscriptRewrite,
+    TranscriptRewrite, TurnBoundaryState,
 };
 use puffer_workflow::WorkflowStore;
 use serde_json::Value;
@@ -1134,6 +1134,7 @@ fn extract_paths_from_patch(patch: &str, _cwd: &Path) -> BTreeSet<String> {
 fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut items = Vec::new();
     let mut pending_assistant = None;
+    let mut current_turn_id: Option<String> = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
             TranscriptEvent::UserMessage {
@@ -1146,6 +1147,7 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                     id: format!("timeline-{index}"),
                     text: text.clone(),
                     attachments: attachment_dtos(session_store, record.metadata.id, attachments),
+                    turn_id: current_turn_id.clone(),
                     actor: actor.clone(),
                 });
             }
@@ -1154,11 +1156,12 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                 pending_assistant = Some(TimelineItemDto::AssistantMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    turn_id: current_turn_id.clone(),
                     actor: actor.clone(),
                 });
             }
             TranscriptEvent::SystemMessage { text, actor } => {
-                let parsed = parse_system_message(index, text, actor.clone());
+                let parsed = parse_system_message(index, text, actor.clone(), current_turn_id.clone());
                 if parse_tool_message(text).is_none() {
                     flush_pending_assistant(&mut items, &mut pending_assistant);
                 }
@@ -1170,6 +1173,7 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                     id: format!("timeline-{index}"),
                     command_name: name.clone(),
                     command_args: args.clone(),
+                    turn_id: current_turn_id.clone(),
                     actor: actor.clone(),
                 })
             }
@@ -1178,6 +1182,7 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                 items.push(TimelineItemDto::DiffSnapshot {
                     id: format!("timeline-{index}"),
                     snapshot: diff_summary(index, snapshot),
+                    turn_id: current_turn_id.clone(),
                 })
             }
             TranscriptEvent::SessionRenamed { name } => {
@@ -1185,8 +1190,20 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                 items.push(TimelineItemDto::SystemMessage {
                     id: format!("timeline-{index}"),
                     text: format!("Session renamed to {name}."),
+                    turn_id: current_turn_id.clone(),
                     actor: None,
                 })
+            }
+            TranscriptEvent::TurnBoundary { turn_id, state } => {
+                flush_pending_assistant(&mut items, &mut pending_assistant);
+                match state {
+                    TurnBoundaryState::Started => current_turn_id = Some(turn_id.clone()),
+                    TurnBoundaryState::Finished => {
+                        if current_turn_id.as_deref() == Some(turn_id.as_str()) {
+                            current_turn_id = None;
+                        }
+                    }
+                }
             }
             TranscriptEvent::ToolInvocation {
                 call_id,
@@ -1208,6 +1225,7 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                     input_text: input.clone(),
                     input_json: serde_json::from_str(input).ok(),
                     output_text: output.clone(),
+                    turn_id: current_turn_id.clone(),
                     metadata: metadata.clone(),
                     actor: actor.clone(),
                     subject: subject.clone(),
@@ -1216,6 +1234,7 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                     items.push(TimelineItemDto::SystemMessage {
                         id: format!("timeline-{index}-{call_id}-lambda-gate"),
                         text,
+                        turn_id: current_turn_id.clone(),
                         actor: actor.clone(),
                     });
                 }
@@ -1227,6 +1246,7 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                         summary,
                         reason: reason.to_string(),
                         input_text: Some(input.clone()),
+                        turn_id: current_turn_id.clone(),
                         actor: actor.clone(),
                     });
                 }
@@ -1351,6 +1371,7 @@ fn parse_system_message(
     index: usize,
     text: &str,
     actor: Option<MessageActor>,
+    turn_id: Option<String>,
 ) -> Vec<TimelineItemDto> {
     if let Some(parsed) = parse_tool_message(text) {
         let summary = summarize_tool_input(&parsed.tool_id, &parsed.input_text);
@@ -1362,6 +1383,7 @@ fn parse_system_message(
             input_text: parsed.input_text.clone(),
             input_json: parsed.input_json,
             output_text: parsed.output_text.clone(),
+            turn_id: turn_id.clone(),
             metadata: None,
             actor: actor.clone(),
             subject: None,
@@ -1374,6 +1396,7 @@ fn parse_system_message(
                 summary,
                 reason: reason.to_string(),
                 input_text: Some(parsed.input_text),
+                turn_id: turn_id.clone(),
                 actor: actor.clone(),
             });
         }
@@ -1382,6 +1405,7 @@ fn parse_system_message(
     vec![TimelineItemDto::SystemMessage {
         id: format!("timeline-{index}"),
         text: text.to_string(),
+        turn_id,
         actor,
     }]
 }

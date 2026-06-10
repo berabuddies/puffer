@@ -206,6 +206,10 @@ pub enum TranscriptEvent {
     GitDiffSnapshot {
         snapshot: GitDiffSnapshot,
     },
+    TurnBoundary {
+        turn_id: String,
+        state: TurnBoundaryState,
+    },
     TranscriptRewritten {
         #[serde(flatten)]
         rewrite: TranscriptRewrite,
@@ -255,6 +259,14 @@ pub enum TranscriptEvent {
         #[serde(default)]
         session_tool_permissions: std::collections::HashMap<String, String>,
     },
+}
+
+/// Marks the beginning or end of a provider turn in the append-only log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnBoundaryState {
+    Started,
+    Finished,
 }
 
 #[cfg(test)]

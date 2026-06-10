@@ -161,6 +161,7 @@ type TimelineBase = {
   id: string;
   kind: TimelineKind;
   createdAtMs?: number | null;
+  turnId?: string | null;
   title: string;
   summary: string;
   body: string;

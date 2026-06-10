@@ -358,7 +358,7 @@ fn timeline_item(
             statusline_enabled: *statusline_enabled,
             working_dirs: working_dirs.clone(),
         }),
-        TranscriptEvent::TranscriptRewritten { .. } => None,
+        TranscriptEvent::TurnBoundary { .. } | TranscriptEvent::TranscriptRewritten { .. } => None,
     }
 }
 

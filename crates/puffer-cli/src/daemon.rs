@@ -55,6 +55,7 @@ use puffer_provider_registry::{
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{
     MessageActor, SessionMetadata, SessionStore, StoredAttachment, TranscriptEvent,
+    TurnBoundaryState,
 };
 use puffer_transport_anthropic::{
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
@@ -3443,6 +3444,37 @@ fn arm_disconnect_cancel_watchdog(state: Arc<DaemonState>) {
 
 const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
 
+fn append_turn_boundary(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    turn_id: &str,
+    state: TurnBoundaryState,
+) -> Result<()> {
+    session_store.append_event(
+        session_uuid,
+        TranscriptEvent::TurnBoundary {
+            turn_id: turn_id.to_string(),
+            state,
+        },
+    )
+}
+
+fn append_turn_started(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    turn_id: &str,
+) -> Result<()> {
+    append_turn_boundary(session_store, session_uuid, turn_id, TurnBoundaryState::Started)
+}
+
+fn append_turn_finished(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    turn_id: &str,
+) -> Result<()> {
+    append_turn_boundary(session_store, session_uuid, turn_id, TurnBoundaryState::Finished)
+}
+
 fn report_cancelled_turn(
     state: &DaemonState,
     session_uuid: Uuid,
@@ -3460,6 +3492,7 @@ fn report_cancelled_turn(
     }
     let session_store = SessionStore::from_paths(&state.paths)?;
     if !user_prompt_persisted.swap(true, Ordering::SeqCst) {
+        append_turn_started(&session_store, session_uuid, turn_id)?;
         session_store.append_event(
             session_uuid,
             TranscriptEvent::UserMessage {
@@ -3477,6 +3510,7 @@ fn report_cancelled_turn(
             actor: None,
         },
     )?;
+    append_turn_finished(&session_store, session_uuid, turn_id)?;
     publish_turn_error_event(
         state,
         channel,
@@ -4140,6 +4174,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         if !user_prompt_persisted_thread.swap(true, Ordering::SeqCst) {
             let _ = inputs.session_store.append_event(
                 session_uuid,
+                TranscriptEvent::TurnBoundary {
+                    turn_id: turn_id_thread.clone(),
+                    state: TurnBoundaryState::Started,
+                },
+            );
+            let _ = inputs.session_store.append_event(
+                session_uuid,
                 TranscriptEvent::UserMessage {
                     text: message_for_thread.clone(),
                     attachments: staged_attachments_for_thread.clone(),
@@ -4431,6 +4472,11 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         trace,
                     );
                 }
+                let _ = append_turn_finished(
+                    &inputs.session_store,
+                    session_uuid,
+                    &turn_id_thread,
+                );
                 let _ = inputs
                     .session_store
                     .append_event(session_uuid, app_state.snapshot_event());
@@ -4475,6 +4521,11 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         text: friendly.clone(),
                         actor: Some(stream_actor.clone()),
                     },
+                );
+                let _ = append_turn_finished(
+                    &inputs.session_store,
+                    session_uuid,
+                    &turn_id_thread,
                 );
                 publish_turn_error_event(
                     &setup_state,

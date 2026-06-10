@@ -12,6 +12,7 @@ pub use events::StoredAttachment;
 pub use events::StoredAttachmentKind;
 pub use events::TranscriptEvent;
 pub use events::TranscriptRewrite;
+pub use events::TurnBoundaryState;
 pub use metadata::{SessionMetadata, SessionRecord, SessionSummary};
 pub use store::{SessionListPage, SessionStore, BACKGROUND_SESSION_TAG};
 

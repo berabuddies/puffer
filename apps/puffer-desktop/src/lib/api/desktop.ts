@@ -145,6 +145,11 @@ type BackendActorFields = {
   subject?: MessageActor | null;
 };
 
+type BackendTurnFields = {
+  turnId?: string | null;
+  turn_id?: string | null;
+};
+
 type BackendChatAttachment = {
   id: string;
   name: string;
@@ -162,26 +167,26 @@ type BackendTimelineItem =
       text: string;
       createdAtMs?: number | null;
       attachments?: BackendChatAttachment[];
-    } & BackendActorFields)
+    } & BackendActorFields & BackendTurnFields)
   | ({
       kind: "assistant_message";
       id: string;
       text: string;
       createdAtMs?: number | null;
-    } & BackendActorFields)
+    } & BackendActorFields & BackendTurnFields)
   | ({
       kind: "system_message";
       id: string;
       text: string;
       createdAtMs?: number | null;
-    } & BackendActorFields)
+    } & BackendActorFields & BackendTurnFields)
   | ({
       kind: "command";
       id: string;
       commandName: string;
       commandArgs: string;
       createdAtMs?: number | null;
-    } & BackendActorFields)
+    } & BackendActorFields & BackendTurnFields)
   | {
       kind: "tool_call";
       id: string;
@@ -197,7 +202,7 @@ type BackendTimelineItem =
       outputText?: string;
       output_text?: string;
       metadata?: unknown;
-    } & BackendActorFields
+    } & BackendActorFields & BackendTurnFields
   | ({
       kind: "permission_dialog";
       id: string;
@@ -207,8 +212,8 @@ type BackendTimelineItem =
       summary: string | null;
       reason: string;
       inputText: string | null;
-    } & BackendActorFields)
-  | { kind: "diff_snapshot"; id: string; snapshot: BackendDiff; createdAtMs?: number | null };
+    } & BackendActorFields & BackendTurnFields)
+  | ({ kind: "diff_snapshot"; id: string; snapshot: BackendDiff; createdAtMs?: number | null } & BackendTurnFields);
 
 type BackendAgentDiffFile = {
   path: string;
@@ -451,6 +456,7 @@ function normalizeAskUserQuestionTool(
     id: value.id,
     kind: "question",
     createdAtMs: value.createdAtMs ?? null,
+    turnId: normalizeBackendTurnId(value),
     title: pending ? "Question" : "Answered question",
     summary: answerSummary || questions.map((question) => question.question).join("\n"),
     body: "",
@@ -494,6 +500,11 @@ function normalizeActivityStatus(value: string | null | undefined): AgentActivit
   }
 }
 
+function normalizeBackendTurnId(value: BackendTurnFields): string | null {
+  const raw = value.turnId ?? value.turn_id ?? null;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw : null;
+}
+
 function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
   switch (value.kind) {
     case "user_message": {
@@ -502,6 +513,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "user",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: "User message",
         summary: preview(value.text),
         body: value.text,
@@ -515,6 +527,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "assistant",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: "Assistant response",
         summary: preview(value.text),
         body: value.text,
@@ -529,6 +542,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "system",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: isVerifiedSkillGate ? "Verified Skill Gate" : "System message",
         summary: preview(systemText),
         body: systemText,
@@ -541,6 +555,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "command",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: `/${value.commandName}`,
         summary: preview(value.commandArgs || `/${value.commandName}`),
         body: [value.commandName, value.commandArgs].filter(Boolean).join(" "),
@@ -566,6 +581,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "tool",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: `Tool call: ${toolName}`,
         summary: value.summary ?? preview(outputText || inputText),
         body: outputText || "Tool call completed without textual output.",
@@ -584,6 +600,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "permission",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: "Permission request",
         summary: value.summary ?? `${value.toolId} requires approval`,
         body: `Tool: ${value.toolId}\nReason: ${value.reason}`,
@@ -608,6 +625,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         id: value.id,
         kind: "diff",
         createdAtMs: value.createdAtMs ?? null,
+        turnId: normalizeBackendTurnId(value),
         title: diff.title,
         summary: diff.status,
         body: diff.patch,
