@@ -390,6 +390,22 @@ pub(super) fn execute_monitor_reply_send(
     let store_cwd = state.session.cwd.clone();
     let task = load_monitor_task(store_cwd.as_path(), &parsed.task_id)?
         .ok_or_else(|| anyhow!("monitor task `{}` not found", parsed.task_id))?;
+    if let Some(receipt) = monitor_reply_receipt(&task.metadata) {
+        return Ok(serde_json::to_string_pretty(&json!({
+            "success": true,
+            "taskId": parsed.task_id,
+            "alreadySent": true,
+            "status": task.status,
+            "receipt": receipt,
+        }))?);
+    }
+    if terminal_task_status(&task.status) {
+        bail!(
+            "monitor task `{}` is already {}; not sending monitor reply",
+            parsed.task_id,
+            task.status
+        );
+    }
     let target = monitor_reply_target(&task)?;
     let connector_input = monitor_reply_connector_act_input(&target, message);
     let raw = super::connector_tools::execute_connector_act(state, cwd, connector_input)?;
@@ -609,6 +625,24 @@ fn metadata_marks_monitor_ignored(metadata: Option<&Map<String, Value>>) -> bool
         .and_then(|metadata| metadata.get("ignored"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn monitor_reply_receipt(metadata: &Map<String, Value>) -> Option<Value> {
+    metadata
+        .get("action_receipts")
+        .or_else(|| metadata.get("actionReceipts"))
+        .and_then(Value::as_array)
+        .and_then(|receipts| {
+            receipts
+                .iter()
+                .find(|receipt| {
+                    receipt
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind == "monitor_reply_send")
+                })
+                .cloned()
+        })
 }
 
 fn monitor_reply_target(task: &StoredTask) -> Result<MonitorReplyTarget> {
@@ -1228,6 +1262,60 @@ mod tests {
         assert_eq!(input["input"]["message"], "Acknowledged.");
         assert!(input["input"].get("to").is_none());
         assert!(input["input"].get("target").is_none());
+    }
+
+    #[test]
+    fn monitor_reply_send_rejects_already_completed_tasks_before_connector_action() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+        let path = monitor_tasks_path(tmp.path());
+        let mut store = load_store::<TaskStore>(&path).unwrap();
+        store.tasks[0].status = "completed".to_string();
+        save_store(&path, &store).unwrap();
+
+        let error = execute_monitor_reply_send(
+            &mut state,
+            tmp.path(),
+            json!({"taskId": task_id, "message": "Acknowledged."}),
+        )
+        .expect_err("completed task must not send again");
+
+        assert!(error.to_string().contains("already completed"));
+    }
+
+    #[test]
+    fn monitor_reply_send_noops_existing_reply_receipts_before_connector_action() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+        let path = monitor_tasks_path(tmp.path());
+        let mut store = load_store::<TaskStore>(&path).unwrap();
+        let task = &mut store.tasks[0];
+        task.status = "completed".to_string();
+        task.metadata.insert(
+            "action_receipts".to_string(),
+            json!([
+                {
+                    "kind": "monitor_reply_send",
+                    "delivery_target": {
+                        "type": "telegram_chat",
+                        "chat_id": "8759047281"
+                    }
+                }
+            ]),
+        );
+        save_store(&path, &store).unwrap();
+
+        let raw = execute_monitor_reply_send(
+            &mut state,
+            tmp.path(),
+            json!({"taskId": task_id, "message": "Acknowledged."}),
+        )
+        .expect("existing reply receipt should be idempotent");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["alreadySent"], true);
+        assert_eq!(payload["taskId"], task_id);
     }
 
     #[test]

@@ -9,6 +9,9 @@ description: |-
   message to that exact recorded Telegram chat, writes a delivery receipt, and
   marks the task completed.
 
+  Re-running this tool after its delivery receipt exists is idempotent and will
+  not send the reply again.
+
   If the task does not have a stable sourceContext delivery target, ask the
   user before sending anywhere.
 handler: runtime:workflow:monitor_reply_send
