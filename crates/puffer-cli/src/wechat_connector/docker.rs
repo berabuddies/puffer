@@ -31,22 +31,50 @@ const DISPLAY_PRELUDE: &str = concat!(
     "export DISPLAY=\"${display:-:1}\"; "
 );
 
+/// Container runtime backend. Docker is the default and the only path validated
+/// end-to-end; Apple `container` (macOS, built into the OS — no Docker Desktop
+/// install) is supported as a near drop-in (its `run`/`exec` CLI is
+/// flag-compatible), selected on macOS when the `container` binary is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Runtime {
+    Docker,
+    Container,
+}
+
+/// Resolves the runtime + its CLI binary. `WECHAT_RUNTIME=docker|container|auto`
+/// (default `auto`). Apple `container` is currently **opt-in** (`=container`):
+/// `auto` resolves to Docker so the validated path stays the default. Once the
+/// `container` path is validated end-to-end, `auto` should prefer it on macOS
+/// when the `container` binary is present (it only installs on macOS 26+).
+/// `DOCKER_BIN` / `WECHAT_CONTAINER_BIN` override the binary path.
+fn select_runtime() -> (Runtime, String) {
+    match env_or("WECHAT_RUNTIME", "auto").to_ascii_lowercase().as_str() {
+        "container" => (Runtime::Container, env_or("WECHAT_CONTAINER_BIN", "container")),
+        // "docker" and "auto" both resolve to Docker for now.
+        _ => (Runtime::Docker, env_or("DOCKER_BIN", "docker")),
+    }
+}
+
 /// One managed WeChat desktop instance, addressed by container name.
 #[derive(Debug, Clone)]
 pub(crate) struct WechatInstance {
     /// Logical instance name (e.g. `default`); the container is `puffer-wechat-<name>`.
     name: String,
-    /// Docker binary, overridable via `DOCKER_BIN` (default `docker`).
+    /// CLI binary for the selected runtime (`docker` or `container`).
     docker_bin: String,
+    /// Selected container runtime.
+    runtime: Runtime,
 }
 
 impl WechatInstance {
     /// Builds an instance from the environment: `WECHAT_INSTANCE` (default
-    /// `default`) and `DOCKER_BIN` (default `docker`).
+    /// `default`) and the runtime selection (see [`select_runtime`]).
     pub(crate) fn from_env() -> Self {
+        let (runtime, docker_bin) = select_runtime();
         Self {
             name: env_or("WECHAT_INSTANCE", "default"),
-            docker_bin: env_or("DOCKER_BIN", "docker"),
+            docker_bin,
+            runtime,
         }
     }
 
@@ -58,9 +86,11 @@ impl WechatInstance {
         if slug.is_empty() {
             return Self::from_env();
         }
+        let (runtime, docker_bin) = select_runtime();
         Self {
             name: slug.to_string(),
-            docker_bin: env_or("DOCKER_BIN", "docker"),
+            docker_bin,
+            runtime,
         }
     }
 
@@ -110,6 +140,26 @@ impl WechatInstance {
     ///    `ghcr.io/gloridust/wechat-on-cloud:latest`).
     /// A clear, actionable error is returned when none succeed.
     async fn ensure_image(&self, cfg: &InstanceConfig) -> Result<()> {
+        if self.runtime == Runtime::Container {
+            // `container` has its own image store and no local `build` step. The
+            // AT-SPI image is loaded/pulled into that store out of band, so here we
+            // only check presence and give an actionable error otherwise.
+            if self
+                .docker(&["image", "inspect", &cfg.image])
+                .await?
+                .status
+                .success()
+            {
+                return Ok(());
+            }
+            bail!(
+                "wechat image `{}` is not in the `container` image store. Pull or load it first, \
+                 e.g. `container image pull {}` (or `container image load`), then retry. The local \
+                 Docker image store is separate from `container`'s.",
+                cfg.image,
+                cfg.image
+            );
+        }
         if self
             .docker(&["image", "inspect", &cfg.image])
             .await?
@@ -179,7 +229,7 @@ impl WechatInstance {
     /// Creates and starts a fresh container, recovering from a name conflict
     /// (a leftover container by the same name) by removing it and retrying once.
     async fn create_container(&self, cfg: &InstanceConfig) -> Result<()> {
-        let args = run_args(cfg);
+        let args = run_args(cfg, self.runtime);
         let output = self.docker_args(&args).await?;
         if output.status.success() {
             return Ok(());
@@ -643,12 +693,15 @@ impl WechatInstance {
 /// (data volume at `/config`, 1g shm, `seccomp=unconfined`, restart policy,
 /// PUID/PGID/TZ/CUSTOM_USER/PASSWORD) but, having no panel, publishes the
 /// KasmVNC web port to localhost so puffer's own browser pane can reach it.
-fn run_args(cfg: &InstanceConfig) -> Vec<String> {
+fn run_args(cfg: &InstanceConfig, runtime: Runtime) -> Vec<String> {
     let container = cfg.container_name();
     let volume = cfg.volume_name();
     let mut args: Vec<String> = vec!["run".into(), "-d".into()];
     args.extend(["--name".into(), container.clone()]);
-    args.extend(["--hostname".into(), container]);
+    if runtime == Runtime::Docker {
+        // `container` has no --hostname flag.
+        args.extend(["--hostname".into(), container]);
+    }
     for (key, value) in [
         ("PUID", &cfg.puid),
         ("PGID", &cfg.pgid),
@@ -659,16 +712,31 @@ fn run_args(cfg: &InstanceConfig) -> Vec<String> {
         args.push("-e".into());
         args.push(format!("{key}={value}"));
     }
-    args.extend(["-v".into(), format!("{volume}:/config")]);
+    // Named data volume at /config (login + chat data persist across recreate).
+    match runtime {
+        Runtime::Docker => args.extend(["-v".into(), format!("{volume}:/config")]),
+        // `container` uses --mount instead of -v.
+        Runtime::Container => args.extend([
+            "--mount".into(),
+            format!("type=volume,source={volume},target=/config"),
+        ]),
+    }
     args.extend(["--shm-size".into(), "1g".into()]);
-    args.extend(["--security-opt".into(), "seccomp=unconfined".into()]);
+    if runtime == Runtime::Docker {
+        // `container` does not accept --security-opt; its VM isolation makes the
+        // seccomp relaxation unnecessary.
+        args.extend(["--security-opt".into(), "seccomp=unconfined".into()]);
+    }
     // Grant SYS_PTRACE (read other procs' /proc/<pid>/mem) only when the direct
     // chat-DB reader is enabled (on by default; `WECHAT_ENABLE_DB_READ=0` drops
     // both the reader and this cap on the container running the WeChat binary).
     if super::dbread::enabled() {
         args.extend(["--cap-add".into(), "SYS_PTRACE".into()]);
     }
-    args.extend(["--restart".into(), "unless-stopped".into()]);
+    if runtime == Runtime::Docker {
+        // `container` has no restart policy; the app/connector restarts it.
+        args.extend(["--restart".into(), "unless-stopped".into()]);
+    }
     // Publish only on loopback: KasmVNC basic-auth is the only gate, so never
     // expose the WeChat desktop on a routable interface.
     args.push("-p".into());
@@ -694,6 +762,7 @@ mod tests {
         let instance = WechatInstance {
             name: "default".to_string(),
             docker_bin: "docker".to_string(),
+            runtime: Runtime::Docker,
         };
         assert_eq!(instance.container_name(), "puffer-wechat-default");
         assert_eq!(instance.name(), "default");
@@ -716,7 +785,7 @@ mod tests {
             pgid: "1000".to_string(),
             tz: "Asia/Shanghai".to_string(),
         };
-        let args = run_args(&cfg);
+        let args = run_args(&cfg, Runtime::Docker);
         let joined = args.join(" ");
         assert!(args.starts_with(&["run".to_string(), "-d".to_string()]));
         assert!(joined.contains("--name puffer-wechat-default"));
@@ -730,5 +799,29 @@ mod tests {
         assert!(!joined.contains("0.0.0.0"));
         // Image is the final positional argument.
         assert_eq!(args.last().unwrap(), &cfg.image);
+    }
+
+    #[test]
+    fn run_args_container_maps_unsupported_flags() {
+        let cfg = InstanceConfig {
+            instance: "default".to_string(),
+            image: "puffer-wechat-atspi:4.1.1.4".to_string(),
+            host_port: 37042,
+            kasm_user: "woc".to_string(),
+            kasm_password: "pw".to_string(),
+            puid: "1000".to_string(),
+            pgid: "1000".to_string(),
+            tz: "Asia/Shanghai".to_string(),
+        };
+        let joined = run_args(&cfg, Runtime::Container).join(" ");
+        // Apple `container`: volume via --mount, none of the docker-only flags.
+        assert!(joined.contains("--mount type=volume,source=puffer-wechat-default,target=/config"));
+        assert!(!joined.contains(" -v "));
+        assert!(!joined.contains("--restart"));
+        assert!(!joined.contains("--security-opt"));
+        assert!(!joined.contains("--hostname"));
+        // Still publishes loopback-only and passes the env + image through.
+        assert!(joined.contains("-p 127.0.0.1:37042:3000"));
+        assert!(joined.contains("-e CUSTOM_USER=woc"));
     }
 }
