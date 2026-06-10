@@ -1,4 +1,4 @@
-//! Saved-contact JSON persistence helpers.
+//! Saved-contact and inferred-contact JSON persistence helpers.
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const CONTACT_STORE_VERSION: u32 = 1;
+const INFERRED_CONTACT_STORE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(super) struct ContactStoreFile {
@@ -14,7 +15,7 @@ pub(super) struct ContactStoreFile {
     pub(super) version: u32,
     #[serde(default)]
     pub(super) contacts: Vec<SavedContact>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) proposals: Vec<ContactProposal>,
 }
 
@@ -23,6 +24,23 @@ impl Default for ContactStoreFile {
         Self {
             version: CONTACT_STORE_VERSION,
             contacts: Vec::new(),
+            proposals: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct InferredContactStoreFile {
+    #[serde(default = "inferred_contact_store_version")]
+    version: u32,
+    #[serde(default)]
+    proposals: Vec<ContactProposal>,
+}
+
+impl Default for InferredContactStoreFile {
+    fn default() -> Self {
+        Self {
+            version: INFERRED_CONTACT_STORE_VERSION,
             proposals: Vec::new(),
         }
     }
@@ -51,7 +69,9 @@ pub(super) fn save_store(paths: &ConfigPaths, store: &ContactStoreFile) -> Resul
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut persisted = store.clone();
-    normalize_store_version(&mut persisted);
+    sanitize_store(&mut persisted);
+    migrate_legacy_proposals(paths, &persisted)?;
+    persisted.proposals.clear();
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&persisted)?)
         .with_context(|| format!("write {}", tmp.display()))?;
@@ -59,55 +79,155 @@ pub(super) fn save_store(paths: &ConfigPaths, store: &ContactStoreFile) -> Resul
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
 }
 
-/// Replaces the last inferred contact proposals in the workspace store.
+/// Loads the last inferred contact proposals from the workspace runtime store.
+pub(super) fn load_proposals(paths: &ConfigPaths) -> Result<Vec<ContactProposal>> {
+    let mut contact_store = load_store(paths)?;
+    let contacts = std::mem::take(&mut contact_store.contacts);
+    let mut store = load_inferred_store(paths)?;
+    let mut should_save = false;
+    if store.proposals.is_empty() && !contact_store.proposals.is_empty() {
+        store.proposals = std::mem::take(&mut contact_store.proposals);
+        should_save = true;
+    }
+    let before = store.proposals.clone();
+    sanitize_proposals(&mut store.proposals);
+    prune_proposal_list_for_saved_contacts(&mut store.proposals, &contacts);
+    should_save |= store.proposals != before;
+    if should_save {
+        save_inferred_store(paths, &store)?;
+    }
+    Ok(store.proposals)
+}
+
+/// Replaces the last inferred contact proposals in the workspace runtime store.
 pub(super) fn save_proposals(
     paths: &ConfigPaths,
     proposals: Vec<ContactProposal>,
 ) -> Result<Vec<ContactProposal>> {
-    let mut store = load_store(paths)?;
-    store.proposals = proposals;
-    sanitize_store(&mut store);
+    let contacts = load_store(paths)?.contacts;
+    let mut store = InferredContactStoreFile {
+        proposals,
+        ..InferredContactStoreFile::default()
+    };
+    sanitize_inferred_store(&mut store);
+    prune_proposal_list_for_saved_contacts(&mut store.proposals, &contacts);
     let stored = store.proposals.clone();
-    save_store(paths, &store)?;
+    save_inferred_store(paths, &store)?;
     Ok(stored)
 }
 
 /// Removes inferred proposals that overlap saved contact ids.
 pub(super) fn prune_proposals_for_contact_ids(
-    store: &mut ContactStoreFile,
+    paths: &ConfigPaths,
     contact_ids: &[String],
-) {
-    let saved_ids = normalize_contact_ids(contact_ids);
-    if saved_ids.is_empty() {
-        return;
+) -> Result<Vec<ContactProposal>> {
+    let mut store = load_inferred_store(paths)?;
+    let before = store.proposals.clone();
+    prune_proposal_list_for_contact_ids(&mut store.proposals, contact_ids);
+    if store.proposals != before {
+        save_inferred_store(paths, &store)?;
     }
-    store.proposals.retain(|proposal| {
-        normalize_contact_ids(&proposal.contact_ids)
-            .iter()
-            .all(|proposal_id| !saved_ids.contains(proposal_id))
-    });
+    Ok(store.proposals)
 }
 
-/// Removes inferred proposals that overlap any saved contact.
-pub(super) fn prune_proposals_for_saved_contacts(store: &mut ContactStoreFile) {
-    let contact_ids = store
-        .contacts
-        .iter()
-        .flat_map(|contact| contact.contact_ids.iter().cloned())
-        .collect::<Vec<_>>();
-    prune_proposals_for_contact_ids(store, &contact_ids);
+fn load_inferred_store(paths: &ConfigPaths) -> Result<InferredContactStoreFile> {
+    let path = inferred_contacts_path(paths);
+    if !path.exists() {
+        return Ok(InferredContactStoreFile::default());
+    }
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(InferredContactStoreFile::default());
+    }
+    let mut store =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    sanitize_inferred_store(&mut store);
+    Ok(store)
+}
+
+fn save_inferred_store(paths: &ConfigPaths, store: &InferredContactStoreFile) -> Result<()> {
+    let path = inferred_contacts_path(paths);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut persisted = store.clone();
+    sanitize_inferred_store(&mut persisted);
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&persisted)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+}
+
+fn migrate_legacy_proposals(paths: &ConfigPaths, store: &ContactStoreFile) -> Result<()> {
+    if store.proposals.is_empty() {
+        return Ok(());
+    }
+    let mut inferred = load_inferred_store(paths)?;
+    if inferred.proposals.is_empty() {
+        inferred.proposals = store.proposals.clone();
+        prune_proposal_list_for_saved_contacts(&mut inferred.proposals, &store.contacts);
+        save_inferred_store(paths, &inferred)?;
+    }
+    Ok(())
 }
 
 fn sanitize_store(store: &mut ContactStoreFile) {
     normalize_store_version(store);
     sanitize_contacts(&mut store.contacts);
     sanitize_proposals(&mut store.proposals);
-    prune_proposals_for_saved_contacts(store);
+    prune_legacy_proposals_for_saved_contacts(store);
+}
+
+fn sanitize_inferred_store(store: &mut InferredContactStoreFile) {
+    normalize_inferred_store_version(store);
+    sanitize_proposals(&mut store.proposals);
+}
+
+fn prune_proposal_list_for_contact_ids(
+    proposals: &mut Vec<ContactProposal>,
+    contact_ids: &[String],
+) {
+    let saved_ids = normalize_contact_ids(contact_ids);
+    if saved_ids.is_empty() {
+        return;
+    }
+    proposals.retain(|proposal| {
+        normalize_contact_ids(&proposal.contact_ids)
+            .iter()
+            .all(|proposal_id| !saved_ids.contains(proposal_id))
+    });
+}
+
+fn prune_proposal_list_for_saved_contacts(
+    proposals: &mut Vec<ContactProposal>,
+    contacts: &[SavedContact],
+) {
+    let contact_ids = contacts
+        .iter()
+        .flat_map(|contact| contact.contact_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    prune_proposal_list_for_contact_ids(proposals, &contact_ids);
+}
+
+fn prune_legacy_proposals_for_saved_contacts(store: &mut ContactStoreFile) {
+    let contact_ids = store
+        .contacts
+        .iter()
+        .flat_map(|contact| contact.contact_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    prune_proposal_list_for_contact_ids(&mut store.proposals, &contact_ids);
 }
 
 fn normalize_store_version(store: &mut ContactStoreFile) {
     if store.version == 0 {
         store.version = CONTACT_STORE_VERSION;
+    }
+}
+
+fn normalize_inferred_store_version(store: &mut InferredContactStoreFile) {
+    if store.version == 0 {
+        store.version = INFERRED_CONTACT_STORE_VERSION;
     }
 }
 
@@ -211,8 +331,19 @@ fn contacts_path(paths: &ConfigPaths) -> PathBuf {
         .join("contacts.json")
 }
 
+fn inferred_contacts_path(paths: &ConfigPaths) -> PathBuf {
+    paths
+        .workspace_config_dir
+        .join("runtime")
+        .join("inferred_contacts.json")
+}
+
 fn contact_store_version() -> u32 {
     CONTACT_STORE_VERSION
+}
+
+fn inferred_contact_store_version() -> u32 {
+    INFERRED_CONTACT_STORE_VERSION
 }
 
 #[cfg(test)]
@@ -246,6 +377,30 @@ mod tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["version"], CONTACT_STORE_VERSION);
+        assert!(value.get("proposals").is_none());
+    }
+
+    #[test]
+    fn save_store_migrates_legacy_proposals_to_inferred_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_config_paths(temp.path());
+        let store = ContactStoreFile {
+            version: 1,
+            contacts: Vec::new(),
+            proposals: vec![ContactProposal {
+                name: "Bob".to_string(),
+                description: "Frequent project contact.".to_string(),
+                avatar: None,
+                contact_ids: vec!["telegram@bob".to_string()],
+            }],
+        };
+
+        save_store(&paths, &store).unwrap();
+
+        let raw = std::fs::read_to_string(contacts_path(&paths)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value.get("proposals").is_none());
+        assert_eq!(load_proposals(&paths).unwrap(), store.proposals);
     }
 
     #[test]
@@ -274,13 +429,13 @@ mod tests {
         .unwrap();
 
         let store = load_store(&paths).unwrap();
+        let proposals = load_proposals(&paths).unwrap();
 
         assert_eq!(store.contacts.len(), 1);
-        assert_eq!(store.proposals.len(), 1);
-        assert_eq!(
-            store.proposals[0].contact_ids,
-            vec!["telegram@bob".to_string()]
-        );
+        assert!(store.proposals.is_empty());
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].contact_ids, vec!["telegram@bob".to_string()]);
+        assert!(inferred_contacts_path(&paths).exists());
     }
 
     #[test]
@@ -488,6 +643,36 @@ mod tests {
     }
 
     #[test]
+    fn load_proposals_migrates_legacy_contacts_store_proposals() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_config_paths(temp.path());
+        let runtime_dir = paths.workspace_config_dir.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(
+            runtime_dir.join("contacts.json"),
+            serde_json::to_vec_pretty(&ContactStoreFile {
+                version: 1,
+                contacts: Vec::new(),
+                proposals: vec![ContactProposal {
+                    name: " Bob ".to_string(),
+                    description: " Unsaved collaborator. ".to_string(),
+                    avatar: None,
+                    contact_ids: vec![" Telegram@@Bob ".to_string()],
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let proposals = load_proposals(&paths).unwrap();
+        let migrated = load_inferred_store(&paths).unwrap();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].name, "Bob");
+        assert_eq!(migrated.proposals, proposals);
+    }
+
+    #[test]
     fn save_proposals_sanitizes_returned_and_persisted_values() {
         let temp = tempfile::tempdir().unwrap();
         let paths = test_config_paths(temp.path());
@@ -530,9 +715,10 @@ mod tests {
             ]
         );
 
-        let reloaded = load_store(&paths).unwrap();
+        let reloaded = load_proposals(&paths).unwrap();
 
-        assert_eq!(reloaded.proposals, stored);
+        assert_eq!(reloaded, stored);
+        assert!(load_store(&paths).unwrap().proposals.is_empty());
     }
 
     #[test]
@@ -570,15 +756,17 @@ mod tests {
 
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].name, "Bob");
-        assert_eq!(load_store(&paths).unwrap().proposals, stored);
+        assert_eq!(load_proposals(&paths).unwrap(), stored);
+        assert!(load_store(&paths).unwrap().proposals.is_empty());
     }
 
     #[test]
     fn prune_proposals_for_contact_ids_removes_overlapping_proposals() {
-        let mut store = ContactStoreFile {
-            version: 1,
-            contacts: Vec::new(),
-            proposals: vec![
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_config_paths(temp.path());
+        save_proposals(
+            &paths,
+            vec![
                 ContactProposal {
                     name: "Alice".to_string(),
                     description: "Frequent launch collaborator.".to_string(),
@@ -592,12 +780,15 @@ mod tests {
                     contact_ids: vec!["telegram@bob".to_string()],
                 },
             ],
-        };
+        )
+        .unwrap();
 
-        prune_proposals_for_contact_ids(&mut store, &["telegram@alice".to_string()]);
+        let proposals =
+            prune_proposals_for_contact_ids(&paths, &["telegram@alice".to_string()]).unwrap();
 
-        assert_eq!(store.proposals.len(), 1);
-        assert_eq!(store.proposals[0].name, "Bob");
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].name, "Bob");
+        assert_eq!(load_proposals(&paths).unwrap(), proposals);
     }
 
     fn test_config_paths(root: &Path) -> ConfigPaths {

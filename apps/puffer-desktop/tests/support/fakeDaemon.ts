@@ -780,9 +780,9 @@ export class FakeDaemon {
           }
         ]
       }
-    ],
-    proposals: []
+    ]
   };
+  private inferredContactProposals: JsonRecord[] = [];
   private nextTab = 2;
   private nextPty = 1;
   private rejectConnections = false;
@@ -965,9 +965,9 @@ export class FakeDaemon {
   setContactsSnapshot(snapshot: ContactsSnapshotFixture): void {
     this.contactsSnapshot = {
       contacts: snapshot.contacts.map((contact) => ({ ...contact })),
-      candidates: snapshot.candidates.map((candidate) => ({ ...candidate })),
-      proposals: snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? []
+      candidates: snapshot.candidates.map((candidate) => ({ ...candidate }))
     };
+    this.inferredContactProposals = snapshot.proposals?.map((proposal) => ({ ...proposal })) ?? [];
   }
 
   setLegacyContactInferResponse(enabled = true): void {
@@ -1649,7 +1649,7 @@ export class FakeDaemon {
         .filter((candidate) => candidateContactMatches(candidate, query))
         .slice(0, limit)
         .map((candidate) => ({ ...candidate })),
-      proposals: this.contactsSnapshot.proposals.map((proposal) => ({ ...proposal }))
+      proposals: this.inferredContactProposals.map((proposal) => ({ ...proposal }))
     };
   }
 
@@ -1679,9 +1679,11 @@ export class FakeDaemon {
           candidate.id !== id && !overlapsContactIds(candidate, contactIds)
         ),
         contact
-      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
-      proposals: this.contactsSnapshot.proposals.filter((proposal) => !overlapsContactIds(proposal, contactIds))
+      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
     };
+    this.inferredContactProposals = this.inferredContactProposals.filter(
+      (proposal) => !overlapsContactIds(proposal, contactIds)
+    );
     return this.contactsList({});
   }
 
@@ -1718,10 +1720,7 @@ export class FakeDaemon {
       });
       for (const id of contactIds) knownContactIds.add(id);
     }
-    this.contactsSnapshot = {
-      ...this.contactsSnapshot,
-      proposals
-    };
+    this.inferredContactProposals = proposals;
     const response = {
       proposals: proposals.map((proposal) => ({ ...proposal })),
       candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))

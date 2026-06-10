@@ -30,7 +30,7 @@ use daemon_contacts_params::{
     ContactSaveParams,
 };
 use daemon_contacts_store::{
-    load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
+    load_proposals, load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
 };
 use daemon_contacts_telegram::{
     collect_telegram_candidates, read_telegram_peer_avatars, read_telegram_peer_names,
@@ -126,13 +126,14 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
         .map(str::trim)
         .filter(|q| !q.is_empty());
     let store = load_store(paths)?;
+    let proposals = load_proposals(paths)?;
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
     let candidates = filtered_candidates(paths, limit, query)?;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
-        "proposals": store.proposals,
+        "proposals": proposals,
     }))
 }
 
@@ -147,13 +148,14 @@ pub(crate) fn handle_contacts_search(paths: &ConfigPaths, params: &Value) -> Res
         .map(str::trim)
         .filter(|q| !q.is_empty());
     let store = load_store(paths)?;
+    let proposals = load_proposals(paths)?;
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
     let candidates = searched_candidates(paths, limit, query)?;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
-        "proposals": store.proposals,
+        "proposals": proposals,
     }))
 }
 
@@ -201,8 +203,8 @@ pub(crate) fn handle_contacts_save(paths: &ConfigPaths, params: &Value) -> Resul
             .to_ascii_lowercase()
             .cmp(&right.name.to_ascii_lowercase())
     });
-    prune_proposals_for_contact_ids(&mut store, &saved_contact_ids);
     save_store(paths, &store)?;
+    prune_proposals_for_contact_ids(paths, &saved_contact_ids)?;
     handle_contacts_list(paths, &json!({ "limit": DEFAULT_LIMIT }))
 }
 
