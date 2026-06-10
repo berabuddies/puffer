@@ -5,6 +5,7 @@ use puffer_config::ConfigPaths;
 use puffer_subscriptions::{normalize_contact_ids, ContactProposal, SavedContact};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use uuid::Uuid;
 
 const CONTACT_STORE_VERSION: u32 = 1;
 const INFERRED_CONTACT_STORE_VERSION: u32 = 1;
@@ -58,25 +59,18 @@ pub(super) fn load_store(paths: &ConfigPaths) -> Result<ContactStoreFile> {
     }
     let mut store =
         serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    repair_auto_saved_inferred_contacts(paths, &mut store)?;
     sanitize_store(&mut store);
     Ok(store)
 }
 
 /// Saves contacts to the workspace runtime store through a temporary file.
 pub(super) fn save_store(paths: &ConfigPaths, store: &ContactStoreFile) -> Result<()> {
-    let path = contacts_path(paths);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
     let mut persisted = store.clone();
     sanitize_store(&mut persisted);
     migrate_legacy_proposals(paths, &persisted)?;
     persisted.proposals.clear();
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&persisted)?)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+    write_contacts_store(paths, &persisted)
 }
 
 /// Loads the last inferred contact proposals from the workspace runtime store.
@@ -159,6 +153,18 @@ fn save_inferred_store(paths: &ConfigPaths, store: &InferredContactStoreFile) ->
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
 }
 
+fn write_contacts_store(paths: &ConfigPaths, store: &ContactStoreFile) -> Result<()> {
+    let path = contacts_path(paths);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(store)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+}
+
 fn migrate_legacy_proposals(paths: &ConfigPaths, store: &ContactStoreFile) -> Result<()> {
     if store.proposals.is_empty() {
         return Ok(());
@@ -170,6 +176,72 @@ fn migrate_legacy_proposals(paths: &ConfigPaths, store: &ContactStoreFile) -> Re
         save_inferred_store(paths, &inferred)?;
     }
     Ok(())
+}
+
+fn repair_auto_saved_inferred_contacts(
+    paths: &ConfigPaths,
+    store: &mut ContactStoreFile,
+) -> Result<()> {
+    if !looks_like_auto_saved_inferred_store(store) {
+        return Ok(());
+    }
+    let mut inferred = load_inferred_store(paths)?;
+    if !inferred.proposals.is_empty() {
+        return Ok(());
+    }
+    inferred.proposals = store
+        .contacts
+        .iter()
+        .map(contact_proposal_from_saved_contact)
+        .collect();
+    write_auto_saved_repair_backup(paths, store)?;
+    save_inferred_store(paths, &inferred)?;
+    store.contacts.clear();
+    store.proposals.clear();
+    store.version = CONTACT_STORE_VERSION;
+    write_contacts_store(paths, store)
+}
+
+fn write_auto_saved_repair_backup(paths: &ConfigPaths, store: &ContactStoreFile) -> Result<()> {
+    let path = contacts_path(paths);
+    let backup = path.with_file_name("contacts.auto-saved-inferred-v0.bak.json");
+    if backup.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = backup.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp = backup.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(store)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &backup)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), backup.display()))
+}
+
+fn looks_like_auto_saved_inferred_store(store: &ContactStoreFile) -> bool {
+    store.version == 0
+        && !store.contacts.is_empty()
+        && store.proposals.is_empty()
+        && store
+            .contacts
+            .iter()
+            .all(looks_like_auto_saved_inferred_contact)
+}
+
+fn looks_like_auto_saved_inferred_contact(contact: &SavedContact) -> bool {
+    Uuid::parse_str(contact.id.trim()).is_ok()
+        && !contact.name.trim().is_empty()
+        && !contact.description.trim().is_empty()
+        && !normalize_contact_ids(&contact.contact_ids).is_empty()
+}
+
+fn contact_proposal_from_saved_contact(contact: &SavedContact) -> ContactProposal {
+    ContactProposal {
+        name: contact.name.clone(),
+        description: contact.description.clone(),
+        avatar: contact.avatar.clone(),
+        contact_ids: contact.contact_ids.clone(),
+    }
 }
 
 fn sanitize_store(store: &mut ContactStoreFile) {
@@ -469,6 +541,111 @@ mod tests {
         let store = load_store(&paths).unwrap();
 
         assert!(store.proposals.is_empty());
+    }
+
+    #[test]
+    fn load_store_repairs_legacy_auto_saved_inferred_contacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_config_paths(temp.path());
+        let runtime_dir = paths.workspace_config_dir.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(
+            runtime_dir.join("contacts.json"),
+            serde_json::to_vec_pretty(&ContactStoreFile {
+                version: 0,
+                contacts: vec![
+                    SavedContact {
+                        id: "64e1c45f-f6a1-44d8-a66d-b0a1b54c425b".to_string(),
+                        name: "Alice".to_string(),
+                        description: "Frequent collaborator.".to_string(),
+                        avatar: Some(" data:image/jpeg;base64,ZmFrZQ== ".to_string()),
+                        contact_ids: vec![" Telegram@@Alice ".to_string()],
+                    },
+                    SavedContact {
+                        id: "66bcd250-6b28-42ce-a668-89ab0810e92c".to_string(),
+                        name: "Bob".to_string(),
+                        description: "Release reviewer.".to_string(),
+                        avatar: None,
+                        contact_ids: vec!["google@Bob@Example.COM".to_string()],
+                    },
+                ],
+                proposals: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let store = load_store(&paths).unwrap();
+        let proposals = load_proposals(&paths).unwrap();
+
+        assert_eq!(store.version, CONTACT_STORE_VERSION);
+        assert!(store.contacts.is_empty());
+        assert!(store.proposals.is_empty());
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(proposals[0].name, "Alice");
+        assert_eq!(
+            proposals[0].avatar.as_deref(),
+            Some("data:image/jpeg;base64,ZmFrZQ==")
+        );
+        assert_eq!(proposals[0].contact_ids, vec!["telegram@alice"]);
+        assert_eq!(proposals[1].name, "Bob");
+        assert_eq!(proposals[1].contact_ids, vec!["google@bob@example.com"]);
+
+        let raw = std::fs::read_to_string(contacts_path(&paths)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["version"], CONTACT_STORE_VERSION);
+        assert!(value["contacts"].as_array().unwrap().is_empty());
+        assert!(value.get("proposals").is_none());
+        assert!(inferred_contacts_path(&paths).exists());
+        assert!(runtime_dir
+            .join("contacts.auto-saved-inferred-v0.bak.json")
+            .exists());
+    }
+
+    #[test]
+    fn load_store_preserves_legacy_contacts_when_inferred_store_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_config_paths(temp.path());
+        let runtime_dir = paths.workspace_config_dir.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(
+            runtime_dir.join("contacts.json"),
+            serde_json::to_vec_pretty(&ContactStoreFile {
+                version: 0,
+                contacts: vec![SavedContact {
+                    id: "64e1c45f-f6a1-44d8-a66d-b0a1b54c425b".to_string(),
+                    name: "Alice".to_string(),
+                    description: "User-saved collaborator.".to_string(),
+                    avatar: None,
+                    contact_ids: vec!["telegram@alice".to_string()],
+                }],
+                proposals: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        save_inferred_store(
+            &paths,
+            &InferredContactStoreFile {
+                version: 1,
+                proposals: vec![ContactProposal {
+                    name: "Bob".to_string(),
+                    description: "Unsaved reviewer.".to_string(),
+                    avatar: None,
+                    contact_ids: vec!["telegram@bob".to_string()],
+                }],
+            },
+        )
+        .unwrap();
+
+        let store = load_store(&paths).unwrap();
+        let proposals = load_proposals(&paths).unwrap();
+
+        assert_eq!(store.contacts.len(), 1);
+        assert_eq!(store.contacts[0].name, "Alice");
+        assert_eq!(store.contacts[0].contact_ids, vec!["telegram@alice"]);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].name, "Bob");
     }
 
     #[test]
