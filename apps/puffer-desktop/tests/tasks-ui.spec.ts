@@ -5,6 +5,46 @@ async function openTasks(page: Page) {
   await page.locator(".pf-sidebar").getByRole("button", { name: "Tasks" }).click();
 }
 
+test("monitor task detail sanitizes source and judgment boilerplate", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setWorkflowSnapshot({
+    workflows: [],
+    runs: [],
+    connections: [],
+    connectors: [],
+    workflow_bindings: [],
+    monitor_tasks: [
+      {
+        task_id: "monitor-26",
+        subject: "Reply to Telegram request to buy something from a supermarket",
+        description:
+          "Personal Telegram message asks: \"帮我买个东西路过超市的时候\". This is an actionable request to buy an item when passing a supermarket. Need a reply that clarifies what to buy, any budget/preferences, and when they expect it.",
+        status: "pending",
+        monitor_connection: "telegram-user",
+        monitor_connector: "telegram-login",
+        monitor_memory_path: "/Users/yuna/.puffer/runtime/monitors/telegram-user.md",
+        started_at_ms: Date.now() - 10_000,
+        updated_at_ms: Date.now()
+      }
+    ],
+    monitor_task_error: null
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openTasks(page);
+  await page.getByRole("button", { name: /Reply to request to buy something from a supermarket/ }).click();
+
+  const detail = page.getByRole("complementary", { name: "Selected task" });
+  await expect(detail).toBeVisible();
+  await expect(detail).toContainText("帮我买个东西路过超市的时候");
+  await expect(detail).not.toContainText("\"帮我买个东西路过超市的时候\".");
+  await expect(detail).not.toContainText("Telegram");
+  await expect(detail).not.toContainText("message asks");
+  await expect(detail).not.toContainText("actionable request");
+  await expect(detail).not.toContainText("Need a reply");
+});
+
 test("tasks history shows received monitor messages and agent outcomes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

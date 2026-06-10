@@ -9,6 +9,7 @@ use super::task_runtime::{
     runtime_agent_terminal_status, terminal_task_status, wait_for_runtime_agent_output,
     wait_for_stored_task,
 };
+use crate::monitor_task_text::{sanitize_monitor_task_fields, sanitize_monitor_task_text};
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -106,100 +107,8 @@ pub(super) fn execute_task_create(
     }))?)
 }
 
-fn sanitize_monitor_task_text(value: &str) -> String {
-    let without_prefix = strip_monitor_source_prefix(value.trim());
-    let without_judgment = remove_monitor_judgment_sentences(&without_prefix);
-    let without_terms = remove_monitor_source_terms(&without_judgment);
-    normalize_monitor_task_text(&without_terms)
-}
-
-fn strip_monitor_source_prefix(value: &str) -> String {
-    let mut text = value.trim();
-    loop {
-        let lowered = text.to_ascii_lowercase();
-        let mut matched = None;
-        for prefix in [
-            "personal telegram message asks:",
-            "personal telegram message ask:",
-            "telegram message asks:",
-            "telegram message ask:",
-            "personal message asks:",
-            "personal message ask:",
-            "message asks:",
-            "message ask:",
-            "telegram message from",
-            "incoming telegram message",
-            "telegram user sent",
-            "in telegram group",
-            "message from chat_id",
-        ] {
-            if lowered.starts_with(prefix) {
-                matched = Some(prefix.len());
-                break;
-            }
-        }
-        let Some(prefix_len) = matched else {
-            return text.to_string();
-        };
-        text = text[prefix_len..]
-            .trim_start_matches([' ', ':', '-', '>', '\t'])
-            .trim();
-    }
-}
-
-fn remove_monitor_judgment_sentences(value: &str) -> String {
-    value
-        .split_inclusive(['.', '!', '?'])
-        .filter(|sentence| {
-            let lowered = sentence.to_ascii_lowercase();
-            !lowered.contains("actionable request")
-                && !lowered.contains("actionable task")
-                && !lowered.contains("non-actionable")
-                && !lowered.contains("triage")
-        })
-        .collect::<String>()
-}
-
-fn remove_monitor_source_terms(value: &str) -> String {
-    let mut text = value.to_string();
-    for term in [
-        "personal telegram",
-        "telegram",
-        "message asks",
-        "message ask",
-        "actionable request",
-        "actionable task",
-    ] {
-        text = replace_ascii_case_insensitive(&text, term, "");
-    }
-    text
-}
-
-fn replace_ascii_case_insensitive(value: &str, needle: &str, replacement: &str) -> String {
-    let mut text = value.to_string();
-    loop {
-        let lowered = text.to_ascii_lowercase();
-        let Some(start) = lowered.find(needle) else {
-            return text;
-        };
-        let end = start + needle.len();
-        text.replace_range(start..end, replacement);
-    }
-}
-
-fn normalize_monitor_task_text(value: &str) -> String {
-    let mut out = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    for (from, to) in [
-        (" :", ":"),
-        (" .", "."),
-        (" ,", ","),
-        (" !", "!"),
-        (" ?", "?"),
-        ("  ", " "),
-    ] {
-        out = out.replace(from, to);
-    }
-    out.trim_matches([' ', ':', '-', '.']).trim().to_string()
+fn sanitize_monitor_task_record(task: &mut StoredTask) -> bool {
+    sanitize_monitor_task_fields(&mut task.subject, &mut task.description)
 }
 
 /// Executes the live `TaskGet` workflow tool.
@@ -255,6 +164,7 @@ pub(super) fn execute_task_list(
     let mut monitor_changed = false;
     for task in &mut monitor_store.tasks {
         let previous = task.clone();
+        monitor_changed |= sanitize_monitor_task_record(task);
         if task.output.is_none() {
             task.output = read_task_output(task);
             monitor_changed |= task.output.is_some();
@@ -526,7 +436,15 @@ fn validate_monitor_task_metadata(metadata: &Map<String, Value>) -> Result<()> {
 }
 
 fn load_monitor_task(cwd: &Path, task_id: &str) -> Result<Option<StoredTask>> {
-    let store = load_store::<TaskStore>(&monitor_tasks_path(cwd))?;
+    let monitor_path = monitor_tasks_path(cwd);
+    let mut store = load_store::<TaskStore>(&monitor_path)?;
+    let mut changed = false;
+    for task in &mut store.tasks {
+        changed |= sanitize_monitor_task_record(task);
+    }
+    if changed {
+        save_store(&monitor_path, &store)?;
+    }
     Ok(store.tasks.into_iter().find(|task| task.task_id == task_id))
 }
 

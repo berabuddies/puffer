@@ -295,14 +295,122 @@
   }
 
   function taskFromMonitor(task: WorkflowMonitorTask): WorkflowTask {
+    const subject = sanitizeMonitorTaskText(task.subject);
+    const description = sanitizeMonitorTaskText(task.description);
     return {
       ...task,
+      subject,
+      description,
       source: "monitor",
       task_scope: "monitor",
       task_scope_label: "monitors",
       task_type: "task",
-      active_form: task.subject
+      active_form: subject
     };
+  }
+
+  function sanitizeMonitorTaskText(value: string): string {
+    let text = value.trim();
+    text = stripMonitorTaskPrefix(text);
+    text = unwrapMonitorTaskMessageQuote(text);
+    text = removeMonitorTaskJudgmentSentences(text);
+    text = stripMonitorTaskSourceTerms(text);
+    text = text.replace(/\band\s+asks\s+to\b/gi, "and wants to");
+    text = text.replace(/\bReply to\s+request\b/gi, "Reply to request");
+    return normalizeMonitorTaskText(text);
+  }
+
+  function stripMonitorTaskPrefix(value: string): string {
+    let text = value.trim();
+    const prefixes = [
+      "personal telegram message asks:",
+      "personal telegram message ask:",
+      "telegram message asks:",
+      "telegram message ask:",
+      "incoming telegram message:",
+      "incoming telegram message",
+      "telegram user sent:",
+      "telegram user sent",
+      "in telegram group:",
+      "in telegram group",
+      "message from chat_id:",
+      "message from chat_id",
+      "message asks:",
+      "message ask:",
+      "message says:",
+      "message say:",
+      "incoming message:",
+      "incoming message",
+      "user asked:",
+      "user asks:",
+      "sender said:",
+      "sender says:"
+    ];
+    for (;;) {
+      const lowered = text.toLowerCase();
+      const prefix = prefixes.find((item) => lowered.startsWith(item));
+      if (!prefix) return text;
+      text = text.slice(prefix.length).replace(/^[\s:->]+/, "").trim();
+    }
+  }
+
+  function unwrapMonitorTaskMessageQuote(value: string): string {
+    const pairs: Array<[string, string]> = [["\"", "\""], ["'", "'"], ["“", "”"], ["‘", "’"]];
+    for (const [open, close] of pairs) {
+      const openIndex = value.indexOf(open);
+      if (openIndex < 0) continue;
+      const closeIndex = value.indexOf(close, openIndex + open.length);
+      if (closeIndex < 0) continue;
+      const prefix = value.slice(0, openIndex).toLowerCase();
+      const tail = value.slice(closeIndex + close.length).trim().toLowerCase();
+      const looksLikeSource = /(message|sender|user|chat|asks|asked|says|said|telegram)/.test(prefix);
+      const looksLikeExplanation = tail === "" || /^[.!?]?\s*(this is|need|needs|sender|likely|please)\b/.test(tail);
+      if ((openIndex === 0 || looksLikeSource) && looksLikeExplanation) {
+        return value.slice(openIndex + open.length, closeIndex).trim();
+      }
+    }
+    return value.trim();
+  }
+
+  function removeMonitorTaskJudgmentSentences(value: string): string {
+    return value
+      .split(/(?<=[.!?])\s+/)
+      .filter((sentence) => {
+        const lowered = sentence.toLowerCase();
+        return ![
+          "actionable request",
+          "actionable task",
+          "need a reply",
+          "needs a reply",
+          "message asks",
+          "message says",
+          "they are asking",
+          "this looks like",
+          "likely "
+        ].some((term) => lowered.includes(term));
+      })
+      .join(" ");
+  }
+
+  function stripMonitorTaskSourceTerms(value: string): string {
+    return value
+      .replace(/\bpersonal telegram\b/gi, "")
+      .replace(/\btelegram\b/gi, "")
+      .replace(/\bmessage asks\b/gi, "")
+      .replace(/\bmessage says\b/gi, "")
+      .replace(/\bactionable request\b/gi, "")
+      .replace(/\bchat_id\b/gi, "")
+      .replace(/\bsender_id\b/gi, "");
+  }
+
+  function normalizeMonitorTaskText(value: string): string {
+    return value
+      .replace(/\s+([,.;:!?])/g, "$1")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\s+-\s+/g, " - ")
+      .replace(/\(\s+/g, "(")
+      .replace(/\s+\)/g, ")")
+      .trim();
   }
 
   function filteredTasks(): WorkflowTask[] {

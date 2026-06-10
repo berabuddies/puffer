@@ -7,6 +7,7 @@ mod monitor_history;
 mod monitor_ignore_result;
 mod monitor_memory;
 mod monitor_task_ignore;
+mod monitor_task_snapshot;
 mod planned;
 mod task_snapshot;
 
@@ -28,8 +29,7 @@ use puffer_subscriptions::{
 };
 use puffer_workflow::{RegisterOptions, WorkflowStore};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
-use std::fs;
+use serde_json::{json, Value};
 
 /// Returns the workflow editor snapshot with connector catalog context.
 pub(crate) fn handle_workflow_list(paths: &ConfigPaths) -> Result<Value> {
@@ -247,7 +247,7 @@ fn add_monitor_task_context(paths: &ConfigPaths, snapshot: &mut Value) {
     let Some(object) = snapshot.as_object_mut() else {
         return;
     };
-    match load_monitor_tasks(paths) {
+    match monitor_task_snapshot::load_monitor_tasks(paths) {
         Ok(tasks) => {
             object.insert("monitor_tasks".to_string(), Value::Array(tasks));
             object.insert("monitor_task_error".to_string(), Value::Null);
@@ -566,169 +566,6 @@ fn ensure_workflow_subscriber_started(
     Ok(())
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct MonitorTaskStoreSnapshot {
-    #[serde(default)]
-    tasks: Vec<MonitorTaskSnapshotRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MonitorTaskSnapshotRecord {
-    #[serde(alias = "id", alias = "taskId")]
-    task_id: String,
-    #[serde(default)]
-    subject: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    metadata: Map<String, Value>,
-    #[serde(default, alias = "startedAtMs")]
-    started_at_ms: Option<u64>,
-    #[serde(default, alias = "updatedAtMs")]
-    updated_at_ms: Option<u64>,
-}
-
-fn load_monitor_tasks(paths: &ConfigPaths) -> Result<Vec<Value>> {
-    let path = monitor_tasks_path(paths);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", path.display()));
-        }
-    };
-    let store: MonitorTaskStoreSnapshot = serde_json::from_str(&raw)
-        .with_context(|| format!("invalid monitor task store {}", path.display()))?;
-    Ok(store.tasks.into_iter().map(monitor_task_json).collect())
-}
-
-fn monitor_tasks_path(paths: &ConfigPaths) -> std::path::PathBuf {
-    paths
-        .workspace_config_dir
-        .join("runtime")
-        .join("claude_workflow")
-        .join("monitor_tasks.json")
-}
-
-fn monitor_task_json(task: MonitorTaskSnapshotRecord) -> Value {
-    json!({
-        "task_id": task.task_id,
-        "subject": task.subject,
-        "description": task.description,
-        "status": task.status,
-        "monitor_connection": monitor_metadata_string(
-            &task.metadata,
-            &["monitor_connection", "monitorConnection"],
-            &["connection", "connection_slug", "connectionSlug"]
-        ),
-        "monitor_connector": monitor_metadata_string(
-            &task.metadata,
-            &["monitor_connector", "monitorConnector"],
-            &["connector", "connector_slug", "connectorSlug"]
-        ),
-        "monitor_memory_path": monitor_metadata_string(
-            &task.metadata,
-            &["monitor_memory_path", "monitorMemoryPath"],
-            &["memory_path", "memoryPath"]
-        ),
-        "ignored": monitor_metadata_bool(&task.metadata, "ignored"),
-        "actions": monitor_actions(&task.metadata),
-        "possible_ignore_reasons": monitor_ignore_reasons(&task.metadata),
-        "started_at_ms": task.started_at_ms,
-        "updated_at_ms": task.updated_at_ms,
-    })
-}
-
-fn monitor_metadata_string(
-    metadata: &Map<String, Value>,
-    top_level_keys: &[&str],
-    monitor_keys: &[&str],
-) -> Option<String> {
-    top_level_keys
-        .iter()
-        .find_map(|key| string_value(metadata.get(*key)))
-        .or_else(|| {
-            metadata
-                .get("monitor")
-                .and_then(Value::as_object)
-                .and_then(|monitor| {
-                    monitor_keys
-                        .iter()
-                        .find_map(|key| string_value(monitor.get(*key)))
-                })
-        })
-}
-
-fn monitor_metadata_bool(metadata: &Map<String, Value>, key: &str) -> bool {
-    metadata.get(key).and_then(Value::as_bool).unwrap_or(false)
-        || metadata
-            .get("monitor")
-            .and_then(Value::as_object)
-            .and_then(|monitor| monitor.get(key))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-}
-
-fn monitor_actions(metadata: &Map<String, Value>) -> Vec<Value> {
-    metadata_value_array(metadata, "actions")
-        .map(|actions| {
-            actions
-                .iter()
-                .filter_map(|action| {
-                    let name = string_field(action, &["actionName", "name", "title"])?;
-                    let prompt = string_field(action, &["actionPrompt", "prompt"])?;
-                    Some(json!({
-                        "name": name,
-                        "prompt": prompt,
-                    }))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn monitor_ignore_reasons(metadata: &Map<String, Value>) -> Vec<Value> {
-    metadata_value_array(metadata, "possibleIgnoreReasons")
-        .or_else(|| metadata_value_array(metadata, "possible_ignore_reasons"))
-        .map(|reasons| {
-            reasons
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|reason| !reason.is_empty())
-                .map(|reason| Value::String(reason.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn metadata_value_array<'a>(metadata: &'a Map<String, Value>, key: &str) -> Option<&'a Vec<Value>> {
-    metadata
-        .get(key)
-        .or_else(|| {
-            metadata
-                .get("monitor")
-                .and_then(Value::as_object)
-                .and_then(|monitor| monitor.get(key))
-        })
-        .and_then(Value::as_array)
-}
-
-fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    let object = value.as_object()?;
-    keys.iter().find_map(|key| string_value(object.get(*key)))
-}
-
-fn string_value(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 fn connection_snapshot_json(connection: ConnectionRecord, can_trigger_workflow: bool) -> Value {
     let monitor_command = can_trigger_workflow.then(|| format!("/monitor {}", connection.slug));
     let connect_command = format!("/connect {} {}", connection.connector_slug, connection.slug);
@@ -787,7 +624,7 @@ mod tests {
     fn workflow_snapshot_includes_monitor_tasks() {
         let tempdir = tempfile::tempdir().unwrap();
         let paths = ConfigPaths::discover(tempdir.path());
-        let task_path = monitor_tasks_path(&paths);
+        let task_path = monitor_task_snapshot::monitor_tasks_path(&paths);
         std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
         std::fs::write(
             &task_path,
@@ -795,8 +632,8 @@ mod tests {
                 "tasks": [
                     {
                         "task_id": "monitor-1",
-                        "subject": "Answer Telegram support ping",
-                        "description": "Alice asked whether the deployment is finished.",
+                        "subject": "Reply to Telegram support ping",
+                        "description": "Incoming Telegram message asks: \"部署结束了吗\". Likely needs a reply or status update.",
                         "status": "pending",
                         "metadata": {
                             "_monitor": true,
@@ -825,6 +662,8 @@ mod tests {
 
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["task_id"], "monitor-1");
+        assert_eq!(tasks[0]["subject"], "Reply to support ping");
+        assert_eq!(tasks[0]["description"], "部署结束了吗");
         assert_eq!(tasks[0]["monitor_connection"], "telegram-user");
         assert_eq!(tasks[0]["monitor_connector"], "telegram-login");
         assert_eq!(tasks[0]["monitor_memory_path"], "/tmp/telegram-user.md");
@@ -838,6 +677,11 @@ mod tests {
             "duplicate support ping"
         );
         assert_eq!(snapshot["monitor_task_error"], Value::Null);
+
+        let stored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap()).unwrap();
+        assert_eq!(stored["tasks"][0]["subject"], "Reply to support ping");
+        assert_eq!(stored["tasks"][0]["description"], "部署结束了吗");
     }
 
     #[test]
