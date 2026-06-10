@@ -981,9 +981,7 @@ export type ContactInferTracePayload =
       createdAtMs?: number | null;
     };
 
-export type ContactInferResult = Partial<ContactsSnapshot> & {
-  savedCount?: number;
-};
+export type ContactInferResult = Partial<ContactsSnapshot>;
 
 export async function inferContacts(limit = 30, traceId?: string): Promise<ContactInferResult> {
   const client = await ensureLocalDaemonClient();

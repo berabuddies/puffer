@@ -74,13 +74,13 @@ struct BrowserRootState {
 }
 #[derive(Clone)]
 pub(super) struct BrowserSession {
-    tx: Sender<BrowserCommand>,
-    state: Arc<Mutex<BrowserState>>,
-    network: Arc<Mutex<BrowserNetworkState>>,
-    last_active: Arc<Mutex<Instant>>,
-    alive: Arc<AtomicBool>,
-    root: Option<BrowserRootSession>,
-    native_cef_session_id: Option<String>,
+    pub(super) tx: Sender<BrowserCommand>,
+    pub(super) state: Arc<Mutex<BrowserState>>,
+    pub(super) network: Arc<Mutex<BrowserNetworkState>>,
+    pub(super) last_active: Arc<Mutex<Instant>>,
+    pub(super) alive: Arc<AtomicBool>,
+    pub(super) root: Option<BrowserRootSession>,
+    pub(super) native_cef_session_id: Option<String>,
 }
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
@@ -336,24 +336,6 @@ impl BrowserSession {
             root: Some(root),
             native_cef_session_id,
         })
-    }
-
-    /// Creates a synthetic page worker for unit tests without launching Chrome.
-    #[cfg(test)]
-    pub(super) fn new_for_test(
-        tx: Sender<BrowserCommand>,
-        state: Arc<Mutex<BrowserState>>,
-        last_active: Arc<Mutex<Instant>>,
-    ) -> Self {
-        Self {
-            tx,
-            state,
-            network: Arc::new(Mutex::new(BrowserNetworkState::default())),
-            last_active,
-            alive: Arc::new(AtomicBool::new(true)),
-            root: None,
-            native_cef_session_id: None,
-        }
     }
 
     /// Returns the native desktop CEF slot id that owns this CDP target, when known.

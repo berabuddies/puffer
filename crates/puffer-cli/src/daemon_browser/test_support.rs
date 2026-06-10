@@ -5,14 +5,38 @@
 //! the prewarm-pool logic can be exercised across modules without launching a
 //! real browser.
 
+use super::command::BrowserCommand;
+use super::network_idle::BrowserNetworkState;
+use super::session::BrowserSession;
+use super::BrowserState;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::Message;
+
+impl BrowserSession {
+    /// Creates a synthetic page worker for unit tests without launching Chrome.
+    pub(super) fn new_for_test(
+        tx: Sender<BrowserCommand>,
+        state: Arc<Mutex<BrowserState>>,
+        last_active: Arc<Mutex<Instant>>,
+    ) -> Self {
+        Self {
+            tx,
+            state,
+            network: Arc::new(Mutex::new(BrowserNetworkState::default())),
+            last_active,
+            alive: Arc::new(AtomicBool::new(true)),
+            root: None,
+            native_cef_session_id: None,
+        }
+    }
+}
 
 /// Serializes mutation of the process-global `PUFFER_CEF_*` env vars so the
 /// CEF-backed browser tests can run in parallel without clobbering each

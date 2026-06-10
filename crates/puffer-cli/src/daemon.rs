@@ -7432,7 +7432,9 @@ mod tests {
         assert!(!msg.contains("reqwest"), "raw chain leaked: {msg}");
 
         // DNS resolution failure → same clean, actionable message.
-        let err = anyhow::anyhow!("dns error: failed to lookup address information: nodename nor servname provided");
+        let err = anyhow::anyhow!(
+            "dns error: failed to lookup address information: nodename nor servname provided"
+        );
         let (_msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "provider_unreachable");
 
@@ -7446,8 +7448,7 @@ mod tests {
             .send()
             .expect_err("connecting to a closed port must fail");
         assert!(req_err.is_connect(), "expected a connect-phase error");
-        let err = anyhow::Error::new(req_err)
-            .context("request to http://127.0.0.1:1/ failed");
+        let err = anyhow::Error::new(req_err).context("request to http://127.0.0.1:1/ failed");
         let (msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "provider_unreachable", "{msg}");
         assert_eq!(msg, PROVIDER_UNREACHABLE_MESSAGE);

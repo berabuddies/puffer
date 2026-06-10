@@ -30,7 +30,7 @@ use daemon_contacts_params::{
     ContactSaveParams,
 };
 use daemon_contacts_store::{
-    load_store, prune_proposals_for_contact_ids, save_inferred_contacts, save_store,
+    load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
 };
 use daemon_contacts_telegram::{
     collect_telegram_candidates, read_telegram_peer_avatars, read_telegram_peer_names,
@@ -240,7 +240,7 @@ pub(crate) fn handle_contacts_context(paths: &ConfigPaths, params: &Value) -> Re
     Ok(json!({ "contact_ids": contact_ids, "context": contexts }))
 }
 
-/// Infers and saves contacts from top connector candidates.
+/// Infers contact proposals from top connector candidates.
 pub(crate) fn handle_contacts_infer(state: &DaemonState, params: &Value) -> Result<Value> {
     let params: ContactInferParams =
         serde_json::from_value(params.clone()).context("invalid contact infer params")?;
@@ -308,16 +308,16 @@ pub(crate) fn handle_contacts_infer(state: &DaemonState, params: &Value) -> Resu
         }
     };
     let proposals = infer_proposals(state, &candidates, limit, params.model.as_deref(), &trace)?;
-    let saved_count = save_inferred_contacts(paths, proposals)?;
+    let proposals = save_proposals(paths, proposals)?;
     trace.message(
         "assistant",
         "Inference complete",
-        format!("Saved {} inferred contact(s).", saved_count),
+        format!("Inferred {} contact proposal(s).", proposals.len()),
     );
     let mut snapshot = handle_contacts_list(paths, &json!({ "limit": DEFAULT_LIMIT }))?;
     if let Some(object) = snapshot.as_object_mut() {
         object.insert("candidates".to_string(), json!(candidates));
-        object.insert("savedCount".to_string(), json!(saved_count));
+        object.insert("proposals".to_string(), json!(proposals));
     }
     Ok(snapshot)
 }

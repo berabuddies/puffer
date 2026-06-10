@@ -5,7 +5,6 @@ use puffer_config::ConfigPaths;
 use puffer_subscriptions::{normalize_contact_ids, ContactProposal, SavedContact};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use uuid::Uuid;
 
 const CONTACT_STORE_VERSION: u32 = 1;
 
@@ -61,7 +60,6 @@ pub(super) fn save_store(paths: &ConfigPaths, store: &ContactStoreFile) -> Resul
 }
 
 /// Replaces the last inferred contact proposals in the workspace store.
-#[cfg(test)]
 pub(super) fn save_proposals(
     paths: &ConfigPaths,
     proposals: Vec<ContactProposal>,
@@ -72,34 +70,6 @@ pub(super) fn save_proposals(
     let stored = store.proposals.clone();
     save_store(paths, &store)?;
     Ok(stored)
-}
-
-/// Promotes inferred contact proposals to saved contacts in the workspace store.
-pub(super) fn save_inferred_contacts(
-    paths: &ConfigPaths,
-    proposals: Vec<ContactProposal>,
-) -> Result<usize> {
-    let mut store = load_store(paths)?;
-    let mut saved_count = 0;
-    store.proposals.clear();
-    for proposal in proposals {
-        let Some(contact) = saved_contact_from_proposal(proposal) else {
-            continue;
-        };
-        if store
-            .contacts
-            .iter()
-            .any(|existing| contact_ids_overlap(&existing.contact_ids, &contact.contact_ids))
-        {
-            continue;
-        }
-        store.contacts.push(contact);
-        saved_count += 1;
-    }
-    sanitize_store(&mut store);
-    sort_contacts(&mut store.contacts);
-    save_store(paths, &store)?;
-    Ok(saved_count)
 }
 
 /// Removes inferred proposals that overlap saved contact ids.
@@ -197,29 +167,6 @@ fn merge_saved_contact(existing: &mut SavedContact, contact: SavedContact) {
             .chain(contact.contact_ids.iter())
             .cloned(),
     );
-}
-
-fn saved_contact_from_proposal(proposal: ContactProposal) -> Option<SavedContact> {
-    let name = proposal.name.trim().to_string();
-    let contact_ids = normalize_contact_ids(proposal.contact_ids);
-    if name.is_empty() || contact_ids.is_empty() {
-        return None;
-    }
-    Some(SavedContact {
-        id: Uuid::new_v4().to_string(),
-        name,
-        description: proposal.description.trim().to_string(),
-        avatar: trimmed_optional(proposal.avatar),
-        contact_ids,
-    })
-}
-
-fn sort_contacts(contacts: &mut [SavedContact]) {
-    contacts.sort_by(|left, right| {
-        left.name
-            .to_ascii_lowercase()
-            .cmp(&right.name.to_ascii_lowercase())
-    });
 }
 
 fn contact_ids_overlap(left: &[String], right: &[String]) -> bool {
@@ -624,100 +571,6 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].name, "Bob");
         assert_eq!(load_store(&paths).unwrap().proposals, stored);
-    }
-
-    #[test]
-    fn save_inferred_contacts_persists_contacts_and_clears_proposals() {
-        let temp = tempfile::tempdir().unwrap();
-        let paths = test_config_paths(temp.path());
-        save_proposals(
-            &paths,
-            vec![ContactProposal {
-                name: "Stale".to_string(),
-                description: "Old proposal.".to_string(),
-                avatar: None,
-                contact_ids: vec!["telegram@stale".to_string()],
-            }],
-        )
-        .unwrap();
-
-        let saved = save_inferred_contacts(
-            &paths,
-            vec![
-                ContactProposal {
-                    name: " Alice ".to_string(),
-                    description: " Project collaborator. ".to_string(),
-                    avatar: Some(" data:image/jpeg;base64,ZmFrZQ== ".to_string()),
-                    contact_ids: vec![" Telegram@@Alice ".to_string()],
-                },
-                ContactProposal {
-                    name: "Invalid".to_string(),
-                    description: "No routable identity.".to_string(),
-                    avatar: None,
-                    contact_ids: vec!["not-a-contact".to_string()],
-                },
-            ],
-        )
-        .unwrap();
-        let store = load_store(&paths).unwrap();
-
-        assert_eq!(saved, 1);
-        assert_eq!(store.contacts.len(), 1);
-        assert!(!store.contacts[0].id.is_empty());
-        assert_eq!(store.contacts[0].name, "Alice");
-        assert_eq!(store.contacts[0].description, "Project collaborator.");
-        assert_eq!(
-            store.contacts[0].avatar.as_deref(),
-            Some("data:image/jpeg;base64,ZmFrZQ==")
-        );
-        assert_eq!(store.contacts[0].contact_ids, vec!["telegram@alice"]);
-        assert!(store.proposals.is_empty());
-    }
-
-    #[test]
-    fn save_inferred_contacts_skips_existing_saved_identities() {
-        let temp = tempfile::tempdir().unwrap();
-        let paths = test_config_paths(temp.path());
-        let mut store = ContactStoreFile::default();
-        store.contacts.push(SavedContact {
-            id: "contact-alice".to_string(),
-            name: "Alice".to_string(),
-            description: "User curated description.".to_string(),
-            avatar: None,
-            contact_ids: vec!["telegram@alice".to_string()],
-        });
-        save_store(&paths, &store).unwrap();
-
-        let saved = save_inferred_contacts(
-            &paths,
-            vec![
-                ContactProposal {
-                    name: "Alice Replacement".to_string(),
-                    description: "Should not replace the saved record.".to_string(),
-                    avatar: None,
-                    contact_ids: vec!["Telegram@@Alice".to_string()],
-                },
-                ContactProposal {
-                    name: "Bob".to_string(),
-                    description: "New collaborator.".to_string(),
-                    avatar: None,
-                    contact_ids: vec!["google@bob@example.com".to_string()],
-                },
-            ],
-        )
-        .unwrap();
-        let store = load_store(&paths).unwrap();
-
-        assert_eq!(saved, 1);
-        assert_eq!(store.contacts.len(), 2);
-        assert!(store
-            .contacts
-            .iter()
-            .any(|contact| contact.name == "Alice"
-                && contact.description == "User curated description."));
-        assert!(store.contacts.iter().any(|contact| contact.name == "Bob"
-            && contact.contact_ids == vec!["google@bob@example.com"]));
-        assert!(store.proposals.is_empty());
     }
 
     #[test]

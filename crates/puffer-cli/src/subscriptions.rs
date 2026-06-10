@@ -28,7 +28,6 @@ use puffer_subscriptions::{
     ConnectorActionExecutor, ConnectorActionRequest, ConnectorTemplate, Outbound, RemoteClassifier,
     SubscriberManifestRoots, SubscriptionManager, SubscriptionManagerBuilder,
 };
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread;
@@ -127,7 +126,7 @@ pub(crate) fn install(
         .context("failed to build subscription tokio runtime")?;
     let handle = runtime.handle().clone();
 
-    let store_path = subscriptions_path(paths);
+    let store_path = paths.user_config_dir.join("subscriptions.json");
     let mut builder = SubscriptionManagerBuilder::new(&store_path);
     if let Some(classifier) = build_anthropic_classifier(auth_store, anthropic_base_url) {
         builder = builder.with_classifier(classifier);
@@ -802,10 +801,6 @@ fn subscriber_for_action(
         return Ok(Some(subscriber_id));
     }
     Ok(subscriber_for_platform(connector_slug).map(ToString::to_string))
-}
-
-fn subscriptions_path(paths: &ConfigPaths) -> PathBuf {
-    paths.user_config_dir.join("subscriptions.json")
 }
 
 #[cfg(test)]

@@ -140,12 +140,6 @@ function mergedOverlappingContactIds(contacts: JsonRecord[], savedId: string, co
   return Array.from(new Set(merged)).sort();
 }
 
-function inferredContactId(name: string, contactIds: string[]): string {
-  const source = [name, ...contactIds].filter(Boolean).join(" ") || "inferred";
-  const slug = source.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return `contact-${slug || "inferred"}`;
-}
-
 function contactsQuery(params: JsonRecord): string {
   if (params.query !== undefined && typeof params.query !== "string") {
     throw new Error("invalid contact query");
@@ -1708,32 +1702,15 @@ export class FakeDaemon {
         Array.isArray(contact.contact_ids) ? contact.contact_ids : []
       )
     );
-    if (this.legacyContactInferResponse) {
-      const proposals = this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({
-        name: String(candidate.name ?? candidate.id ?? "Contact").trim(),
-        description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
-        avatar: candidate.avatar ?? null,
-        contact_ids: normalizeContactIds([String(candidate.id ?? "")])
-      })).filter((proposal) => proposal.name && proposal.contact_ids.length > 0 && !overlapsContactIds(proposal, savedContactIds));
-      this.contactsSnapshot = {
-        ...this.contactsSnapshot,
-        proposals
-      };
-      return {
-        proposals: proposals.map((proposal) => ({ ...proposal })),
-        candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
-      };
-    }
     const knownContactIds = new Set(savedContactIds);
-    const inferredContacts: JsonRecord[] = [];
+    const proposals: JsonRecord[] = [];
     for (const candidate of this.contactsSnapshot.candidates.slice(0, limit)) {
       const contactIds = normalizeContactIds([String(candidate.id ?? "")]);
       const name = String(candidate.name ?? candidate.id ?? "Contact").trim();
       if (!name || contactIds.length === 0 || includesKnownContactId(contactIds, knownContactIds)) {
         continue;
       }
-      inferredContacts.push({
-        id: inferredContactId(name, contactIds),
+      proposals.push({
         name,
         description: `Messages from ${String(candidate.id ?? "this contact")} are frequent and have task-like context. They are retained because the candidate has recent conversation content rather than isolated bulk traffic.`,
         avatar: candidate.avatar ?? null,
@@ -1743,18 +1720,13 @@ export class FakeDaemon {
     }
     this.contactsSnapshot = {
       ...this.contactsSnapshot,
-      contacts: [
-        ...this.contactsSnapshot.contacts,
-        ...inferredContacts
-      ].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))),
-      proposals: []
+      proposals
     };
-    return {
-      contacts: this.contactsSnapshot.contacts.map((contact) => ({ ...contact })),
-      candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate })),
-      proposals: [],
-      savedCount: inferredContacts.length
+    const response = {
+      proposals: proposals.map((proposal) => ({ ...proposal })),
+      candidates: this.contactsSnapshot.candidates.slice(0, limit).map((candidate) => ({ ...candidate }))
     };
+    return this.legacyContactInferResponse ? response : { ...this.contactsList({ limit }), ...response };
   }
 
   private contactContext(params: JsonRecord): JsonRecord {

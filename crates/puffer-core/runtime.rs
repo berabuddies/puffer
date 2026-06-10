@@ -329,6 +329,7 @@ pub enum RetryAttemptKind {
 }
 
 impl RetryAttemptKind {
+    /// Returns the stable event label for this retry-attempt source.
     pub fn as_str(&self) -> &'static str {
         match self {
             RetryAttemptKind::Transport => "transport",
