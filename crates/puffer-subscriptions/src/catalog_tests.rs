@@ -1,4 +1,5 @@
 use crate::{builtin_connector_template, builtin_connector_templates, suggested_connection_slug};
+use serde_json::Value;
 
 #[test]
 fn builtins_cover_required_initial_connectors() {
@@ -234,4 +235,65 @@ fn serve_mode_connectors_do_not_claim_workflow_runtime_capabilities() {
             "{slug} should not advertise connector protocol command support"
         );
     }
+}
+
+#[test]
+fn send_message_schema_matches_runtime_alias_contract() {
+    let telegram = builtin_connector_template("telegram-login").unwrap();
+    let action = telegram.actions.get("send_message").unwrap();
+    let schema = &action.input_schema;
+    let recipient_any = schema["allOf"][0]["anyOf"].as_array().unwrap();
+    let body_any = schema["allOf"][1]["anyOf"].as_array().unwrap();
+
+    for field in [
+        "to",
+        "target",
+        "channel",
+        "chat_id",
+        "open_id",
+        "user",
+        "receive_id",
+    ] {
+        assert!(
+            schema_any_requires(recipient_any, field),
+            "missing recipient alias {field}"
+        );
+    }
+    assert!(!schema_any_requires(recipient_any, "reply_to"));
+    assert!(!schema_any_requires(recipient_any, "reply_to_message_id"));
+
+    for field in [
+        "message",
+        "text",
+        "caption",
+        "media",
+        "file",
+        "files",
+        "attachments",
+        "path",
+    ] {
+        assert!(
+            schema_any_requires(body_any, field),
+            "missing body/media alias {field}"
+        );
+    }
+    assert!(schema_property_accepts_integer(schema, "chat_id"));
+}
+
+fn schema_any_requires(any_of: &[Value], field: &str) -> bool {
+    any_of.iter().any(|item| {
+        item.get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| required.iter().any(|value| value.as_str() == Some(field)))
+    })
+}
+
+fn schema_property_accepts_integer(schema: &Value, field: &str) -> bool {
+    schema["properties"][field]["oneOf"]
+        .as_array()
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["type"].as_str() == Some("integer"))
+        })
 }

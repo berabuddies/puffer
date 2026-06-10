@@ -618,13 +618,13 @@ fn send_message_actions() -> BTreeMap<String, ConnectorActionDefinition> {
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "to": {"type": "string"},
-                "target": {"type": "string"},
-                "channel": {"type": "string"},
-                "chat_id": {"type": "string"},
-                "open_id": {"type": "string"},
-                "user": {"type": "string"},
-                "receive_id": {"type": "string"},
+                "to": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                "target": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                "channel": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                "chat_id": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                "open_id": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                "user": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+                "receive_id": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
                 "receive_id_type": {"type": "string"},
                 "message": {"type": "string"},
                 "text": {"type": "string"},
@@ -663,6 +663,14 @@ fn send_message_actions() -> BTreeMap<String, ConnectorActionDefinition> {
                     "description": "Convenience alias for an array of media paths or attachment objects.",
                     "type": "array"
                 },
+                "attachments": {
+                    "description": "Convenience alias for an array of media paths or attachment objects.",
+                    "type": "array"
+                },
+                "path": {
+                    "description": "Convenience alias for a single media path or URL.",
+                    "type": "string"
+                },
                 "reply_to": {
                     "description": "Optional platform message id, or an object with message_id, to send this as a reply.",
                     "oneOf": [
@@ -679,16 +687,30 @@ fn send_message_actions() -> BTreeMap<String, ConnectorActionDefinition> {
                     ]
                 }
             },
-            "anyOf": [
-                {"required": ["to"]},
-                {"required": ["target"]},
-                {"required": ["channel"]},
-                {"required": ["chat_id"]},
-                {"required": ["open_id"]},
-                {"required": ["user"]},
-                {"required": ["receive_id"]},
-                {"required": ["reply_to"]},
-                {"required": ["reply_to_message_id"]}
+            "allOf": [
+                {
+                    "anyOf": [
+                        {"required": ["to"]},
+                        {"required": ["target"]},
+                        {"required": ["channel"]},
+                        {"required": ["chat_id"]},
+                        {"required": ["open_id"]},
+                        {"required": ["user"]},
+                        {"required": ["receive_id"]}
+                    ]
+                },
+                {
+                    "anyOf": [
+                        {"required": ["message"]},
+                        {"required": ["text"]},
+                        {"required": ["caption"]},
+                        {"required": ["media"]},
+                        {"required": ["file"]},
+                        {"required": ["files"]},
+                        {"required": ["attachments"]},
+                        {"required": ["path"]}
+                    ]
+                }
             ],
             "additionalProperties": true
         }),

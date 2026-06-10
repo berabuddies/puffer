@@ -54,6 +54,16 @@ use self::telegram_connector_actions::{
 use self::telegram_connector_actions::{telegram_subscriber_id, validate_telegram_connection_slug};
 
 const SUBSCRIBER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
+const SEND_MESSAGE_RECIPIENT_KEYS: &[&str] = &[
+    "to",
+    "target",
+    "channel",
+    "chat_id",
+    "open_id",
+    "user",
+    "receive_id",
+];
+const SEND_MESSAGE_TEXT_KEYS: &[&str] = &["message", "text", "caption"];
 
 /// Owned wrapper around the dedicated Tokio runtime used by the
 /// subscription manager and its supervised subscribers. Dropping it
@@ -521,21 +531,13 @@ fn send_message_via_subscriber(
     connection_slug: &str,
     input: &serde_json::Value,
 ) -> Result<String> {
-    let target = input
-        .get("to")
-        .or_else(|| input.get("target"))
-        .or_else(|| input.get("channel"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let text = input
-        .get("message")
-        .or_else(|| input.get("text"))
-        .or_else(|| input.get("caption"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+    let target = send_message_target(input).unwrap_or_default();
+    let text = send_message_text(input).unwrap_or_default();
     let media = parse_media_attachments(input)?;
     if target.trim().is_empty() || (text.trim().is_empty() && media.is_empty()) {
-        anyhow::bail!("send_message requires `to`/`channel` and `message`, `caption`, or `media`");
+        anyhow::bail!(
+            "send_message requires a recipient (`to`, `target`, `channel`, `chat_id`, `open_id`, `user`, or `receive_id`) and message body (`message`, `text`, `caption`, `media`, `file`, `files`, `attachments`, or `path`)"
+        );
     }
     let reply_to = parse_reply_to(input)?;
     let subscriber_id = subscriber_for_action(manager, paths, connector_slug, connection_slug)?
@@ -559,10 +561,46 @@ fn send_message_via_subscriber(
         &event,
         &subscriber_id,
         connector_slug,
-        target,
+        &target,
         text.len(),
         media.len(),
     )
+}
+
+fn send_message_target(input: &serde_json::Value) -> Option<String> {
+    first_send_message_value(input, SEND_MESSAGE_RECIPIENT_KEYS, true)
+}
+
+fn send_message_text(input: &serde_json::Value) -> Option<String> {
+    first_send_message_value(input, SEND_MESSAGE_TEXT_KEYS, false)
+}
+
+fn first_send_message_value(
+    input: &serde_json::Value,
+    keys: &[&str],
+    accept_numbers: bool,
+) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| input.get(*key))
+        .find_map(|value| send_message_value(value, accept_numbers))
+}
+
+fn send_message_value(value: &serde_json::Value, accept_numbers: bool) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(if accept_numbers {
+                trimmed.to_string()
+            } else {
+                text.to_string()
+            });
+        }
+        return None;
+    }
+    if accept_numbers {
+        return value.as_number().map(ToString::to_string);
+    }
+    None
 }
 
 fn send_event_summary(

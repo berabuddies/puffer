@@ -107,6 +107,63 @@ fn parse_media_attachments_accepts_audio_video_aliases() {
 }
 
 #[test]
+fn send_message_via_subscriber_accepts_schema_recipient_aliases() {
+    let runtime = test_subscription_runtime();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(temp.path());
+    let error = send_message_via_subscriber(
+        &runtime.manager,
+        &paths,
+        "telegram-login",
+        "telegram-user",
+        &serde_json::json!({
+            "chat_id": 123456789,
+            "text": "deployment is finished"
+        }),
+    )
+    .expect_err("missing subscriber should fail after input aliases are accepted");
+
+    let error = error.to_string();
+    assert!(
+        error.contains("subscriber") && !error.contains("requires"),
+        "unexpected validation error: {error}"
+    );
+}
+
+#[test]
+fn send_message_target_accepts_advertised_recipient_aliases() {
+    for (field, value, expected) in [
+        ("to", serde_json::json!("alice"), "alice"),
+        ("target", serde_json::json!("bob"), "bob"),
+        ("channel", serde_json::json!("#ops"), "#ops"),
+        ("chat_id", serde_json::json!(123456789), "123456789"),
+        ("open_id", serde_json::json!("ou_123"), "ou_123"),
+        ("user", serde_json::json!("u_123"), "u_123"),
+        ("receive_id", serde_json::json!("rid_123"), "rid_123"),
+    ] {
+        let mut input = serde_json::Map::new();
+        input.insert(field.to_string(), value);
+        assert_eq!(
+            send_message_target(&Value::Object(input)).as_deref(),
+            Some(expected),
+            "recipient alias {field} should be accepted"
+        );
+    }
+}
+
+#[test]
+fn send_message_aliases_skip_empty_preferred_values() {
+    assert_eq!(
+        send_message_target(&serde_json::json!({"to": " ", "chat_id": 42})).as_deref(),
+        Some("42")
+    );
+    assert_eq!(
+        send_message_text(&serde_json::json!({"message": " ", "text": "hello"})).as_deref(),
+        Some("hello")
+    );
+}
+
+#[test]
 fn telegram_connector_actions_use_subscriber_fallback() {
     assert!(is_telegram_connector("telegram-login"));
     assert!(is_telegram_action("vote_poll"));
