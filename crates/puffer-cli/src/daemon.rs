@@ -5080,6 +5080,14 @@ fn publish_sessionless_turn_error_event(
 ///     Responses stream emitted `response.completed`.
 ///   * `other` — anything we haven't classified.
 fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
+    // Model-provider transport failures (DNS / TCP connect / TLS handshake /
+    // timeout / dropped body) come through first so the chat surface never
+    // shows a raw `reqwest` chain like `request to https://… failed: error
+    // sending request for url (…): client error (Connect): tls handshake eof`.
+    // The unmodified chain is still forwarded as `errorRaw` for debugging.
+    if let Some(friendly) = classify_provider_transport_error(err) {
+        return friendly;
+    }
     // anyhow walks the chain via Display when you `format!("{:#}", err)`
     let chain = format!("{err:#}");
     let lower = chain.to_ascii_lowercase();
@@ -5105,6 +5113,78 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
         return (chain, "provider_stream_closed");
     }
     (chain, "other")
+}
+
+// Concise, actionable messages for transport-level failures. Kept free of the
+// raw error chain (preserved separately as `errorRaw`) so the chat bubble reads
+// like a status, not a stack trace.
+const PROVIDER_TIMEOUT_MESSAGE: &str =
+    "The model provider didn't respond in time and the request timed out. \
+     This is usually a slow or unstable connection — please try again.";
+const PROVIDER_UNREACHABLE_MESSAGE: &str =
+    "Couldn't reach the model provider (the connection or TLS handshake failed). \
+     This is usually a network blip or a provider-side outage — check your \
+     connection and the provider's base URL, then try again.";
+const PROVIDER_CONNECTION_DROPPED_MESSAGE: &str =
+    "The connection to the model provider dropped while receiving the response. \
+     This is usually transient — please try again.";
+const PROVIDER_NETWORK_MESSAGE: &str =
+    "A network error stopped the request from reaching the model provider. \
+     Please check your connection and try again.";
+
+/// Maps a model-provider transport failure to a concise, user-facing
+/// `(message, category)` pair, or `None` when the error isn't transport-level
+/// so [`classify_turn_error`] can fall through to higher-level classification.
+///
+/// Modeled on codex's `reqwest::Error` → `TransportError` mapping
+/// (`is_timeout()` → timeout, otherwise network), but it emits a user-facing
+/// sentence instead of a debug enum. The typed `reqwest::Error` downcast is the
+/// primary signal because it's robust to message-format churn; a narrow string
+/// fallback catches TLS / send failures wrapped by a layer that erased the
+/// concrete `reqwest::Error` type (only the Display chain survives).
+///
+/// A `reqwest::Error` in the chain always means the *provider* HTTP client
+/// failed; the gRPC tool runner surfaces its transport failures as plain
+/// strings (`tcp connect error`), so this never shadows the
+/// `runner_unreachable` path — and the string fallback deliberately omits the
+/// generic `connection refused` / `tcp connect error` phrases the runner uses.
+fn classify_provider_transport_error(err: &anyhow::Error) -> Option<(String, &'static str)> {
+    if let Some(req_err) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+    {
+        if req_err.is_timeout() {
+            return Some((PROVIDER_TIMEOUT_MESSAGE.to_string(), "provider_timeout"));
+        }
+        if req_err.is_connect() {
+            return Some((
+                PROVIDER_UNREACHABLE_MESSAGE.to_string(),
+                "provider_unreachable",
+            ));
+        }
+        if req_err.is_body() || req_err.is_decode() {
+            return Some((
+                PROVIDER_CONNECTION_DROPPED_MESSAGE.to_string(),
+                "provider_connection_dropped",
+            ));
+        }
+        return Some((PROVIDER_NETWORK_MESSAGE.to_string(), "provider_network"));
+    }
+
+    let lower = format!("{err:#}").to_ascii_lowercase();
+    if lower.contains("tls handshake")
+        || lower.contains("handshake eof")
+        || lower.contains("client error (connect)")
+        || lower.contains("error sending request")
+        || lower.contains("dns error")
+        || lower.contains("failed to lookup address")
+    {
+        return Some((
+            PROVIDER_UNREACHABLE_MESSAGE.to_string(),
+            "provider_unreachable",
+        ));
+    }
+    None
 }
 
 #[derive(Debug, Clone, Default)]
@@ -7327,6 +7407,55 @@ mod tests {
         let (msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "other");
         assert!(msg.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn classify_turn_error_normalizes_provider_transport_failures() {
+        use super::{classify_turn_error, PROVIDER_UNREACHABLE_MESSAGE};
+
+        // The exact shape from the screenshot bug report: a TLS handshake EOF
+        // wrapped in the `request to {url} failed` context from openai.rs. The
+        // concrete `reqwest::Error` type is erased by the time it reaches here
+        // (only the Display chain survives), so the string fallback must catch
+        // it and the chat bubble must NOT show the raw reqwest chain.
+        let err = anyhow::anyhow!(
+            "error sending request for url (https://infer-api-test-46cc90.worldrouter.ai/v1/responses): \
+             client error (Connect): tls handshake eof"
+        )
+        .context("request to https://infer-api-test-46cc90.worldrouter.ai/v1/responses failed");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "provider_unreachable", "{msg}");
+        assert_eq!(msg, PROVIDER_UNREACHABLE_MESSAGE);
+        assert!(!msg.contains("tls handshake"), "raw chain leaked: {msg}");
+        assert!(!msg.contains("reqwest"), "raw chain leaked: {msg}");
+
+        // DNS resolution failure → same clean, actionable message.
+        let err = anyhow::anyhow!("dns error: failed to lookup address information: nodename nor servname provided");
+        let (_msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "provider_unreachable");
+
+        // A *real* reqwest connect error (closed localhost port, no network
+        // needed) must be classified via the typed downcast, not the strings.
+        let req_err = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .expect_err("connecting to a closed port must fail");
+        assert!(req_err.is_connect(), "expected a connect-phase error");
+        let err = anyhow::Error::new(req_err)
+            .context("request to http://127.0.0.1:1/ failed");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "provider_unreachable", "{msg}");
+        assert_eq!(msg, PROVIDER_UNREACHABLE_MESSAGE);
+
+        // The gRPC tool-runner path is unaffected: it surfaces transport
+        // failures as plain `tcp connect error` strings with no reqwest::Error
+        // in the chain, so it still classifies as runner_unreachable.
+        let err = anyhow::anyhow!("transport error: tcp connect error: Connection refused");
+        let (_msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "runner_unreachable");
     }
 
     #[test]
