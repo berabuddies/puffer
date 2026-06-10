@@ -245,18 +245,25 @@ pub(super) fn execute_task_update(
     }
 
     let task = &mut store.tasks[index];
-    if let Some(metadata) = parsed.metadata.as_ref() {
+    let metadata_update = if let Some(metadata) = parsed.metadata.as_ref() {
         let updating_monitor_task = tp == monitor_tasks_path(&store_cwd)
             || is_monitor_task_metadata(&task.metadata)
             || is_monitor_task_metadata(metadata);
         if updating_monitor_task {
             validate_monitor_task_metadata(metadata)?;
-            validate_monitor_task_metadata_update(metadata)?;
+            Some(sanitize_monitor_task_metadata_update(
+                metadata,
+                &task.metadata,
+            )?)
+        } else {
+            Some(metadata.clone())
         }
-    }
+    } else {
+        None
+    };
     if parsed.status.as_deref() == Some("completed")
         && monitor_task_requires_action_completion(task)
-        && !metadata_marks_monitor_ignored(parsed.metadata.as_ref())
+        && !metadata_marks_monitor_ignored(metadata_update.as_ref())
     {
         bail!(
             "monitor task `{}` must be completed through its monitor action after a delivery receipt",
@@ -337,7 +344,7 @@ pub(super) fn execute_task_update(
     if added_blocked_by {
         updated_fields.push("blockedBy");
     }
-    if let Some(metadata) = parsed.metadata {
+    if let Some(metadata) = metadata_update {
         let before = task.metadata.clone();
         for (key, value) in metadata {
             if value.is_null() {
@@ -399,7 +406,7 @@ pub(super) fn execute_monitor_reply_send(
             "receipt": receipt,
         }))?);
     }
-    if terminal_task_status(&task.status) {
+    if monitor_reply_terminal_status(&task.status) {
         bail!(
             "monitor task `{}` is already {}; not sending monitor reply",
             parsed.task_id,
@@ -439,6 +446,10 @@ pub(super) fn execute_monitor_reply_send(
         },
         "connectorOutput": connector_output,
     }))?)
+}
+
+fn monitor_reply_terminal_status(status: &str) -> bool {
+    terminal_task_status(status) || matches!(status, "cancelled" | "canceled")
 }
 
 fn parse_rfc3339_field(
@@ -500,47 +511,73 @@ fn validate_monitor_task_metadata(metadata: &Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
-fn validate_monitor_task_metadata_update(metadata: &Map<String, Value>) -> Result<()> {
-    for key in [
-        "source_context",
-        "sourceContext",
-        "completion_policy",
-        "completionPolicy",
-        "delivery_target",
-        "deliveryTarget",
-        "action_receipts",
-        "actionReceipts",
-        "action_states",
-        "actionStates",
-        "monitor_actions",
-        "monitorActions",
-        "monitor_envelope_id",
-        "monitorEnvelopeId",
-        "monitor_connection",
-        "monitorConnection",
-        "monitor_connector",
-        "monitorConnector",
-        "chat_id",
-        "chatId",
-        "sender_id",
-        "senderId",
-        "sender_username",
-        "senderUsername",
-    ] {
-        if metadata.contains_key(key) {
+fn sanitize_monitor_task_metadata_update(
+    metadata: &Map<String, Value>,
+    existing: &Map<String, Value>,
+) -> Result<Map<String, Value>> {
+    let mut sanitized = Map::new();
+    for (key, value) in metadata {
+        if let Some(reserved_keys) = reserved_monitor_metadata_keys(key) {
+            if reserved_monitor_value_unchanged(value, existing, reserved_keys) {
+                continue;
+            }
             bail!("reserved monitor metadata field `{key}` cannot be updated by TaskUpdate");
         }
+        sanitized.insert(key.clone(), value.clone());
     }
-    Ok(())
+    Ok(sanitized)
+}
+
+fn reserved_monitor_value_unchanged(
+    value: &Value,
+    existing: &Map<String, Value>,
+    keys: &[&str],
+) -> bool {
+    let existing_value = keys.iter().find_map(|key| existing.get(*key));
+    if value.is_null() {
+        return existing_value.is_none();
+    }
+    existing_value.is_some_and(|existing_value| existing_value == value)
+}
+
+fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        "source_context" | "sourceContext" => Some(&["source_context", "sourceContext"]),
+        "completion_policy" | "completionPolicy" => {
+            Some(&["completion_policy", "completionPolicy"])
+        }
+        "delivery_target" | "deliveryTarget" => Some(&["delivery_target", "deliveryTarget"]),
+        "action_receipts" | "actionReceipts" => Some(&["action_receipts", "actionReceipts"]),
+        "action_states" | "actionStates" => Some(&["action_states", "actionStates"]),
+        "monitor_actions" | "monitorActions" => Some(&["monitor_actions", "monitorActions"]),
+        "monitor_envelope_id" | "monitorEnvelopeId" => {
+            Some(&["monitor_envelope_id", "monitorEnvelopeId"])
+        }
+        "monitor_connection" | "monitorConnection" => {
+            Some(&["monitor_connection", "monitorConnection"])
+        }
+        "monitor_connector" | "monitorConnector" => {
+            Some(&["monitor_connector", "monitorConnector"])
+        }
+        "chat_id" | "chatId" => Some(&["chat_id", "chatId"]),
+        "chat_kind" | "chatKind" => Some(&["chat_kind", "chatKind"]),
+        "sender_id" | "senderId" => Some(&["sender_id", "senderId"]),
+        "sender_username" | "senderUsername" => Some(&["sender_username", "senderUsername"]),
+        _ => None,
+    }
 }
 
 fn normalize_monitor_task_metadata(metadata: &mut Map<String, Value>) {
     let source_context = derived_monitor_source_context(metadata);
     if let Some(source_context) = source_context {
+        let default_completion_policy =
+            default_monitor_completion_policy(metadata, Some(&source_context));
         metadata.insert("source_context".to_string(), source_context);
-        metadata
-            .entry("completion_policy".to_string())
-            .or_insert_with(|| json!({"mode": "send_to_source", "requires_receipt": true}));
+        if let Some(default_completion_policy) = default_completion_policy {
+            metadata
+                .entry("completion_policy".to_string())
+                .or_insert(default_completion_policy);
+        }
     } else {
         metadata.remove("source_context");
     }
@@ -560,6 +597,14 @@ fn derived_monitor_source_context(metadata: &Map<String, Value>) -> Option<Value
         return None;
     }
     let chat_id = metadata_string(metadata, &["chat_id", "chatId"])?;
+    let chat_kind = metadata_string(metadata, &["chat_kind", "chatKind"])
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| "user".to_string());
+    let (source_kind, summary_kind) = match chat_kind.as_str() {
+        "group" | "supergroup" => ("telegram_group_message", "Telegram group message"),
+        "channel" => ("telegram_channel_message", "Telegram channel message"),
+        _ => ("telegram_direct_message", "Telegram direct message"),
+    };
     let connection_slug = metadata_string(metadata, &["monitor_connection", "monitorConnection"]);
     let sender_id = metadata_string(metadata, &["sender_id", "senderId"]);
     let sender_username = metadata_string(metadata, &["sender_username", "senderUsername"]);
@@ -571,13 +616,14 @@ fn derived_monitor_source_context(metadata: &Map<String, Value>) -> Option<Value
         sender.insert("username".to_string(), Value::String(sender_username));
     }
     Some(json!({
-        "kind": "telegram_direct_message",
+        "kind": source_kind,
         "connection_slug": connection_slug,
         "connector_slug": connector_slug,
-        "summary": format!("Telegram direct message from chat_id {chat_id}"),
+        "summary": format!("{summary_kind} from chat_id {chat_id}"),
         "delivery_target": {
             "type": "telegram_chat",
             "chat_id": chat_id,
+            "chat_kind": chat_kind,
         },
         "sender": sender,
     }))
@@ -591,14 +637,43 @@ fn monitor_completion_policy(
         .get("completion_policy")
         .or_else(|| metadata.get("completionPolicy"))
         .cloned()
-        .or_else(|| {
-            source_context.and_then(|context| {
-                context
-                    .get("delivery_target")
-                    .or_else(|| context.get("deliveryTarget"))
-                    .map(|_| json!({"mode": "send_to_source", "requiresReceipt": true}))
-            })
-        })
+        .or_else(|| default_monitor_completion_policy(metadata, source_context))
+}
+
+fn default_monitor_completion_policy(
+    metadata: &Map<String, Value>,
+    source_context: Option<&Value>,
+) -> Option<Value> {
+    if !monitor_actions_require_reply(metadata) {
+        return None;
+    }
+    source_context
+        .and_then(source_context_delivery_target)
+        .map(|_| json!({"mode": "send_to_source", "requires_receipt": true}))
+}
+
+fn source_context_delivery_target(context: &Value) -> Option<&Value> {
+    context
+        .get("delivery_target")
+        .or_else(|| context.get("deliveryTarget"))
+}
+
+fn monitor_actions_require_reply(metadata: &Map<String, Value>) -> bool {
+    monitor_actions(metadata).iter().any(|action| {
+        let name = string_field(action, &["name"]).unwrap_or_default();
+        let prompt = string_field(action, &["prompt"]).unwrap_or_default();
+        let text = format!("{name}\n{prompt}").to_ascii_lowercase();
+        [
+            "reply",
+            "respond",
+            "send it back",
+            "send back",
+            "answer back",
+            "message back",
+        ]
+        .iter()
+        .any(|needle| text.contains(needle))
+    })
 }
 
 fn monitor_task_requires_action_completion(task: &StoredTask) -> bool {
@@ -779,6 +854,7 @@ fn camel_case_delivery_target(value: &Value) -> Value {
     json!({
         "type": string_field_from_map(object, &["type"]),
         "chatId": string_field_from_map(object, &["chat_id", "chatId"]),
+        "chatKind": string_field_from_map(object, &["chat_kind", "chatKind"]),
     })
 }
 
@@ -1200,6 +1276,54 @@ mod tests {
     }
 
     #[test]
+    fn task_get_exposes_group_monitor_source_context() {
+        let (mut state, tmp) = make_state();
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Reply to group mention",
+                "description": "A group chat mentioned me.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "telegram-user",
+                    "monitor_connector": "telegram-login",
+                    "chat_kind": "group",
+                    "chat_id": "-10012345",
+                    "sender_id": "8759047281"
+                },
+                "actions": [
+                    {
+                        "actionName": "Draft reply",
+                        "actionPrompt": "Draft a concise reply to the group."
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        let task_id = serde_json::from_str::<Value>(&raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let raw = execute_task_get(&mut state, tmp.path(), json!({"taskId": task_id})).unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task = payload.get("task").unwrap();
+
+        assert_eq!(
+            task.pointer("/sourceContext/kind").and_then(Value::as_str),
+            Some("telegram_group_message")
+        );
+        assert_eq!(
+            task.pointer("/sourceContext/deliveryTarget/chatKind")
+                .and_then(Value::as_str),
+            Some("group")
+        );
+    }
+
+    #[test]
     fn task_update_rejects_reserved_monitor_metadata_changes() {
         let (mut state, tmp) = make_state();
         let task_id = create_telegram_monitor_task(&mut state, tmp.path());
@@ -1224,6 +1348,31 @@ mod tests {
     }
 
     #[test]
+    fn task_update_ignores_unchanged_reserved_monitor_metadata() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+
+        let raw = execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "metadata": {
+                    "chatId": "8759047281",
+                    "senderId": "8759047281"
+                }
+            }),
+        )
+        .expect("unchanged reserved identity fields should be ignored");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["success"], true);
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        assert!(task.metadata.get("chatId").is_none());
+        assert!(task.metadata.get("senderId").is_none());
+    }
+
+    #[test]
     fn task_update_rejects_generic_completion_for_send_to_source_monitor_task() {
         let (mut state, tmp) = make_state();
         let task_id = create_telegram_monitor_task(&mut state, tmp.path());
@@ -1241,6 +1390,53 @@ mod tests {
         assert!(error
             .to_string()
             .contains("must be completed through its monitor action"));
+    }
+
+    #[test]
+    fn task_update_allows_completion_for_non_reply_monitor_task() {
+        let (mut state, tmp) = make_state();
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Remember Telegram context",
+                "description": "A Telegram message contains a useful deadline.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "telegram-user",
+                    "monitor_connector": "telegram-login",
+                    "chat_id": "8759047281",
+                    "sender_id": "8759047281"
+                },
+                "actions": [
+                    {
+                        "actionName": "Add reminder",
+                        "actionPrompt": "Create a reminder from the deadline."
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        let task_id = serde_json::from_str::<Value>(&raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let raw = execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "status": "completed"
+            }),
+        )
+        .expect("non-reply monitor tasks can complete without sending a reply");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["statusChange"]["to"], "completed");
     }
 
     #[test]
@@ -1281,6 +1477,25 @@ mod tests {
         .expect_err("completed task must not send again");
 
         assert!(error.to_string().contains("already completed"));
+    }
+
+    #[test]
+    fn monitor_reply_send_rejects_cancelled_tasks_before_connector_action() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+        let path = monitor_tasks_path(tmp.path());
+        let mut store = load_store::<TaskStore>(&path).unwrap();
+        store.tasks[0].status = "cancelled".to_string();
+        save_store(&path, &store).unwrap();
+
+        let error = execute_monitor_reply_send(
+            &mut state,
+            tmp.path(),
+            json!({"taskId": task_id, "message": "Acknowledged."}),
+        )
+        .expect_err("cancelled task must not send");
+
+        assert!(error.to_string().contains("already cancelled"));
     }
 
     #[test]
