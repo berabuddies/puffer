@@ -77,6 +77,43 @@ fn cef_remote_port_listening(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(700)).is_ok()
 }
 
+/// Loopback port the desktop CEF host advertises its DevTools endpoint on.
+const DEFAULT_CEF_REMOTE_DEBUGGING_PORT: u16 = 9333;
+/// Short liveness probe used when CEF was not explicitly requested via the
+/// environment, so a non-CEF build (or a not-yet-warm CEF) falls back to the
+/// managed-Chrome screencast backend quickly instead of stalling.
+const CEF_REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Decision for how to reach the native CEF DevTools endpoint.
+///
+/// When the port is configured explicitly via the environment we wait patiently
+/// for CEF to come up and treat an unreachable endpoint as a hard error. When it
+/// is not configured we probe the default loopback port briefly and fall back to
+/// the managed-Chrome backend if CEF is not actually serving — this removes the
+/// startup race where a daemon spawned before CEF warmed up would otherwise be
+/// pinned to the fallback for its entire lifetime.
+struct CefRemoteStartPlan {
+    port: u16,
+    timeout: Duration,
+    /// Whether an unreachable endpoint should hard-error (explicit) or fall back
+    /// gracefully (default probe).
+    explicit: bool,
+}
+
+fn cef_remote_start_plan(explicit_port: Option<u16>) -> CefRemoteStartPlan {
+    match explicit_port {
+        Some(port) => CefRemoteStartPlan {
+            port,
+            timeout: CEF_REMOTE_START_TIMEOUT,
+            explicit: true,
+        },
+        None => CefRemoteStartPlan {
+            port: DEFAULT_CEF_REMOTE_DEBUGGING_PORT,
+            timeout: CEF_REMOTE_PROBE_TIMEOUT,
+            explicit: false,
+        },
+    }
+}
 #[derive(Clone)]
 pub(super) struct BrowserRootSession {
     inner: Arc<Mutex<BrowserRootState>>,
@@ -179,19 +216,19 @@ impl BrowserRootSession {
         profile_dir: &PathBuf,
         launch_settings: &BrowserLaunchSettings,
     ) -> Result<Option<Self>> {
-        let Some(port) = cef_remote_debugging_port() else {
-            log_browser_backend(
-                "CEF remote debugging port is not configured; using Chrome fallback",
-            );
-            return Ok(None);
-        };
-        // Fast probe first: if nothing is listening on the CEF DevTools port —
-        // e.g. the app was launched via `tauri dev`, where the embedded CEF
-        // runtime is not staged (only release bundles stage it) — fall back to the
-        // Chrome screencast backend IMMEDIATELY instead of polling the full
-        // CEF_REMOTE_START_TIMEOUT (30s) and then erroring. That 30s error is what
-        // the desktop surfaces as "Puffer daemon request timed out: browser_open".
-        if !cef_remote_port_listening(port) {
+        let CefRemoteStartPlan {
+            port,
+            timeout,
+            explicit,
+        } = cef_remote_start_plan(cef_remote_debugging_port());
+        // Fast probe first for the implicit (default-port) path: if nothing is
+        // listening on the CEF DevTools port — e.g. the app was launched via
+        // `tauri dev`, where the embedded CEF runtime is not staged (only release
+        // bundles stage it), or CEF has not warmed up yet — fall back to the
+        // Chrome screencast backend IMMEDIATELY instead of polling. When the port
+        // was configured explicitly via the environment we instead wait patiently
+        // below (and treat an unreachable endpoint as a hard error).
+        if !explicit && !cef_remote_port_listening(port) {
             log_browser_backend(format!(
                 "CEF DevTools port {port} is not listening; using Chrome screencast fallback"
             ));
@@ -200,13 +237,20 @@ impl BrowserRootSession {
         log_browser_backend(format!(
             "trying native CEF DevTools on loopback port {port}"
         ));
-        let browser_ws = match read_remote_devtools_ws_url(port, CEF_REMOTE_START_TIMEOUT) {
+        let browser_ws = match read_remote_devtools_ws_url(port, timeout) {
             Ok(browser_ws) => browser_ws,
-            // The port was reachable but the DevTools handshake never completed —
-            // fall back to Chrome rather than failing the whole open.
             Err(error) => {
+                if explicit {
+                    return Err(error).with_context(|| {
+                        format!("native CEF DevTools on loopback port {port} was not reachable")
+                    });
+                }
+                // The port was reachable but the DevTools handshake never
+                // completed, or CEF is not serving on the default port (non-CEF
+                // build, or not yet warm). Fall back to the managed-Chrome
+                // screencast backend instead of failing the whole open.
                 log_browser_backend(format!(
-                    "CEF DevTools on port {port} did not complete its handshake ({error:#}); \
+                    "native CEF DevTools on loopback port {port} is not serving ({error:#}); \
                      using Chrome screencast fallback"
                 ));
                 return Ok(None);
@@ -1136,4 +1180,27 @@ fn ensure_root_alive(inner: &mut BrowserRootState) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_port_waits_patiently_and_hard_errors() {
+        let plan = cef_remote_start_plan(Some(9444));
+
+        assert_eq!(plan.port, 9444);
+        assert_eq!(plan.timeout, CEF_REMOTE_START_TIMEOUT);
+        assert!(plan.explicit);
+    }
+
+    #[test]
+    fn missing_port_probes_default_briefly_and_falls_back() {
+        let plan = cef_remote_start_plan(None);
+
+        assert_eq!(plan.port, DEFAULT_CEF_REMOTE_DEBUGGING_PORT);
+        assert_eq!(plan.timeout, CEF_REMOTE_PROBE_TIMEOUT);
+        assert!(!plan.explicit);
+    }
 }
