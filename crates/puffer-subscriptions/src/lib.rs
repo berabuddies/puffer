@@ -25,6 +25,7 @@ mod connector_process;
 mod connector_stream;
 mod contact_history;
 mod contacts;
+mod event_schema;
 mod history;
 mod manager;
 mod protocol;
@@ -61,6 +62,10 @@ pub use contacts::{
     DISCORD_CONTACT_PREFIX, GOOGLE_CONTACT_PREFIX, LARK_CONTACT_PREFIX, MATRIX_CONTACT_PREFIX,
     SLACK_CONTACT_PREFIX, TELEGRAM_CONTACT_PREFIX,
 };
+pub use event_schema::{
+    EventField, EventFieldRule, EventFieldType, EventFieldValue, EventOperator, EventSchema,
+    EventTextField, compile_event_field_rule, load_event_schema_from_dir, validate_event_schema,
+};
 pub use history::{
     now_ms, WorkflowActionLog, WorkflowBindingRun, WorkflowBindingRunStatus, WorkflowHistoryStore,
     WorkflowHistoryStoreError,
@@ -87,8 +92,8 @@ pub use store::{
     SubscriptionStore, SubscriptionStoreError, WorkflowBindingStore, WorkflowBindingStoreError,
 };
 pub use subscriber_manifest::{
-    connection_subscriber_manifest, connection_subscriber_manifest_exists,
-    connection_workflow_trigger_supported, connector_runtime_hints,
-    connector_workflow_trigger_supported, direct_subscriber_manifest, find_subscriber_manifest,
-    SubscriberManifestRoots,
+    connection_subscriber_manifest, connection_subscriber_manifest_dir,
+    connection_subscriber_manifest_exists, connection_workflow_trigger_supported,
+    connector_runtime_hints, connector_workflow_trigger_supported, direct_subscriber_manifest,
+    find_subscriber_manifest, SubscriberManifestRoots,
 };

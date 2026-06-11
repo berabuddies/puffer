@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "event_source": "gcal-browser",
+  "text_fields": [
+    { "path": "event.title", "label": "Title" },
+    { "path": "event.when", "label": "When" },
+    { "path": "event.location", "label": "Location" }
+  ],
+  "fields": [
+    {
+      "path": "account",
+      "label": "Account",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "event.title",
+      "label": "Event title",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "event.when",
+      "label": "When",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "event.location",
+      "label": "Location",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "event.id",
+      "label": "Event ID",
+      "type": "string",
+      "operators": ["contains", "equals"]
+    },
+    {
+      "path": "event.url",
+      "label": "Event URL",
+      "type": "string",
+      "operators": ["contains", "equals"]
+    },
+    {
+      "path": "event.index",
+      "label": "Row index",
+      "type": "number",
+      "operators": ["equals"]
+    }
+  ]
+}

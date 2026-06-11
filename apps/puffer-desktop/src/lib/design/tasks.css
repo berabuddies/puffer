@@ -1288,6 +1288,309 @@
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--pf-run-failed) 10%, transparent);
 }
 
+.pf-monitor-rule-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pf-monitor-rule-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--background) 92%, var(--muted) 8%);
+}
+
+.pf-monitor-rule-group.is-empty {
+  color: var(--muted-foreground);
+}
+
+.pf-monitor-rule-group-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pf-monitor-rule-group-head > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pf-monitor-rule-group-head strong {
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.pf-monitor-rule-group-head span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.pf-monitor-rule-add-button {
+  min-width: 0;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pf-monitor-rule-add-button:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--puffer-accent) 35%, var(--border));
+  background: color-mix(in oklab, var(--puffer-accent) 8%, var(--background));
+}
+
+.pf-monitor-rule-chip-list {
+  max-height: 172px;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-gutter: stable;
+}
+
+.pf-monitor-rule-chip {
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px 4px 10px;
+  border: 1px solid color-mix(in oklab, var(--puffer-accent) 24%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--puffer-accent) 7%, var(--background));
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.pf-monitor-rule-chip[data-mode="exclude"] {
+  border-color: color-mix(in oklab, var(--pf-run-failed) 24%, var(--border));
+  background: color-mix(in oklab, var(--pf-run-failed) 5%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="text"] {
+  border-color: color-mix(in oklab, #8b5cf6 38%, var(--border));
+  background: color-mix(in oklab, #8b5cf6 10%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="blue"] {
+  border-color: color-mix(in oklab, #2563eb 34%, var(--border));
+  background: color-mix(in oklab, #2563eb 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="green"] {
+  border-color: color-mix(in oklab, #16a34a 34%, var(--border));
+  background: color-mix(in oklab, #16a34a 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="amber"] {
+  border-color: color-mix(in oklab, #d97706 34%, var(--border));
+  background: color-mix(in oklab, #d97706 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="rose"] {
+  border-color: color-mix(in oklab, #e11d48 32%, var(--border));
+  background: color-mix(in oklab, #e11d48 7%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="teal"] {
+  border-color: color-mix(in oklab, #0d9488 34%, var(--border));
+  background: color-mix(in oklab, #0d9488 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="violet"] {
+  border-color: color-mix(in oklab, #7c3aed 34%, var(--border));
+  background: color-mix(in oklab, #7c3aed 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="cyan"] {
+  border-color: color-mix(in oklab, #0891b2 34%, var(--border));
+  background: color-mix(in oklab, #0891b2 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="lime"] {
+  border-color: color-mix(in oklab, #65a30d 34%, var(--border));
+  background: color-mix(in oklab, #65a30d 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="orange"] {
+  border-color: color-mix(in oklab, #ea580c 34%, var(--border));
+  background: color-mix(in oklab, #ea580c 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="pink"] {
+  border-color: color-mix(in oklab, #db2777 32%, var(--border));
+  background: color-mix(in oklab, #db2777 7%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="indigo"] {
+  border-color: color-mix(in oklab, #4f46e5 34%, var(--border));
+  background: color-mix(in oklab, #4f46e5 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="emerald"] {
+  border-color: color-mix(in oklab, #059669 34%, var(--border));
+  background: color-mix(in oklab, #059669 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="yellow"] {
+  border-color: color-mix(in oklab, #ca8a04 34%, var(--border));
+  background: color-mix(in oklab, #ca8a04 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="red"] {
+  border-color: color-mix(in oklab, #dc2626 32%, var(--border));
+  background: color-mix(in oklab, #dc2626 7%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="sky"] {
+  border-color: color-mix(in oklab, #0284c7 34%, var(--border));
+  background: color-mix(in oklab, #0284c7 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="fuchsia"] {
+  border-color: color-mix(in oklab, #c026d3 32%, var(--border));
+  background: color-mix(in oklab, #c026d3 7%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="slate"] {
+  border-color: color-mix(in oklab, #475569 32%, var(--border));
+  background: color-mix(in oklab, #475569 7%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="mint"] {
+  border-color: color-mix(in oklab, #10b981 34%, var(--border));
+  background: color-mix(in oklab, #10b981 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="coral"] {
+  border-color: color-mix(in oklab, #f97316 34%, var(--border));
+  background: color-mix(in oklab, #f97316 8%, var(--background));
+}
+
+.pf-monitor-rule-chip[data-tone="plum"] {
+  border-color: color-mix(in oklab, #9333ea 34%, var(--border));
+  background: color-mix(in oklab, #9333ea 8%, var(--background));
+}
+
+.pf-monitor-rule-chip-text {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-monitor-rule-chip-text strong {
+  font-weight: 700;
+}
+
+.pf-monitor-rule-chip button {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.pf-monitor-rule-chip button:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+
+.pf-monitor-rule-builder {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in oklab, var(--puffer-accent) 24%, var(--border));
+  border-radius: 8px;
+  background: var(--background);
+}
+
+.pf-monitor-rule-builder label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pf-monitor-rule-builder label > span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 13px;
+}
+
+.pf-monitor-rule-builder-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pf-monitor-rule-builder-actions button {
+  min-width: 104px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pf-monitor-rule-builder-actions .pf-secondary-button {
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.pf-monitor-rule-builder-actions .pf-primary-button {
+  border: 1px solid #111111;
+  background: #111111;
+  color: #ffffff;
+}
+
+.pf-monitor-rule-builder-actions button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
 .pf-task-config input,
 .pf-task-config select,
 .pf-task-config textarea {
@@ -1487,9 +1790,16 @@
 
   .pf-task-settings-monitor-form,
   .pf-task-settings-monitor-row,
-  .pf-task-keyword-rule-row {
+  .pf-task-keyword-rule-row,
+  .pf-monitor-rule-builder {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+  }
+
+  .pf-monitor-rule-group-head,
+  .pf-monitor-rule-builder-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .pf-task-contact-table-head {

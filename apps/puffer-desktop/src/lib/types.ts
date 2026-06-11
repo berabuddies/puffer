@@ -709,6 +709,7 @@ export type WorkflowConnection = {
   can_trigger_workflow?: boolean;
   connect_command?: string | null;
   monitor_command?: string | null;
+  monitor_rule_schema?: MonitorRuleSchema | null;
 };
 
 export type WorkflowMonitorTaskAction = {
@@ -817,6 +818,55 @@ export type WorkflowMonitorHistoryMessage = {
 
 export type WorkflowFilterRule = Record<string, unknown>;
 
+export type MonitorRuleMode = "exclude" | "include";
+
+export type MonitorRuleOperator = "contains" | "equals" | "matches" | "exists";
+
+export type MonitorRuleFieldType = "string" | "number" | "boolean" | "enum" | "exists";
+
+export type MonitorRuleSchemaValue = {
+  value: string | number | boolean;
+  label: string;
+};
+
+export type MonitorRuleSchemaTextField = {
+  path: string;
+  label: string;
+};
+
+export type MonitorRuleSchemaField = {
+  path: string;
+  label: string;
+  type: MonitorRuleFieldType;
+  operators: MonitorRuleOperator[];
+  values?: MonitorRuleSchemaValue[];
+};
+
+export type MonitorRuleSchema = {
+  version: number;
+  event_source?: string | null;
+  text_fields?: MonitorRuleSchemaTextField[];
+  fields?: MonitorRuleSchemaField[];
+  source_path?: string | null;
+};
+
+export type MonitorRuleAddRequest =
+  | {
+      connection_slug: string;
+      mode: MonitorRuleMode;
+      kind: "keyword";
+      keywords: string[];
+      case_insensitive?: boolean;
+    }
+  | {
+      connection_slug: string;
+      mode: MonitorRuleMode;
+      kind: "field";
+      field: string;
+      operator: MonitorRuleOperator;
+      value?: string | number | boolean | null;
+    };
+
 export type WorkflowBinding = {
   slug: string;
   description: string;
@@ -835,6 +885,7 @@ export type WorkflowBinding = {
   contact_ids?: string[];
   monitor?: boolean;
   monitor_memory_path?: string | null;
+  monitor_rule_schema?: MonitorRuleSchema | null;
   created_at_ms?: number | null;
 };
 

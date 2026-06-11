@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "event_source": "email",
+  "text_fields": [
+    { "path": "subject", "label": "Subject" },
+    { "path": "body_preview", "label": "Body preview" }
+  ],
+  "fields": [
+    {
+      "path": "from",
+      "label": "From",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "subject",
+      "label": "Subject",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "body_preview",
+      "label": "Body preview",
+      "type": "string",
+      "operators": ["contains", "matches"]
+    },
+    {
+      "path": "thread_id",
+      "label": "Thread ID",
+      "type": "string",
+      "operators": ["contains", "equals"]
+    },
+    {
+      "path": "message_id",
+      "label": "Message ID",
+      "type": "string",
+      "operators": ["contains", "equals"]
+    },
+    {
+      "path": "uid",
+      "label": "UID",
+      "type": "number",
+      "operators": ["equals"]
+    },
+    {
+      "path": "date_ms",
+      "label": "Date",
+      "type": "number",
+      "operators": ["equals"]
+    }
+  ]
+}

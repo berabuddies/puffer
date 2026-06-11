@@ -2,6 +2,7 @@
   import "../design/tasks.css";
 
   import { onMount } from "svelte";
+  import MonitorRulesEditor from "./tasks/MonitorRulesEditor.svelte";
   import {
     addMonitorRule,
     createMonitor,
@@ -22,6 +23,8 @@
   import type {
     ContactsSnapshot,
     ConnectorContact,
+    MonitorRuleAddRequest,
+    MonitorRuleMode,
     ProviderSummary,
     SettingsSnapshot,
     WorkflowActionUsage,
@@ -55,19 +58,6 @@
     saved: boolean;
   };
   type TaskConfigTab = "monitor" | "contacts" | "rules";
-  type MonitorRuleMode = "exclude" | "include";
-  type MonitorRuleListEntry = {
-    mode: MonitorRuleMode;
-    rule: WorkflowFilterRule;
-    index: number;
-  };
-  type MonitorRuleKeywordEntry = MonitorRuleListEntry & {
-    key: string;
-    keyword: string;
-    keywordIndex: number;
-    keywords: string[];
-    fallback: boolean;
-  };
 
   const TASK_PAGE_SIZE = 40;
 
@@ -120,9 +110,6 @@
   let taskListSentinel: HTMLDivElement | null = $state(null);
   let taskWindowKey = "";
   let contactScopeBindingKey = "";
-  let ruleBindingKey = "";
-  let includeRuleKeywordDraft = $state("");
-  let excludeRuleKeywordDraft = $state("");
   let savingMonitorRuleMode = $state<MonitorRuleMode | null>(null);
   let deletingMonitorRuleKey = $state<string | null>(null);
   let refreshGeneration = 0;
@@ -162,6 +149,13 @@
       ?? monitorFilterBindings[0]
       ?? null
   );
+  let selectedFilterConnection = $derived(
+    (snapshot.connections ?? []).find((connection) => connection.slug === selectedFilterBinding?.connection_slug)
+      ?? null
+  );
+  let selectedRuleSchema = $derived(
+    selectedFilterBinding?.monitor_rule_schema ?? selectedFilterConnection?.monitor_rule_schema ?? null
+  );
   let monitorConnections = $derived((snapshot.connections ?? []).filter(canCreateMonitor));
   let monitorConnectionWarnings = $derived(warningMonitorConnections());
   let selectedMonitorConnectionRecord = $derived(
@@ -194,8 +188,6 @@
     selectedHistoryMessage ? ignoreTasksForHistory(selectedHistoryMessage) : []
   );
   let contactChoices = $derived(contactScopeChoices());
-  let displayedIncludeRuleKeywords = $derived(monitorRuleKeywordEntriesForMode(selectedFilterBinding, "include"));
-  let displayedExcludeRuleKeywords = $derived(monitorRuleKeywordEntriesForMode(selectedFilterBinding, "exclude"));
 
   onMount(() => {
     void refresh();
@@ -243,14 +235,6 @@
     if (!showTaskConfig) return;
     if (monitorFilterBindings.some((binding) => binding.slug === selectedFilterBindingSlug)) return;
     selectedFilterBindingSlug = monitorFilterBindings[0]?.slug ?? "";
-  });
-
-  $effect(() => {
-    if (!showTaskConfig) return;
-    const nextKey = selectedFilterBinding?.slug ?? "";
-    if (ruleBindingKey === nextKey) return;
-    ruleBindingKey = nextKey;
-    resetRuleDraft();
   });
 
   $effect(() => {
@@ -804,63 +788,14 @@
     if (memory) chooseConfigMemory(memory.path);
   }
 
-  function resetRuleDraft() {
-    includeRuleKeywordDraft = "";
-    excludeRuleKeywordDraft = "";
-  }
-
-  function ruleKeywordDraftForMode(mode: MonitorRuleMode): string {
-    return mode === "include" ? includeRuleKeywordDraft : excludeRuleKeywordDraft;
-  }
-
-  function setRuleKeywordDraftForMode(mode: MonitorRuleMode, value: string) {
-    if (mode === "include") {
-      includeRuleKeywordDraft = value;
-    } else {
-      excludeRuleKeywordDraft = value;
-    }
-  }
-
-  function keywordPartsFromDraft(draft: string): string[] {
-    const seen = new Set<string>();
-    const parts: string[] = [];
-    for (const keyword of draft
-      .split(/[,\n]/)
-      .map((keyword) => keyword.trim())
-      .filter(Boolean)) {
-      if (seen.has(keyword)) continue;
-      seen.add(keyword);
-      parts.push(keyword);
-    }
-    return parts;
-  }
-
-  function onRuleKeywordInput(event: Event, mode: MonitorRuleMode) {
-    setRuleKeywordDraftForMode(mode, (event.currentTarget as HTMLInputElement).value);
-  }
-
-  function onRuleKeywordKeydown(event: KeyboardEvent, mode: MonitorRuleMode) {
-    if (event.key !== "Enter" && event.key !== ",") return;
-    event.preventDefault();
-    void addConfiguredRuleKeywords(mode);
-  }
-
-  async function addConfiguredRuleKeywords(mode: MonitorRuleMode) {
+  async function addConfiguredRule(request: MonitorRuleAddRequest) {
     if (!selectedFilterBinding || savingMonitorRuleMode !== null) return;
-    const keywords = keywordPartsFromDraft(ruleKeywordDraftForMode(mode));
-    if (keywords.length === 0) return;
-    savingMonitorRuleMode = mode;
+    savingMonitorRuleMode = request.mode;
     try {
-      const next = await addMonitorRule({
-        connection_slug: selectedFilterBinding.connection_slug,
-        mode,
-        keywords,
-        case_insensitive: true
-      });
+      const next = await addMonitorRule(request);
       applySnapshot(next);
-      const action = mode === "include" ? "include" : "exclude";
+      const action = request.mode === "include" ? "task" : "skip";
       notice = `Added ${action} rule for ${selectedFilterBinding.connection_slug}.`;
-      setRuleKeywordDraftForMode(mode, "");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       notice = `Could not add monitor rule: ${message}`;
@@ -869,15 +804,14 @@
     }
   }
 
-  async function deleteConfiguredRule(entry: MonitorRuleListEntry) {
+  async function deleteConfiguredRule(mode: MonitorRuleMode, rule: WorkflowFilterRule, key: string) {
     if (!selectedFilterBinding || deletingMonitorRuleKey !== null) return;
-    const key = `${entry.mode}:${entry.index}`;
     deletingMonitorRuleKey = key;
     try {
       const next = await deleteMonitorRule(
         selectedFilterBinding.connection_slug,
-        entry.mode,
-        entry.rule
+        mode,
+        rule
       );
       applySnapshot(next);
       notice = `Removed monitor rule for ${selectedFilterBinding.connection_slug}.`;
@@ -887,126 +821,6 @@
     } finally {
       deletingMonitorRuleKey = null;
     }
-  }
-
-  async function deleteConfiguredRuleKeyword(entry: MonitorRuleKeywordEntry) {
-    if (!selectedFilterBinding || deletingMonitorRuleKey !== null) return;
-    if (entry.fallback || entry.keywords.length <= 1) {
-      await deleteConfiguredRule(entry);
-      return;
-    }
-    const connectionSlug = selectedFilterBinding.connection_slug;
-    const remainingKeywords = entry.keywords.filter((_, index) => index !== entry.keywordIndex);
-    deletingMonitorRuleKey = entry.key;
-    try {
-      let next = await deleteMonitorRule(connectionSlug, entry.mode, entry.rule);
-      if (remainingKeywords.length > 0) {
-        next = await addMonitorRule({
-          connection_slug: connectionSlug,
-          mode: entry.mode,
-          keywords: remainingKeywords,
-          case_insensitive: ruleCaseInsensitive(entry.rule)
-        });
-      }
-      applySnapshot(next);
-      notice = `Removed keyword ${entry.keyword} for ${connectionSlug}.`;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      notice = `Could not remove monitor rule keyword: ${message}`;
-    } finally {
-      deletingMonitorRuleKey = null;
-    }
-  }
-
-  function monitorRuleEntries(binding: WorkflowBinding | null): MonitorRuleListEntry[] {
-    if (!binding) return [];
-    return [
-      ...includeRules(binding).map((rule, index) => ({ mode: "include" as const, rule, index })),
-      ...((binding.ignore_filters ?? []).map((rule, index) => ({ mode: "exclude" as const, rule, index })))
-    ];
-  }
-
-  function includeRules(binding: WorkflowBinding): WorkflowFilterRule[] {
-    if (binding.include_filters && binding.include_filters.length > 0) return binding.include_filters;
-    return binding.include_filter ? [binding.include_filter] : [];
-  }
-
-  function monitorRuleKeywordEntriesForMode(
-    binding: WorkflowBinding | null,
-    mode: MonitorRuleMode
-  ): MonitorRuleKeywordEntry[] {
-    return monitorRuleEntries(binding).filter((entry) => entry.mode === mode).flatMap((entry) => {
-      const keywords = monitorRuleKeywords(entry.rule);
-      const visibleKeywords = keywords.length > 0 ? keywords : [filterRuleSummary(entry.rule)];
-      return visibleKeywords.map((keyword, keywordIndex) => ({
-        ...entry,
-        key: `${entry.mode}:${entry.index}:${keywordIndex}:${keyword}`,
-        keyword,
-        keywordIndex,
-        keywords: visibleKeywords,
-        fallback: keywords.length === 0
-      }));
-    });
-  }
-
-  function monitorRuleKeywords(rule: WorkflowFilterRule): string[] {
-    const keywords = extractRegexPatterns(rule)
-      .flatMap(splitRegexAlternation)
-      .map(decodeRegexLiteral)
-      .map((keyword) => keyword.trim())
-      .filter(Boolean);
-    return Array.from(new Set(keywords));
-  }
-
-  function extractRegexPatterns(rule: unknown): string[] {
-    if (!rule || typeof rule !== "object") return [];
-    const record = rule as Record<string, unknown>;
-    const direct = record.type === "regex" && typeof record.pattern === "string" ? [record.pattern] : [];
-    const nested = Array.isArray(record.filters) ? record.filters.flatMap(extractRegexPatterns) : [];
-    return [...direct, ...nested];
-  }
-
-  function splitRegexAlternation(pattern: string): string[] {
-    const parts: string[] = [];
-    let current = "";
-    let escaped = false;
-    for (const ch of pattern) {
-      if (escaped) {
-        current += `\\${ch}`;
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === "|") {
-        parts.push(current);
-        current = "";
-      } else {
-        current += ch;
-      }
-    }
-    if (escaped) current += "\\";
-    parts.push(current);
-    return parts;
-  }
-
-  function decodeRegexLiteral(pattern: string): string {
-    return pattern.replace(/\\([\\.^$*+?()[\]{}|/-])/g, "$1");
-  }
-
-  function ruleCaseInsensitive(rule: WorkflowFilterRule): boolean {
-    const regexRule = findFirstRegexRule(rule);
-    return regexRule?.case_insensitive !== false;
-  }
-
-  function findFirstRegexRule(rule: unknown): Record<string, unknown> | null {
-    if (!rule || typeof rule !== "object") return null;
-    const record = rule as Record<string, unknown>;
-    if (record.type === "regex") return record;
-    if (!Array.isArray(record.filters)) return null;
-    for (const filter of record.filters) {
-      const found = findFirstRegexRule(filter);
-      if (found) return found;
-    }
-    return null;
   }
 
   function contactScopeChoices(): ContactChoice[] {
@@ -1067,24 +881,6 @@
 
   function clearContactScope() {
     selectedMonitorContactIds = [];
-  }
-
-  function scalarRuleEntries(rule: WorkflowFilterRule): string[] {
-    return Object.entries(rule)
-      .filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value))
-      .map(([key, value]) => `${key}=${JSON.stringify(value)}`);
-  }
-
-  function filterRuleSummary(rule: WorkflowFilterRule): string {
-    if (rule.type === "regex" && typeof rule.pattern === "string") {
-      const casing = rule.case_insensitive === false ? "case-sensitive" : "case-insensitive";
-      return `${rule.pattern} (${casing})`;
-    }
-    if (rule.type === "jq" && typeof rule.expression === "string") {
-      return rule.expression;
-    }
-    const entries = scalarRuleEntries(rule);
-    return entries.length > 0 ? entries.join("  ") : JSON.stringify(rule);
   }
 
   function openTaskConfig() {
@@ -1971,90 +1767,15 @@
                 </label>
 
                 <div class="pf-task-settings-rules-block">
-                  <span class="pf-task-settings-field-label">Ignore rules</span>
-                  {#if selectedFilterBinding}
-                    <div class="pf-task-keyword-rule-editor">
-                      <div class="pf-task-keyword-rule-row" role="group" aria-label="Only includes">
-                        <span class="pf-task-keyword-rule-label">Only includes</span>
-                        <div class="pf-task-keyword-box pf-task-keyword-rule-box" data-mode="include">
-                          {#each displayedIncludeRuleKeywords as entry (entry.key)}
-                            <span class="pf-task-keyword-chip" data-mode={entry.mode}>
-                              <span>{entry.keyword}</span>
-                              <button
-                                type="button"
-                                aria-label={`Remove ${entry.mode} keyword ${entry.keyword}`}
-                                disabled={deletingMonitorRuleKey !== null || savingMonitorRuleMode !== null}
-                                onclick={() => void deleteConfiguredRuleKeyword(entry)}
-                              >
-                                <Icon name="x" size={10} />
-                              </button>
-                            </span>
-                          {/each}
-                          <input
-                            value={includeRuleKeywordDraft}
-                            aria-label="Only includes keywords"
-                            placeholder={displayedIncludeRuleKeywords.length === 0 ? "Enter keywords" : ""}
-                            disabled={savingMonitorRuleMode !== null}
-                            oninput={(event) => onRuleKeywordInput(event, "include")}
-                            onkeydown={(event) => onRuleKeywordKeydown(event, "include")}
-                            onblur={() => void addConfiguredRuleKeywords("include")}
-                          />
-                        </div>
-                      </div>
-
-                      <div class="pf-task-keyword-rule-row" role="group" aria-label="Exclude">
-                        <span class="pf-task-keyword-rule-label">Exclude</span>
-                        <div class="pf-task-keyword-box pf-task-keyword-rule-box" data-mode="exclude">
-                          {#each displayedExcludeRuleKeywords as entry (entry.key)}
-                            <span class="pf-task-keyword-chip" data-mode={entry.mode}>
-                              <span>{entry.keyword}</span>
-                              <button
-                                type="button"
-                                aria-label={`Remove ${entry.mode} keyword ${entry.keyword}`}
-                                disabled={deletingMonitorRuleKey !== null || savingMonitorRuleMode !== null}
-                                onclick={() => void deleteConfiguredRuleKeyword(entry)}
-                              >
-                                <Icon name="x" size={10} />
-                              </button>
-                            </span>
-                          {/each}
-                          <input
-                            value={excludeRuleKeywordDraft}
-                            aria-label="Exclude keywords"
-                            placeholder={displayedExcludeRuleKeywords.length === 0 ? "Enter keywords" : ""}
-                            disabled={savingMonitorRuleMode !== null}
-                            oninput={(event) => onRuleKeywordInput(event, "exclude")}
-                            onkeydown={(event) => onRuleKeywordKeydown(event, "exclude")}
-                            onblur={() => void addConfiguredRuleKeywords("exclude")}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  {:else}
-                    <div class="pf-task-keyword-rule-editor">
-                      <div class="pf-task-keyword-rule-row" role="group" aria-label="Only includes">
-                        <span class="pf-task-keyword-rule-label">Only includes</span>
-                        <div class="pf-task-keyword-box pf-task-keyword-rule-box" data-mode="include">
-                          <input
-                            aria-label="Only includes keywords"
-                            placeholder="Enter keywords"
-                            disabled
-                          />
-                        </div>
-                      </div>
-                      <div class="pf-task-keyword-rule-row" role="group" aria-label="Exclude">
-                        <span class="pf-task-keyword-rule-label">Exclude</span>
-                        <div class="pf-task-keyword-box pf-task-keyword-rule-box" data-mode="exclude">
-                          <input
-                            aria-label="Exclude keywords"
-                            placeholder="Enter keywords"
-                            disabled
-                          />
-                        </div>
-                      </div>
-                      <p>No monitor rules yet.</p>
-                    </div>
-                  {/if}
+                  <span class="pf-task-settings-field-label">Filter rules</span>
+                  <MonitorRulesEditor
+                    binding={selectedFilterBinding}
+                    schema={selectedRuleSchema}
+                    savingMode={savingMonitorRuleMode}
+                    deletingKey={deletingMonitorRuleKey}
+                    onAddRule={addConfiguredRule}
+                    onDeleteRule={deleteConfiguredRule}
+                  />
                 </div>
 
                 <div class="pf-task-settings-memory-block">
