@@ -186,13 +186,9 @@
             <span>Message detail</span>
             <select aria-label="Message detail" value={selectedPath} onchange={onDetailChange}>
               <option value={MESSAGE_TEXT_PATH}>Message text</option>
-              {#if payloadDetails.length > 0}
-                <optgroup label="Payload fields">
-                  {#each payloadDetails as detail (detail.path)}
-                    <option value={detail.path}>{detail.label}</option>
-                  {/each}
-                </optgroup>
-              {/if}
+              {#each payloadDetails as detail (detail.path)}
+                <option value={detail.path}>{detail.label}</option>
+              {/each}
             </select>
           </label>
           <label>
@@ -276,13 +272,9 @@
             <span>Message detail</span>
             <select aria-label="Message detail" value={selectedPath} onchange={onDetailChange}>
               <option value={MESSAGE_TEXT_PATH}>Message text</option>
-              {#if payloadDetails.length > 0}
-                <optgroup label="Payload fields">
-                  {#each payloadDetails as detail (detail.path)}
-                    <option value={detail.path}>{detail.label}</option>
-                  {/each}
-                </optgroup>
-              {/if}
+              {#each payloadDetails as detail (detail.path)}
+                <option value={detail.path}>{detail.label}</option>
+              {/each}
             </select>
           </label>
           <label>
