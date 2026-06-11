@@ -58,12 +58,22 @@ pub(crate) async fn conversation_row(
     point(&v)
 }
 
-/// Verifies the OPEN chat is `recipient`: the chat-header label in the right pane
-/// (`--min-x`) carries the recipient name.
+/// Verifies the requested chat is the one currently OPEN, via the LEFT
+/// conversation list: the open chat's row carries the `SELECTED` state (verified
+/// live) and its name (chat title + last-message preview) contains the recipient.
+/// Matching the left-list ROW — not a right-pane label — is the safety here: the
+/// right pane exposes the Send button, sender names, and message text as labels
+/// too, any of which can contain the recipient string and would falsely confirm a
+/// different chat (a wrong-recipient send). Substring (`--contains`) stays
+/// consistent with how `conversation_row` opens the chat (the title may be a full
+/// display name while `recipient` is the searched substring).
 pub(crate) async fn open_chat_is(instance: &WechatInstance, recipient: &str) -> Result<bool> {
     let v = run(
         instance,
-        &["find", "--role", "label", "--name", recipient, "--min-x", "280"],
+        &[
+            "find", "--role", "list-item", "--name", recipient, "--contains",
+            "--max-x", "280", "--state", "SELECTED",
+        ],
     )
     .await?;
     Ok(found(&v))
@@ -72,11 +82,13 @@ pub(crate) async fn open_chat_is(instance: &WechatInstance, recipient: &str) -> 
 /// Confirms delivery: the just-sent `body` appears as a message bubble in the
 /// chat history (right pane; bubbles start at x ~= 273).
 pub(crate) async fn body_in_history(instance: &WechatInstance, body: &str) -> Result<bool> {
-    // Match a leading slice of the body (timestamps/suffixes may differ).
+    // Match a leading slice of the body (timestamps/suffixes may differ). Restrict
+    // to a message bubble (list-item) in the right pane, so the input-box echo or
+    // other labels can't be mistaken for a delivered message.
     let needle: String = body.chars().take(16).collect();
     let v = run(
         instance,
-        &["find", "--name", needle.trim(), "--contains", "--min-x", "270"],
+        &["find", "--role", "list-item", "--name", needle.trim(), "--contains", "--min-x", "270"],
     )
     .await?;
     Ok(found(&v))

@@ -489,7 +489,19 @@ async fn quote_message(instance: &WechatInstance, snippet: &str, human: &Human) 
     // right-click it (the row is full-width; the bubble is left for incoming /
     // right for outgoing, so try both), then click the quote menu item.
     if super::atspi::available(instance).await {
-        if let Some((x, y, w, h)) = super::atspi::message_bounds(instance, snippet).await? {
+        // The target bubble lands in the tree shortly after the chat opens; retry
+        // the lookup briefly before giving up.
+        let mut bounds = None;
+        for attempt in 0..6 {
+            bounds = super::atspi::message_bounds(instance, snippet).await?;
+            if bounds.is_some() {
+                break;
+            }
+            if attempt < 5 {
+                sleep_ms(400).await;
+            }
+        }
+        if let Some((x, y, w, h)) = bounds {
             let cy = y + h / 2;
             for rx in [x + 70, x + w - 90] {
                 human_right_click(instance, (rx, cy)).await?;
@@ -506,6 +518,13 @@ async fn quote_message(instance: &WechatInstance, snippet: &str, human: &Human) 
             key(instance, "Escape").await?;
         }
         // Fall through to reading the screen if the accessibility path missed.
+    }
+    // No automatic vision fallback: with screen reading disabled, fail closed.
+    if !read::vision_allowed() {
+        bail!(
+            "could not locate the message `{snippet}` to quote via the accessibility tree, and \
+             screen reading (vision) is disabled (set WECHAT_ALLOW_VISION=1 to allow it)"
+        );
     }
     // Fallback: read the screen (vision) to locate the bubble and the menu item.
     let point = locate_message(instance, snippet).await?.ok_or_else(|| {
@@ -612,25 +631,50 @@ async fn ensure_ready(instance: &WechatInstance, cfg: &InstanceConfig) -> Result
 /// Escape clears any stale search/popup.
 async fn open_chat(instance: &WechatInstance, recipient: &str, human: &Human) -> Result<()> {
     activate_window(instance).await?;
-    // Dismiss any leftover popup/context-menu/search before navigating. Two
-    // Escapes clear nested state (e.g. a context menu over a search box) so a
-    // prior action can't block the next chat from opening.
+    // Preferred path: click the recipient's row in the LEFT conversation list
+    // directly via the accessibility tree — done BEFORE any Escape. An Escape
+    // closes a currently-open chat, and re-clicking its (already-selected) row is
+    // a no-op, so a 2nd send to the same chat would leave the pane closed and the
+    // verify would fail. The conversation list is always visible, so the click
+    // navigates directly; no search box is involved, so no web-result row can
+    // hijack the window (clicking one opens a full-window web view). Falls through
+    // to the search + screen-reading path if the chat isn't in the visible list.
+    if super::atspi::available(instance).await {
+        // If the requested chat is ALREADY open, do not click its conversation
+        // row — clicking the currently-open row TOGGLES the chat closed (verified
+        // live), which is what broke a 2nd consecutive send to the same chat.
+        if super::atspi::open_chat_is(instance, recipient).await.unwrap_or(false) {
+            return Ok(());
+        }
+        for attempt in 0..4 {
+            if let Some(point) = super::atspi::conversation_row(instance, recipient).await? {
+                human_click(instance, point).await?;
+                sleep(human.think_time()).await;
+                return Ok(());
+            }
+            if attempt < 3 {
+                sleep_ms(400).await;
+            }
+        }
+    }
+    // No automatic vision fallback: the search path reads the screen to pick the
+    // result row, so with screen reading disabled, require the chat to be
+    // reachable from the conversation list.
+    if !read::vision_allowed() {
+        bail!(
+            "could not open `{recipient}` from the conversation list via the accessibility tree; \
+             searching needs screen reading (vision), which is disabled. Open the chat on the \
+             desktop once so it is in the recent list, or set WECHAT_ALLOW_VISION=1"
+        );
+    }
+    // Search path: clear any leftover popup/context-menu/search first (two
+    // Escapes clear nested state, e.g. a context menu over a search box) so a
+    // prior action can't block the search box from opening. (Closing the open
+    // chat here is fine — we're about to search-navigate to a different one.)
     key(instance, "Escape").await?;
     sleep_ms(150).await;
     key(instance, "Escape").await?;
     sleep(human.think_time()).await;
-    // Preferred path: click the recipient's row in the LEFT conversation list
-    // directly via the accessibility tree — no search box, so no web-result row
-    // can hijack the window (clicking one opens a full-window web view). Falls
-    // through to the search + screen-reading path if the chat isn't in the
-    // visible list.
-    if super::atspi::available(instance).await {
-        if let Some(point) = super::atspi::conversation_row(instance, recipient).await? {
-            human_click(instance, point).await?;
-            sleep(human.think_time()).await;
-            return Ok(());
-        }
-    }
     key(instance, "ctrl+f").await?;
     sleep(human.think_time()).await;
     key(instance, "ctrl+a").await?; // clear any stale search text
@@ -750,13 +794,27 @@ async fn verify_open_chat(instance: &WechatInstance, recipient: &str) -> Result<
         return Ok(());
     }
     // Verify via the accessibility tree: the open chat's header label carries the
-    // recipient name (right pane). On a match we're done; otherwise (e.g. a
-    // decorative display name the tree exposes differently) fall through to the
-    // screen-reading check below.
-    if super::atspi::available(instance).await
-        && super::atspi::open_chat_is(instance, recipient).await.unwrap_or(false)
-    {
-        return Ok(());
+    // recipient name (right pane). The header label lands in the tree a moment
+    // after the row is clicked, so retry briefly before giving up. On a match
+    // we're done; otherwise (e.g. a decorative display name the tree exposes
+    // differently) fall through to the screen-reading check below.
+    if super::atspi::available(instance).await {
+        for attempt in 0..6 {
+            if super::atspi::open_chat_is(instance, recipient).await.unwrap_or(false) {
+                return Ok(());
+            }
+            if attempt < 5 {
+                sleep_ms(400).await;
+            }
+        }
+    }
+    // No automatic vision fallback: if the accessibility tree could not confirm
+    // the recipient and screen reading is disabled, fail closed with guidance.
+    if !read::vision_allowed() {
+        bail!(
+            "aborting send: could not confirm the open chat is `{recipient}` via the accessibility \
+             tree, and screen reading (vision) is disabled (set WECHAT_ALLOW_VISION=1 to allow it)"
+        );
     }
     // Fast path: transcribe the header and substring-match. This works for plain
     // names and gives a readable name for the error message.
@@ -829,11 +887,22 @@ async fn confirm_delivery(instance: &WechatInstance, body: &str) -> Result<()> {
         return Ok(());
     }
     // Confirm via the accessibility tree: the sent body appears as a message
-    // bubble in the chat history. On a match we're done; otherwise fall through to
-    // the screen-reading last-outgoing check.
-    if super::atspi::available(instance).await
-        && super::atspi::body_in_history(instance, body).await.unwrap_or(false)
-    {
+    // bubble in the chat history (which lands in the tree shortly after send, so
+    // retry briefly). On a match we're done.
+    if super::atspi::available(instance).await {
+        for attempt in 0..6 {
+            if super::atspi::body_in_history(instance, body).await.unwrap_or(false) {
+                return Ok(());
+            }
+            if attempt < 5 {
+                sleep_ms(400).await;
+            }
+        }
+    }
+    // Best-effort only, and never an automatic vision call: with screen reading
+    // disabled, skip the vision cross-check (the send already happened; a missing
+    // confirmation just suppresses a warning, it does not fail the send).
+    if !read::vision_allowed() {
         return Ok(());
     }
     let png = match instance.screenshot_png().await {

@@ -65,6 +65,21 @@ pub(crate) struct WechatMessage {
     pub(crate) text: String,
 }
 
+/// Whether screen reading (the vision model) is permitted. OFF by default — it
+/// costs tokens — and there is NO automatic fallback to it: callers try the
+/// accessibility (AT-SPI) path unconditionally, and only reach the vision model
+/// when the operator has opted in explicitly for the run by setting
+/// `WECHAT_ALLOW_VISION=1` (or `=true`). With it unset, every vision call fails
+/// fast instead of silently spending tokens.
+pub(crate) fn vision_allowed() -> bool {
+    std::env::var("WECHAT_ALLOW_VISION")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
 /// Timeout for a single vision completion. Default 90s; raise it for a slow
 /// backend (e.g. a local codex reverse-proxy) via `WECHAT_VISION_TIMEOUT` (secs).
 fn vision_timeout() -> Duration {
@@ -162,6 +177,14 @@ pub(crate) fn read_messages_from_png(png: &[u8]) -> Result<Vec<WechatMessage>> {
 /// with backoff, so a momentary relay 503 doesn't abort a send. Fails fast on
 /// 4xx (auth/request) errors.
 fn vision_complete(system: &str, user: &str, png: &[u8]) -> Result<String> {
+    // Vision is off by default and never an automatic fallback: bail before any
+    // token is spent unless the operator opted in for this run.
+    if !vision_allowed() {
+        bail!(
+            "screen reading (vision) is disabled by default to avoid token cost, and is not an \
+             automatic fallback; set WECHAT_ALLOW_VISION=1 to permit it for this run"
+        );
+    }
     let (base_url, key, model) = resolve_openai()?;
     let data_url = format!(
         "data:image/png;base64,{}",
