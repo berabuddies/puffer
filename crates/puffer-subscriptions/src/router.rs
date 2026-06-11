@@ -14,6 +14,7 @@ use crate::spec::{
 use crate::store::WorkflowBindingStore;
 use puffer_subscriber_runtime::{EventBus, EventEnvelope, EventReceiver};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -22,6 +23,15 @@ use tokio::sync::Semaphore;
 use tokio::task::{self, JoinHandle};
 
 const MAX_CONCURRENT_EVENT_PROCESSORS: usize = 32;
+const MONITOR_RUNTIME_LANGUAGE_POLICY_MARKER: &str = "Monitor source-language runtime guard";
+const MONITOR_RUNTIME_LANGUAGE_POLICY: &str = r#"Monitor source-language runtime guard:
+- This guard is authoritative for monitor-created task output, including older persisted monitor prompts.
+- Before creating or updating a monitor task, identify the source event text's primary natural language.
+- Task subject, description, actions[].actionPrompt, possibleIgnoreReasons, and user-facing reply or draft text MUST use that primary language.
+- For Chinese source text, write those fields in Chinese. Do not translate them into English just because the workflow prompt, schemas, or tool names are English.
+- For English source text, keep those fields in English.
+- If the source text is mixed-language or unclear, prefer the human/user language evident in the source text or owner context; otherwise preserve the user's wording and avoid defaulting to English.
+- Preserve explicit product names, code identifiers, URLs, and quoted text exactly when appropriate."#;
 
 /// Aggregate counters surfaced by workflow and connection status views.
 #[derive(Debug, Default)]
@@ -354,6 +364,7 @@ pub fn process_envelope_result(
             }
         }
         result.matched = true;
+        let action = effective_action_for_dispatch(&spec);
         tracing::info!(
             workflow_binding = %spec.slug,
             envelope = %envelope.envelope_id,
@@ -361,13 +372,17 @@ pub fn process_envelope_result(
             kind = %envelope.event.kind,
             dedup_hash = %dedup_hash(envelope),
             text_len = envelope.event.text.len(),
-            action = %action_label(&spec.action),
+            action = %action_label(action.as_ref()),
             "workflow router dispatching event"
         );
         let started_at_ms = now_ms();
         let started_history_idx = history_store.and_then(|history_store| {
-            match history_store.append_action_started(&spec, envelope, &spec.action, started_at_ms)
-            {
+            match history_store.append_action_started(
+                &spec,
+                envelope,
+                action.as_ref(),
+                started_at_ms,
+            ) {
                 Ok(run) => Some(run.idx),
                 Err(error) => {
                     tracing::warn!(
@@ -380,13 +395,13 @@ pub fn process_envelope_result(
                 }
             }
         });
-        let action_result = dispatcher.dispatch(&spec.action, envelope);
+        let action_result = dispatcher.dispatch(action.as_ref(), envelope);
         let ended_at_ms = now_ms();
         if let Some(history_store) = history_store {
             let persist_result = match started_history_idx {
                 Some(idx) => match history_store.complete_action_result(
                     idx,
-                    &spec.action,
+                    action.as_ref(),
                     &action_result,
                     started_at_ms,
                     ended_at_ms,
@@ -396,7 +411,7 @@ pub fn process_envelope_result(
                         .append_action_result(
                             &spec,
                             envelope,
-                            &spec.action,
+                            action.as_ref(),
                             &action_result,
                             started_at_ms,
                             ended_at_ms,
@@ -408,7 +423,7 @@ pub fn process_envelope_result(
                     .append_action_result(
                         &spec,
                         envelope,
-                        &spec.action,
+                        action.as_ref(),
                         &action_result,
                         started_at_ms,
                         ended_at_ms,
@@ -603,8 +618,9 @@ fn dispatch_one_matched_envelope(
     result: &mut EnvelopeProcessResult,
 ) {
     let started_at_ms = now_ms();
+    let action = effective_action_for_dispatch(spec);
     let started_history_idx = history_store.and_then(|history_store| {
-        match history_store.append_action_started(spec, envelope, &spec.action, started_at_ms) {
+        match history_store.append_action_started(spec, envelope, action.as_ref(), started_at_ms) {
             Ok(run) => Some(run.idx),
             Err(error) => {
                 tracing::warn!(
@@ -617,11 +633,12 @@ fn dispatch_one_matched_envelope(
             }
         }
     });
-    let action_result = dispatcher.dispatch(&spec.action, envelope);
+    let action_result = dispatcher.dispatch(action.as_ref(), envelope);
     let ended_at_ms = now_ms();
     persist_action_result(
         spec,
         envelope,
+        action.as_ref(),
         &action_result,
         started_at_ms,
         ended_at_ms,
@@ -641,9 +658,15 @@ fn dispatch_matched_batch(
 ) {
     let started_at_ms = now_ms();
     let mut started_history = HashMap::new();
+    let action = effective_action_for_dispatch(spec);
     if let Some(history_store) = history_store {
         for envelope in envelopes {
-            match history_store.append_action_started(spec, envelope, &spec.action, started_at_ms) {
+            match history_store.append_action_started(
+                spec,
+                envelope,
+                action.as_ref(),
+                started_at_ms,
+            ) {
                 Ok(run) => {
                     started_history.insert(envelope.envelope_id.clone(), run.idx);
                 }
@@ -665,16 +688,17 @@ fn dispatch_matched_batch(
     tracing::info!(
         workflow_binding = %spec.slug,
         batch_size = batch.len(),
-        action = %action_label(&spec.action),
+        action = %action_label(action.as_ref()),
         "workflow router dispatching event batch"
     );
-    let action_result = dispatcher.dispatch_batch(&spec.action, &batch);
+    let action_result = dispatcher.dispatch_batch(action.as_ref(), &batch);
     let ended_at_ms = now_ms();
     for envelope in envelopes {
         let started_history_idx = started_history.get(&envelope.envelope_id).copied();
         persist_action_result(
             spec,
             envelope,
+            action.as_ref(),
             &action_result,
             started_at_ms,
             ended_at_ms,
@@ -688,6 +712,7 @@ fn dispatch_matched_batch(
 fn persist_action_result(
     spec: &WorkflowBindingSpec,
     envelope: &EventEnvelope,
+    action: &ActionSpec,
     action_result: &crate::action::ActionResult,
     started_at_ms: i128,
     ended_at_ms: i128,
@@ -698,7 +723,7 @@ fn persist_action_result(
         let persist_result = match started_history_idx {
             Some(idx) => match history_store.complete_action_result(
                 idx,
-                &spec.action,
+                action,
                 action_result,
                 started_at_ms,
                 ended_at_ms,
@@ -708,7 +733,7 @@ fn persist_action_result(
                     .append_action_result(
                         spec,
                         envelope,
-                        &spec.action,
+                        action,
                         action_result,
                         started_at_ms,
                         ended_at_ms,
@@ -720,7 +745,7 @@ fn persist_action_result(
                 .append_action_result(
                     spec,
                     envelope,
-                    &spec.action,
+                    action,
                     action_result,
                     started_at_ms,
                     ended_at_ms,
@@ -900,6 +925,25 @@ fn is_monitor_binding(spec: &WorkflowBindingSpec) -> bool {
     spec.slug.starts_with("monitor-")
         || (matches!(spec.action, ActionSpec::TriageAgent { .. })
             && spec.description.to_ascii_lowercase().contains("monitor"))
+}
+
+fn effective_action_for_dispatch(spec: &WorkflowBindingSpec) -> Cow<'_, ActionSpec> {
+    match &spec.action {
+        ActionSpec::TriageAgent { prompt, model } if is_monitor_binding(spec) => {
+            Cow::Owned(ActionSpec::TriageAgent {
+                prompt: monitor_language_guarded_prompt(prompt),
+                model: model.clone(),
+            })
+        }
+        _ => Cow::Borrowed(&spec.action),
+    }
+}
+
+fn monitor_language_guarded_prompt(prompt: &str) -> String {
+    if prompt.contains(MONITOR_RUNTIME_LANGUAGE_POLICY_MARKER) {
+        return prompt.to_string();
+    }
+    format!("{}\n\n{MONITOR_RUNTIME_LANGUAGE_POLICY}", prompt.trim_end())
 }
 
 fn payload_bool(payload: &Value, key: &str) -> bool {

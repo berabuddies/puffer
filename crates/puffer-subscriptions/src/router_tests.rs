@@ -241,6 +241,233 @@ mod tests {
     }
 
     #[test]
+    fn monitor_triage_dispatch_adds_runtime_language_guard_to_legacy_prompt() {
+        struct PromptRecordingDispatcher {
+            prompts: StdMutex<Vec<String>>,
+        }
+
+        impl ActionDispatcher for PromptRecordingDispatcher {
+            fn dispatch(&self, action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+                match action {
+                    ActionSpec::TriageAgent { prompt, .. } => {
+                        self.prompts.lock().unwrap().push(prompt.clone());
+                        ActionResult::success("triaged")
+                    }
+                    other => ActionResult::failure(format!("unexpected action: {other:?}")),
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "legacy monitor prompt".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let dispatcher = Arc::new(PromptRecordingDispatcher {
+            prompts: StdMutex::new(Vec::new()),
+        });
+        let dispatcher_trait: Arc<dyn ActionDispatcher> = dispatcher.clone();
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let envelope = EventEnvelope {
+            envelope_id: "env-cn".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "请立即整理北京的国保单位名单".into(),
+                payload: serde_json::json!({"message":"请立即整理北京的国保单位名单"}),
+            },
+        };
+
+        let result =
+            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None);
+
+        assert!(result.matched);
+        assert_eq!(result.acted, 1);
+        let prompts = dispatcher.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("legacy monitor prompt"));
+        assert!(prompts[0].contains("Monitor source-language runtime guard"));
+        assert!(prompts[0].contains("For Chinese source text"));
+        assert!(prompts[0].contains("subject, description, actions[].actionPrompt"));
+        match store.get("monitor-telegram-user").unwrap().action {
+            ActionSpec::TriageAgent { prompt, .. } => assert_eq!(prompt, "legacy monitor prompt"),
+            _ => panic!("expected triage agent"),
+        }
+    }
+
+    #[test]
+    fn non_monitor_triage_dispatch_leaves_prompt_unchanged() {
+        struct PromptRecordingDispatcher {
+            prompts: StdMutex<Vec<String>>,
+        }
+
+        impl ActionDispatcher for PromptRecordingDispatcher {
+            fn dispatch(&self, action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+                match action {
+                    ActionSpec::TriageAgent { prompt, .. } => {
+                        self.prompts.lock().unwrap().push(prompt.clone());
+                        ActionResult::success("triaged")
+                    }
+                    other => ActionResult::failure(format!("unexpected action: {other:?}")),
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "custom-triage".into(),
+                description: "Custom triage workflow".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "custom prompt".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let dispatcher = Arc::new(PromptRecordingDispatcher {
+            prompts: StdMutex::new(Vec::new()),
+        });
+        let dispatcher_trait: Arc<dyn ActionDispatcher> = dispatcher.clone();
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let envelope = EventEnvelope {
+            envelope_id: "env-custom".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "hello".into(),
+                payload: serde_json::json!({"message":"hello"}),
+            },
+        };
+
+        let result =
+            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None);
+
+        assert!(result.matched);
+        assert_eq!(result.acted, 1);
+        assert_eq!(
+            dispatcher.prompts.lock().unwrap().as_slice(),
+            &["custom prompt".to_string()]
+        );
+    }
+
+    #[test]
+    fn monitor_triage_batch_adds_runtime_language_guard_to_legacy_prompt() {
+        struct BatchPromptRecordingDispatcher {
+            prompts: StdMutex<Vec<String>>,
+        }
+
+        impl ActionDispatcher for BatchPromptRecordingDispatcher {
+            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+                ActionResult::failure("single dispatch should not run")
+            }
+
+            fn dispatch_batch(
+                &self,
+                action: &ActionSpec,
+                _envelopes: &[EventEnvelope],
+            ) -> ActionResult {
+                match action {
+                    ActionSpec::TriageAgent { prompt, .. } => {
+                        self.prompts.lock().unwrap().push(prompt.clone());
+                        ActionResult::success("batched triage")
+                    }
+                    other => ActionResult::failure(format!("unexpected action: {other:?}")),
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "legacy batch prompt".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let dispatcher = Arc::new(BatchPromptRecordingDispatcher {
+            prompts: StdMutex::new(Vec::new()),
+        });
+        let dispatcher_trait: Arc<dyn ActionDispatcher> = dispatcher.clone();
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let envelopes = vec![EventEnvelope {
+            envelope_id: "env-cn".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("chat:1".into()),
+                text: "请立即整理北京的国保单位名单".into(),
+                payload: serde_json::json!({"message":"请立即整理北京的国保单位名单"}),
+            },
+        }];
+
+        let result = process_envelope_batch_result(
+            &envelopes,
+            &store,
+            None,
+            &dispatcher_trait,
+            &classifier,
+            None,
+        );
+
+        assert!(result.matched);
+        assert_eq!(result.acted, 1);
+        let prompts = dispatcher.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("legacy batch prompt"));
+        assert!(prompts[0].contains("Monitor source-language runtime guard"));
+    }
+
+    #[test]
     fn monitor_bindings_skip_muted_notification_events() {
         let dir = tempdir().unwrap();
         let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
