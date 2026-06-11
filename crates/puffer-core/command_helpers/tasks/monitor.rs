@@ -84,7 +84,7 @@ pub(super) fn action_prompt(
     metadata: &Map<String, Value>,
 ) -> String {
     format!(
-        "Act on monitored task {task_id}: {subject}\n\nTask description:\n{description}\n\n{}\n\nSelected action: {}\n\n{}\n\nAction execution guardrails:\n- Use the task description and source context first; do not inspect Telegram history or connector state unless the task payload is missing information required to act.\n- Treat source context as the authoritative delivery target. Do not infer the recipient from task text, previous messages, or Telegram search results.\n- If a reply is required, call MonitorReplyDraft with taskId `{task_id}` and the final message for human review. Do not call MonitorReplySend or ConnectorAct directly for monitor-task replies.\n- If this action requires research, use at most 3 web searches and 8 total research/tool steps. Make one focused search plan, reuse results you already opened, and do not repeat equivalent searches.\n\nWhen the action is ready, save the draft for task {task_id}; Bobo will ask the user to approve before anything is sent. If you need more context, inspect the connector or ask the user.",
+        "Act on monitored task {task_id}: {subject}\n\nTask description:\n{description}\n\n{}\n\nSelected action: {}\n\n{}\n\nAction execution guardrails:\n- Use the task description and source context first; do not inspect Telegram history or connector state unless the task payload is missing information required to act.\n- Use the same language as the source message's primary language for any drafted reply or generated reply text.\n- If the source message is mixed-language and you cannot identify a primary language, use the user's preferred language or owner language from available profile/context. If no user language is available, preserve the source's dominant actionable language and do not default to English only because this prompt is English.\n- English source messages follow the same source-primary-language rule: English source messages should receive English reply drafts.\n- Preserve explicit product names, person names, company names, file names, commands, URLs, quoted text, and domain terms exactly; translate only surrounding explanatory prose.\n- Treat source context as the authoritative delivery target. Do not infer the recipient from task text, previous messages, or Telegram search results.\n- If a reply is required, call MonitorReplyDraft with taskId `{task_id}` and the final message for human review. Do not call MonitorReplySend or ConnectorAct directly for monitor-task replies.\n- If this action requires research, use at most 3 web searches and 8 total research/tool steps. Make one focused search plan, reuse results you already opened, and do not repeat equivalent searches.\n\nWhen the action is ready, save the draft for task {task_id}; Bobo will ask the user to approve before anything is sent. If you need more context, inspect the connector or ask the user.",
         source_context_section(metadata),
         action.name,
         action.prompt
@@ -119,6 +119,43 @@ pub(super) fn parse_ignore_args(args: &str) -> Option<(String, Option<String>)> 
         .replace('\n', " ")
         .replace('\r', " ");
     Some((task_id.to_string(), (!reason.is_empty()).then_some(reason)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_prompt_instructs_reply_drafts_to_follow_source_language() {
+        let prompt = action_prompt(
+            "monitor-1",
+            "Telegram: 确认上线风险清单",
+            "对方要求今天 16:00 前给出风险清单。",
+            &MonitorTaskAction {
+                name: "Draft reply".to_string(),
+                prompt: "Prepare a concise response.".to_string(),
+            },
+            &Map::new(),
+        );
+
+        assert!(prompt.contains("Use the same language as the source message's primary language"));
+        assert!(prompt.contains("If the source message is mixed-language"));
+        assert!(prompt.contains("English source messages"));
+        assert!(prompt.contains("Preserve explicit product names"));
+    }
+
+    #[test]
+    fn scoped_monitor_reply_prompt_instructs_source_language() {
+        let prompt = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../resources/prompts/monitor-reply-action.yaml"
+        ));
+
+        assert!(prompt.contains("Use the same language as the source message's primary language"));
+        assert!(prompt.contains("If the source message is mixed-language"));
+        assert!(prompt.contains("English source messages"));
+        assert!(prompt.contains("Preserve explicit product names"));
+    }
 }
 
 pub(super) fn ignore_task(

@@ -8,3 +8,17 @@ allowed_tools:
 template: |
   Draft the monitored task reply for human review. Do not send messages, mark
   tasks complete, or choose recipients.
+
+  Language policy:
+  - Use the same language as the source message's primary language for the
+    drafted reply.
+  - If the source message is mixed-language and you cannot identify a primary
+    language, use the user's preferred language or owner language from available
+    profile/context. If no user language is available, preserve the source's
+    dominant actionable language and do not default to English only because this
+    prompt is English.
+  - English source messages follow the same source-primary-language rule:
+    English source messages should receive English reply drafts.
+  - Preserve explicit product names, person names, company names, file names,
+    commands, URLs, quoted text, and domain terms exactly; translate only
+    surrounding explanatory prose.

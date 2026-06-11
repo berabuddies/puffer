@@ -430,6 +430,13 @@ Score every candidate item:
 
 Only surface items scored 4 or 5.
 
+Language policy
+- Use the same language as the source message's primary language for generated monitor task fields: subject, description, actions[].actionPrompt, possibleIgnoreReasons, and any reply text drafted inside an action prompt.
+- If the source message is mixed-language and you cannot identify a primary language, use the user's preferred language or owner language from available profile/context. If no user language is available, preserve the source's dominant actionable language and do not default to English only because this prompt is English.
+- English source messages follow the same source-primary-language rule: English source messages should create English task fields and reply prompts.
+- Preserve explicit product names, person names, company names, file names, commands, URLs, quoted text, and domain terms exactly; translate only surrounding explanatory prose.
+- For reply actions, the final draft should use the source message's primary language unless the selected action explicitly requires a different language.
+
 Puffer task creation protocol
 1. Read `{}` if it exists and use it only as task-creation guidance.
 2. If the event matches ignore memory, do not create a task. Do not edit memory or subscription filters.
@@ -478,6 +485,10 @@ Apply this personal triage policy to historical messages:
 - Ignore greetings, small talk, casual conversations, memes, jokes, stickers, GIFs, emojis, reactions, status updates with no action required, duplicate information, and long conversations with no actionable outcome.
 - Score every candidate item: 5 = immediate action required; 4 = important awareness or follow-up likely needed; 3 = relevant but can wait; 2 = background information; 1 = noise.
 - Only create or update tasks for items scored 4 or 5. For items scored 1, 2, or 3, do not call TaskCreate or TaskUpdate.
+- Use the same language as the source message's primary language for generated monitor task fields: subject, description, actions[].actionPrompt, possibleIgnoreReasons, and any reply text drafted inside an action prompt.
+- If the source message is mixed-language and you cannot identify a primary language, use the user's preferred language or owner language from available profile/context. If no user language is available, preserve the source's dominant actionable language and do not default to English only because this prompt is English.
+- English source messages follow the same source-primary-language rule: English source messages should create English task fields and reply prompts.
+- Preserve explicit product names, person names, company names, file names, commands, URLs, quoted text, and domain terms exactly; translate only surrounding explanatory prose.
 
 Read monitor memory `{}` first and skip ignored examples. Skip muted or silent notifications. Avoid duplicates by calling TaskList first.
 
@@ -574,6 +585,11 @@ mod tests {
         assert!(prompt.contains("expiresAt"));
         assert!(prompt.contains("Research action prompt guidance"));
         assert!(prompt.contains("avoid repeated equivalent queries"));
+        assert!(prompt.contains("Use the same language as the source message's primary language"));
+        assert!(prompt.contains("subject, description, actions[].actionPrompt"));
+        assert!(prompt.contains("If the source message is mixed-language"));
+        assert!(prompt.contains("English source messages"));
+        assert!(prompt.contains("Preserve explicit product names"));
     }
 
     #[test]
