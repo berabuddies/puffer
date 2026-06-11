@@ -11,7 +11,11 @@ use puffer_subscriber_telegram_user::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::Duration;
 use tracing::warn;
+
+const TELEGRAM_PEER_CACHE_HYDRATE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum TelegramPeerCacheHydrationMode {
@@ -93,20 +97,39 @@ fn hydrate_telegram_peer_cache_from_session_blocking(
         return result;
     }
 
-    let paths = paths.clone();
-    let account_dir = account_dir.to_path_buf();
+    let (sender, receiver) = mpsc::channel();
+    let worker_paths = paths.clone();
+    let worker_account_dir = account_dir.to_path_buf();
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .context("build Telegram contact hydrate runtime")?;
-        runtime.block_on(hydrate_telegram_peer_cache_from_session(
-            &paths,
-            &account_dir,
-        ))
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("Telegram contact hydrate thread panicked"))?
+            .context("build Telegram contact hydrate runtime")
+            .and_then(|runtime| {
+                runtime.block_on(hydrate_telegram_peer_cache_from_session(
+                    &worker_paths,
+                    &worker_account_dir,
+                ))
+            });
+        let _ = sender.send(result);
+    });
+    wait_for_telegram_peer_cache_hydrate_result(receiver, TELEGRAM_PEER_CACHE_HYDRATE_TIMEOUT)
+}
+
+fn wait_for_telegram_peer_cache_hydrate_result(
+    receiver: Receiver<Result<()>>,
+    timeout: Duration,
+) -> Result<()> {
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => anyhow::bail!(
+            "Telegram contact hydrate timed out after {}s",
+            timeout.as_secs_f32()
+        ),
+        Err(RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("Telegram contact hydrate thread ended without a result")
+        }
+    }
 }
 
 async fn hydrate_telegram_peer_cache_from_session(
@@ -194,4 +217,25 @@ where
         *cell.borrow_mut() = Some(Box::new(hydrator));
     });
     TestTelegramPeerCacheHydratorGuard
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn telegram_peer_cache_hydrate_wait_times_out() {
+        let (_sender, receiver) = mpsc::channel::<Result<()>>();
+
+        let error = wait_for_telegram_peer_cache_hydrate_result(receiver, Duration::from_millis(0))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("timed out"),
+            "unexpected timeout error: {error}"
+        );
+    }
 }
