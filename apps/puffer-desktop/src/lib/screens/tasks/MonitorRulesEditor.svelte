@@ -121,6 +121,7 @@
           mode: openMode,
           kind: "keyword",
           keywords: [rawValue],
+          operator: selectedOperator,
           case_insensitive: true
         }
       : {

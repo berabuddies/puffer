@@ -1587,6 +1587,7 @@ export async function addMonitorRule(params: MonitorRuleAddRequest): Promise<Wor
   };
   if (params.kind === "keyword") {
     payload.keywords = params.keywords;
+    payload.operator = params.operator ?? "contains";
     payload.case_insensitive = params.case_insensitive ?? true;
   } else {
     payload.field = params.field;

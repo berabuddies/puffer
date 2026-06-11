@@ -856,6 +856,7 @@ export type MonitorRuleAddRequest =
       mode: MonitorRuleMode;
       kind: "keyword";
       keywords: string[];
+      operator?: MonitorRuleOperator;
       case_insensitive?: boolean;
     }
   | {
