@@ -176,6 +176,19 @@ impl WechatInstance {
         format!("puffer-wechat-{}", self.name)
     }
 
+    /// The resolved runtime CLI binary (`docker` or `container`) — for callers
+    /// outside the async lifecycle (e.g. connection-delete cleanup) that must
+    /// drive the same runtime the instance was created on.
+    pub(crate) fn bin(&self) -> &str {
+        &self.docker_bin
+    }
+
+    /// Whether this instance uses the Apple `container` runtime (vs Docker).
+    /// Teardown differs: `container volume delete` vs `docker volume rm -f`.
+    pub(crate) fn is_container(&self) -> bool {
+        self.runtime == Runtime::Container
+    }
+
     /// Runs `docker <args>` and returns its captured output (success or not).
     /// `kill_on_drop` so a cancelled call (e.g. the monitor racing shutdown)
     /// leaves no orphaned `docker exec`.

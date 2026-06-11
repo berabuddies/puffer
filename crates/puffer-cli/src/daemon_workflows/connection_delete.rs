@@ -80,16 +80,22 @@ fn cleanup_wechat_container(connection: &ConnectionRecord) {
     if !connection.connector_slug.starts_with("wechat-") {
         return;
     }
-    let bin = env_or("DOCKER_BIN", "docker");
-    let container = format!("puffer-wechat-{}", connection.slug);
+    // Drive the SAME runtime the instance was created on (Docker or Apple
+    // `container`) — resolved exactly as the connector does — so deleting a
+    // connection on the `container` runtime removes the real container/volume
+    // rather than running `docker` commands that can't see it.
+    let instance = crate::wechat_connector::WechatInstance::for_connection(&connection.slug);
+    let bin = instance.bin();
+    let container = instance.container_name();
     // Stop first (ignore "not running"), then remove and capture the result.
-    let _ = Command::new(&bin)
+    // Both runtimes accept `stop -t` and `rm -f`.
+    let _ = Command::new(bin)
         .args(["stop", "-t", "3", &container])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    match Command::new(&bin)
+    match Command::new(bin)
         .args(["rm", "-f", &container])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -104,7 +110,7 @@ fn cleanup_wechat_container(connection: &ConnectionRecord) {
             }
         }
         Err(error) => {
-            eprintln!("wechat cleanup: could not run docker rm for `{container}` (engine down?): {error}");
+            eprintln!("wechat cleanup: could not run `{bin} rm` for `{container}` (runtime down?): {error}");
         }
         _ => {}
     }
@@ -112,8 +118,14 @@ fn cleanup_wechat_container(connection: &ConnectionRecord) {
     // chat data live at /config). So a later re-add starts fresh (new QR scan),
     // and no account data is left behind. (A plain stop/restart keeps the volume;
     // only deleting the connection removes it.) Volume name == container name.
-    let _ = Command::new(&bin)
-        .args(["volume", "rm", "-f", &container])
+    // Apple `container` uses `volume delete`; Docker uses `volume rm -f`.
+    let mut volume_cmd = Command::new(bin);
+    if instance.is_container() {
+        volume_cmd.args(["volume", "delete", &container]);
+    } else {
+        volume_cmd.args(["volume", "rm", "-f", &container]);
+    }
+    let _ = volume_cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
