@@ -31,7 +31,7 @@ mod subscribe;
 
 use human::Human;
 pub(crate) use config::InstanceConfig;
-pub(crate) use docker::WechatInstance;
+pub(crate) use docker::{teardown_runtimes, WechatInstance};
 
 /// Runs one `puffer __connector wechat-user <op> ...` invocation. `identity`
 /// is currently always `"user"` (personal WeChat has no bot identity); it is

@@ -83,6 +83,17 @@ Puffer makes the `container` path turnkey (no terminal), via `ensure_container` 
   data's ownership consistent, so WeChat survives a stop/start instead of dying
   on an unreadable, wrong-uid profile.
 
+**Exposure note.** KasmVNC is gated by basic-auth (a random per-instance password,
+never shown by default). Docker publishes the desktop only on loopback; on
+`container` it is reached at the container's vmnet IP, which is host-routable and
+reachable by co-resident VMs on the same vmnet — a slightly wider surface than
+loopback, still behind the basic-auth gate. Apple `container` 1.x has no
+host-only network mode, so loopback parity is not yet available.
+
+**Vision is off by default.** The connector drives WeChat via the AT-SPI
+accessibility tree; the vision model (screen reading) costs tokens and is NOT an
+automatic fallback — set `WECHAT_ALLOW_VISION=1` to permit it for a run.
+
 Validated live on macOS 26.3.1: `auto` selects `container`, the WeChat 4.1.1.4
 desktop comes up (a11y bus + client), a real-account QR login + a 0-vision
 message send succeed, `exec` (stdout/stdin/env/`--user`) and `--mount`

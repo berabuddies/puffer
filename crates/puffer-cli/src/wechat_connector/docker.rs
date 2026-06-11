@@ -96,8 +96,34 @@ fn locate_container_bin() -> Option<String> {
     }
     ["/opt/homebrew/bin/container", "/usr/local/bin/container"]
         .into_iter()
-        .find(|path| Path::new(path).is_file())
+        .find(|path| is_executable_file(Path::new(path)))
         .map(str::to_string)
+}
+
+/// Whether `path` is an existing regular file with an execute bit set — so a
+/// same-named non-executable file isn't mistaken for the CLI (it would only fail
+/// with EACCES at exec time instead of falling through cleanly).
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Runtimes whose teardown should be attempted when deleting a WeChat connection:
+/// Docker always (the universal fallback), plus Apple `container` when its CLI is
+/// installed. The instance's runtime can drift between create and delete (a
+/// `WECHAT_RUNTIME` change, installing/removing `container`, an OS upgrade), and
+/// the container + its named data volume live on whichever runtime created them —
+/// so cleaning every present runtime (the others harmlessly no-op) prevents a
+/// silent leak of the container and its login/chat data. Each entry is
+/// `(binary, is_container)`.
+pub(crate) fn teardown_runtimes() -> Vec<(String, bool)> {
+    let mut runtimes = vec![(env_or("DOCKER_BIN", "docker"), false)];
+    if let Some(bin) = container_bin_override().or_else(locate_container_bin) {
+        runtimes.push((bin, true));
+    }
+    runtimes
 }
 
 /// Absolute path of `bin` if it is found on `PATH`.
@@ -105,7 +131,7 @@ fn which_on_path(bin: &str) -> Option<String> {
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths)
         .map(|dir| dir.join(bin))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
         .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
@@ -174,19 +200,6 @@ impl WechatInstance {
     /// Returns the docker container name (`puffer-wechat-<name>`).
     pub(crate) fn container_name(&self) -> String {
         format!("puffer-wechat-{}", self.name)
-    }
-
-    /// The resolved runtime CLI binary (`docker` or `container`) — for callers
-    /// outside the async lifecycle (e.g. connection-delete cleanup) that must
-    /// drive the same runtime the instance was created on.
-    pub(crate) fn bin(&self) -> &str {
-        &self.docker_bin
-    }
-
-    /// Whether this instance uses the Apple `container` runtime (vs Docker).
-    /// Teardown differs: `container volume delete` vs `docker volume rm -f`.
-    pub(crate) fn is_container(&self) -> bool {
-        self.runtime == Runtime::Container
     }
 
     /// Runs `docker <args>` and returns its captured output (success or not).
@@ -335,9 +348,14 @@ impl WechatInstance {
             && self.runtime == Runtime::Container
             && stderr_needs_kernel(&output.stderr)
         {
-            let _ = self
-                .docker(&["system", "kernel", "set", "--recommended"])
-                .await;
+            if let Ok(kr) = self.docker(&["system", "kernel", "set", "--recommended"]).await {
+                if !kr.status.success() {
+                    eprintln!(
+                        "wechat: `container system kernel set --recommended` failed: {}",
+                        String::from_utf8_lossy(&kr.stderr).trim()
+                    );
+                }
+            }
             output = self.docker_args(&args).await?;
         }
         if output.status.success() {
@@ -421,9 +439,22 @@ impl WechatInstance {
     /// loopback if it can't be read).
     pub(crate) async fn desktop_authority(&self, cfg: &InstanceConfig) -> String {
         if self.runtime == Runtime::Container {
-            if let Some(ip) = self.container_ip().await {
-                return format!("{ip}:3000");
+            // The vmnet IPv4 lease appears a moment after the VM boots, so it can
+            // be absent right after `run -d` returns — poll briefly.
+            for attempt in 0..10 {
+                if let Some(ip) = self.container_ip().await {
+                    return format!("{ip}:3000");
+                }
+                if attempt < 9 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
             }
+            // `container` publishes no host port, so loopback is a dead address
+            // here — surface that rather than hand back a silently-broken URL.
+            eprintln!(
+                "wechat: could not read the container's vmnet IP from `container inspect`; \
+                 the WeChat desktop URL may be unreachable"
+            );
         }
         format!("127.0.0.1:{}", cfg.host_port)
     }
@@ -983,9 +1014,7 @@ fn env_or(key: &str, default: &str) -> String {
 /// which is cleared by `container system kernel set --recommended`.
 fn stderr_needs_kernel(stderr: &[u8]) -> bool {
     let s = String::from_utf8_lossy(stderr);
-    s.contains("kernel not configured")
-        || s.contains("kernel is not configured")
-        || s.contains("kernel set")
+    s.contains("kernel not configured") || s.contains("kernel is not configured")
 }
 
 #[cfg(test)]

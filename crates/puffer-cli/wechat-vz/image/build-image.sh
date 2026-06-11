@@ -21,7 +21,10 @@ RUNTIME="${WECHAT_RUNTIME:-docker}"            # docker | container (where to la
 echo "[build] fetching pinned WeChat from $AW"
 "$DOCKER" image inspect "$AW" >/dev/null 2>&1 || "$DOCKER" pull "$AW"
 cid=$("$DOCKER" create "$AW")
-trap '"$DOCKER" rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+tmp=""  # save-tarball path (set later for the container load); cleaned on EXIT
+# Clean up on any exit (incl. a failed build/save/load): the extraction
+# container, the ~670MB wc411/ build context, and the temp save tarball.
+trap '"$DOCKER" rm -f "$cid" >/dev/null 2>&1 || true; rm -rf wc411 "${tmp:-}" 2>/dev/null || true' EXIT
 rm -rf wc411 && mkdir wc411
 "$DOCKER" cp "$cid:/opt/wechat/." wc411/
 [ -x wc411/wechat ] || { echo "ERROR: WeChat binary not found in $AW:/opt/wechat"; exit 1; }
@@ -37,7 +40,7 @@ if [ "$RUNTIME" = "container" ]; then
     # accepts the docker archive, so no inner builder VM is involved.
     echo "[build] loading $TAG into Apple container's image store"
     "$CONTAINER" system start >/dev/null 2>&1 || true
-    tmp="$(mktemp -t wechat-atspi.XXXX.tar)"
+    tmp="$(mktemp -t wechat-atspi)"  # BSD mktemp: arg is a prefix; a `.tar` suffix isn't needed (load reads the archive by content)
     "$DOCKER" save "$TAG" -o "$tmp"
     "$CONTAINER" image load -i "$tmp"
     rm -f "$tmp"

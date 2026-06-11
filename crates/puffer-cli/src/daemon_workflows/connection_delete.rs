@@ -80,60 +80,79 @@ fn cleanup_wechat_container(connection: &ConnectionRecord) {
     if !connection.connector_slug.starts_with("wechat-") {
         return;
     }
-    // Drive the SAME runtime the instance was created on (Docker or Apple
-    // `container`) — resolved exactly as the connector does — so deleting a
-    // connection on the `container` runtime removes the real container/volume
-    // rather than running `docker` commands that can't see it.
-    let instance = crate::wechat_connector::WechatInstance::for_connection(&connection.slug);
-    let bin = instance.bin();
-    let container = instance.container_name();
-    // Stop first (ignore "not running"), then remove and capture the result.
-    // Both runtimes accept `stop -t` and `rm -f`.
+    let container = format!("puffer-wechat-{}", connection.slug);
+    // The instance's runtime can drift between create and delete (a WECHAT_RUNTIME
+    // change, installing/removing `container`, an OS upgrade), and the container +
+    // its named data volume live on whichever runtime created them. Tear down on
+    // every present runtime (Docker, plus Apple `container` when installed) — the
+    // others harmlessly no-op — so a drift can't silently leak the container and
+    // its login/chat data.
+    for (bin, is_container) in crate::wechat_connector::teardown_runtimes() {
+        teardown_one_runtime(&bin, is_container, &container);
+    }
+    // Remove per-instance state files (config/policy/seen/lock + the cached DB keys).
+    if let Some(dir) = wechat_state_dir() {
+        for suffix in ["json", "policy.json", "seen.json", "policy.lock", "ui.lock", "dbkey"] {
+            let _ = std::fs::remove_file(dir.join(format!("{}.{suffix}", connection.slug)));
+        }
+    }
+}
+
+/// Stops and removes the container + its named data volume on ONE runtime
+/// (`is_container` selects Apple `container`'s `volume delete` vs Docker's
+/// `volume rm -f`). Best-effort: a "no such container/volume" or an absent engine
+/// is benign (that runtime simply doesn't hold this instance), but any other
+/// failure is logged so a genuine leak is visible. Stop precedes rm because
+/// Docker's `--restart unless-stopped` could otherwise resurrect a bare `rm -f`.
+fn teardown_one_runtime(bin: &str, is_container: bool, container: &str) {
     let _ = Command::new(bin)
-        .args(["stop", "-t", "3", &container])
+        .args(["stop", "-t", "3", container])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    match Command::new(bin)
-        .args(["rm", "-f", &container])
+    let benign = |err: &str| {
+        let e = err.to_lowercase();
+        e.contains("no such") || e.contains("not found") || e.contains("not exist")
+    };
+    if let Ok(out) = Command::new(bin)
+        .args(["rm", "-f", container])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
     {
-        Ok(out) if !out.status.success() => {
+        if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            // "No such container" is fine; anything else is worth surfacing.
-            if !err.contains("No such container") {
-                eprintln!("wechat cleanup: failed to remove `{container}`: {}", err.trim());
+            if !benign(&err) {
+                eprintln!("wechat cleanup: `{bin} rm` failed for `{container}`: {}", err.trim());
             }
         }
-        Err(error) => {
-            eprintln!("wechat cleanup: could not run `{bin} rm` for `{container}` (runtime down?): {error}");
-        }
-        _ => {}
     }
-    // Delete is a FULL wipe: remove the data volume too (the login session + all
-    // chat data live at /config). So a later re-add starts fresh (new QR scan),
-    // and no account data is left behind. (A plain stop/restart keeps the volume;
-    // only deleting the connection removes it.) Volume name == container name.
-    // Apple `container` uses `volume delete`; Docker uses `volume rm -f`.
-    let mut volume_cmd = Command::new(bin);
-    if instance.is_container() {
-        volume_cmd.args(["volume", "delete", &container]);
+    // Volume removal differs: Apple `container` uses `volume delete`, Docker uses
+    // `volume rm -f`. The volume holds the login session + all chat data, so a
+    // silent failure here would leak account data — log non-benign failures.
+    let volume_args: &[&str] = if is_container {
+        &["volume", "delete", container]
     } else {
-        volume_cmd.args(["volume", "rm", "-f", &container]);
-    }
-    let _ = volume_cmd
+        &["volume", "rm", "-f", container]
+    };
+    if let Ok(out) = Command::new(bin)
+        .args(volume_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    // Remove per-instance state files (config/policy/seen/lock + the cached DB keys).
-    if let Some(dir) = wechat_state_dir() {
-        for suffix in ["json", "policy.json", "seen.json", "policy.lock", "ui.lock", "dbkey"] {
-            let _ = std::fs::remove_file(dir.join(format!("{}.{suffix}", connection.slug)));
+        .stderr(Stdio::piped())
+        .output()
+    {
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if !benign(&err) {
+                eprintln!(
+                    "wechat cleanup: `{bin} {}` failed for `{container}`: {}",
+                    volume_args.join(" "),
+                    err.trim()
+                );
+            }
         }
     }
 }
