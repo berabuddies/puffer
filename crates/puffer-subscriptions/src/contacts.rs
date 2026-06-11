@@ -41,6 +41,9 @@ pub struct ConnectorContact {
     /// Higher scores are more reactive/important.
     #[serde(default)]
     pub score: f64,
+    /// Connector-specific last interaction timestamp in milliseconds since UNIX epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at_ms: Option<i128>,
 }
 
 /// One context item attached to a contact.
@@ -333,13 +336,20 @@ fn collect_telegram_ids(payload: &Value, ids: &mut BTreeSet<String>) {
     if !direct_user || payload.get("chat_is_bot").and_then(Value::as_bool) == Some(true) {
         return;
     }
-    if let Some(username) = string_at(payload, &["chat_username"]) {
+    let username = string_at(payload, &["chat_username"]);
+    if username
+        .as_deref()
+        .is_some_and(telegram_username_looks_like_bot)
+    {
+        return;
+    }
+    if let Some(user_id) = telegram_payload_user_id(payload) {
+        insert_prefixed(ids, TELEGRAM_USER_ID_CONTACT_PREFIX, &user_id.to_string());
+    } else if let Some(username) = username {
         if telegram_username_looks_like_bot(&username) {
             return;
         }
         insert_prefixed(ids, TELEGRAM_CONTACT_PREFIX, &username);
-    } else if let Some(user_id) = telegram_payload_user_id(payload) {
-        insert_prefixed(ids, TELEGRAM_USER_ID_CONTACT_PREFIX, &user_id.to_string());
     }
 }
 
@@ -579,6 +589,15 @@ mod tests {
             contact_ids_from_payload(&json!({
                 "chat_kind": "user",
                 "chat_id": 5229190700_i64,
+                "chat_username": "alice",
+                "sender_id": 5229190700_i64
+            })),
+            vec!["telegram-user-id@5229190700"]
+        );
+        assert_eq!(
+            contact_ids_from_payload(&json!({
+                "chat_kind": "user",
+                "chat_id": 5229190700_i64,
                 "sender_id": 5229190700_i64
             })),
             vec!["telegram-user-id@5229190700"]
@@ -728,6 +747,20 @@ mod tests {
             &["telegram@bob".to_string()],
             &json!({"chat_kind":"group","chat_id":-1,"sender_username":"bob"})
         ));
+        let telegram_payload = json!({
+            "chat_kind": "user",
+            "chat_id": 5229190700_i64,
+            "chat_username": "alice",
+            "sender_id": 5229190700_i64
+        });
+        assert!(contact_filter_matches(
+            &["telegram-user-id@5229190700".to_string()],
+            &telegram_payload
+        ));
+        assert!(!contact_filter_matches(
+            &["telegram@alice".to_string()],
+            &telegram_payload
+        ));
     }
 
     #[test]
@@ -754,6 +787,7 @@ mod tests {
                     name: None,
                     context: Vec::new(),
                     score: 1.0,
+                    last_message_at_ms: None,
                 },
                 ConnectorContact {
                     id: "google@alice@example.com".into(),
@@ -761,6 +795,7 @@ mod tests {
                     name: None,
                     context: Vec::new(),
                     score: 1.0,
+                    last_message_at_ms: None,
                 },
             ],
         );

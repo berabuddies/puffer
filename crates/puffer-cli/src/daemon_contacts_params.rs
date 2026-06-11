@@ -8,6 +8,10 @@ pub(super) struct ContactListParams {
     pub(super) limit: Option<usize>,
     #[serde(default)]
     pub(super) query: Option<String>,
+    #[serde(default)]
+    pub(super) connector: Option<String>,
+    #[serde(default)]
+    pub(super) sort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

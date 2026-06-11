@@ -851,6 +851,9 @@ fn execute_workflow_tool_with_media_context(
         "McpToolCall" => workflow::mcp_tool_call::execute_mcp_tool_call(state, cwd, input),
         "McpStatus" => workflow::mcp_status::execute_mcp_status(state, cwd, input),
         "ModalAction" => workflow::modal_action::execute_modal_action(state, cwd, input),
+        "MonitorReplyDraft" => {
+            workflow::monitor_reply_draft::execute_monitor_reply_draft(state, cwd, input)
+        }
         "MonitorReplySend" => {
             workflow::monitor_reply_send::execute_monitor_reply_send(state, cwd, input)
         }

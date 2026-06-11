@@ -1,0 +1,27 @@
+id: MonitorReplyDraft
+name: MonitorReplyDraft
+description: |-
+  Save a draft reply for a monitored connector task.
+
+  Use this tool when acting on a human-gated Telegram monitor task. This tool
+  does not send any message and does not complete the task. It stores the draft
+  for the user to review and approve in Bobo.
+
+  Do not choose or infer a recipient. The daemon records the task's source
+  context itself.
+handler: runtime:workflow:monitor_reply_draft
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    taskId:
+      type: string
+      description: The monitor task id for this action turn.
+    message:
+      type: string
+      description: The exact draft message text for the user to review.
+  required:
+    - taskId
+    - message
+  additionalProperties: false

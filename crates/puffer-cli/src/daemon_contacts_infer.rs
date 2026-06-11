@@ -712,6 +712,7 @@ mod tests {
             name: Some("Alice".to_string()),
             context: Vec::new(),
             score: 1.0,
+            last_message_at_ms: None,
         }];
 
         let enriched = attach_candidate_avatars(proposals, &candidates);
@@ -732,6 +733,7 @@ mod tests {
                 payload: Value::Null,
             }],
             score: 42.5,
+            last_message_at_ms: None,
         }];
 
         let prompt = candidate_prompt_json(&compact_candidates(&candidates)).unwrap();

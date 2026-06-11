@@ -1,0 +1,10 @@
+id: monitor-reply-action
+description: Draft a monitored Telegram task reply without sending it
+allowed_tools:
+  - MonitorReplyDraft
+  - WebSearch
+  - WebFetch
+  - AskUserQuestion
+template: |
+  Draft the monitored task reply for human review. Do not send messages, mark
+  tasks complete, or choose recipients.

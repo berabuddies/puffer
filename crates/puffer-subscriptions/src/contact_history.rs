@@ -41,6 +41,7 @@ pub(crate) fn list_contacts(
             name: contact.name,
             context: contact.context,
             score: contact.score,
+            last_message_at_ms: None,
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {

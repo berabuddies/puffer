@@ -204,6 +204,11 @@ fn task_json(task: TaskSnapshotRecord, source: &str, scope: &str, scope_label: &
         ),
         "source_context": monitor_source_context(&task.metadata),
         "completion_policy": monitor_completion_policy(&task.metadata),
+        "pending_reply": metadata_value(
+            &task.metadata,
+            &["pending_reply", "pendingReply"],
+            &["reply", "draft"]
+        ),
         "ignore_reason": metadata_string(
             &task.metadata,
             &["ignore_reason", "ignoreReason"],

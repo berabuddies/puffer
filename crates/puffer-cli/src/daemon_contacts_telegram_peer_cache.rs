@@ -1,19 +1,27 @@
 //! Telegram peer-cache helpers for contact ranking.
 
-use super::{merge_telegram_name, read_telegram_peer_metadata_from_account, Candidate};
+use super::{
+    merge_candidate_last_message_at_ms, merge_telegram_name,
+    read_telegram_primary_peer_metadata_from_account, Candidate,
+};
 use anyhow::{Context, Result};
 use grammers_session::Session;
 use puffer_config::ConfigPaths;
 use puffer_subscriber_telegram_user::{
-    default_init_params, hydrate_contact_book_cache, resolve_api_credentials, Client, Config,
-    PersistedCredentials, SkillEnv,
+    default_init_params, hydrate_contact_book_cache, hydrate_recent_dialog_peer_cache,
+    resolve_api_credentials, Client, Config, PersistedCredentials, SkillEnv,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
-use tracing::warn;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
+
+const RECENT_DIALOG_CACHE_FILE: &str = "recent-dialog-cache.json";
+const RECENT_DIALOG_TARGET_MIN: usize = 5;
+const RECENT_DIALOG_TARGET_MAX: usize = 50;
+const RECENT_DIALOG_MAX_DIALOGS: usize = 500;
 
 const TELEGRAM_PEER_CACHE_HYDRATE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -27,15 +35,20 @@ pub(super) fn collect_telegram_peer_cache_candidates(
     account_dir: &Path,
     by_id: &mut HashMap<String, Candidate>,
 ) {
-    for (id, metadata) in read_telegram_peer_metadata_from_account(account_dir) {
+    for (id, metadata) in read_telegram_primary_peer_metadata_from_account(account_dir) {
         let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
             id,
             name: metadata.name.clone(),
             avatar: metadata.avatar.clone(),
             score: 0.01,
+            last_message_at_ms: metadata.last_message_at_ms,
             context: Vec::new(),
         });
         entry.score = entry.score.max(0.01);
+        merge_candidate_last_message_at_ms(
+            &mut entry.last_message_at_ms,
+            metadata.last_message_at_ms,
+        );
         merge_telegram_name(&mut entry.name, &metadata.name);
         if entry.avatar.is_none() {
             entry.avatar = metadata.avatar;
@@ -65,6 +78,39 @@ pub(super) fn hydrate_telegram_peer_cache(
             "failed to hydrate Telegram peer cache for contacts list"
         );
     }
+}
+
+pub(super) fn hydrate_telegram_recent_peer_cache_if_needed(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    limit: usize,
+) {
+    if telegram_recent_dialog_cache_ready(account_dir) {
+        return;
+    }
+    if !account_dir.join("telegram.session").exists() {
+        return;
+    }
+    if let Err(error) =
+        hydrate_telegram_recent_peer_cache_from_session_blocking(paths, account_dir, limit)
+    {
+        warn!(
+            account = %account_dir.display(),
+            %error,
+            "failed to hydrate Telegram recent dialog cache for contacts list"
+        );
+    }
+}
+
+pub(super) fn telegram_recent_dialog_cache_ready(account_dir: &Path) -> bool {
+    let path = account_dir.join(RECENT_DIALOG_CACHE_FILE);
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|marker| marker.get("ready").and_then(Value::as_bool))
+        .unwrap_or(false)
 }
 
 fn telegram_peer_cache_needs_hydration(account_dir: &Path) -> bool {
@@ -170,6 +216,110 @@ async fn hydrate_telegram_peer_cache_from_session(
         .save_to_file(&env.session_path)
         .with_context(|| format!("save Telegram session {}", env.session_path.display()))?;
     Ok(())
+}
+
+fn hydrate_telegram_recent_peer_cache_from_session_blocking(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    limit: usize,
+) -> Result<()> {
+    let paths = paths.clone();
+    let account_dir = account_dir.to_path_buf();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build Telegram recent dialog hydrate runtime")?;
+        runtime.block_on(hydrate_telegram_recent_peer_cache_from_session(
+            &paths,
+            &account_dir,
+            limit,
+        ))
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("Telegram recent dialog hydrate thread panicked"))?
+}
+
+async fn hydrate_telegram_recent_peer_cache_from_session(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    limit: usize,
+) -> Result<()> {
+    let env = telegram_skill_env(paths, account_dir);
+    if !env.session_path.exists() {
+        return Ok(());
+    }
+    let session = Session::load_file(&env.session_path)
+        .with_context(|| format!("load Telegram session {}", env.session_path.display()))?;
+    if !session.signed_in() {
+        return Ok(());
+    }
+    let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
+    let (api_id, api_hash) = resolve_api_credentials(None, None, &persisted)?;
+    let client = Client::connect(Config {
+        session,
+        api_id,
+        api_hash,
+        params: default_init_params(),
+    })
+    .await
+    .context("connect Telegram recent dialog hydrate client")?;
+    if !client
+        .is_authorized()
+        .await
+        .context("check Telegram recent dialog hydrate authorization")?
+    {
+        return Ok(());
+    }
+    let target = limit
+        .max(RECENT_DIALOG_TARGET_MIN)
+        .min(RECENT_DIALOG_TARGET_MAX);
+    let direct_users_seen =
+        hydrate_recent_dialog_peer_cache(&env, &client, target, RECENT_DIALOG_MAX_DIALOGS)
+            .await
+            .context("hydrate Telegram recent dialog peer cache")?;
+    client
+        .session()
+        .save_to_file(&env.session_path)
+        .with_context(|| format!("save Telegram session {}", env.session_path.display()))?;
+    write_recent_dialog_cache_marker(account_dir, direct_users_seen, target)?;
+    info!(
+        account = %account_dir.display(),
+        direct_users_seen,
+        target,
+        "Telegram recent dialog cache ready"
+    );
+    Ok(())
+}
+
+fn write_recent_dialog_cache_marker(
+    account_dir: &Path,
+    direct_users_seen: usize,
+    target: usize,
+) -> Result<()> {
+    std::fs::create_dir_all(account_dir)
+        .with_context(|| format!("create Telegram account dir {}", account_dir.display()))?;
+    let path = account_dir.join(RECENT_DIALOG_CACHE_FILE);
+    let tmp = path.with_extension("tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(&json!({
+            "ready": true,
+            "hydrated_at_ms": now_unix_millis(),
+            "direct_users_seen": direct_users_seen,
+            "target": target,
+        }))?,
+    )
+    .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+}
+
+fn now_unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 fn telegram_skill_env(paths: &ConfigPaths, account_dir: &Path) -> SkillEnv {

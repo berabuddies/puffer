@@ -13,6 +13,7 @@ use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -374,6 +375,13 @@ struct MonitorReplySendInput {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct MonitorReplyDraftInput {
+    #[serde(rename = "taskId")]
+    task_id: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MonitorReplyTarget {
     connector_slug: String,
@@ -397,6 +405,18 @@ pub(super) fn execute_monitor_reply_send(
     let store_cwd = state.session.cwd.clone();
     let task = load_monitor_task(store_cwd.as_path(), &parsed.task_id)?
         .ok_or_else(|| anyhow!("monitor task `{}` not found", parsed.task_id))?;
+    if monitor_task_requires_action_completion(&task) {
+        append_monitor_reply_audit_to_store(
+            store_cwd.as_path(),
+            &parsed.task_id,
+            "send_rejected",
+            json!({"reason": "requires_human_approval"}),
+        )?;
+        bail!(
+            "monitor task `{}` requires human approval; use the Bobo review flow",
+            parsed.task_id
+        );
+    }
     if let Some(receipt) = monitor_reply_receipt(&task.metadata) {
         return Ok(serde_json::to_string_pretty(&json!({
             "success": true,
@@ -450,6 +470,137 @@ pub(super) fn execute_monitor_reply_send(
 
 fn monitor_reply_terminal_status(status: &str) -> bool {
     terminal_task_status(status) || matches!(status, "cancelled" | "canceled")
+}
+
+/// Saves a draft reply for a daemon-validated monitor action turn.
+pub(super) fn execute_monitor_reply_draft(
+    state: &mut AppState,
+    _cwd: &Path,
+    input: Value,
+) -> Result<String> {
+    let parsed: MonitorReplyDraftInput =
+        serde_json::from_value(input).context("invalid MonitorReplyDraft input")?;
+    let message = parsed.message.trim();
+    if message.is_empty() {
+        bail!("MonitorReplyDraft message cannot be empty");
+    }
+    let scope = state
+        .monitor_reply_scope
+        .clone()
+        .ok_or_else(|| anyhow!("MonitorReplyDraft requires a monitor reply scope"))?;
+    if parsed.task_id != scope.task_id {
+        bail!(
+            "MonitorReplyDraft taskId `{}` does not match scoped monitor task `{}`",
+            parsed.task_id,
+            scope.task_id
+        );
+    }
+
+    let store_cwd = state.session.cwd.clone();
+    let path = monitor_tasks_path(store_cwd.as_path());
+    let mut store = load_store::<TaskStore>(&path)?;
+    let Some(task) = store
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == parsed.task_id)
+    else {
+        bail!("monitor task `{}` not found", parsed.task_id);
+    };
+    if task.status != "pending" {
+        bail!(
+            "MonitorReplyDraft expected pending monitor task `{}`, got `{}`",
+            parsed.task_id,
+            task.status
+        );
+    }
+    if !monitor_task_requires_action_completion(task) {
+        bail!(
+            "MonitorReplyDraft expected a human-gated monitor task `{}`",
+            parsed.task_id
+        );
+    }
+    let source_context = monitor_source_context(&task.metadata)
+        .ok_or_else(|| anyhow!("monitor task `{}` has no source_context", parsed.task_id))?;
+    // Validate the target from the server-owned source context before saving a
+    // draft; the model never supplies recipient fields.
+    let target = monitor_reply_target(task)?;
+    let previous = task
+        .metadata
+        .get("pending_reply")
+        .and_then(Value::as_object)
+        .cloned();
+    if let Some(previous_status) = previous
+        .as_ref()
+        .and_then(|draft| draft.get("status"))
+        .and_then(Value::as_str)
+    {
+        if matches!(previous_status, "sending" | "sent") {
+            bail!("cannot supersede monitor reply draft in `{previous_status}` state");
+        }
+    }
+    let previous_version = previous
+        .as_ref()
+        .and_then(|draft| draft.get("version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let now = now_rfc3339()?;
+    let draft_id = format!("draft-{}-{}", parsed.task_id, now_ms());
+    let version = previous_version + 1;
+    if let Some(previous) = previous {
+        append_monitor_reply_audit(
+            task,
+            "draft_superseded",
+            json!({"previousStatus": previous.get("status").cloned()}),
+        );
+    }
+    let source_hash = source_context_hash(&source_context)?;
+    task.metadata.insert(
+        "pending_reply".to_string(),
+        json!({
+            "id": draft_id,
+            "created_by": "MonitorReplyDraft",
+            "status": "draft_ready",
+            "version": version,
+            "agent_draft_text": message,
+            "created_at": now,
+            "updated_at": now,
+            "session_id": scope.session_id,
+            "turn_id": scope.turn_id,
+            "source_context_snapshot": source_context,
+            "source_context_hash": source_hash,
+            "approved_message": Value::Null,
+            "approved_by": Value::Null,
+            "approved_at": Value::Null,
+            "client_request_id": Value::Null,
+            "send_attempt_id": Value::Null,
+            "receipt": Value::Null,
+            "error": Value::Null,
+        }),
+    );
+    task.updated_at_ms = Some(now_ms());
+    append_monitor_reply_audit(
+        task,
+        "draft_created",
+        json!({
+            "draft_id": draft_id,
+            "version": version,
+            "session_id": scope.session_id,
+            "turn_id": scope.turn_id,
+            "source_context_hash": source_hash,
+            "chat_id": target.chat_id,
+        }),
+    );
+    save_store(&path, &store)?;
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "taskId": parsed.task_id,
+        "draft": {
+            "id": draft_id,
+            "status": "draft_ready",
+            "version": version,
+        }
+    }))?)
 }
 
 fn parse_rfc3339_field(
@@ -508,6 +659,16 @@ fn validate_monitor_task_metadata(metadata: &Map<String, Value>) -> Result<()> {
             bail!("monitor task metadata cannot include ignore filter field `{key}`");
         }
     }
+    for key in [
+        "pending_reply",
+        "pendingReply",
+        "monitor_reply_events",
+        "monitorReplyEvents",
+    ] {
+        if metadata.contains_key(key) {
+            bail!("monitor task metadata cannot include reserved field `{key}`");
+        }
+    }
     Ok(())
 }
 
@@ -563,6 +724,13 @@ fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> 
         "chat_kind" | "chatKind" => Some(&["chat_kind", "chatKind"]),
         "sender_id" | "senderId" => Some(&["sender_id", "senderId"]),
         "sender_username" | "senderUsername" => Some(&["sender_username", "senderUsername"]),
+        "pending_reply" | "pendingReply" => Some(&["pending_reply", "pendingReply"]),
+        "monitor_reply_events" | "monitorReplyEvents" => {
+            Some(&["monitor_reply_events", "monitorReplyEvents"])
+        }
+        "source_context_hash" | "sourceContextHash" => {
+            Some(&["source_context_hash", "sourceContextHash"])
+        }
         _ => None,
     }
 }
@@ -649,7 +817,7 @@ fn default_monitor_completion_policy(
     }
     source_context
         .and_then(source_context_delivery_target)
-        .map(|_| json!({"mode": "send_to_source", "requires_receipt": true}))
+        .map(|_| human_gated_completion_policy())
 }
 
 fn source_context_delivery_target(context: &Value) -> Option<&Value> {
@@ -686,13 +854,21 @@ fn monitor_task_requires_action_completion(task: &StoredTask) -> bool {
     )
     .and_then(|policy| completion_policy_mode(&policy).map(str::to_string))
     .as_deref()
-        == Some("send_to_source")
+    .is_some_and(|mode| matches!(mode, "draft_then_approve" | "send_to_source"))
 }
 
 fn completion_policy_mode(policy: &Value) -> Option<&str> {
     policy
         .as_str()
         .or_else(|| policy.get("mode").and_then(Value::as_str))
+}
+
+fn human_gated_completion_policy() -> Value {
+    json!({
+        "mode": "draft_then_approve",
+        "requires_human_approval": true,
+        "requires_receipt": true,
+    })
 }
 
 fn metadata_marks_monitor_ignored(metadata: Option<&Map<String, Value>>) -> bool {
@@ -807,6 +983,50 @@ fn append_monitor_action_receipt(
             task.metadata
                 .insert("action_receipts".to_string(), Value::Array(vec![receipt]));
         }
+    }
+    Ok(())
+}
+
+fn now_rfc3339() -> Result<String> {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("failed to format monitor reply timestamp")
+}
+
+fn source_context_hash(source_context: &Value) -> Result<String> {
+    let raw = serde_json::to_vec(source_context).context("failed to encode source context")?;
+    Ok(format!("{:x}", Sha256::digest(raw)))
+}
+
+fn append_monitor_reply_audit(task: &mut StoredTask, event: &str, details: Value) {
+    let entry = json!({
+        "event": event,
+        "at": now_rfc3339().unwrap_or_else(|_| OffsetDateTime::now_utc().to_string()),
+        "details": details,
+    });
+    match task.metadata.get_mut("monitor_reply_events") {
+        Some(Value::Array(events)) => events.push(entry),
+        _ => {
+            task.metadata.insert(
+                "monitor_reply_events".to_string(),
+                Value::Array(vec![entry]),
+            );
+        }
+    }
+}
+
+fn append_monitor_reply_audit_to_store(
+    cwd: &Path,
+    task_id: &str,
+    event: &str,
+    details: Value,
+) -> Result<()> {
+    let path = monitor_tasks_path(cwd);
+    let mut store = load_store::<TaskStore>(&path)?;
+    if let Some(task) = store.tasks.iter_mut().find(|task| task.task_id == task_id) {
+        append_monitor_reply_audit(task, event, details);
+        task.updated_at_ms = Some(now_ms());
+        save_store(&path, &store)?;
     }
     Ok(())
 }
@@ -1461,76 +1681,83 @@ mod tests {
     }
 
     #[test]
-    fn monitor_reply_send_rejects_already_completed_tasks_before_connector_action() {
+    fn monitor_reply_send_rejects_human_gated_monitor_tasks() {
         let (mut state, tmp) = make_state();
         let task_id = create_telegram_monitor_task(&mut state, tmp.path());
-        let path = monitor_tasks_path(tmp.path());
-        let mut store = load_store::<TaskStore>(&path).unwrap();
-        store.tasks[0].status = "completed".to_string();
-        save_store(&path, &store).unwrap();
 
         let error = execute_monitor_reply_send(
             &mut state,
             tmp.path(),
-            json!({"taskId": task_id, "message": "Acknowledged."}),
+            json!({
+                "taskId": task_id,
+                "message": "Acknowledged."
+            }),
         )
-        .expect_err("completed task must not send again");
+        .expect_err("human-gated monitor replies must not be sent by agent tools");
 
-        assert!(error.to_string().contains("already completed"));
+        assert!(error.to_string().contains("requires human approval"));
     }
 
     #[test]
-    fn monitor_reply_send_rejects_cancelled_tasks_before_connector_action() {
+    fn monitor_reply_draft_requires_matching_monitor_reply_scope() {
         let (mut state, tmp) = make_state();
         let task_id = create_telegram_monitor_task(&mut state, tmp.path());
-        let path = monitor_tasks_path(tmp.path());
-        let mut store = load_store::<TaskStore>(&path).unwrap();
-        store.tasks[0].status = "cancelled".to_string();
-        save_store(&path, &store).unwrap();
 
-        let error = execute_monitor_reply_send(
+        let error = execute_monitor_reply_draft(
             &mut state,
             tmp.path(),
-            json!({"taskId": task_id, "message": "Acknowledged."}),
+            json!({
+                "taskId": task_id,
+                "message": "Acknowledged."
+            }),
         )
-        .expect_err("cancelled task must not send");
+        .expect_err("draft tool must be scoped to a monitor action turn");
 
-        assert!(error.to_string().contains("already cancelled"));
+        assert!(error.to_string().contains("monitor reply scope"));
     }
 
     #[test]
-    fn monitor_reply_send_noops_existing_reply_receipts_before_connector_action() {
+    fn monitor_reply_draft_saves_server_owned_source_snapshot() {
         let (mut state, tmp) = make_state();
         let task_id = create_telegram_monitor_task(&mut state, tmp.path());
-        let path = monitor_tasks_path(tmp.path());
-        let mut store = load_store::<TaskStore>(&path).unwrap();
-        let task = &mut store.tasks[0];
-        task.status = "completed".to_string();
-        task.metadata.insert(
-            "action_receipts".to_string(),
-            json!([
-                {
-                    "kind": "monitor_reply_send",
-                    "delivery_target": {
-                        "type": "telegram_chat",
-                        "chat_id": "8759047281"
-                    }
-                }
-            ]),
+        state.set_monitor_reply_scope_for_turn(
+            task_id.clone(),
+            "session-1".to_string(),
+            "turn-1".to_string(),
         );
-        save_store(&path, &store).unwrap();
 
-        let raw = execute_monitor_reply_send(
+        execute_monitor_reply_draft(
             &mut state,
             tmp.path(),
-            json!({"taskId": task_id, "message": "Acknowledged."}),
+            json!({
+                "taskId": task_id,
+                "message": "Acknowledged."
+            }),
         )
-        .expect("existing reply receipt should be idempotent");
-        let payload: Value = serde_json::from_str(&raw).unwrap();
+        .unwrap();
 
-        assert_eq!(payload["success"], true);
-        assert_eq!(payload["alreadySent"], true);
-        assert_eq!(payload["taskId"], task_id);
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        let pending = task
+            .metadata
+            .get("pending_reply")
+            .and_then(Value::as_object)
+            .expect("draft metadata should be stored");
+
+        assert_eq!(
+            pending.get("status").and_then(Value::as_str),
+            Some("draft_ready")
+        );
+        assert_eq!(
+            pending.get("agent_draft_text").and_then(Value::as_str),
+            Some("Acknowledged.")
+        );
+        assert_eq!(
+            Value::Object(pending.clone())
+                .pointer("/source_context_snapshot/delivery_target/chat_id")
+                .and_then(Value::as_str),
+            Some("8759047281")
+        );
+        assert!(pending.get("source_context_hash").is_some());
     }
 
     #[test]

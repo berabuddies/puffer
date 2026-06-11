@@ -62,6 +62,11 @@ pub(crate) fn handle_monitor_task_complete(paths: &ConfigPaths, params: &Value) 
         .context("monitor task entry must be an object")?;
 
     if !is_terminal(task_object) {
+        if is_human_gated_reply_task(task_object) {
+            anyhow::bail!(
+                "human-gated monitor reply tasks require human approval and a send receipt"
+            );
+        }
         task_object.insert("status".to_string(), Value::String("completed".to_string()));
         task_object.insert("completed_via".to_string(), Value::String(completed_via));
         task_object.insert("updated_at_ms".to_string(), Value::from(now_ms()));
@@ -82,9 +87,66 @@ fn is_terminal(task: &serde_json::Map<String, Value>) -> bool {
     )
 }
 
+fn is_human_gated_reply_task(task: &serde_json::Map<String, Value>) -> bool {
+    let Some(metadata) = task.get("metadata").and_then(Value::as_object) else {
+        return false;
+    };
+    let policy = metadata
+        .get("completion_policy")
+        .or_else(|| metadata.get("completionPolicy"));
+    let mode = policy.and_then(|policy| {
+        policy
+            .get("mode")
+            .and_then(Value::as_str)
+            .or_else(|| policy.as_str())
+    });
+    matches!(mode, Some("draft_then_approve" | "send_to_source"))
+        || policy
+            .and_then(|policy| {
+                policy
+                    .get("requires_human_approval")
+                    .or_else(|| policy.get("requiresHumanApproval"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false)
+        || monitor_source_has_delivery_target(metadata)
+}
+
+fn monitor_source_has_delivery_target(metadata: &serde_json::Map<String, Value>) -> bool {
+    metadata
+        .get("source_context")
+        .or_else(|| metadata.get("sourceContext"))
+        .and_then(|source| {
+            source
+                .get("delivery_target")
+                .or_else(|| source.get("deliveryTarget"))
+        })
+        .and_then(|target| target.get("chat_id").or_else(|| target.get("chatId")))
+        .and_then(value_to_non_empty_string)
+        .is_some()
+        || metadata
+            .get("monitor_connector")
+            .or_else(|| metadata.get("monitorConnector"))
+            .and_then(Value::as_str)
+            .is_some_and(|connector| connector.contains("telegram"))
+            && metadata
+                .get("chat_id")
+                .or_else(|| metadata.get("chatId"))
+                .and_then(value_to_non_empty_string)
+                .is_some()
+}
+
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn value_to_non_empty_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => non_empty(value).map(ToString::to_string),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn now_ms() -> u64 {

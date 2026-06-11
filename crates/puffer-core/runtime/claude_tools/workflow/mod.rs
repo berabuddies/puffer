@@ -27,6 +27,7 @@ mod lsp_live_diagnostics;
 pub mod mcp_status;
 pub mod mcp_tool_call;
 pub mod modal_action;
+pub mod monitor_reply_draft;
 pub mod monitor_reply_send;
 pub mod native_mcp_action;
 pub mod powershell;

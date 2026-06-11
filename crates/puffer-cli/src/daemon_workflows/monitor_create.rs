@@ -2,11 +2,12 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
-    connection_workflow_trigger_supported, ActionSpec, ConnectionRecord, ConnectionState,
-    WorkflowBindingSpec, WorkflowBindingStatus,
+    connection_workflow_trigger_supported, normalize_contact_id, ActionSpec, ConnectionRecord,
+    ConnectionState, WorkflowBindingSpec, WorkflowBindingStatus,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +80,12 @@ fn create_or_resume_monitor(
             connection.connector_slug
         );
     }
+    let contact_update = expand_monitor_contact_update(
+        paths,
+        connection_slug,
+        &connection.connector_slug,
+        contact_update,
+    );
 
     let monitor_slug = monitor_slug(connection_slug);
     let memory_path = monitor_memory_path(paths, connection_slug)?;
@@ -258,6 +265,117 @@ fn normalized_contact_update(value: Option<Vec<String>>) -> MonitorContactUpdate
         None => MonitorContactUpdate::Preserve,
         Some(ids) => MonitorContactUpdate::Set(puffer_subscriptions::normalize_contact_ids(ids)),
     }
+}
+
+fn expand_monitor_contact_update(
+    paths: &ConfigPaths,
+    connection_slug: &str,
+    connector_slug: &str,
+    update: MonitorContactUpdate,
+) -> MonitorContactUpdate {
+    match update {
+        MonitorContactUpdate::Preserve => MonitorContactUpdate::Preserve,
+        MonitorContactUpdate::Set(ids) => MonitorContactUpdate::Set(expand_monitor_contact_ids(
+            paths,
+            connection_slug,
+            connector_slug,
+            ids,
+        )),
+    }
+}
+
+fn expand_monitor_contact_ids(
+    paths: &ConfigPaths,
+    connection_slug: &str,
+    connector_slug: &str,
+    ids: Vec<String>,
+) -> Vec<String> {
+    if connector_slug != "telegram-login" {
+        return puffer_subscriptions::normalize_contact_ids(ids);
+    }
+    let username_aliases = telegram_username_contact_id_aliases(paths, connection_slug);
+    ids.into_iter()
+        .filter_map(|id| normalize_contact_id(&id))
+        .map(|id| username_aliases.get(&id).cloned().unwrap_or(id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn telegram_username_contact_id_aliases(
+    paths: &ConfigPaths,
+    connection_slug: &str,
+) -> HashMap<String, String> {
+    let path = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join(connection_slug)
+        .join("peer-cache.json");
+    let Ok(raw) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(cache) = serde_json::from_str::<Value>(&raw) else {
+        return HashMap::new();
+    };
+    let Some(peers) = cache.get("peers").and_then(Value::as_array) else {
+        return HashMap::new();
+    };
+    let mut aliases = HashMap::new();
+    for peer in peers {
+        if peer.get("kind").and_then(Value::as_str) != Some("user")
+            || peer.get("is_bot").and_then(Value::as_bool) == Some(true)
+        {
+            continue;
+        }
+        let Some(numeric_id) = telegram_peer_numeric_id(peer) else {
+            continue;
+        };
+        let Some(numeric_contact_id) =
+            normalize_contact_id(&format!("telegram-user-id@{numeric_id}"))
+        else {
+            continue;
+        };
+        for username in telegram_peer_usernames(peer) {
+            if let Some(username_contact_id) = normalize_contact_id(&format!("telegram@{username}"))
+            {
+                aliases.insert(username_contact_id, numeric_contact_id.clone());
+            }
+        }
+    }
+    aliases
+}
+
+fn telegram_peer_numeric_id(peer: &Value) -> Option<i64> {
+    peer.get("numeric_id")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            peer.get("id")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<i64>().ok())
+        })
+        .filter(|id| *id > 0)
+}
+
+fn telegram_peer_usernames(peer: &Value) -> Vec<String> {
+    let mut usernames = BTreeSet::new();
+    if let Some(username) = peer.get("username").and_then(Value::as_str) {
+        let username = username.trim().trim_start_matches('@');
+        if !username.is_empty() {
+            usernames.insert(username.to_string());
+        }
+    }
+    if let Some(values) = peer.get("usernames").and_then(Value::as_array) {
+        for value in values {
+            let Some(username) = value.as_str() else {
+                continue;
+            };
+            let username = username.trim().trim_start_matches('@');
+            if !username.is_empty() {
+                usernames.insert(username.to_string());
+            }
+        }
+    }
+    usernames.into_iter().collect()
 }
 
 fn deserialize_model_update<'de, D>(
@@ -536,5 +654,50 @@ mod tests {
 
         assert_eq!(monitor_action_model(&binding.action), None);
         assert!(binding.contact_ids.is_empty());
+    }
+
+    #[test]
+    fn telegram_monitor_contact_update_resolves_usernames_to_numeric_ids() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let account_dir = paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join("telegram-user");
+        fs::create_dir_all(&account_dir).unwrap();
+        fs::write(
+            account_dir.join("peer-cache.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "peers": [{
+                    "id": "8689648954",
+                    "numeric_id": 8689648954_i64,
+                    "kind": "user",
+                    "title": "dawei",
+                    "username": "daweitaozi",
+                    "is_bot": false
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let update = expand_monitor_contact_update(
+            &paths,
+            "telegram-user",
+            "telegram-login",
+            MonitorContactUpdate::Set(vec![
+                "telegram@daweitaozi".to_string(),
+                "telegram-user-id@8759047281".to_string(),
+            ]),
+        );
+
+        assert_eq!(
+            update,
+            MonitorContactUpdate::Set(vec![
+                "telegram-user-id@8689648954".to_string(),
+                "telegram-user-id@8759047281".to_string()
+            ])
+        );
     }
 }

@@ -15,7 +15,7 @@ use grammers_client::{
 };
 use grammers_tl_types as tl;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::state::SkillEnv;
 
@@ -57,6 +57,8 @@ struct TelegramPeerRecord {
     source: Option<String>,
     #[serde(default)]
     updated_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_message_at_ms: Option<i64>,
 }
 
 impl TelegramPeerCache {
@@ -86,6 +88,19 @@ impl TelegramPeerCache {
     /// Records metadata for one Telegram chat or user.
     pub(crate) fn observe_chat(&mut self, chat: &Chat, source: &str) {
         self.observe_chat_with_avatar(chat, None, source);
+    }
+
+    /// Records metadata plus the last message timestamp observed from a dialog snapshot.
+    pub(crate) fn observe_chat_with_last_message_at_ms(
+        &mut self,
+        chat: &Chat,
+        source: &str,
+        last_message_at_ms: Option<i64>,
+    ) {
+        if let Some(mut record) = record_from_chat(chat, source) {
+            record.last_message_at_ms = last_message_at_ms;
+            self.merge(record);
+        }
     }
 
     fn observe_chat_with_avatar(&mut self, chat: &Chat, avatar: Option<String>, source: &str) {
@@ -152,6 +167,15 @@ impl TelegramPeerCache {
         existing.is_bot |= candidate.is_bot;
         existing.source = candidate.source.or_else(|| existing.source.clone());
         existing.updated_at_ms = candidate.updated_at_ms;
+        if let Some(last_message_at_ms) = candidate.last_message_at_ms {
+            existing.last_message_at_ms = Some(
+                existing
+                    .last_message_at_ms
+                    .map_or(last_message_at_ms, |current| {
+                        current.max(last_message_at_ms)
+                    }),
+            );
+        }
     }
 
     fn save(&self, env: &SkillEnv) -> anyhow::Result<()> {
@@ -221,6 +245,59 @@ pub async fn hydrate_contact_book_cache(env: &SkillEnv, client: &Client) -> anyh
     let changed = cache != original;
     cache.save_if_changed(env, &original)?;
     Ok(changed)
+}
+
+/// Hydrates recent direct-user dialog metadata without starting the subscriber.
+///
+/// This is used by onboarding/contact pickers before a monitor exists. It
+/// records dialog names and last-message timestamps only; it does not mutate
+/// the delivery cursor and does not emit connector events.
+pub async fn hydrate_recent_dialog_peer_cache(
+    env: &SkillEnv,
+    client: &Client,
+    target_direct_users: usize,
+    max_dialogs: usize,
+) -> anyhow::Result<usize> {
+    let original = TelegramPeerCache::load(env).unwrap_or_default();
+    let mut cache = original.clone();
+    let target_direct_users = target_direct_users.max(1);
+    let max_dialogs = max_dialogs.max(target_direct_users);
+    let mut dialogs_seen = 0usize;
+    let mut direct_users_seen = 0usize;
+    let mut iter = client.iter_dialogs();
+    while dialogs_seen < max_dialogs && direct_users_seen < target_direct_users {
+        let dialog = match iter.next().await {
+            Ok(Some(dialog)) => dialog,
+            Ok(None) => break,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    dialogs_seen,
+                    "iter_dialogs failed during Telegram recent dialog cache hydration; saving partial state"
+                );
+                break;
+            }
+        };
+        dialogs_seen += 1;
+        let chat = dialog.chat();
+        let last_message_at_ms = dialog
+            .last_message
+            .as_ref()
+            .map(|message| message.date().timestamp_millis());
+        cache.observe_chat_with_last_message_at_ms(chat, "recent_dialog", last_message_at_ms);
+        if matches!(chat, Chat::User(user) if !user.raw.bot) && last_message_at_ms.is_some() {
+            direct_users_seen += 1;
+        }
+    }
+    cache.save_if_changed(env, &original)?;
+    info!(
+        dialogs_seen,
+        direct_users_seen,
+        target_direct_users,
+        max_dialogs,
+        "hydrated Telegram recent dialog peer cache"
+    );
+    Ok(direct_users_seen)
 }
 
 /// Resolves saved `telegram@username` contact ids into cached Telegram peers.
@@ -366,6 +443,7 @@ fn record_from_chat(chat: &Chat, source: &str) -> Option<TelegramPeerRecord> {
             is_bot: username_looks_like_bot(chat.username()),
             source: Some(source.to_string()),
             updated_at_ms: now_unix_millis(),
+            last_message_at_ms: None,
         }),
     }
 }
@@ -398,6 +476,7 @@ fn record_from_user(user: &User, saved_name: Option<String>, source: &str) -> Te
         is_bot: user.raw.bot || username_looks_like_bot(user.username()),
         source: Some(source.to_string()),
         updated_at_ms: now_unix_millis(),
+        last_message_at_ms: None,
     }
 }
 

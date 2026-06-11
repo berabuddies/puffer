@@ -14,11 +14,12 @@ fn telegram_candidates_require_private_users_and_ignore_bots_groups() {
         telegram_contact_id(
             &json!({
                 "chat_kind": "user",
+                "chat_id": 5,
                 "chat_username": "Alice"
             }),
             "user"
         ),
-        Some("telegram@alice".to_string())
+        Some("telegram-user-id@5".to_string())
     );
     assert_eq!(
         telegram_contact_id(
@@ -197,7 +198,7 @@ fn telegram_candidates_prefer_full_names() {
 
     assert_eq!(
         ranked
-            .get("telegram@alice")
+            .get("telegram-user-id@5")
             .and_then(|candidate| candidate.name.as_deref()),
         Some("Alice Smith")
     );
@@ -234,7 +235,7 @@ fn telegram_context_marks_recent_messages_and_interaction_replies() {
     }
 
     let ranked = score_telegram_window(&messages);
-    let context = &ranked.get("telegram@alice").unwrap().context;
+    let context = &ranked.get("telegram-user-id@5").unwrap().context;
 
     assert_eq!(context.len(), 40);
     assert_eq!(
@@ -295,7 +296,7 @@ fn telegram_context_keeps_twenty_recent_messages_when_available() {
     }
 
     let ranked = score_telegram_window(&messages);
-    let context = &ranked.get("telegram@alice").unwrap().context;
+    let context = &ranked.get("telegram-user-id@5").unwrap().context;
 
     assert_eq!(
         context
@@ -321,6 +322,7 @@ fn inference_sampling_keeps_top_contacts_per_prefix() {
             name: None,
             avatar: None,
             score: 100.0 - index as f64,
+            last_message_at_ms: None,
             context: Vec::new(),
         });
     }
@@ -330,6 +332,7 @@ fn inference_sampling_keeps_top_contacts_per_prefix() {
             name: None,
             avatar: None,
             score: 10.0 - index as f64,
+            last_message_at_ms: None,
             context: Vec::new(),
         });
     }
@@ -362,6 +365,7 @@ fn inference_sampling_excludes_bot_candidates() {
             name: Some("Alert Bot".to_string()),
             avatar: None,
             score: 100.0,
+            last_message_at_ms: None,
             context: Vec::new(),
         },
         Candidate {
@@ -369,6 +373,7 @@ fn inference_sampling_excludes_bot_candidates() {
             name: Some("Support Bot".to_string()),
             avatar: None,
             score: 90.0,
+            last_message_at_ms: None,
             context: Vec::new(),
         },
         Candidate {
@@ -376,6 +381,7 @@ fn inference_sampling_excludes_bot_candidates() {
             name: Some("Alice".to_string()),
             avatar: None,
             score: 80.0,
+            last_message_at_ms: None,
             context: Vec::new(),
         },
     ];
@@ -513,7 +519,7 @@ fn contacts_list_returns_lightweight_candidate_previews() {
     let candidates = result["candidates"].as_array().unwrap();
     let candidate = candidates
         .iter()
-        .find(|candidate| candidate["id"] == "telegram@alice_smith")
+        .find(|candidate| candidate["id"] == "telegram-user-id@5")
         .unwrap();
 
     assert!(candidate.get("context").is_none(), "{candidate:#}");
@@ -587,7 +593,7 @@ fn contacts_list_prefers_telegram_peer_cache_names() {
     let candidates = result["candidates"].as_array().unwrap();
     let candidate = candidates
         .iter()
-        .find(|candidate| candidate["id"] == "telegram@tohsakar_in")
+        .find(|candidate| candidate["id"] == "telegram-user-id@37253512")
         .unwrap();
 
     assert_eq!(candidate["name"], "Rin Tohsaka");
@@ -598,7 +604,7 @@ fn contacts_list_prefers_telegram_peer_cache_names() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|candidate| candidate["id"] == "telegram@tohsakar_in")
+        .find(|candidate| candidate["id"] == "telegram-user-id@37253512")
         .unwrap();
     assert!(
         search_candidate.get("avatar").is_none(),
@@ -610,7 +616,7 @@ fn contacts_list_prefers_telegram_peer_cache_names() {
         &json!({
             "name": "Rin",
             "description": "Technical collaborator.",
-            "contact_ids": ["telegram@tohsakar_in"]
+            "contact_ids": ["telegram-user-id@37253512"]
         }),
     )
     .unwrap();
@@ -680,7 +686,7 @@ fn contacts_list_uses_telegram_peer_cache_without_message_diagnostics() {
 
     assert!(candidates
         .iter()
-        .any(|candidate| candidate["id"] == "telegram@tohsakar_in"
+        .any(|candidate| candidate["id"] == "telegram-user-id@37253512"
             && candidate["name"] == "Rin Tohsaka"));
     assert!(candidates
         .iter()
@@ -752,11 +758,11 @@ fn contacts_refresh_forces_telegram_peer_cache_hydration_when_cache_is_non_empty
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert!(candidates
         .iter()
-        .any(|candidate| candidate["id"] == "telegram@fresh_contact"
+        .any(|candidate| candidate["id"] == "telegram-user-id@2"
             && candidate["name"] == "Fresh Contact"));
     assert!(!candidates
         .iter()
-        .any(|candidate| candidate["id"] == "telegram@old_contact"));
+        .any(|candidate| candidate["id"] == "telegram-user-id@1"));
 }
 
 #[test]
@@ -927,7 +933,7 @@ fn contacts_context_returns_marked_telegram_destination_context() {
 
     let result = handle_contacts_context(
         &paths,
-        &json!({ "contact_ids": ["telegram@alice"], "limit": 30 }),
+        &json!({ "contact_ids": ["telegram-user-id@5"], "limit": 30 }),
     )
     .unwrap();
     let context = result["context"].as_array().unwrap();

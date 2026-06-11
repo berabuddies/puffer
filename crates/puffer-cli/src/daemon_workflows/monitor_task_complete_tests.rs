@@ -73,6 +73,143 @@ fn complete_accepts_task_id_alias_and_explicit_completed_via() {
 }
 
 #[test]
+fn complete_rejects_human_gated_reply_task() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-1",
+                "subject": "Telegram request",
+                "description": "reply please",
+                "status": "pending",
+                "metadata": {
+                    "_monitor": true,
+                    "completion_policy": {
+                        "mode": "draft_then_approve",
+                        "requires_receipt": true,
+                        "requires_human_approval": true
+                    },
+                    "source_context": {
+                        "connector_slug": "telegram-login",
+                        "connection_slug": "telegram-user",
+                        "delivery_target": {
+                            "type": "telegram_chat",
+                            "chat_id": "8759047281"
+                        }
+                    }
+                }
+            }]
+        }),
+    );
+
+    let error = handle_monitor_task_complete(&paths, &json!({"task_id": "monitor-1"}))
+        .expect_err("human-gated replies must not complete without a send receipt");
+
+    assert!(error.to_string().contains("human approval"));
+    let stored = read_store(&paths);
+    assert_eq!(stored["tasks"][0]["status"], "pending");
+}
+
+#[test]
+fn complete_rejects_derived_human_gated_reply_task() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-1",
+                "subject": "Telegram request",
+                "description": "reply please",
+                "status": "pending",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connector": "telegram-login",
+                    "monitor_connection": "telegram-user",
+                    "chat_id": "8759047281"
+                }
+            }]
+        }),
+    );
+
+    let error = handle_monitor_task_complete(&paths, &json!({"task_id": "monitor-1"}))
+        .expect_err("derived Telegram delivery target must be human-gated");
+
+    assert!(error.to_string().contains("human approval"));
+    let stored = read_store(&paths);
+    assert_eq!(stored["tasks"][0]["status"], "pending");
+}
+
+#[test]
+fn complete_rejects_numeric_derived_human_gated_reply_task() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-1",
+                "subject": "Telegram request",
+                "description": "reply please",
+                "status": "pending",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connector": "telegram-login",
+                    "monitor_connection": "telegram-user",
+                    "chat_id": 5229190700_i64
+                }
+            }]
+        }),
+    );
+
+    let error = handle_monitor_task_complete(&paths, &json!({"task_id": "monitor-1"}))
+        .expect_err("numeric derived Telegram delivery target must be human-gated");
+
+    assert!(error.to_string().contains("human approval"));
+    let stored = read_store(&paths);
+    assert_eq!(stored["tasks"][0]["status"], "pending");
+}
+
+#[test]
+fn complete_rejects_numeric_source_context_human_gated_reply_task() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-1",
+                "subject": "Telegram request",
+                "description": "reply please",
+                "status": "pending",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connector": "telegram-login",
+                    "monitor_connection": "telegram-user",
+                    "source_context": {
+                        "connector_slug": "telegram-login",
+                        "connection_slug": "telegram-user",
+                        "delivery_target": {
+                            "type": "telegram_chat",
+                            "chat_id": 5229190700_i64
+                        }
+                    }
+                }
+            }]
+        }),
+    );
+
+    let error = handle_monitor_task_complete(&paths, &json!({"task_id": "monitor-1"}))
+        .expect_err("numeric source_context Telegram delivery target must be human-gated");
+
+    assert!(error.to_string().contains("human approval"));
+    let stored = read_store(&paths);
+    assert_eq!(stored["tasks"][0]["status"], "pending");
+}
+
+#[test]
 fn complete_is_idempotent_no_op_on_already_terminal() {
     // Backstop for agentenv/monorepo#561/#562 review (dev-4 Finding 2): a
     // duplicate or stray complete on an already-terminal task must be a harmless

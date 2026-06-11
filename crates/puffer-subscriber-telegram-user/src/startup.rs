@@ -69,7 +69,15 @@ pub(crate) async fn hydrate_dialog_state(
             }
         };
         dialogs_seen += 1;
-        peer_cache.observe_chat(dialog.chat(), "dialog");
+        let last_message_at_ms = dialog
+            .last_message
+            .as_ref()
+            .map(|message| message.date().timestamp_millis());
+        peer_cache.observe_chat_with_last_message_at_ms(
+            dialog.chat(),
+            "dialog",
+            last_message_at_ms,
+        );
         match hydrate_chat_avatar(client, &mut peer_cache, dialog.chat(), "dialog").await {
             Ok(true) => avatars_hydrated += 1,
             Ok(false) => {}

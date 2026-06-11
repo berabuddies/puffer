@@ -1,8 +1,9 @@
 //! Telegram diagnostics-backed contact ranking.
 
 use super::{
-    days_since, entropy_score, push_context, Candidate, CandidateContextOptions,
-    TELEGRAM_CONTEXT_LIMIT, TELEGRAM_INTERACTION_CONTEXT_LIMIT, TELEGRAM_RECENT_CONTEXT_LIMIT,
+    days_since, entropy_score, merge_candidate_last_message_at_ms, push_context, Candidate,
+    CandidateContextOptions, TELEGRAM_CONTEXT_LIMIT, TELEGRAM_INTERACTION_CONTEXT_LIMIT,
+    TELEGRAM_RECENT_CONTEXT_LIMIT,
 };
 use anyhow::{Context, Result};
 use grammers_session::Session;
@@ -19,7 +20,8 @@ use std::path::Path;
 mod daemon_contacts_telegram_peer_cache;
 use daemon_contacts_telegram_peer_cache::{
     collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache,
-    hydrate_telegram_peer_cache_if_needed, TelegramPeerCacheHydrationMode,
+    hydrate_telegram_peer_cache_if_needed, hydrate_telegram_recent_peer_cache_if_needed,
+    telegram_recent_dialog_cache_ready, TelegramPeerCacheHydrationMode,
 };
 
 #[cfg(test)]
@@ -100,12 +102,20 @@ struct TelegramPeerCacheEntry {
     avatar: Option<String>,
     #[serde(default)]
     is_bot: bool,
+    #[serde(default)]
+    last_message_at_ms: Option<i128>,
 }
 
 #[derive(Debug, Clone, Default)]
-struct TelegramPeerMetadata {
+pub(super) struct TelegramPeerMetadata {
     name: Option<String>,
     avatar: Option<String>,
+    last_message_at_ms: Option<i128>,
+}
+
+pub(super) struct TelegramRecentContacts {
+    pub(super) ready: bool,
+    pub(super) candidates: Vec<Candidate>,
 }
 
 /// Collects ranked Telegram contacts from cached message diagnostics.
@@ -142,6 +152,10 @@ pub(super) fn collect_telegram_candidates(
                 .and_modify(|existing| {
                     existing.score += candidate.score;
                     merge_telegram_name(&mut existing.name, &candidate.name);
+                    merge_candidate_last_message_at_ms(
+                        &mut existing.last_message_at_ms,
+                        candidate.last_message_at_ms,
+                    );
                     if existing.avatar.is_none() {
                         existing.avatar = candidate.avatar.clone();
                     }
@@ -166,6 +180,79 @@ pub(super) fn refresh_telegram_peer_caches(paths: &ConfigPaths) -> Result<()> {
         hydrate_telegram_peer_cache(paths, &entry.path(), TelegramPeerCacheHydrationMode::Force);
     }
     Ok(())
+}
+
+pub(super) fn recent_telegram_contacts(
+    paths: &ConfigPaths,
+    limit: usize,
+) -> Result<TelegramRecentContacts> {
+    let root = paths.user_config_dir.join("telegram-accounts");
+    if !root.exists() {
+        return Ok(TelegramRecentContacts {
+            ready: true,
+            candidates: Vec::new(),
+        });
+    }
+    let mut ready = true;
+    let mut by_id: HashMap<String, Candidate> = HashMap::new();
+    for entry in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
+        let Ok(entry) = entry else { continue };
+        let account_dir = entry.path();
+        hydrate_telegram_recent_peer_cache_if_needed(paths, &account_dir, limit);
+        if !telegram_recent_contacts_ready(&account_dir) {
+            ready = false;
+            continue;
+        }
+        for (id, metadata) in read_telegram_primary_peer_metadata_from_account(&account_dir) {
+            if id == "telegram-user-id@777000" {
+                continue;
+            }
+            let Some(last_message_at_ms) = metadata.last_message_at_ms else {
+                continue;
+            };
+            let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
+                id,
+                name: metadata.name.clone(),
+                avatar: metadata.avatar.clone(),
+                score: 0.01,
+                last_message_at_ms: Some(last_message_at_ms),
+                context: Vec::new(),
+            });
+            entry.score = entry.score.max(0.01);
+            merge_candidate_last_message_at_ms(
+                &mut entry.last_message_at_ms,
+                Some(last_message_at_ms),
+            );
+            merge_telegram_name(&mut entry.name, &metadata.name);
+            if entry.avatar.is_none() {
+                entry.avatar = metadata.avatar;
+            }
+        }
+    }
+    let mut candidates = by_id.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .last_message_at_ms
+            .cmp(&left.last_message_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    candidates.truncate(limit);
+    Ok(TelegramRecentContacts { ready, candidates })
+}
+
+fn telegram_dialog_hydration_ready(account_dir: &Path) -> bool {
+    let path = account_dir.join("delivery-cursor.json");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|cursor| cursor.get("initialized").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn telegram_recent_contacts_ready(account_dir: &Path) -> bool {
+    telegram_dialog_hydration_ready(account_dir) || telegram_recent_dialog_cache_ready(account_dir)
 }
 
 fn read_telegram_messages(
@@ -357,9 +444,11 @@ fn score_telegram_window_with_options(
                 name: message.name.clone(),
                 avatar: message.avatar.clone(),
                 score: 0.0,
+                last_message_at_ms: Some(message.date_ms),
                 context: Vec::new(),
             });
         merge_telegram_name(&mut entry.name, &message.name);
+        merge_candidate_last_message_at_ms(&mut entry.last_message_at_ms, Some(message.date_ms));
         if entry.avatar.is_none() {
             entry.avatar = message.avatar.clone();
         }
@@ -625,6 +714,11 @@ pub(super) fn telegram_contact_id(payload: &Value, chat_kind: &str) -> Option<St
     {
         return None;
     }
+    if let Some(id) = telegram_payload_user_id(payload)
+        .and_then(|user_id| normalize_contact_id(&format!("telegram-user-id@{user_id}")))
+    {
+        return Some(id);
+    }
     if let Some(id) = payload
         .get("chat_username")
         .and_then(Value::as_str)
@@ -632,8 +726,7 @@ pub(super) fn telegram_contact_id(payload: &Value, chat_kind: &str) -> Option<St
     {
         return Some(id);
     }
-    telegram_payload_user_id(payload)
-        .and_then(|user_id| normalize_contact_id(&format!("telegram-user-id@{user_id}")))
+    None
 }
 
 /// Returns the best display name for a Telegram diagnostic payload.
@@ -796,6 +889,25 @@ fn read_telegram_peer_metadata(paths: &ConfigPaths) -> HashMap<String, TelegramP
 fn read_telegram_peer_metadata_from_account(
     account_dir: &Path,
 ) -> HashMap<String, TelegramPeerMetadata> {
+    read_telegram_peer_metadata_from_account_with(account_dir, TelegramPeerMetadataIdMode::Aliases)
+}
+
+pub(super) fn read_telegram_primary_peer_metadata_from_account(
+    account_dir: &Path,
+) -> HashMap<String, TelegramPeerMetadata> {
+    read_telegram_peer_metadata_from_account_with(account_dir, TelegramPeerMetadataIdMode::Primary)
+}
+
+#[derive(Clone, Copy)]
+enum TelegramPeerMetadataIdMode {
+    Primary,
+    Aliases,
+}
+
+fn read_telegram_peer_metadata_from_account_with(
+    account_dir: &Path,
+    mode: TelegramPeerMetadataIdMode,
+) -> HashMap<String, TelegramPeerMetadata> {
     let path = account_dir.join("peer-cache.json");
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return HashMap::new();
@@ -817,11 +929,15 @@ fn read_telegram_peer_metadata_from_account(
         let peer_metadata = TelegramPeerMetadata {
             name: peer_cache_entry_name(&peer),
             avatar: peer_cache_entry_avatar(&peer),
+            last_message_at_ms: peer.last_message_at_ms,
         };
-        if peer_metadata.name.is_none() && peer_metadata.avatar.is_none() {
+        if peer_metadata.name.is_none()
+            && peer_metadata.avatar.is_none()
+            && peer_metadata.last_message_at_ms.is_none()
+        {
             continue;
         }
-        for id in peer_cache_entry_contact_ids(&peer) {
+        for id in peer_cache_entry_contact_ids(&peer, mode) {
             merge_peer_metadata(&mut metadata, id, peer_metadata.clone());
         }
     }
@@ -842,6 +958,7 @@ fn merge_peer_metadata(
     if entry.avatar.is_none() {
         entry.avatar = candidate.avatar;
     }
+    merge_candidate_last_message_at_ms(&mut entry.last_message_at_ms, candidate.last_message_at_ms);
 }
 
 fn peer_cache_entry_name(peer: &TelegramPeerCacheEntry) -> Option<String> {
@@ -886,19 +1003,24 @@ fn peer_cache_entry_usernames(peer: &TelegramPeerCacheEntry) -> Vec<String> {
         .collect()
 }
 
-fn peer_cache_entry_contact_ids(peer: &TelegramPeerCacheEntry) -> Vec<String> {
-    let mut ids = Vec::new();
-    for username in peer_cache_entry_usernames(peer) {
-        if let Some(id) = normalize_contact_id(&format!("telegram@{username}")) {
-            ids.push(id);
-        }
-    }
-    if ids.is_empty() && peer.numeric_id > 0 {
+fn peer_cache_entry_contact_ids(
+    peer: &TelegramPeerCacheEntry,
+    mode: TelegramPeerMetadataIdMode,
+) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    if peer.numeric_id > 0 {
         if let Some(id) = normalize_contact_id(&format!("telegram-user-id@{}", peer.numeric_id)) {
-            ids.push(id);
+            ids.insert(id);
         }
     }
-    ids
+    if matches!(mode, TelegramPeerMetadataIdMode::Aliases) || ids.is_empty() {
+        for username in peer_cache_entry_usernames(peer) {
+            if let Some(id) = normalize_contact_id(&format!("telegram@{username}")) {
+                ids.insert(id);
+            }
+        }
+    }
+    ids.into_iter().collect()
 }
 
 fn telegram_payload_user_id(payload: &Value) -> Option<i64> {
@@ -958,10 +1080,20 @@ fn telegram_name_is_more_complete(existing: Option<&str>, candidate: &str) -> bo
     let Some(existing) = existing.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
     };
+    let existing_is_contact_id = telegram_name_looks_like_contact_id(existing);
+    let candidate_is_contact_id = telegram_name_looks_like_contact_id(candidate);
+    if existing_is_contact_id != candidate_is_contact_id {
+        return existing_is_contact_id && !candidate_is_contact_id;
+    }
     let existing_parts = existing.split_whitespace().count();
     let candidate_parts = candidate.split_whitespace().count();
     candidate_parts > existing_parts
         || (candidate_parts == existing_parts && candidate.len() > existing.len())
+}
+
+fn telegram_name_looks_like_contact_id(name: &str) -> bool {
+    let value = name.trim().to_ascii_lowercase();
+    value.starts_with("telegram@") || value.starts_with("telegram-user-id@")
 }
 
 fn payload_username_looks_like_bot(payload: &Value, key: &str) -> bool {

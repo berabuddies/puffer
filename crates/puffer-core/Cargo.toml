@@ -81,10 +81,10 @@ puffer-subscriptions = { path = "../puffer-subscriptions" }
 puffer-tools = { path = "../puffer-tools" }
 puffer-transport-anthropic = { path = "../puffer-transport-anthropic" }
 puffer-workflow = { path = "../puffer-workflow" }
+sha2.workspace = true
 
 [dev-dependencies]
 axum = "0.8"
-sha2.workspace = true
 tempfile.workspace = true
 tokio-util = "0.7"
 uuid.workspace = true
