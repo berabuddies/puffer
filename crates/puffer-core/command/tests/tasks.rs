@@ -317,7 +317,7 @@ fn monitor_tasks_offer_actions_and_ignore_choices() {
             && entry.command.contains("Draft a concise reply to Alice")
             && entry.command.contains("chat_id=8759047281")
             && entry.command.contains("only authorized reply target")
-            && entry.command.contains("MonitorReplySend")
+            && entry.command.contains("MonitorReplyDraft")
     }));
 
     dispatch_command(

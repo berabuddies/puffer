@@ -51,10 +51,10 @@ description: |-
 
   ## Monitor Tasks
 
-  Do not mark a monitor task completed with TaskUpdate when its
-  completionPolicy.mode is "send_to_source". For those tasks, use
-  MonitorReplySend so the reply is sent to the recorded source and the task is
-  completed with a delivery receipt.
+  Do not mark a human-gated monitor task completed with TaskUpdate when its
+  completionPolicy.mode is "draft_then_approve" or it has a Telegram delivery
+  target. For those tasks, save a draft with MonitorReplyDraft and let Bobo ask
+  the user to approve the final send.
 
   ## Examples
 

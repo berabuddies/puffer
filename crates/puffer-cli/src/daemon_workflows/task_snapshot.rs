@@ -467,7 +467,13 @@ fn default_monitor_completion_policy(metadata: &Map<String, Value>) -> Option<Va
                 .or_else(|| context.get("deliveryTarget"))
                 .cloned()
         })
-        .map(|_| json!({"mode": "send_to_source", "requires_receipt": true}))
+        .map(|_| {
+            json!({
+                "mode": "draft_then_approve",
+                "requires_human_approval": true,
+                "requires_receipt": true,
+            })
+        })
 }
 
 fn monitor_actions_require_reply(metadata: &Map<String, Value>) -> bool {
@@ -632,7 +638,14 @@ mod tests {
             monitor_task["source_context"]["delivery_target"]["chat_id"],
             "8759047281"
         );
-        assert_eq!(monitor_task["completion_policy"]["mode"], "send_to_source");
+        assert_eq!(
+            monitor_task["completion_policy"]["mode"],
+            "draft_then_approve"
+        );
+        assert_eq!(
+            monitor_task["completion_policy"]["requires_human_approval"],
+            true
+        );
         assert_eq!(
             monitor_task["ignore_analysis_result"],
             "filter looks scoped"
@@ -643,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn task_context_does_not_default_send_to_source_for_non_reply_actions() {
+    fn task_context_does_not_default_reply_policy_for_non_reply_actions() {
         let tempdir = tempfile::tempdir().unwrap();
         let paths = ConfigPaths::discover(tempdir.path());
         let workflow = workflow_root(&paths);

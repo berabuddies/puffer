@@ -263,11 +263,11 @@ pub(super) fn execute_task_update(
         None
     };
     if parsed.status.as_deref() == Some("completed")
-        && monitor_task_requires_action_completion(task)
+        && monitor_task_is_human_gated(task)
         && !metadata_marks_monitor_ignored(metadata_update.as_ref())
     {
         bail!(
-            "monitor task `{}` must be completed through its monitor action after a delivery receipt",
+            "monitor task `{}` must be completed through its monitor action after human approval",
             parsed.task_id
         );
     }
@@ -405,7 +405,7 @@ pub(super) fn execute_monitor_reply_send(
     let store_cwd = state.session.cwd.clone();
     let task = load_monitor_task(store_cwd.as_path(), &parsed.task_id)?
         .ok_or_else(|| anyhow!("monitor task `{}` not found", parsed.task_id))?;
-    if monitor_task_requires_action_completion(&task) {
+    if monitor_task_is_human_gated(&task) {
         append_monitor_reply_audit_to_store(
             store_cwd.as_path(),
             &parsed.task_id,
@@ -513,7 +513,7 @@ pub(super) fn execute_monitor_reply_draft(
             task.status
         );
     }
-    if !monitor_task_requires_action_completion(task) {
+    if !monitor_task_is_human_gated(task) {
         bail!(
             "MonitorReplyDraft expected a human-gated monitor task `{}`",
             parsed.task_id
@@ -844,23 +844,53 @@ fn monitor_actions_require_reply(metadata: &Map<String, Value>) -> bool {
     })
 }
 
-fn monitor_task_requires_action_completion(task: &StoredTask) -> bool {
+fn monitor_task_is_human_gated(task: &StoredTask) -> bool {
     if !is_monitor_task_metadata(&task.metadata) {
         return false;
     }
-    monitor_completion_policy(
-        &task.metadata,
-        monitor_source_context(&task.metadata).as_ref(),
-    )
-    .and_then(|policy| completion_policy_mode(&policy).map(str::to_string))
-    .as_deref()
-    .is_some_and(|mode| matches!(mode, "draft_then_approve" | "send_to_source"))
+    let source_context = monitor_source_context(&task.metadata);
+    monitor_completion_policy(&task.metadata, source_context.as_ref())
+        .as_ref()
+        .is_some_and(completion_policy_requires_human_approval)
+        || monitor_task_has_telegram_delivery_target(&task.metadata, source_context.as_ref())
 }
 
 fn completion_policy_mode(policy: &Value) -> Option<&str> {
     policy
         .as_str()
         .or_else(|| policy.get("mode").and_then(Value::as_str))
+}
+
+fn completion_policy_requires_human_approval(policy: &Value) -> bool {
+    completion_policy_mode(policy)
+        .is_some_and(|mode| matches!(mode, "draft_then_approve" | "send_to_source"))
+        || policy
+            .get("requires_human_approval")
+            .or_else(|| policy.get("requiresHumanApproval"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn monitor_task_has_telegram_delivery_target(
+    metadata: &Map<String, Value>,
+    source_context: Option<&Value>,
+) -> bool {
+    source_context
+        .and_then(|context| {
+            let connector_slug = string_field(context, &["connector_slug", "connectorSlug"])
+                .or_else(|| {
+                    metadata_string(metadata, &["monitor_connector", "monitorConnector"])
+                })?;
+            connector_slug.contains("telegram").then_some(context)
+        })
+        .and_then(|context| {
+            source_context_delivery_target(context)
+                .and_then(|target| string_field(target, &["chat_id", "chatId"]))
+        })
+        .is_some()
+        || metadata_string(metadata, &["monitor_connector", "monitorConnector"])
+            .is_some_and(|connector| connector.contains("telegram"))
+            && metadata_string(metadata, &["chat_id", "chatId"]).is_some()
 }
 
 fn human_gated_completion_policy() -> Value {
@@ -1440,6 +1470,37 @@ mod tests {
             .to_string()
     }
 
+    fn create_telegram_non_reply_monitor_task(state: &mut AppState, cwd: &Path) -> String {
+        let raw = execute_task_create(
+            state,
+            cwd,
+            json!({
+                "subject": "Remember Telegram context",
+                "description": "A Telegram message contains a useful deadline.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "telegram-user",
+                    "monitor_connector": "telegram-login",
+                    "chat_id": "8759047281",
+                    "sender_id": "8759047281"
+                },
+                "actions": [
+                    {
+                        "actionName": "Add reminder",
+                        "actionPrompt": "Create a reminder from the deadline."
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        serde_json::from_str::<Value>(&raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
     #[test]
     fn monitor_task_metadata_rejects_ignore_filter_fields() {
         let metadata = serde_json::json!({
@@ -1491,7 +1552,12 @@ mod tests {
         assert_eq!(
             task.pointer("/completionPolicy/mode")
                 .and_then(Value::as_str),
-            Some("send_to_source")
+            Some("draft_then_approve")
+        );
+        assert_eq!(
+            task.pointer("/completionPolicy/requires_human_approval")
+                .and_then(Value::as_bool),
+            Some(true)
         );
     }
 
@@ -1593,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn task_update_rejects_generic_completion_for_send_to_source_monitor_task() {
+    fn task_update_rejects_generic_completion_for_human_gated_monitor_task() {
         let (mut state, tmp) = make_state();
         let task_id = create_telegram_monitor_task(&mut state, tmp.path());
 
@@ -1605,7 +1671,7 @@ mod tests {
                 "status": "completed"
             }),
         )
-        .expect_err("send-to-source monitor tasks need a delivery receipt before completion");
+        .expect_err("human-gated monitor tasks need approval before completion");
 
         assert!(error
             .to_string()
@@ -1613,38 +1679,11 @@ mod tests {
     }
 
     #[test]
-    fn task_update_allows_completion_for_non_reply_monitor_task() {
+    fn task_update_rejects_completion_for_telegram_delivery_target_without_policy() {
         let (mut state, tmp) = make_state();
-        let raw = execute_task_create(
-            &mut state,
-            tmp.path(),
-            json!({
-                "subject": "Remember Telegram context",
-                "description": "A Telegram message contains a useful deadline.",
-                "receivedAt": "2026-06-10T13:00:00Z",
-                "expiresAt": "2026-06-11T13:00:00Z",
-                "metadata": {
-                    "_monitor": true,
-                    "monitor_connection": "telegram-user",
-                    "monitor_connector": "telegram-login",
-                    "chat_id": "8759047281",
-                    "sender_id": "8759047281"
-                },
-                "actions": [
-                    {
-                        "actionName": "Add reminder",
-                        "actionPrompt": "Create a reminder from the deadline."
-                    }
-                ]
-            }),
-        )
-        .unwrap();
-        let task_id = serde_json::from_str::<Value>(&raw).unwrap()["task"]["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let task_id = create_telegram_non_reply_monitor_task(&mut state, tmp.path());
 
-        let raw = execute_task_update(
+        let error = execute_task_update(
             &mut state,
             tmp.path(),
             json!({
@@ -1652,11 +1691,11 @@ mod tests {
                 "status": "completed"
             }),
         )
-        .expect("non-reply monitor tasks can complete without sending a reply");
-        let payload: Value = serde_json::from_str(&raw).unwrap();
+        .expect_err("Telegram delivery-target monitor tasks need approval before completion");
 
-        assert_eq!(payload["success"], true);
-        assert_eq!(payload["statusChange"]["to"], "completed");
+        assert!(error
+            .to_string()
+            .contains("must be completed through its monitor action"));
     }
 
     #[test]
@@ -1694,6 +1733,24 @@ mod tests {
             }),
         )
         .expect_err("human-gated monitor replies must not be sent by agent tools");
+
+        assert!(error.to_string().contains("requires human approval"));
+    }
+
+    #[test]
+    fn monitor_reply_send_rejects_telegram_delivery_target_without_policy() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_non_reply_monitor_task(&mut state, tmp.path());
+
+        let error = execute_monitor_reply_send(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "message": "Acknowledged."
+            }),
+        )
+        .expect_err("Telegram delivery-target tasks must not be sent by agent tools");
 
         assert!(error.to_string().contains("requires human approval"));
     }

@@ -223,21 +223,24 @@ fn hydrate_telegram_recent_peer_cache_from_session_blocking(
     account_dir: &Path,
     limit: usize,
 ) -> Result<()> {
+    let (sender, receiver) = mpsc::channel();
     let paths = paths.clone();
     let account_dir = account_dir.to_path_buf();
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .context("build Telegram recent dialog hydrate runtime")?;
-        runtime.block_on(hydrate_telegram_recent_peer_cache_from_session(
-            &paths,
-            &account_dir,
-            limit,
-        ))
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("Telegram recent dialog hydrate thread panicked"))?
+            .context("build Telegram recent dialog hydrate runtime")
+            .and_then(|runtime| {
+                runtime.block_on(hydrate_telegram_recent_peer_cache_from_session(
+                    &paths,
+                    &account_dir,
+                    limit,
+                ))
+            });
+        let _ = sender.send(result);
+    });
+    wait_for_telegram_peer_cache_hydrate_result(receiver, TELEGRAM_PEER_CACHE_HYDRATE_TIMEOUT)
 }
 
 async fn hydrate_telegram_recent_peer_cache_from_session(

@@ -1,13 +1,14 @@
 id: MonitorReplySend
 name: MonitorReplySend
 description: |-
-  Send a reply for a monitored connector task to the task's recorded source.
+  Send an already human-approved reply for a monitored connector task to the
+  task's recorded source.
 
-  Use this tool when acting on a Telegram monitor task that has a sourceContext
-  and completionPolicy.mode = "send_to_source". Do not choose or infer a
-  recipient yourself. This tool reads the task source context, sends the
-  message to that exact recorded Telegram chat, writes a delivery receipt, and
-  marks the task completed.
+  Do not use this tool while drafting a Telegram monitor-task reply. During
+  agent action turns, use MonitorReplyDraft so Bobo can ask the user to approve
+  the final message. This tool reads the task source context, sends the message
+  to that exact recorded Telegram chat, writes a delivery receipt, and marks the
+  task completed.
 
   Re-running this tool after its delivery receipt exists is idempotent and will
   not send the reply again.
