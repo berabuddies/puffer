@@ -148,12 +148,13 @@ async fn run_bringup(instance: &WechatInstance) -> Result<()> {
     match instance.ensure_container(&cfg).await {
         Ok(()) => {
             let logged_in = instance.is_logged_in().await.unwrap_or(false);
+            let url = format!("http://{}/", instance.desktop_authority(&cfg).await);
             println!(
                 "{}",
                 json!({
                     "ok": true,
                     "container": cfg.container_name(),
-                    "url": format!("http://127.0.0.1:{}/", cfg.host_port),
+                    "url": url,
                     "logged_in": logged_in,
                     "db_read_enabled": dbread::enabled(),
                 })

@@ -4,8 +4,9 @@
 //! instance's own KasmVNC desktop (native WeChat running in a container). The
 //! flow, all driven from the desktop app with no terminal:
 //!
-//! 1. start the Docker engine if needed (OrbStack), create the instance
-//!    container, and install the native WeChat client into it,
+//! 1. start the container runtime if needed (the Docker engine, or Apple
+//!    `container` on macOS 26+), create the instance container, and install the
+//!    native WeChat client into it,
 //! 2. open the KasmVNC desktop in a puffer browser pane — WeChat shows its
 //!    login QR there,
 //! 3. ask the user to scan the QR with their phone and click Continue,
@@ -115,10 +116,16 @@ impl SetupFlow {
             .block_on(instance.ensure_container(&cfg))
             .context("bring up the WeChat container")?;
 
+        // The desktop's reachable host:port depends on the runtime: Docker
+        // publishes the web port to loopback, while Apple `container` exposes it
+        // only at the container's vmnet IP. Resolve it once now that the
+        // container exists, and use it for every URL shown to the user.
+        let authority = self.rt.block_on(instance.desktop_authority(&cfg));
+
         // 2. Tell the user where the desktop lives (and, in test mode, the
         //    credentials) so they can open it manually if the embedded pane is
         //    unavailable.
-        self.announce_desktop(&cfg);
+        self.announce_desktop(&cfg, &authority);
 
         // 3. Make sure WeChat is installed (large download on first run).
         if !self.rt.block_on(instance.wechat_installed()).unwrap_or(false) {
@@ -137,22 +144,22 @@ impl SetupFlow {
         //    external browser. Login detection works regardless of how it's shown.
         if embed_pane_enabled() {
             self.status("Opening the WeChat screen…");
-            if let Err(error) = self.open_desktop(&cfg.kasm_url()) {
+            if let Err(error) = self.open_desktop(&cfg.kasm_url_for_authority(&authority)) {
                 self.status(&format!(
                     "Could not embed the WeChat screen in-app ({error:#}). Open this URL in any browser to scan the QR: {}",
-                    self.display_url(&cfg)
+                    self.display_url(&cfg, &authority)
                 ));
             }
         } else {
             self.status(&format!(
                 "Open this URL in a browser to see the WeChat QR, then scan it with your phone: {}",
-                self.display_url(&cfg)
+                self.display_url(&cfg, &authority)
             ));
         }
 
         // 6. Show the QR prompt and AUTO-ADVANCE the moment login is detected —
         //    the user does not need to click Continue.
-        self.wait_for_login(&instance, &cfg)?;
+        self.wait_for_login(&instance, &cfg, &authority)?;
 
         // 7. Register the connection.
         let registered = self.register()?;
@@ -205,12 +212,17 @@ impl SetupFlow {
     /// instant the account marker appears — the user never has to click Continue
     /// (though a manual Continue still works). Re-shows the prompt if the user
     /// confirms before logging in. Times out after [`LOGIN_WAIT_TOTAL`].
-    fn wait_for_login(&self, instance: &WechatInstance, cfg: &InstanceConfig) -> Result<()> {
+    fn wait_for_login(
+        &self,
+        instance: &WechatInstance,
+        cfg: &InstanceConfig,
+        authority: &str,
+    ) -> Result<()> {
         if self.rt.block_on(instance.is_logged_in()).unwrap_or(false) {
             return Ok(());
         }
         let deadline = Instant::now() + LOGIN_WAIT_TOTAL;
-        let (mut request_id, mut rx) = self.publish_scan_question(cfg)?;
+        let (mut request_id, mut rx) = self.publish_scan_question(cfg, authority)?;
         loop {
             self.cancel.check()?;
             if self.rt.block_on(instance.is_logged_in()).unwrap_or(false) {
@@ -228,7 +240,7 @@ impl SetupFlow {
                 Ok(_) => {
                     // Manual Continue but not logged in yet — re-show the prompt.
                     self.pending_questions.lock().unwrap().remove(&request_id);
-                    let (rid, new_rx) = self.publish_scan_question(cfg)?;
+                    let (rid, new_rx) = self.publish_scan_question(cfg, authority)?;
                     request_id = rid;
                     rx = new_rx;
                 }
@@ -255,29 +267,26 @@ impl SetupFlow {
 
     /// Announces the desktop URL (and, in test mode, the credentials) so the
     /// user can reach the WeChat screen even if the embedded pane is unavailable.
-    fn announce_desktop(&self, cfg: &InstanceConfig) {
+    fn announce_desktop(&self, cfg: &InstanceConfig, authority: &str) {
         if show_creds() {
             self.status(&format!(
-                "WeChat screen ready at http://127.0.0.1:{} — login `{}` / password `{}` \
+                "WeChat screen ready at http://{authority} — login `{}` / password `{}` \
                  (TEST credentials, shown only in test mode; production uses a random password \
                  that is never displayed).",
-                cfg.host_port, cfg.kasm_user, cfg.kasm_password
+                cfg.kasm_user, cfg.kasm_password
             ));
         } else {
-            self.status(&format!(
-                "WeChat screen ready at http://127.0.0.1:{}.",
-                cfg.host_port
-            ));
+            self.status(&format!("WeChat screen ready at http://{authority}."));
         }
     }
 
     /// URL to show the user for manual access: credential-embedded in test mode,
-    /// bare loopback in production.
-    fn display_url(&self, cfg: &InstanceConfig) -> String {
+    /// bare host:port in production.
+    fn display_url(&self, cfg: &InstanceConfig, authority: &str) -> String {
         if show_creds() {
-            cfg.kasm_url()
+            cfg.kasm_url_for_authority(authority)
         } else {
-            format!("http://127.0.0.1:{}/", cfg.host_port)
+            format!("http://{authority}/")
         }
     }
 
@@ -288,8 +297,9 @@ impl SetupFlow {
     fn publish_scan_question(
         &self,
         cfg: &InstanceConfig,
+        authority: &str,
     ) -> Result<(String, mpsc::Receiver<UserQuestionPromptResponse>)> {
-        let display = self.display_url(cfg);
+        let display = self.display_url(cfg, authority);
         let request_id = self
             .next_request_id
             .fetch_add(1, Ordering::SeqCst)
@@ -316,7 +326,10 @@ impl SetupFlow {
         );
         payload.insert("browserSessionId".to_string(), json!(self.session_id));
         payload.insert("browserTabId".to_string(), json!(SETUP_TAB_ID));
-        payload.insert("browserUrl".to_string(), json!(cfg.kasm_url()));
+        payload.insert(
+            "browserUrl".to_string(),
+            json!(cfg.kasm_url_for_authority(authority)),
+        );
         self.state.publish_event(ServerEnvelope::Event {
             event: self.channel.clone(),
             payload: Value::Object(payload),

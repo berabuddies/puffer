@@ -47,19 +47,43 @@ Point the connector at the image with `WECHAT_IMAGE=puffer-wechat-atspi:4.1.1.4`
 3. send: click the message-input bounds → xdotool type → Enter.
 4. confirm sent: the sent body appears as a history bubble (screen read fallback).
 
-## Runtime backend (Docker today; Apple `container` next)
+## Runtime backend (Docker or Apple `container`)
 
-`runtime.rs` will hold a `WechatRuntime` trait that `WechatInstance` delegates to,
-so the connector can target more than one container runtime:
+`WechatInstance` (`wechat_connector/docker.rs`) drives either runtime through one
+flag-compatible CLI surface (`run`/`exec`/`stop`/`rm`). Selection:
+`WECHAT_RUNTIME=auto|docker|container` — `auto` prefers Apple `container` on
+macOS 26+ when its CLI is installed (no Docker Desktop needed) and falls back to
+Docker otherwise. `DOCKER_BIN` / `WECHAT_CONTAINER_BIN` override the binaries.
 
-| concern | Docker (default/fallback) | Apple `container` (macOS 26) |
+| concern | Docker (fallback) | Apple `container` (macOS 26+) |
 |---|---|---|
 | lifecycle | `docker run/start/stop/rm` | `container run/stop/rm` |
-| exec | `docker exec [-i] --user` | `container exec` |
-| ports | `-p 127.0.0.1:<p>:3000` | `-p 127.0.0.1:<p>:3000` |
+| exec | `docker exec [-i] --user -e` | same flags (validated) |
+| volume | `-v vol:/config` | `--mount type=volume,source=vol,target=/config` |
+| desktop reach | published `127.0.0.1:<port>` | **vmnet IP `<container-ip>:3000`** (no loopback port forwarding) |
+| image source | local build / pull | `container image load` of a docker archive, or `pull` |
 
-Selection: `WECHAT_RUNTIME=auto|docker|container`; `auto` → `container` on Apple
-Silicon + macOS 26 with the `container` CLI present, else `docker`. The goal is
-removing the Docker Desktop install requirement on macOS 26. (Note: `container`'s
-VM operations need the user's login session, so this path is validated in the app/
-terminal, not the headless test harness.)
+Puffer makes the `container` path turnkey (no terminal), via `ensure_container` →
+`ensure_runtime_ready`:
+
+- **apiserver** — starts it (`container system start`) and waits until it
+  answers. Requires Homebrew `container` >= 1.0.0_1: the 1.0.0 bottle mislocated
+  its plugins so the apiserver crash-looped "cannot find any plugins with type
+  network" and hung every command (homebrew-core PR #286989 fixed it — if you
+  hit it, `brew update && brew upgrade container`).
+- **kernel** — installs the recommended VM kernel lazily on the first `run`
+  (`container system kernel set --recommended` re-downloads each call, so it's
+  not run eagerly).
+- **image** — `pull` (registry ref) or `load` from `WECHAT_CONTAINER_IMAGE_TAR`.
+- **desktop URL** — resolved to the container's vmnet IP, since `container` does
+  not forward published ports to loopback.
+- **uid stability** — the PUID/PGID remap is dropped on `container` (the
+  VM-backed store needs no host-uid matching). The remap is non-deterministic
+  across boots there; leaving `abc` at the image-default uid keeps the login
+  data's ownership consistent, so WeChat survives a stop/start instead of dying
+  on an unreadable, wrong-uid profile.
+
+Validated live on macOS 26.3.1: `auto` selects `container`, the WeChat 4.1.1.4
+desktop comes up (a11y bus + client), a real-account QR login + a 0-vision
+message send succeed, `exec` (stdout/stdin/env/`--user`) and `--mount`
+persistence work, and the instance survives a stop/start (stable uid).

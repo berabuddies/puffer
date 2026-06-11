@@ -102,12 +102,15 @@ impl InstanceConfig {
         format!("puffer-wechat-{}", self.instance)
     }
 
-    /// The localhost URL of the KasmVNC web client, with basic-auth credentials
-    /// embedded so the puffer browser pane loads it without a login prompt.
-    pub(crate) fn kasm_url(&self) -> String {
+    /// Credential-embedded KasmVNC URL for a `host:port` authority, so the puffer
+    /// browser pane loads it without a login prompt. The authority is loopback
+    /// for Docker's published port and the container's vmnet IP for Apple
+    /// `container` (which doesn't forward ports); see
+    /// [`WechatInstance::desktop_authority`](super::docker::WechatInstance::desktop_authority).
+    pub(crate) fn kasm_url_for_authority(&self, authority: &str) -> String {
         format!(
-            "http://{}:{}@127.0.0.1:{}/",
-            self.kasm_user, self.kasm_password, self.host_port
+            "http://{}:{}@{}/",
+            self.kasm_user, self.kasm_password, authority
         )
     }
 }
@@ -181,8 +184,16 @@ mod tests {
     }
 
     #[test]
-    fn kasm_url_embeds_credentials_on_localhost() {
-        assert_eq!(sample().kasm_url(), "http://woc:secret@127.0.0.1:37042/");
+    fn kasm_url_embeds_credentials_for_any_authority() {
+        // Docker (loopback) and Apple `container` (vmnet IP) authorities.
+        assert_eq!(
+            sample().kasm_url_for_authority("127.0.0.1:37042"),
+            "http://woc:secret@127.0.0.1:37042/"
+        );
+        assert_eq!(
+            sample().kasm_url_for_authority("192.168.64.6:3000"),
+            "http://woc:secret@192.168.64.6:3000/"
+        );
     }
 
     #[test]

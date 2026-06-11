@@ -1,17 +1,20 @@
-//! Docker lifecycle and `exec` helpers for a managed WeChat desktop instance.
+//! Container lifecycle and `exec` helpers for a managed WeChat desktop instance.
 //!
 //! A WeChat "instance" is one container named `puffer-wechat-<name>`, based on
 //! the WechatOnCloud image (`ghcr.io/gloridust/wechat-on-cloud`), which bundles
 //! Xvfb + openbox + KasmVNC + the native WeChat client plus `xdotool`/`xclip`.
-//! Puffer talks to it exclusively through the `docker` CLI (matching how the
-//! browser worker shells out to Chrome), so there is no new dependency.
+//! Puffer talks to it through the `docker` or Apple `container` CLI — selected
+//! at runtime (see [`select_runtime`]); their `run`/`exec` flags match — so
+//! there is no new dependency (the browser worker likewise shells out to Chrome).
 //!
 //! All input/read commands run as the in-container `abc` user (the user WeChat
 //! runs as) and export `DISPLAY` by probing `/tmp/.X11-unix` the same way the
 //! WechatOnCloud panel does.
 
 use anyhow::{bail, Context, Result};
+use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -41,18 +44,87 @@ pub(crate) enum Runtime {
     Container,
 }
 
-/// Resolves the runtime + its CLI binary. `WECHAT_RUNTIME=docker|container|auto`
-/// (default `auto`). Apple `container` is currently **opt-in** (`=container`):
-/// `auto` resolves to Docker so the validated path stays the default. Once the
-/// `container` path is validated end-to-end, `auto` should prefer it on macOS
-/// when the `container` binary is present (it only installs on macOS 26+).
-/// `DOCKER_BIN` / `WECHAT_CONTAINER_BIN` override the binary path.
+/// Resolves the runtime + its CLI binary from
+/// `WECHAT_RUNTIME=docker|container|auto` (default `auto`). `auto` prefers Apple
+/// `container` on macOS 26+ when it is installed — it ships only there and needs
+/// no Docker Desktop — and falls back to Docker otherwise. `DOCKER_BIN` /
+/// `WECHAT_CONTAINER_BIN` override the resolved binaries.
 fn select_runtime() -> (Runtime, String) {
     match env_or("WECHAT_RUNTIME", "auto").to_ascii_lowercase().as_str() {
-        "container" => (Runtime::Container, env_or("WECHAT_CONTAINER_BIN", "container")),
-        // "docker" and "auto" both resolve to Docker for now.
-        _ => (Runtime::Docker, env_or("DOCKER_BIN", "docker")),
+        "container" => (Runtime::Container, resolve_container_bin()),
+        "docker" => (Runtime::Docker, env_or("DOCKER_BIN", "docker")),
+        // `auto`: Apple `container` on macOS 26+ if installed, else Docker.
+        _ => match auto_container_bin() {
+            Some(bin) => (Runtime::Container, bin),
+            None => (Runtime::Docker, env_or("DOCKER_BIN", "docker")),
+        },
     }
+}
+
+/// The `container` binary for an explicit `WECHAT_RUNTIME=container`: the
+/// `WECHAT_CONTAINER_BIN` override, else an absolute path resolved from `PATH`
+/// or the standard Homebrew locations (so it works under the GUI app's minimal
+/// `PATH`), else the bare name.
+fn resolve_container_bin() -> String {
+    container_bin_override()
+        .or_else(locate_container_bin)
+        .unwrap_or_else(|| "container".to_string())
+}
+
+/// For `WECHAT_RUNTIME=auto`: the `container` binary iff this is macOS 26+ and
+/// the binary is installed, else `None` (→ Docker).
+fn auto_container_bin() -> Option<String> {
+    if !cfg!(target_os = "macos") || macos_major_version() < 26 {
+        return None;
+    }
+    container_bin_override().or_else(locate_container_bin)
+}
+
+/// `WECHAT_CONTAINER_BIN`, if set and non-empty.
+fn container_bin_override() -> Option<String> {
+    std::env::var("WECHAT_CONTAINER_BIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Absolute path to the `container` CLI from `PATH` or the standard Homebrew
+/// locations, or `None` if it is not installed.
+fn locate_container_bin() -> Option<String> {
+    if let Some(path) = which_on_path("container") {
+        return Some(path);
+    }
+    ["/opt/homebrew/bin/container", "/usr/local/bin/container"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .map(str::to_string)
+}
+
+/// Absolute path of `bin` if it is found on `PATH`.
+fn which_on_path(bin: &str) -> Option<String> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(bin))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
+}
+
+/// The major macOS version (e.g. `26`), cached for the process. `0` off macOS or
+/// if the version can't be read.
+fn macos_major_version() -> u32 {
+    use std::sync::OnceLock;
+    static VERSION: OnceLock<u32> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|out| {
+                let text = String::from_utf8(out.stdout).ok()?;
+                text.trim().split('.').next()?.parse().ok()
+            })
+            .unwrap_or(0)
+    })
 }
 
 /// One managed WeChat desktop instance, addressed by container name.
@@ -141,22 +213,33 @@ impl WechatInstance {
     /// A clear, actionable error is returned when none succeed.
     async fn ensure_image(&self, cfg: &InstanceConfig) -> Result<()> {
         if self.runtime == Runtime::Container {
-            // `container` has its own image store and no local `build` step. The
-            // AT-SPI image is loaded/pulled into that store out of band, so here we
-            // only check presence and give an actionable error otherwise.
-            if self
-                .docker(&["image", "inspect", &cfg.image])
-                .await?
-                .status
-                .success()
-            {
+            // `container` has its own image store (separate from Docker's) and no
+            // local Dockerfile `build` step. Resolution order: already present →
+            // `pull` (when the image is a registry reference) → `load` from a
+            // configured OCI archive (`WECHAT_CONTAINER_IMAGE_TAR`, for an offline
+            // / bundled image). A clear error is returned when none succeed.
+            if self.container_image_present(cfg).await? {
                 return Ok(());
             }
+            let _ = self.docker(&["image", "pull", &cfg.image]).await;
+            if self.container_image_present(cfg).await? {
+                return Ok(());
+            }
+            if let Ok(tar) = std::env::var("WECHAT_CONTAINER_IMAGE_TAR") {
+                let tar = tar.trim();
+                if !tar.is_empty() {
+                    let _ = self.docker(&["image", "load", "-i", tar]).await;
+                    if self.container_image_present(cfg).await? {
+                        return Ok(());
+                    }
+                }
+            }
             bail!(
-                "wechat image `{}` is not in the `container` image store. Pull or load it first, \
-                 e.g. `container image pull {}` (or `container image load`), then retry. The local \
-                 Docker image store is separate from `container`'s.",
-                cfg.image,
+                "wechat image `{}` is not in the `container` image store and could not be \
+                 fetched: `container image pull` failed (set WECHAT_IMAGE to a registry \
+                 reference for an auto-pull) and no WECHAT_CONTAINER_IMAGE_TAR was set to an \
+                 OCI archive of it (produce one with `container image save`/`docker save`). \
+                 The Docker image store is separate from `container`'s.",
                 cfg.image
             );
         }
@@ -204,8 +287,8 @@ impl WechatInstance {
     /// pulls the image) if missing. Idempotent — safe to call before every
     /// `act`/`subscribe`. The data volume persists login across recreates.
     pub(crate) async fn ensure_container(&self, cfg: &InstanceConfig) -> Result<()> {
-        // The engine itself may be off on a fresh machine — start it first.
-        self.ensure_docker_daemon().await?;
+        // The engine/runtime itself may be off on a fresh machine — start it first.
+        self.ensure_runtime_ready().await?;
         if self.is_running().await? {
             return Ok(());
         }
@@ -230,7 +313,20 @@ impl WechatInstance {
     /// (a leftover container by the same name) by removing it and retrying once.
     async fn create_container(&self, cfg: &InstanceConfig) -> Result<()> {
         let args = run_args(cfg, self.runtime);
-        let output = self.docker_args(&args).await?;
+        let mut output = self.docker_args(&args).await?;
+        // Apple `container`: the very first `run` on a fresh setup fails until a
+        // VM kernel is configured. Install the recommended kernel once, then
+        // retry. (We do this lazily here rather than on every startup because
+        // `kernel set` re-downloads each call.)
+        if !output.status.success()
+            && self.runtime == Runtime::Container
+            && stderr_needs_kernel(&output.stderr)
+        {
+            let _ = self
+                .docker(&["system", "kernel", "set", "--recommended"])
+                .await;
+            output = self.docker_args(&args).await?;
+        }
         if output.status.success() {
             return Ok(());
         }
@@ -256,6 +352,92 @@ impl WechatInstance {
         let name = self.container_name();
         let _ = self.docker(&["stop", "-t", "5", &name]).await?;
         Ok(())
+    }
+
+    /// Brings the selected runtime up and ready before any container op, so the
+    /// user never has to open a terminal. Docker launches the engine; Apple
+    /// `container` starts (and, on a Homebrew install, repairs) its apiserver.
+    async fn ensure_runtime_ready(&self) -> Result<()> {
+        match self.runtime {
+            Runtime::Docker => self.ensure_docker_daemon().await,
+            Runtime::Container => self.ensure_container_runtime().await,
+        }
+    }
+
+    /// Ensures Apple `container`'s background apiserver is up and answering,
+    /// starting it if needed. The VM kernel is installed lazily on the first
+    /// `create` (see [`Self::create_container`]), since `kernel set` re-downloads
+    /// each call. Idempotent and cheap once the apiserver is healthy.
+    async fn ensure_container_runtime(&self) -> Result<()> {
+        if self.container_runtime_ready().await {
+            return Ok(());
+        }
+        // Bring the apiserver up (idempotent — a no-op if another start raced us).
+        let _ = self.docker(&["system", "start"]).await;
+        for _ in 0..30 {
+            if self.container_runtime_ready().await {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        bail!(
+            "Apple `container` apiserver did not respond after `container system start`. \
+             If it reports a missing `network` plugin, the Homebrew `container` 1.0.0 \
+             package mislocated its plugins; update past it with \
+             `brew update && brew upgrade container` (the fix shipped in 1.0.0_1)."
+        )
+    }
+
+    /// Reports whether `container system status` answers "running". That command
+    /// hangs while the apiserver is wedged, so it is bounded by a timeout (a
+    /// cancelled call is killed via `kill_on_drop`).
+    async fn container_runtime_ready(&self) -> bool {
+        match tokio::time::timeout(Duration::from_secs(8), self.docker(&["system", "status"])).await
+        {
+            Ok(Ok(out)) => {
+                out.status.success() && String::from_utf8_lossy(&out.stdout).contains("running")
+            }
+            _ => false,
+        }
+    }
+
+    /// The `host:port` authority where this instance's KasmVNC desktop is
+    /// reachable from the host. Docker publishes the web port to loopback; Apple
+    /// `container` does NOT forward published ports — the desktop is reachable
+    /// only at the container's vmnet IP — so resolve that IP (falling back to
+    /// loopback if it can't be read).
+    pub(crate) async fn desktop_authority(&self, cfg: &InstanceConfig) -> String {
+        if self.runtime == Runtime::Container {
+            if let Some(ip) = self.container_ip().await {
+                return format!("{ip}:3000");
+            }
+        }
+        format!("127.0.0.1:{}", cfg.host_port)
+    }
+
+    /// The container's vmnet IPv4 address (Apple `container` only), without the
+    /// CIDR suffix, or `None` if it can't be determined.
+    async fn container_ip(&self) -> Option<String> {
+        let name = self.container_name();
+        let out = self.docker(&["inspect", &name]).await.ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+        let entry = value.as_array().and_then(|items| items.first()).unwrap_or(&value);
+        let addr = entry
+            .pointer("/status/networks/0/ipv4Address")
+            .and_then(serde_json::Value::as_str)?;
+        Some(addr.split('/').next().unwrap_or(addr).to_string())
+    }
+
+    /// Reports whether `cfg.image` is present in `container`'s image store.
+    async fn container_image_present(&self, cfg: &InstanceConfig) -> Result<bool> {
+        Ok(self
+            .docker(&["image", "inspect", &cfg.image])
+            .await?
+            .status
+            .success())
     }
 
     /// Ensures the Docker engine is reachable, starting it if not so the user
@@ -369,14 +551,30 @@ impl WechatInstance {
     /// Reports whether the instance container exists and is running.
     pub(crate) async fn is_running(&self) -> Result<bool> {
         let name = self.container_name();
-        let output = self
-            .docker(&["inspect", "-f", "{{.State.Running}}", &name])
-            .await?;
-        if !output.status.success() {
-            // No such container is the common case — treat as "not running".
-            return Ok(false);
+        match self.runtime {
+            Runtime::Docker => {
+                let output = self
+                    .docker(&["inspect", "-f", "{{.State.Running}}", &name])
+                    .await?;
+                // No such container is the common case — treat as "not running".
+                Ok(output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).trim() == "true")
+            }
+            Runtime::Container => {
+                // Apple `container inspect` has no `-f` flag; its JSON exposes the
+                // run state at /status/state ("running" | "stopped").
+                let output = self.docker(&["inspect", &name]).await?;
+                if !output.status.success() {
+                    return Ok(false);
+                }
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+                    return Ok(false);
+                };
+                let entry = value.as_array().and_then(|items| items.first()).unwrap_or(&value);
+                Ok(entry.pointer("/status/state").and_then(serde_json::Value::as_str)
+                    == Some("running"))
+            }
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
     }
 
     /// Runs a bash script inside the container as the `abc` user with `DISPLAY`
@@ -702,13 +900,23 @@ fn run_args(cfg: &InstanceConfig, runtime: Runtime) -> Vec<String> {
         // `container` has no --hostname flag.
         args.extend(["--hostname".into(), container]);
     }
-    for (key, value) in [
-        ("PUID", &cfg.puid),
-        ("PGID", &cfg.pgid),
-        ("TZ", &cfg.tz),
-        ("CUSTOM_USER", &cfg.kasm_user),
-        ("PASSWORD", &cfg.kasm_password),
-    ] {
+    // PUID/PGID remap the in-container `abc` user to the given uid/gid. On Apple
+    // `container` the linuxserver remap is applied non-deterministically across
+    // boots — `abc`'s uid drifts between the image default and PUID — so the
+    // persisted login data (mode 700) ends up owned by a uid a later boot can't
+    // read, and WeChat exits 255 / the a11y bus fails to bind. The VM-backed
+    // store needs no host-uid matching, so skip the remap there: `abc` keeps a
+    // stable uid and ownership stays consistent across restarts. Docker (where
+    // the remap is reliable and host-uid matching can matter) keeps it.
+    let mut env: Vec<(&str, &str)> = Vec::new();
+    if runtime == Runtime::Docker {
+        env.push(("PUID", &cfg.puid));
+        env.push(("PGID", &cfg.pgid));
+    }
+    env.push(("TZ", &cfg.tz));
+    env.push(("CUSTOM_USER", &cfg.kasm_user));
+    env.push(("PASSWORD", &cfg.kasm_password));
+    for (key, value) in env {
         args.push("-e".into());
         args.push(format!("{key}={value}"));
     }
@@ -737,10 +945,15 @@ fn run_args(cfg: &InstanceConfig, runtime: Runtime) -> Vec<String> {
         // `container` has no restart policy; the app/connector restarts it.
         args.extend(["--restart".into(), "unless-stopped".into()]);
     }
-    // Publish only on loopback: KasmVNC basic-auth is the only gate, so never
-    // expose the WeChat desktop on a routable interface.
-    args.push("-p".into());
-    args.push(format!("127.0.0.1:{}:3000", cfg.host_port));
+    if runtime == Runtime::Docker {
+        // Docker: publish only on loopback (KasmVNC basic-auth is the only gate,
+        // so never expose the WeChat desktop on a routable interface).
+        args.push("-p".into());
+        args.push(format!("127.0.0.1:{}:3000", cfg.host_port));
+    }
+    // Apple `container` reaches the desktop at the container's vmnet IP (see
+    // `desktop_authority`), so it needs no published host port — and `-p` would
+    // also collide on the host port with a Docker instance of the same slug.
     args.push(cfg.image.clone());
     args
 }
@@ -751,6 +964,15 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+/// Whether a `container run` failure is the fresh-setup "no VM kernel" error,
+/// which is cleared by `container system kernel set --recommended`.
+fn stderr_needs_kernel(stderr: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(stderr);
+    s.contains("kernel not configured")
+        || s.contains("kernel is not configured")
+        || s.contains("kernel set")
 }
 
 #[cfg(test)]
@@ -774,6 +996,15 @@ mod tests {
     }
 
     #[test]
+    fn stderr_needs_kernel_detects_fresh_setup() {
+        assert!(stderr_needs_kernel(
+            b"Error: default kernel not configured for architecture arm64, please use the \
+              `container system kernel set` command to configure it"
+        ));
+        assert!(!stderr_needs_kernel(b"Error: container name already in use"));
+    }
+
+    #[test]
     fn run_args_mirror_wechatoncloud_and_publish_loopback() {
         let cfg = InstanceConfig {
             instance: "default".to_string(),
@@ -792,6 +1023,8 @@ mod tests {
         assert!(joined.contains("-v puffer-wechat-default:/config"));
         assert!(joined.contains("--shm-size 1g"));
         assert!(joined.contains("--security-opt seccomp=unconfined"));
+        // Docker keeps the PUID/PGID remap.
+        assert!(joined.contains("-e PUID=1000"));
         assert!(joined.contains("-e CUSTOM_USER=woc"));
         assert!(joined.contains("-e PASSWORD=pw"));
         // Port is published ONLY on loopback.
@@ -820,8 +1053,12 @@ mod tests {
         assert!(!joined.contains("--restart"));
         assert!(!joined.contains("--security-opt"));
         assert!(!joined.contains("--hostname"));
-        // Still publishes loopback-only and passes the env + image through.
-        assert!(joined.contains("-p 127.0.0.1:37042:3000"));
+        // No published host port — the desktop is reached at the vmnet IP, and
+        // `-p` would collide with a Docker instance of the same slug.
+        assert!(!joined.contains("-p "));
+        // No PUID/PGID remap on `container` (keeps `abc`'s uid stable across boots).
+        assert!(!joined.contains("PUID"));
+        assert!(!joined.contains("PGID"));
         assert!(joined.contains("-e CUSTOM_USER=woc"));
     }
 }
