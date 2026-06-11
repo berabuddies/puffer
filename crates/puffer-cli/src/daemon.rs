@@ -1328,6 +1328,11 @@ async fn dispatch_request(
                 crate::daemon_contacts::handle_contacts_search(s.config_paths(), &p)
             }))
         }
+        "contacts_refresh" => {
+            respond!(detached!(|s, p| {
+                crate::daemon_contacts::handle_contacts_refresh(s.config_paths(), &p)
+            }))
+        }
         "contacts_context" => {
             respond!(detached!(|s, p| {
                 crate::daemon_contacts::handle_contacts_context(s.config_paths(), &p)

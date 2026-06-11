@@ -695,6 +695,71 @@ fn contacts_list_uses_telegram_peer_cache_without_message_diagnostics() {
 }
 
 #[test]
+fn contacts_refresh_forces_telegram_peer_cache_hydration_when_cache_is_non_empty() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [{
+                "id": "1",
+                "numeric_id": 1_i64,
+                "kind": "user",
+                "title": "Old Contact",
+                "username": "old_contact",
+                "is_bot": false,
+                "updated_at_ms": 1_700_000_000_000_i64
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _guard = super::daemon_contacts_telegram::install_test_telegram_peer_cache_hydrator({
+        let calls = std::sync::Arc::clone(&calls);
+        move |_paths, account_dir| {
+            calls.lock().unwrap().push(account_dir.to_path_buf());
+            std::fs::write(
+                account_dir.join("peer-cache.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "version": 1,
+                    "peers": [{
+                        "id": "2",
+                        "numeric_id": 2_i64,
+                        "kind": "user",
+                        "title": "Fresh Contact",
+                        "username": "fresh_contact",
+                        "is_bot": false,
+                        "updated_at_ms": 1_700_000_100_000_i64
+                    }]
+                }))
+                .unwrap(),
+            )?;
+            Ok(())
+        }
+    });
+
+    let result = handle_contacts_refresh(&paths, &json!({ "limit": 10 })).unwrap();
+    let candidates = result["candidates"].as_array().unwrap();
+
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram@fresh_contact"
+            && candidate["name"] == "Fresh Contact"));
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram@old_contact"));
+}
+
+#[test]
 fn telegram_peer_cache_skips_malformed_entries() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_config_paths(temp.path());

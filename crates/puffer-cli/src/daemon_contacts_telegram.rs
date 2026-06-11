@@ -18,8 +18,17 @@ use std::path::Path;
 #[path = "daemon_contacts_telegram_peer_cache.rs"]
 mod daemon_contacts_telegram_peer_cache;
 use daemon_contacts_telegram_peer_cache::{
-    collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache_if_needed,
+    collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache,
+    hydrate_telegram_peer_cache_if_needed, TelegramPeerCacheHydrationMode,
 };
+
+#[cfg(test)]
+pub(super) fn install_test_telegram_peer_cache_hydrator<F>(hydrator: F) -> impl Drop
+where
+    F: Fn(&ConfigPaths, &Path) -> Result<()> + 'static,
+{
+    daemon_contacts_telegram_peer_cache::install_test_telegram_peer_cache_hydrator(hydrator)
+}
 
 const DEFAULT_LIMIT: usize = 30;
 const DAY_MS: i128 = 86_400_000;
@@ -142,6 +151,19 @@ pub(super) fn collect_telegram_candidates(
                 })
                 .or_insert(candidate);
         }
+    }
+    Ok(())
+}
+
+/// Forces a best-effort refresh of Telegram peer caches for contact pickers.
+pub(super) fn refresh_telegram_peer_caches(paths: &ConfigPaths) -> Result<()> {
+    let root = paths.user_config_dir.join("telegram-accounts");
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
+        let Ok(entry) = entry else { continue };
+        hydrate_telegram_peer_cache(paths, &entry.path(), TelegramPeerCacheHydrationMode::Force);
     }
     Ok(())
 }

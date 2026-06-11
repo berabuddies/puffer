@@ -34,6 +34,7 @@ use daemon_contacts_store::{
 };
 use daemon_contacts_telegram::{
     collect_telegram_candidates, read_telegram_peer_avatars, read_telegram_peer_names,
+    refresh_telegram_peer_caches,
 };
 use daemon_contacts_trace::ContactInferTrace;
 
@@ -157,6 +158,23 @@ pub(crate) fn handle_contacts_search(paths: &ConfigPaths, params: &Value) -> Res
         "candidates": candidates,
         "proposals": proposals,
     }))
+}
+
+/// Refreshes connector-backed contact caches and returns the current contact snapshot.
+pub(crate) fn handle_contacts_refresh(paths: &ConfigPaths, params: &Value) -> Result<Value> {
+    let parsed: ContactListParams =
+        serde_json::from_value(params.clone()).context("invalid contact refresh params")?;
+    refresh_telegram_peer_caches(paths)?;
+    let has_query = parsed
+        .query
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|query| !query.is_empty());
+    if has_query {
+        handle_contacts_search(paths, params)
+    } else {
+        handle_contacts_list(paths, params)
+    }
 }
 
 /// Saves a user-curated contact and returns the refreshed contact snapshot.

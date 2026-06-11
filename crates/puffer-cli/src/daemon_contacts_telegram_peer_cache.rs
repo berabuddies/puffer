@@ -13,6 +13,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::warn;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum TelegramPeerCacheHydrationMode {
+    IfNeeded,
+    Force,
+}
+
 pub(super) fn collect_telegram_peer_cache_candidates(
     account_dir: &Path,
     by_id: &mut HashMap<String, Candidate>,
@@ -34,13 +40,24 @@ pub(super) fn collect_telegram_peer_cache_candidates(
 }
 
 pub(super) fn hydrate_telegram_peer_cache_if_needed(paths: &ConfigPaths, account_dir: &Path) {
-    if !telegram_peer_cache_needs_hydration(account_dir) {
+    hydrate_telegram_peer_cache(paths, account_dir, TelegramPeerCacheHydrationMode::IfNeeded);
+}
+
+pub(super) fn hydrate_telegram_peer_cache(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    mode: TelegramPeerCacheHydrationMode,
+) {
+    if mode == TelegramPeerCacheHydrationMode::IfNeeded
+        && !telegram_peer_cache_needs_hydration(account_dir)
+    {
         return;
     }
     if let Err(error) = hydrate_telegram_peer_cache_from_session_blocking(paths, account_dir) {
         warn!(
             account = %account_dir.display(),
             %error,
+            force = mode == TelegramPeerCacheHydrationMode::Force,
             "failed to hydrate Telegram peer cache for contacts list"
         );
     }
@@ -67,6 +84,15 @@ fn hydrate_telegram_peer_cache_from_session_blocking(
     paths: &ConfigPaths,
     account_dir: &Path,
 ) -> Result<()> {
+    #[cfg(test)]
+    if let Some(result) = TEST_HYDRATOR.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|hydrator| hydrator(paths, account_dir))
+    }) {
+        return result;
+    }
+
     let paths = paths.clone();
     let account_dir = account_dir.to_path_buf();
     std::thread::spawn(move || {
@@ -136,4 +162,36 @@ fn telegram_skill_env(paths: &ConfigPaths, account_dir: &Path) -> SkillEnv {
         topic,
         workspace_config_dir: Some(paths.workspace_config_dir.clone()),
     }
+}
+
+#[cfg(test)]
+type TestHydrator = Box<dyn Fn(&ConfigPaths, &Path) -> Result<()> + 'static>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HYDRATOR: std::cell::RefCell<Option<TestHydrator>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct TestTelegramPeerCacheHydratorGuard;
+
+#[cfg(test)]
+impl Drop for TestTelegramPeerCacheHydratorGuard {
+    fn drop(&mut self) {
+        TEST_HYDRATOR.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_test_telegram_peer_cache_hydrator<F>(hydrator: F) -> impl Drop
+where
+    F: Fn(&ConfigPaths, &Path) -> Result<()> + 'static,
+{
+    TEST_HYDRATOR.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hydrator));
+    });
+    TestTelegramPeerCacheHydratorGuard
 }
