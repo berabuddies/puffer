@@ -337,6 +337,8 @@ fn telegram_skill_env(paths: &ConfigPaths, account_dir: &Path) -> SkillEnv {
         session_path: account_dir.join("telegram.session"),
         topic,
         workspace_config_dir: Some(paths.workspace_config_dir.clone()),
+        // Hydration reads the live session directly; nothing is staged.
+        live_session_path: None,
     }
 }
 

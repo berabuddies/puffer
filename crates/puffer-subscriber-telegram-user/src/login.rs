@@ -134,7 +134,7 @@ pub async fn submit_code(
 
     match client.sign_in(&token, &code).await {
         Ok(user) => {
-            save_session(env, client)?;
+            save_completed_session(env, client)?;
             persist_credentials_from_state(env, state);
             state.clear_tokens();
             emit_control(
@@ -211,7 +211,7 @@ pub async fn submit_password(
         .await
     {
         Ok(user) => {
-            save_session(env, client)?;
+            save_completed_session(env, client)?;
             persist_credentials_from_state(env, state);
             state.clear_tokens();
             emit_control(
@@ -245,6 +245,43 @@ pub async fn submit_password(
 /// login flow again.
 pub fn save_session(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
     save_session_bytes(&env.session_path, client.session().save())
+}
+
+/// Persists a *fully authorized* session and promotes it onto the live
+/// session path when the host staged the login (see
+/// [`SkillEnv::live_session_path`]).
+///
+/// Completion events must only be emitted after this returns: parents treat
+/// `login_complete` as terminal and may kill this process the moment they
+/// read it, which would otherwise strand the staged session and leave the
+/// account with credentials but no usable `telegram.session`
+/// (agentenv/monorepo#551).
+pub fn save_completed_session(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
+    save_session(env, client)?;
+    promote_completed_session(env)
+}
+
+/// Atomically renames the staged session at `env.session_path` onto
+/// `env.live_session_path`. No-op when the host does not stage logins or
+/// when nothing was staged.
+pub(crate) fn promote_completed_session(env: &SkillEnv) -> anyhow::Result<()> {
+    let Some(live) = env.live_session_path.as_ref() else {
+        return Ok(());
+    };
+    if live == &env.session_path || !env.session_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = live.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create session parent dir {}", parent.display()))?;
+    }
+    std::fs::rename(&env.session_path, live).with_context(|| {
+        format!(
+            "promote session {} -> {}",
+            env.session_path.display(),
+            live.display()
+        )
+    })
 }
 
 fn save_session_bytes(path: &std::path::Path, bytes: Vec<u8>) -> anyhow::Result<()> {
@@ -335,5 +372,57 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"session-bytes");
         assert!(!path.with_extension("tmp").exists());
+    }
+
+    fn staging_env(temp: &tempfile::TempDir, live: Option<std::path::PathBuf>) -> SkillEnv {
+        SkillEnv {
+            state_dir: temp.path().to_path_buf(),
+            session_path: temp.path().join("login-staging.session"),
+            topic: "telegram-user".to_string(),
+            workspace_config_dir: None,
+            live_session_path: live,
+        }
+    }
+
+    #[test]
+    fn promote_completed_session_renames_staging_onto_live() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("telegram.session");
+        let env = staging_env(&temp, Some(live.clone()));
+        std::fs::write(&env.session_path, b"authorized-session").unwrap();
+
+        promote_completed_session(&env).unwrap();
+
+        assert_eq!(std::fs::read(&live).unwrap(), b"authorized-session");
+        assert!(
+            !env.session_path.exists(),
+            "staging must be renamed onto live, not copied"
+        );
+    }
+
+    #[test]
+    fn promote_completed_session_noop_without_live_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = staging_env(&temp, None);
+        std::fs::write(&env.session_path, b"resident-session").unwrap();
+
+        promote_completed_session(&env).unwrap();
+
+        assert_eq!(
+            std::fs::read(&env.session_path).unwrap(),
+            b"resident-session"
+        );
+    }
+
+    #[test]
+    fn promote_completed_session_noop_when_nothing_staged() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("telegram.session");
+        std::fs::write(&live, b"existing-live-session").unwrap();
+        let env = staging_env(&temp, Some(live.clone()));
+
+        promote_completed_session(&env).unwrap();
+
+        assert_eq!(std::fs::read(&live).unwrap(), b"existing-live-session");
     }
 }

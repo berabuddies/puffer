@@ -93,6 +93,12 @@ fn run_telegram_repl(paths: &ConfigPaths, connection_slug: &str) -> Result<()> {
         // the resident subscriber loads — see telegram_login_staging_path /
         // promote_staged_session (agentenv/monorepo#551).
         session_path: telegram_login_staging_path(&state_dir),
+        // The login flow promotes staging onto this live path BEFORE emitting
+        // `login_complete`. GUI hosts (bobo) treat that event as terminal and
+        // may reap this process right after reading it, so the promote must
+        // already be durable by then — `finalize_login` below is only a
+        // fallback for older flows.
+        live_session_path: Some(telegram_live_session_path(&state_dir)),
         state_dir,
         topic: connection_slug.to_string(),
         workspace_config_dir: Some(paths.workspace_config_dir.clone()),

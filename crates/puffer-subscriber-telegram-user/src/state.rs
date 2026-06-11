@@ -30,6 +30,14 @@ pub struct SkillEnv {
     pub topic: String,
     /// Workspace `.puffer` directory supplied by the host process when known.
     pub workspace_config_dir: Option<PathBuf>,
+    /// Live session path a completed login's session is atomically promoted
+    /// onto *before* `login_complete` is emitted. Hosts that stage logins
+    /// (`puffer connect` writes to `login-staging.session`) set this; parents
+    /// treat `login_complete` as terminal and may kill the process the moment
+    /// they read it, so the promote cannot be left to post-event cleanup
+    /// (agentenv/monorepo#551). `None` means `session_path` is already the
+    /// live session and no promotion happens.
+    pub live_session_path: Option<PathBuf>,
 }
 
 impl SkillEnv {
@@ -53,6 +61,7 @@ impl SkillEnv {
             session_path,
             topic,
             workspace_config_dir,
+            live_session_path: None,
         }
     }
 

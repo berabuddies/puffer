@@ -127,7 +127,7 @@ impl TelegramPeerCache {
         self.merge(record);
     }
 
-    fn has_avatar(&self, chat: &Chat) -> bool {
+    pub(crate) fn has_avatar(&self, chat: &Chat) -> bool {
         self.peers.iter().any(|record| {
             record.numeric_id == chat.id()
                 && record.kind == peer_kind_label(chat)
@@ -208,6 +208,69 @@ pub(crate) async fn hydrate_chat_avatar(
     };
     cache.observe_chat_with_avatar(chat, Some(avatar), source);
     Ok(true)
+}
+
+/// How many avatar downloads run concurrently in the deferred pass. Avatars
+/// are small thumbnails; a modest fan-out stays well under Telegram's media
+/// flood limits while collapsing hundreds of serial round-trips.
+const DEFERRED_AVATAR_FETCH_CONCURRENCY: usize = 8;
+
+/// Fetches avatars for `chats` concurrently and merges them into the durable
+/// peer cache. Runs OFF the startup-hydration critical path: avatars only
+/// feed contact-picker UI, so they must never delay live message delivery
+/// (a fresh login on a large account used to spend ~2 minutes downloading
+/// them serially before the update loop could start).
+pub(crate) async fn hydrate_chat_avatars_deferred(env: &SkillEnv, client: &Client, chats: Vec<Chat>) {
+    if chats.is_empty() {
+        return;
+    }
+    let total = chats.len();
+    let mut fetched: Vec<(Chat, String)> = Vec::new();
+    let mut chats = chats.into_iter();
+    let mut join_set = tokio::task::JoinSet::new();
+    loop {
+        while join_set.len() < DEFERRED_AVATAR_FETCH_CONCURRENCY {
+            let Some(chat) = chats.next() else { break };
+            let client = client.clone();
+            join_set.spawn(async move {
+                let avatar = fetch_chat_avatar_data_uri(&client, &chat).await;
+                (chat, avatar)
+            });
+        }
+        let Some(result) = join_set.join_next().await else {
+            break;
+        };
+        match result {
+            Ok((chat, Ok(Some(avatar)))) => fetched.push((chat, avatar)),
+            Ok((_, Ok(None))) => {}
+            Ok((chat, Err(error))) => {
+                warn!(
+                    chat = %chat.id(),
+                    %error,
+                    "failed to fetch Telegram avatar in deferred hydration"
+                );
+            }
+            Err(error) => {
+                warn!(%error, "deferred Telegram avatar fetch task failed");
+            }
+        }
+    }
+    // Reload before merging: the daemon's contact-picker hydrations may have
+    // written the cache while the downloads ran.
+    let original = TelegramPeerCache::load(env).unwrap_or_default();
+    let mut cache = original.clone();
+    for (chat, avatar) in &fetched {
+        cache.observe_chat_with_avatar(chat, Some(avatar.clone()), "dialog");
+    }
+    if let Err(error) = cache.save_if_changed(env, &original) {
+        warn!(%error, "failed to save deferred Telegram avatar hydration");
+        return;
+    }
+    info!(
+        total,
+        hydrated = fetched.len(),
+        "hydrated Telegram dialog avatars in background"
+    );
 }
 
 /// Hydrates the peer cache from Telegram's contact book response.
@@ -656,6 +719,7 @@ mod tests {
             session_path: temp.path().join("state/telegram.session"),
             topic: "telegram-user".to_string(),
             workspace_config_dir: Some(workspace_config_dir),
+            live_session_path: None,
         };
 
         assert_eq!(

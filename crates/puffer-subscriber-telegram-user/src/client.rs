@@ -38,10 +38,8 @@ enum RuntimeCommandOutcome {
     ClientReplaced,
 }
 
-enum StartupHydrationStep {
-    Hydrated,
-    Command(Option<SubscriberCommand>),
-}
+/// Result state handed back by the spawned startup hydration task.
+type StartupHydrationState = (DeliveryCursor, NotificationMuteCache);
 
 /// Runs the Telegram user subscriber until stdin closes or a fatal error
 /// occurs. The caller is expected to already be inside a Tokio runtime
@@ -408,6 +406,10 @@ async fn run_update_loop(
     notification_mutes: &mut NotificationMuteCache,
 ) -> anyhow::Result<UpdateLoopExit> {
     emit_control(&env.topic, "ready", json!({}))?;
+    // Monitoring is promised from this moment on: messages dated after this
+    // boundary must reach the triage pipeline even when they arrive while
+    // startup hydration is still running (see hydrate_dialog_state).
+    let live_since_ms = monitoring_live_since_ms();
     reset_delivery_cursor_for_current_account(client, delivery_cursor).await?;
     if let Some(exit) = hydrate_startup_state_before_updates(
         env,
@@ -417,6 +419,7 @@ async fn run_update_loop(
         qr_state,
         delivery_cursor,
         notification_mutes,
+        live_since_ms,
     )
     .await?
     {
@@ -456,6 +459,7 @@ async fn run_update_loop(
                                 qr_state,
                                 delivery_cursor,
                                 notification_mutes,
+                                live_since_ms,
                             )
                             .await?
                             {
@@ -507,6 +511,7 @@ async fn run_update_loop(
                             qr_state,
                             delivery_cursor,
                             notification_mutes,
+                            live_since_ms,
                         )
                         .await?
                         {
@@ -536,6 +541,15 @@ async fn reset_delivery_cursor_for_current_account(
     Ok(())
 }
 
+/// Runs startup hydration on its own task so inbound runtime commands (the
+/// once-a-minute connection auth probe, message search/send, …) are answered
+/// while hydration keeps making progress.
+///
+/// Hydration must NOT be recreated per command: dropping the in-flight future
+/// on every command meant accounts whose hydration outlasts the probe
+/// interval restarted from scratch forever, never reached the live update
+/// loop, and silently stopped delivering messages while the connection still
+/// reported healthy.
 async fn hydrate_startup_state_before_updates(
     env: &SkillEnv,
     commands: &mut CommandStream,
@@ -544,45 +558,121 @@ async fn hydrate_startup_state_before_updates(
     qr_state: &mut Option<qr_login::QrLoginState>,
     delivery_cursor: &mut DeliveryCursor,
     notification_mutes: &mut NotificationMuteCache,
+    live_since_ms: i64,
 ) -> anyhow::Result<Option<UpdateLoopExit>> {
+    let mut hydration = spawn_startup_hydration(
+        env,
+        client,
+        delivery_cursor,
+        notification_mutes,
+        live_since_ms,
+    );
     loop {
-        let step = {
-            let hydration = crate::startup::hydrate_dialog_state(
-                env,
-                client,
-                delivery_cursor,
-                notification_mutes,
-            );
-            tokio::pin!(hydration);
-            tokio::select! {
-                biased;
-                cmd = commands.next() => StartupHydrationStep::Command(cmd?),
-                result = &mut hydration => {
-                    result?;
-                    StartupHydrationStep::Hydrated
-                }
-            }
-        };
-
-        match step {
-            StartupHydrationStep::Hydrated => return Ok(None),
-            StartupHydrationStep::Command(Some(cmd)) => {
-                match handle_runtime_command(env, client, login_state, qr_state, cmd).await? {
-                    RuntimeCommandOutcome::Continue => {}
-                    RuntimeCommandOutcome::ReauthStarted => {
-                        return Ok(Some(UpdateLoopExit::ReauthStarted));
+        tokio::select! {
+            biased;
+            cmd = commands.next() => match cmd? {
+                Some(cmd) => {
+                    match handle_runtime_command(env, client, login_state, qr_state, cmd).await? {
+                        RuntimeCommandOutcome::Continue => {}
+                        RuntimeCommandOutcome::ReauthStarted => {
+                            abort_startup_hydration(hydration).await;
+                            return Ok(Some(UpdateLoopExit::ReauthStarted));
+                        }
+                        RuntimeCommandOutcome::ClientReplaced => {
+                            // The in-flight hydration belongs to the replaced
+                            // client; restart it against the new one from the
+                            // last persisted cursor state.
+                            abort_startup_hydration(hydration).await;
+                            *delivery_cursor = DeliveryCursor::load(env).unwrap_or_default();
+                            *notification_mutes = NotificationMuteCache::default();
+                            reset_delivery_cursor_for_current_account(client, delivery_cursor)
+                                .await?;
+                            info!("restarting telegram startup hydration for replaced client");
+                            hydration = spawn_startup_hydration(
+                                env,
+                                client,
+                                delivery_cursor,
+                                notification_mutes,
+                                live_since_ms,
+                            );
+                        }
                     }
-                    RuntimeCommandOutcome::ClientReplaced => {
-                        reset_delivery_cursor_for_current_account(client, delivery_cursor).await?;
-                    }
                 }
-            }
-            StartupHydrationStep::Command(None) => {
-                info!("stdin closed before telegram startup hydration completed");
-                return Ok(Some(UpdateLoopExit::StdinClosed));
+                None => {
+                    abort_startup_hydration(hydration).await;
+                    info!("stdin closed before telegram startup hydration completed");
+                    return Ok(Some(UpdateLoopExit::StdinClosed));
+                }
+            },
+            result = &mut hydration => {
+                let (cursor, mutes) =
+                    result.context("join telegram startup hydration task")??;
+                *delivery_cursor = cursor;
+                *notification_mutes = mutes;
+                return Ok(None);
             }
         }
     }
+}
+
+/// Spawns `hydrate_dialog_state` on an owned task. The cursor and mute cache
+/// are moved in (leaving defaults behind) and handed back on completion.
+fn spawn_startup_hydration(
+    env: &SkillEnv,
+    client: &Client,
+    delivery_cursor: &mut DeliveryCursor,
+    notification_mutes: &mut NotificationMuteCache,
+    live_since_ms: i64,
+) -> tokio::task::JoinHandle<anyhow::Result<StartupHydrationState>> {
+    let env = env.clone();
+    let client = client.clone();
+    let mut cursor = std::mem::take(delivery_cursor);
+    let mut mutes = std::mem::take(notification_mutes);
+    tokio::spawn(async move {
+        let pending_avatar_chats = crate::startup::hydrate_dialog_state(
+            &env,
+            &client,
+            &mut cursor,
+            &mut mutes,
+            live_since_ms,
+        )
+        .await?;
+        if !pending_avatar_chats.is_empty() {
+            // Avatars are contact-picker garnish; fetch them after the update
+            // loop is live instead of delaying message delivery.
+            tokio::spawn(async move {
+                crate::peer_cache::hydrate_chat_avatars_deferred(
+                    &env,
+                    &client,
+                    pending_avatar_chats,
+                )
+                .await;
+            });
+        }
+        Ok((cursor, mutes))
+    })
+}
+
+/// Unix-millis boundary from which this session promises message delivery.
+/// Message dates are Telegram server time; a small grace window absorbs local
+/// clock skew so a message sent moments after startup is never misread as
+/// pre-session history.
+fn monitoring_live_since_ms() -> i64 {
+    const CLOCK_SKEW_GRACE_MS: i64 = 30_000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    now_ms - CLOCK_SKEW_GRACE_MS
+}
+
+/// Stops an in-flight hydration task and waits for it to wind down so a
+/// successor never runs concurrently against the same on-disk state.
+async fn abort_startup_hydration(
+    hydration: tokio::task::JoinHandle<anyhow::Result<StartupHydrationState>>,
+) {
+    hydration.abort();
+    let _ = hydration.await;
 }
 
 fn persist_live_session_state(env: &SkillEnv, client: &Client) {

@@ -317,6 +317,10 @@ async fn complete_qr_login(
 
     let verified = reconnect_authorized_client(env, api_id, api_hash).await?;
     let verified_user = verified.get_me().await?;
+    // Promote the staged session BEFORE `login_complete` goes out: parents
+    // treat that event as terminal and may kill this process immediately
+    // after reading it (agentenv/monorepo#551).
+    login::promote_completed_session(env)?;
     emit_control(
         &env.topic,
         "login_complete",
