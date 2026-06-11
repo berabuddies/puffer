@@ -214,10 +214,10 @@ fn operator_allowed(field_type: EventFieldType, operator: EventOperator) -> bool
 
 fn compile_jq_expression(field: &EventField, rule: &EventFieldRule) -> Result<String> {
     match rule.operator {
-        EventOperator::Exists => Ok(format!(".{} | test(\".+\")", field.path)),
+        EventOperator::Exists => Ok(format!(".{} | exists", field.path)),
         EventOperator::Equals => {
-            let value = rule_value_string(rule)?;
-            Ok(format!(".{} == {}", field.path, json_string(&value)?))
+            let value = rule_value_scalar(rule)?;
+            Ok(format!(".{} == {}", field.path, json_literal(value)?))
         }
         EventOperator::Contains => {
             let value = regex::escape(&rule_value_string(rule)?);
@@ -249,14 +249,29 @@ fn rule_value_string(rule: &EventFieldRule) -> Result<String> {
     })
 }
 
+fn rule_value_scalar(rule: &EventFieldRule) -> Result<&Value> {
+    let value = rule
+        .value
+        .as_ref()
+        .context("event field rule value required")?;
+    match value {
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => Ok(value),
+        other => anyhow::bail!("event field rule value must be a JSON scalar, got {other}"),
+    }
+}
+
 fn json_string(value: &str) -> Result<String> {
     serde_json::to_string(value).context("failed to encode jq string literal")
+}
+
+fn json_literal(value: &Value) -> Result<String> {
+    serde_json::to_string(value).context("failed to encode jq value literal")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TaggedFilterSpec, filter_matches};
+    use crate::{filter_matches, TaggedFilterSpec};
     use serde_json::json;
 
     fn schema() -> EventSchema {
@@ -313,42 +328,34 @@ mod tests {
 
         let mut duplicate = schema();
         duplicate.fields.push(duplicate.fields[0].clone());
-        assert!(
-            validate_event_schema(&duplicate)
-                .unwrap_err()
-                .to_string()
-                .contains("duplicate")
-        );
+        assert!(validate_event_schema(&duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
     }
 
     #[test]
     fn rejects_unsafe_paths_versions_and_operator_sets() {
         let mut bad_version = schema();
         bad_version.version = 2;
-        assert!(
-            validate_event_schema(&bad_version)
-                .unwrap_err()
-                .to_string()
-                .contains("version")
-        );
+        assert!(validate_event_schema(&bad_version)
+            .unwrap_err()
+            .to_string()
+            .contains("version"));
 
         let mut bad_path = schema();
         bad_path.fields[0].path = ".payload.subject".to_string();
-        assert!(
-            validate_event_schema(&bad_path)
-                .unwrap_err()
-                .to_string()
-                .contains("path")
-        );
+        assert!(validate_event_schema(&bad_path)
+            .unwrap_err()
+            .to_string()
+            .contains("path"));
 
         let mut bad_operator = schema();
         bad_operator.fields[2].operators = vec![EventOperator::Contains];
-        assert!(
-            validate_event_schema(&bad_operator)
-                .unwrap_err()
-                .to_string()
-                .contains("operator")
-        );
+        assert!(validate_event_schema(&bad_operator)
+            .unwrap_err()
+            .to_string()
+            .contains("operator"));
     }
 
     #[test]
@@ -413,5 +420,225 @@ mod tests {
                 "bundled event schema for {slug} has no fields"
             );
         }
+    }
+
+    fn bundled_schema(slug: &str) -> EventSchema {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        load_event_schema_from_dir(&root.join("resources").join("subscribers").join(slug))
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing bundled event schema for {slug}"))
+    }
+
+    fn field_filter(
+        schema: &EventSchema,
+        field: &str,
+        operator: EventOperator,
+        value: Option<Value>,
+    ) -> FilterSpec {
+        compile_event_field_rule(
+            schema,
+            &EventFieldRule {
+                field: field.to_string(),
+                operator,
+                value,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bundled_connector_field_matrix_matches_representative_payloads() {
+        let telegram = bundled_schema("telegram-user");
+        let gmail = bundled_schema("gmail-browser");
+        let email = bundled_schema("email");
+        let gcal = bundled_schema("gcal-browser");
+
+        let chat_kind = field_filter(
+            &telegram,
+            "chat_kind",
+            EventOperator::Equals,
+            Some(json!("group")),
+        );
+        assert!(filter_matches(
+            Some(&chat_kind),
+            "",
+            &json!({"chat_kind": "group"})
+        ));
+        assert!(!filter_matches(
+            Some(&chat_kind),
+            "",
+            &json!({"chat_kind": "user"})
+        ));
+
+        let outgoing_no = field_filter(
+            &telegram,
+            "is_outgoing",
+            EventOperator::Equals,
+            Some(json!(false)),
+        );
+        assert!(filter_matches(
+            Some(&outgoing_no),
+            "",
+            &json!({"is_outgoing": false})
+        ));
+        assert!(!filter_matches(
+            Some(&outgoing_no),
+            "",
+            &json!({"is_outgoing": "false"})
+        ));
+
+        let has_media = field_filter(&telegram, "media", EventOperator::Exists, None);
+        assert!(filter_matches(
+            Some(&has_media),
+            "",
+            &json!({"media": {"kind": "photo"}})
+        ));
+        for empty_payload in [
+            json!({}),
+            json!({"media": null}),
+            json!({"media": ""}),
+            json!({"media": []}),
+        ] {
+            assert!(
+                !filter_matches(Some(&has_media), "", &empty_payload),
+                "empty media payload should not satisfy exists: {empty_payload}"
+            );
+        }
+
+        let gmail_subject = field_filter(
+            &gmail,
+            "message.subject",
+            EventOperator::Contains,
+            Some(json!("invoice")),
+        );
+        assert!(filter_matches(
+            Some(&gmail_subject),
+            "",
+            &json!({"message": {"subject": "invoice due"}})
+        ));
+
+        let gmail_unread = field_filter(
+            &gmail,
+            "message.unread",
+            EventOperator::Equals,
+            Some(json!(true)),
+        );
+        assert!(filter_matches(
+            Some(&gmail_unread),
+            "",
+            &json!({"message": {"unread": true}})
+        ));
+        assert!(!filter_matches(
+            Some(&gmail_unread),
+            "",
+            &json!({"message": {"unread": "true"}})
+        ));
+
+        let uid = field_filter(&email, "uid", EventOperator::Equals, Some(json!(123)));
+        assert!(filter_matches(Some(&uid), "", &json!({"uid": 123})));
+        assert!(!filter_matches(Some(&uid), "", &json!({"uid": "123"})));
+
+        let row_index = field_filter(&gcal, "event.index", EventOperator::Equals, Some(json!(2)));
+        assert!(filter_matches(
+            Some(&row_index),
+            "",
+            &json!({"event": {"index": 2}})
+        ));
+        assert!(!filter_matches(
+            Some(&row_index),
+            "",
+            &json!({"event": {"index": "2"}})
+        ));
+
+        let event_title = field_filter(
+            &gcal,
+            "event.title",
+            EventOperator::Contains,
+            Some(json!("invoice")),
+        );
+        assert!(filter_matches(
+            Some(&event_title),
+            "",
+            &json!({"event": {"title": "invoice review"}})
+        ));
+    }
+
+    #[test]
+    fn field_rules_reject_unknown_fields_and_escape_contains_literals() {
+        let telegram = bundled_schema("telegram-user");
+        let gmail = bundled_schema("gmail-browser");
+
+        let error = compile_event_field_rule(
+            &telegram,
+            &EventFieldRule {
+                field: "message.subject".to_string(),
+                operator: EventOperator::Contains,
+                value: Some(json!("invoice")),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not declared"));
+
+        let literal = field_filter(
+            &gmail,
+            "message.subject",
+            EventOperator::Contains,
+            Some(json!("a.+?()")),
+        );
+        assert!(filter_matches(
+            Some(&literal),
+            "",
+            &json!({"message": {"subject": "literal a.+?() value"}})
+        ));
+        assert!(!filter_matches(
+            Some(&literal),
+            "",
+            &json!({"message": {"subject": "literal axxx value"}})
+        ));
+
+        let regex = field_filter(
+            &gmail,
+            "message.subject",
+            EventOperator::Matches,
+            Some(json!("invoice|receipt")),
+        );
+        assert!(filter_matches(
+            Some(&regex),
+            "",
+            &json!({"message": {"subject": "receipt attached"}})
+        ));
+        assert!(!filter_matches(
+            Some(&regex),
+            "",
+            &json!({"message": {"subject": "status update"}})
+        ));
+    }
+
+    #[test]
+    fn telegram_enum_labels_map_to_wire_values() {
+        let telegram = bundled_schema("telegram-user");
+        let field = telegram
+            .fields
+            .iter()
+            .find(|field| field.path == "chat_kind")
+            .expect("chat kind field");
+        let values = field
+            .values
+            .iter()
+            .map(|value| {
+                (
+                    value.label.as_str(),
+                    value.value.as_str().expect("string enum value"),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(values.get("Group"), Some(&"group"));
+        assert_eq!(values.get("Channel"), Some(&"channel"));
+        assert_eq!(values.get("Direct message"), Some(&"user"));
     }
 }

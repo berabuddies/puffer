@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::path::{Component, Path};
 
 /// Backwards-compatible alias for older callers.
@@ -102,8 +103,8 @@ pub enum TaggedFilterSpec {
     },
     /// Small Puffer path expression evaluated by Puffer, not the connector.
     ///
-    /// Supported forms are `.path == "value"`, `.path =~ "regex"`, and
-    /// `.path | test("regex")`.
+    /// Supported forms are `.path == value`, `.path =~ "regex"`,
+    /// `.path | test("regex")`, and `.path | exists`.
     Jq {
         /// Puffer path expression.
         expression: String,
@@ -470,8 +471,9 @@ fn value_contains(actual: &Value, expected: &Value) -> bool {
 
 #[derive(Debug, Clone)]
 enum JqLikePredicate {
-    Equals { path: String, value: String },
+    Equals { path: String, value: Value },
     Regex { path: String, pattern: String },
+    Exists { path: String },
 }
 
 fn compile_jq_like(expression: &str) -> Result<JqLikePredicate, String> {
@@ -479,7 +481,7 @@ fn compile_jq_like(expression: &str) -> Result<JqLikePredicate, String> {
     if let Some((path, value)) = expression.split_once("==") {
         return Ok(JqLikePredicate::Equals {
             path: parse_jq_path(path)?,
-            value: parse_quoted(value.trim())?,
+            value: parse_json_literal(value.trim())?,
         });
     }
     if let Some((path, value)) = expression.split_once("=~") {
@@ -492,6 +494,11 @@ fn compile_jq_like(expression: &str) -> Result<JqLikePredicate, String> {
     }
     if let Some((path, call)) = expression.split_once("|") {
         let call = call.trim();
+        if call == "exists" {
+            return Ok(JqLikePredicate::Exists {
+                path: parse_jq_path(path)?,
+            });
+        }
         let Some(inner) = call
             .strip_prefix("test(")
             .and_then(|rest| rest.strip_suffix(')'))
@@ -510,17 +517,20 @@ fn compile_jq_like(expression: &str) -> Result<JqLikePredicate, String> {
 
 fn eval_jq_like(expression: &str, text: &str, payload: &Value) -> Result<bool, String> {
     match compile_jq_like(expression)? {
-        JqLikePredicate::Equals { path, value } => {
-            Ok(json_path(payload, text, &path).as_deref() == Some(value.as_str()))
-        }
+        JqLikePredicate::Equals { path, value } => Ok(json_path_value(payload, text, &path)
+            .as_deref()
+            .is_some_and(|actual| actual == &value)),
         JqLikePredicate::Regex { path, pattern } => {
-            let Some(value) = json_path(payload, text, &path) else {
+            let Some(value) = json_path_string(payload, text, &path) else {
                 return Ok(false);
             };
             Ok(regex::Regex::new(&pattern)
                 .map_err(|error| format!("jq regex invalid: {error}"))?
                 .is_match(&value))
         }
+        JqLikePredicate::Exists { path } => Ok(json_path_value(payload, text, &path)
+            .as_deref()
+            .is_some_and(json_value_exists)),
     }
 }
 
@@ -537,18 +547,39 @@ fn parse_quoted(value: &str) -> Result<String, String> {
         .map_err(|error| format!("jq literal must be a JSON string: {error}"))
 }
 
-fn json_path(payload: &Value, text: &str, path: &str) -> Option<String> {
+fn parse_json_literal(value: &str) -> Result<Value, String> {
+    serde_json::from_str::<Value>(value)
+        .map_err(|error| format!("jq literal must be valid JSON: {error}"))
+}
+
+fn json_path_value<'a>(payload: &'a Value, text: &str, path: &str) -> Option<Cow<'a, Value>> {
     if path == "text" || path == "message" {
-        return Some(text.to_string());
+        return Some(Cow::Owned(Value::String(text.to_string())));
     }
     let mut current = payload;
     for part in path.split('.') {
         current = current.get(part)?;
     }
-    Some(match current {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    })
+    Some(Cow::Borrowed(current))
+}
+
+fn json_path_string(payload: &Value, text: &str, path: &str) -> Option<String> {
+    let value = json_path_value(payload, text, path)?;
+    match value.as_ref() {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn json_value_exists(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
+    }
 }
 
 /// Allow only `[A-Za-z_][A-Za-z0-9_]*`. Conservative on purpose.
