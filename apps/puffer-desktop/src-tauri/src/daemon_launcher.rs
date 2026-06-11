@@ -12,6 +12,7 @@ mod daemon_process;
 use anyhow::{Context, Result};
 use daemon_process::terminate_existing_daemon;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -19,6 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+const DEFAULT_CEF_REMOTE_DEBUGGING_PORT: u16 = 9333;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -418,19 +421,57 @@ fn daemon_handshake_failure_message(
 }
 
 fn apply_default_cef_remote_debugging_port(cmd: &mut Command) {
-    if let Some((key, value)) =
-        default_cef_remote_debugging_port_env(std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT"))
-    {
+    if let Some((key, value)) = default_cef_remote_debugging_port_env(
+        std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+        ready_default_cef_remote_debugging_port(),
+    ) {
         cmd.env(key, value);
     }
 }
 
 fn default_cef_remote_debugging_port_env(
     current: Option<OsString>,
-) -> Option<(&'static str, &'static str)> {
+    available_native_port: Option<u16>,
+) -> Option<(&'static str, String)> {
+    let port = available_native_port?;
     current
         .is_none()
-        .then_some(("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333"))
+        .then_some(("PUFFER_CEF_REMOTE_DEBUGGING_PORT", port.to_string()))
+}
+
+fn ready_default_cef_remote_debugging_port() -> Option<u16> {
+    devtools_browser_ws_available(DEFAULT_CEF_REMOTE_DEBUGGING_PORT)
+        .then_some(DEFAULT_CEF_REMOTE_DEBUGGING_PORT)
+}
+
+fn devtools_browser_ws_available(port: u16) -> bool {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_millis(100))
+        .timeout(Duration::from_millis(250))
+        .build()
+    else {
+        return false;
+    };
+    [
+        format!("http://127.0.0.1:{port}/json/version"),
+        format!("http://[::1]:{port}/json/version"),
+    ]
+    .iter()
+    .any(|endpoint| {
+        client
+            .get(endpoint)
+            .send()
+            .and_then(|response| response.error_for_status())
+            .and_then(|response| response.json::<Value>())
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("webSocketDebuggerUrl")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .is_some()
+    })
 }
 
 #[cfg(unix)]
@@ -800,15 +841,25 @@ mod tests {
     }
 
     #[test]
-    fn cef_remote_debugging_port_defaults_for_local_daemon() {
-        let env = default_cef_remote_debugging_port_env(None);
+    fn cef_remote_debugging_port_defaults_when_native_cef_is_ready() {
+        let env = default_cef_remote_debugging_port_env(None, Some(9333));
 
-        assert_eq!(env, Some(("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333")));
+        assert_eq!(
+            env,
+            Some(("PUFFER_CEF_REMOTE_DEBUGGING_PORT", "9333".to_string()))
+        );
+    }
+
+    #[test]
+    fn cef_remote_debugging_port_is_not_defaulted_when_native_cef_is_unavailable() {
+        let env = default_cef_remote_debugging_port_env(None, None);
+
+        assert!(env.is_none());
     }
 
     #[test]
     fn cef_remote_debugging_port_env_is_not_overwritten() {
-        let env = default_cef_remote_debugging_port_env(Some(OsString::from("9444")));
+        let env = default_cef_remote_debugging_port_env(Some(OsString::from("9444")), Some(9333));
 
         assert!(env.is_none());
     }
