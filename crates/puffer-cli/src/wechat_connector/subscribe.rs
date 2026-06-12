@@ -154,7 +154,7 @@ async fn poll_db(
         let detail = if now_logged_in {
             ("ok", format!("WeChat `{}` login restored", instance.name()))
         } else {
-            ("error", format!("WeChat `{}` is logged out; re-scan the QR to resume", instance.name()))
+            ("error", format!("WeChat `{}` is logged out; reconnect it via the connector setup to re-show the QR and resume", instance.name()))
         };
         write_frame(&health(detail.0, detail.1)).await?;
     }
@@ -216,7 +216,7 @@ async fn prepare(instance: &WechatInstance) -> Option<String> {
     }
     if !instance.is_logged_in().await.unwrap_or(false) {
         return Some(format!(
-            "WeChat `{}` is not logged in; run the login flow first",
+            "WeChat `{}` is not connected; reconnect it via the connector setup (it shows the QR to scan)",
             instance.name()
         ));
     }
@@ -247,7 +247,7 @@ async fn poll_once(
         } else {
             write_frame(&health(
                 "error",
-                format!("WeChat `{}` is logged out; re-scan the QR to resume", instance.name()),
+                format!("WeChat `{}` is logged out; reconnect it via the connector setup to re-show the QR and resume", instance.name()),
             ))
             .await?;
         }

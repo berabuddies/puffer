@@ -611,8 +611,9 @@ async fn ensure_ready(instance: &WechatInstance, cfg: &InstanceConfig) -> Result
     instance.ensure_container(cfg).await?;
     if !instance.is_logged_in().await? {
         bail!(
-            "wechat instance `{}` is not logged in; run the WeChat login flow \
-             (scan the QR in the browser pane) first",
+            "wechat connection `{}` is not connected (logged out); reconnect it via the \
+             connector setup — that re-opens the WeChat screen with a fresh QR to scan. Tell \
+             the user to reconnect the WeChat connector, not to scan a QR out of nowhere.",
             instance.name()
         );
     }

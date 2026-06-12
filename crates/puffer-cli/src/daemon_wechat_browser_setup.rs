@@ -326,10 +326,11 @@ impl SetupFlow {
         );
         payload.insert("browserSessionId".to_string(), json!(self.session_id));
         payload.insert("browserTabId".to_string(), json!(SETUP_TAB_ID));
-        payload.insert(
-            "browserUrl".to_string(),
-            json!(cfg.kasm_url_for_authority(authority)),
-        );
+        // The pane renders via `browserSessionId` (the daemon session that
+        // open_desktop already authenticated with the credentialed URL), so the
+        // user-facing `browserUrl` must be credential-free — never leak the KasmVNC
+        // user/password in the URL sent to the client.
+        payload.insert("browserUrl".to_string(), json!(display.clone()));
         self.state.publish_event(ServerEnvelope::Event {
             event: self.channel.clone(),
             payload: Value::Object(payload),
