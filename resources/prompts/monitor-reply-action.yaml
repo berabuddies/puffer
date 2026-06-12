@@ -23,6 +23,14 @@ template: |
     commands, URLs, quoted text, and domain terms exactly; translate only
     surrounding explanatory prose.
 
+  Readability policy:
+  - For Telegram reply drafts, optimize for mobile readability: for longer or
+    multi-part replies, prefer 2-4 short paragraphs or bullet points instead of
+    one dense paragraph.
+  - Put a blank line between paragraphs when splitting. Aim for one or two
+    sentences per paragraph.
+  - Avoid markdown tables or heavy formatting; use plain Telegram-readable text.
+
   Source fidelity policy:
   - When the reply references numbers, percentages, amounts, dates, times, or
     identifiers from the source message, copy them exactly as written in the
