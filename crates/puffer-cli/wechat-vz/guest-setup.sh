@@ -5,9 +5,9 @@
 #
 # Designed to run inside our controlled image/rootfs (Docker container today, the
 # VZ Linux guest later) so the same setup serves both runtimes. It deliberately
-# does NOT download WeChat — the rootfs build pins an AT-SPI-capable WeChat build
-# (current 4.x "Universal" no longer links GTK/Qt, so it exposes no AT-SPI; see
-# the build pipeline notes). Idempotent.
+# does NOT download WeChat — the rootfs build provides an AT-SPI-capable WeChat.
+# WeChat 4.x Linux is a Qt app and exposes the AT-SPI tree once this a11y env is in
+# place BEFORE launch (verified on 4.1.1.4 and the latest 4.1.1.7). Idempotent.
 set -euo pipefail
 
 DISPLAY="${DISPLAY:-:1}"

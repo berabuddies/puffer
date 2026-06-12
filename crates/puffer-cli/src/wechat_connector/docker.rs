@@ -20,8 +20,13 @@ use tokio::process::Command;
 
 use super::config::InstanceConfig;
 
-/// Default WeChat runtime image (WechatOnCloud, multi-arch amd64/arm64).
-pub(crate) const DEFAULT_IMAGE: &str = "ghcr.io/gloridust/wechat-on-cloud:latest";
+/// Default WeChat runtime image: the AT-SPI-capable, a11y-baked build produced by
+/// `wechat-vz/image/build-image.sh` (current latest WeChat 4.1.1.7, verified to
+/// expose the AT-SPI tree). The no-vision operate path NEEDS this image — the bare
+/// WechatOnCloud base (`ghcr.io/gloridust/wechat-on-cloud:latest`) ships no
+/// accessibility stack. Build/load it locally first; override per instance with
+/// `WECHAT_IMAGE`.
+pub(crate) const DEFAULT_IMAGE: &str = "puffer-wechat-atspi:4.1.1.7";
 
 /// Shell prelude that resolves `DISPLAY` inside the container exactly like the
 /// WechatOnCloud panel: honor an existing `$DISPLAY`, else take the first
@@ -1080,7 +1085,7 @@ mod tests {
     fn run_args_container_maps_unsupported_flags() {
         let cfg = InstanceConfig {
             instance: "default".to_string(),
-            image: "puffer-wechat-atspi:4.1.1.4".to_string(),
+            image: "puffer-wechat-atspi:4.1.1.7".to_string(),
             host_port: 37042,
             kasm_user: "woc".to_string(),
             kasm_password: "pw".to_string(),

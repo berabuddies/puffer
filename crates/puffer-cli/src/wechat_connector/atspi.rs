@@ -6,8 +6,9 @@
 //! not reachable (e.g. a WeChat build that does not expose AT-SPI) the caller
 //! reads the screen with the vision model instead. Gated by [`available`].
 //!
-//! Requires an AT-SPI-capable WeChat build (4.1.1.4) with the accessibility
-//! environment set up by the image (see `wechat-vz/`).
+//! Requires an AT-SPI-capable WeChat build with the accessibility environment set
+//! up by the image (see `wechat-vz/`). Verified on 4.1.1.4 AND on the current
+//! latest 4.1.1.7 — both expose the full tree; the image defaults to 4.1.1.7.
 
 use anyhow::{Context, Result};
 use serde_json::Value;

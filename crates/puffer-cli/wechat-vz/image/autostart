@@ -40,7 +40,7 @@ fi
     done
 ) &
 
-# 1) Wait for WeChat to be present (the image pre-seeds 4.1.1.4, so usually ready).
+# 1) Wait for WeChat to be present (the image pre-seeds the baked WeChat, so ready).
 notified=0
 while [ ! -x "${WECHAT_BIN}" ]; do
     if [ "${notified}" -eq 0 ]; then

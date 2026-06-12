@@ -13,29 +13,44 @@ Two related pieces:
 
 ## Why a custom image
 
-The current WeChat 4.x "Universal" build is a self-contained Radium/Chromium app
-that links no system GTK/Qt, so the atk-bridge can't attach → **no AT-SPI**
-(verified: 0 accessible apps even with the full env). **WeChat 4.1.1.4 does expose
-the full tree.** So the image (`image/`) pins 4.1.1.4 and bakes the accessibility
+WeChat 4.x Linux is a **Qt app** whose accessibility bridge is OFF by default; it
+exposes an AT-SPI tree only when `QT_ACCESSIBILITY=1` /
+`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` and the at-spi2 D-Bus bridge are set up
+**before** the client launches, with `/config/.cache` owned by the app user. The
+bare WechatOnCloud base does none of this, so this image (`image/`) bakes that
 environment in.
+
+> **Correction (2026-06-12).** An earlier note here claimed the latest "Universal"
+> 4.x build had *dropped* AT-SPI (self-contained Radium/Chromium, no GTK/Qt). That
+> was **WRONG** — empirically disproven: the current latest **4.1.1.7** exposes a
+> full, live AT-SPI tree (frame + 21 buttons + 36 labels), and a 0-vision send was
+> verified end-to-end through the connector. "Universal" is a Tencent CDN *path*,
+> not a version; the binary is Qt with `AtSpiAdaptor` compiled in (the
+> `RadiumWMPF` Chromium bits are only the mini-program sandbox). The old "0 apps"
+> reading was an env false-negative (bridge not in WeChat's own process /
+> root-owned `.cache`). **4.1.1.4 and 4.1.1.7 both work; the image defaults to
+> 4.1.1.7** and is not capability-pinned.
 
 ## Components in this dir
 
 - `a11y_locate.py` — AT-SPI locator: find an element by role/name → pixel
   bounds/center, read states. Runs in the guest/container; embedded into the
   connector via `include_str!` and pushed in at runtime.
-- `image/` — `Dockerfile` + `build-image.sh` build `puffer-wechat-atspi:4.1.1.4`:
-  `FROM ghcr.io/gloridust/wechat-on-cloud` + the a11y stack (at-spi2-core,
-  gir1.2-atspi-2.0, python3-gi, dbus-x11). `build-image.sh` extracts WeChat
-  4.1.1.4 from `ghcr.io/thisnick/agent-wechat`. `99-seed-wechat` (root cont-init)
-  seeds 4.1.1.4 into `/config`, hands `/config/.cache` to the app user (root-owned
-  .cache otherwise blocks the a11y bus socket), and makes `/run/wechat` writable.
-  `autostart` starts a session D-Bus + at-spi-bus + the a11y env before WeChat and
-  publishes the bus address to `/run/wechat/dbus-addr`.
+- `image/` — `Dockerfile` + `build-image.sh` build `puffer-wechat-atspi:<version>`
+  (currently **4.1.1.7**): `FROM ghcr.io/gloridust/wechat-on-cloud` + the a11y
+  stack (at-spi2-core, gir1.2-atspi-2.0, python3-gi, dbus-x11). `build-image.sh`
+  fetches the latest Universal WeChat `.deb` from Tencent and tags the image with
+  its actual version (override with `WECHAT_DEB_URL` / `WECHAT_ATSPI_IMAGE`).
+  `99-seed-wechat` (root cont-init) seeds the baked WeChat into `/config`, hands
+  `/config/.cache` to the app user (root-owned .cache otherwise blocks the a11y bus
+  socket), and makes `/run/wechat` writable. `autostart` starts a session D-Bus +
+  at-spi-bus + the a11y env before WeChat and publishes the bus address to
+  `/run/wechat/dbus-addr`.
 - `guest-setup.sh` — equivalent provisioning for a VM guest (a11y stack + sshd +
   virtiofs + KasmVNC over NAT), for the container/VM runtime below.
 
-Point the connector at the image with `WECHAT_IMAGE=puffer-wechat-atspi:4.1.1.4`.
+The connector's `DEFAULT_IMAGE` is `puffer-wechat-atspi:4.1.1.7`; override per
+instance with `WECHAT_IMAGE=puffer-wechat-atspi:<version>`.
 
 ## Operate path, per action (current)
 
@@ -94,7 +109,7 @@ host-only network mode, so loopback parity is not yet available.
 accessibility tree; the vision model (screen reading) costs tokens and is NOT an
 automatic fallback — set `WECHAT_ALLOW_VISION=1` to permit it for a run.
 
-Validated live on macOS 26.3.1: `auto` selects `container`, the WeChat 4.1.1.4
-desktop comes up (a11y bus + client), a real-account QR login + a 0-vision
-message send succeed, `exec` (stdout/stdin/env/`--user`) and `--mount`
-persistence work, and the instance survives a stop/start (stable uid).
+Validated live on macOS 26.3.1: `auto` selects `container`, the WeChat desktop
+comes up (a11y bus + client) on both 4.1.1.4 and the latest 4.1.1.7, a real-account
+QR login + a 0-vision message send succeed, `exec` (stdout/stdin/env/`--user`) and
+`--mount` persistence work, and the instance survives a stop/start (stable uid).
