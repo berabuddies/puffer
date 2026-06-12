@@ -522,6 +522,33 @@ test("task monitor rules renders installed include and exclude keyword chips", a
   await expect(excludeRow.getByRole("button", { name: "Remove exclude keyword 通知" })).toBeVisible();
 });
 
+test("task monitor rules hides regex case-insensitive wrappers in field chips", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setWorkflowSnapshot(monitorRulesSnapshot({
+    ignore_filters: [
+      { type: "jq", expression: ".sender_name | test(\"(?i:john)\")" }
+    ],
+    monitor_rule_schema: {
+      version: 1,
+      event_source: "telegram-user",
+      text_fields: [],
+      fields: [
+        {
+          path: "sender_name",
+          label: "Sender name",
+          type: "string",
+          operators: ["contains", "equals", "matches"]
+        }
+      ]
+    }
+  }));
+
+  const dialog = await openRulesDialog(page, daemon);
+  const excludeRow = dialog.getByRole("group", { name: "Skip tasks when" });
+  await expect(excludeRow.getByRole("button", { name: "Remove skip condition Sender name contains john" })).toBeVisible();
+  await expect(excludeRow).not.toContainText("(?i:");
+});
+
 test("task monitor rules removes one saved keyword chip without deleting siblings", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowSnapshot(monitorRulesSnapshot({

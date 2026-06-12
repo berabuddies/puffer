@@ -225,7 +225,7 @@ function parseJqExpression(
     return {
       detail,
       operator: "contains",
-      valueLabel: decodeRegexLiteral(pattern)
+      valueLabel: displayRegexLiteral(pattern)
     };
   }
   return null;
@@ -253,7 +253,7 @@ function displayValue(detail: MonitorRuleDetail, value: unknown): string {
 
 function regexRuleLabel(pattern: string): string {
   return splitRegexAlternation(pattern)
-    .map(decodeRegexLiteral)
+    .map(displayRegexLiteral)
     .map((keyword) => keyword.trim())
     .filter(Boolean)
     .join(", ");
@@ -313,4 +313,13 @@ function splitRegexAlternation(pattern: string): string[] {
 
 function decodeRegexLiteral(pattern: string): string {
   return pattern.replace(/\\([\\.^$*+?()[\]{}|/-])/g, "$1");
+}
+
+function displayRegexLiteral(pattern: string): string {
+  return decodeRegexLiteral(stripCaseInsensitiveRegexWrapper(pattern));
+}
+
+function stripCaseInsensitiveRegexWrapper(pattern: string): string {
+  const match = pattern.match(/^\(\?i:(?<inner>.*)\)$/s);
+  return match?.groups?.inner ?? pattern;
 }
