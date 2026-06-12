@@ -394,12 +394,73 @@ pub(super) fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Va
     with_verbatim_source_text(metadata, context)
 }
 
-pub(super) fn monitor_source_context_with_sender_avatars(
+pub(super) fn monitor_source_context_with_sender_identity(
     metadata: &Map<String, Value>,
     telegram_peer_avatars: &HashMap<String, String>,
+    telegram_peer_names: &HashMap<String, String>,
 ) -> Option<Value> {
-    monitor_source_context(metadata)
-        .map(|context| with_sender_avatar_url(metadata, context, telegram_peer_avatars))
+    monitor_source_context(metadata).map(|context| {
+        let context = with_sender_avatar_url(metadata, context, telegram_peer_avatars);
+        with_sender_name(metadata, context, telegram_peer_names)
+    })
+}
+
+/// Fills `sender.name` from the cached Telegram peer display names when the
+/// stored context lacks one. Triage only copies stable identity fields
+/// (sender_id / sender_username) onto tasks, so accounts without an
+/// @username surfaced as "Unknown sender" even though the peer cache knows
+/// their display name.
+fn with_sender_name(
+    metadata: &Map<String, Value>,
+    mut context: Value,
+    telegram_peer_names: &HashMap<String, String>,
+) -> Value {
+    if telegram_peer_names.is_empty() || context_sender_name(&context).is_some() {
+        return context;
+    }
+    let Some(name) = sender_identity_from_cache(metadata, &context, telegram_peer_names) else {
+        return context;
+    };
+    let Some(object) = context.as_object_mut() else {
+        return context;
+    };
+    let sender = object
+        .entry("sender".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(sender) = sender.as_object_mut() else {
+        return context;
+    };
+    sender.insert("name".to_string(), Value::String(name));
+    context
+}
+
+fn context_sender_name(context: &Value) -> Option<String> {
+    context
+        .get("sender")
+        .and_then(Value::as_object)
+        .and_then(|sender| {
+            scalar_string(sender.get("name"))
+                .or_else(|| scalar_string(sender.get("display_name")))
+                .or_else(|| scalar_string(sender.get("displayName")))
+        })
+}
+
+fn sender_identity_from_cache(
+    metadata: &Map<String, Value>,
+    context: &Value,
+    cache: &HashMap<String, String>,
+) -> Option<String> {
+    for contact_id in sender_avatar_contact_ids(metadata, context) {
+        if let Some(value) = cache
+            .get(&contact_id)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn with_sender_avatar_url(
