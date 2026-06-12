@@ -21,7 +21,7 @@ use crate::notifications::NotificationMuteCache;
 use crate::outbound::handle_send_message;
 use crate::peers::{handle_list_messages, handle_list_peers, handle_search_messages};
 use crate::qr_login;
-use crate::session_resume::{recoverable_live_update_error, try_resume_session};
+use crate::session_resume::{recoverable_live_update_error, try_resume_session, SessionResume};
 use crate::state::{default_init_params, LoginState, SkillEnv};
 use crate::updates::{handle_live_update, spawn_live_update_task, LiveUpdateEvent};
 
@@ -82,13 +82,30 @@ pub async fn run() -> anyhow::Result<()> {
     // Attempt to reuse a pre-authenticated session first. If the session file
     // holds a valid auth key we can go straight to the update loop without
     // prompting the agent for login credentials.
+    //
+    // `offline_reason` parks the subscriber as "temporarily offline" when the
+    // resume failed for infrastructure reasons (network/DC unreachable) with
+    // the auth material intact. In that state a business command acts as the
+    // user's explicit retry: it re-attempts the resume on demand instead of
+    // answering "not authenticated" (agentenv/monorepo#626). No background
+    // retry loop — recovery is always user-driven.
+    let mut offline_reason: Option<String> = None;
     let mut client = match try_resume_session(&env).await? {
-        Some(c) => {
+        SessionResume::Resumed(c) => {
             emit_control(&env.topic, "ready", json!({ "resumed": true }))?;
             Some(c)
         }
-        None => {
+        SessionResume::AuthRequired => {
             emit_control(&env.topic, "login_required", json!({}))?;
+            None
+        }
+        SessionResume::Transient(detail) => {
+            emit_control(
+                &env.topic,
+                "resume_offline",
+                json!({ "error": detail, "retryable": true }),
+            )?;
+            offline_reason = Some(detail);
             None
         }
     };
@@ -103,6 +120,44 @@ pub async fn run() -> anyhow::Result<()> {
             info!("stdin closed before login completed");
             return Ok(());
         };
+        // Resume-on-demand: when parked offline, a business command is the
+        // user's explicit Retry — attempt the resume once before answering.
+        if offline_reason.is_some() && is_resume_retry_command(&cmd) {
+            match try_resume_session(&env).await? {
+                SessionResume::Resumed(mut resumed) => {
+                    offline_reason = None;
+                    emit_control(
+                        &env.topic,
+                        "ready",
+                        json!({ "resumed": true, "recovered": true }),
+                    )?;
+                    // Serve the command that triggered the recovery, then fall
+                    // through into the normal authorized flow.
+                    let _ = handle_runtime_command(
+                        &env,
+                        &mut resumed,
+                        &mut login_state,
+                        &mut qr_state,
+                        cmd,
+                    )
+                    .await?;
+                    client = Some(resumed);
+                    continue;
+                }
+                SessionResume::AuthRequired => {
+                    // The retry revealed genuine auth loss — switch to the
+                    // login-required mode and let the arms below answer with
+                    // the real auth error.
+                    offline_reason = None;
+                    emit_control(&env.topic, "login_required", json!({}))?;
+                }
+                SessionResume::Transient(detail) => {
+                    emit_offline_command_error(&env, &cmd, &detail)?;
+                    offline_reason = Some(detail);
+                    continue;
+                }
+            }
+        }
         match cmd {
             SubscriberCommand::TelegramLoginStart {
                 phone,
@@ -164,12 +219,19 @@ pub async fn run() -> anyhow::Result<()> {
                 )?;
             }
             SubscriberCommand::TelegramAuthOk => {
+                // While parked offline the on-disk session is signed in and
+                // only the network was unreachable — answering ok:false would
+                // degrade the connection as if the login were lost. Probes
+                // deliberately do NOT trigger a resume retry (recovery stays
+                // user-driven, not poll-driven).
+                let offline = offline_reason.is_some();
                 emit_control(
                     &env.topic,
                     "auth_ok",
                     json!({
-                        "ok": false,
-                        "authenticated": false,
+                        "ok": offline,
+                        "authenticated": offline,
+                        "offline": offline,
                     }),
                 )?;
             }
@@ -447,7 +509,9 @@ async fn run_update_loop(
                     if recoverable {
                         warn!(%error, "recovering telegram live update stream");
                         tokio::time::sleep(LIVE_UPDATE_RECOVERY_DELAY).await;
-                        if let Some(recovered) = try_resume_session(env).await? {
+                        if let SessionResume::Resumed(recovered) =
+                            try_resume_session(env).await?
+                        {
                             *client = recovered;
                             reset_delivery_cursor_for_current_account(client, delivery_cursor)
                                 .await?;
@@ -937,6 +1001,79 @@ fn handle_login_custom(env: &SkillEnv, op: String, args: serde_json::Value) -> a
     )
 }
 
+/// Business commands that retry a parked-offline resume on demand. Login
+/// commands run their own flow, and auth probes must stay passive — recovery
+/// is user-driven, never poll-driven (agentenv/monorepo#626).
+fn is_resume_retry_command(cmd: &SubscriberCommand) -> bool {
+    match cmd {
+        SubscriberCommand::TelegramListPeers { .. }
+        | SubscriberCommand::TelegramSearchMessages { .. }
+        | SubscriberCommand::TelegramListMessages { .. }
+        | SubscriberCommand::SendMessage { .. } => true,
+        SubscriberCommand::Custom { op, .. } => op == "telegram_act",
+        _ => false,
+    }
+}
+
+/// Answers a business command while temporarily offline with a retryable
+/// error on the command's own response channel — deliberately NOT the
+/// "not authenticated" wording, which would send the user to a re-login the
+/// account doesn't need.
+fn emit_offline_command_error(
+    env: &SkillEnv,
+    cmd: &SubscriberCommand,
+    detail: &str,
+) -> anyhow::Result<()> {
+    let error = format!(
+        "Telegram connection is temporarily offline: {detail}. Check the network and retry."
+    );
+    match cmd {
+        SubscriberCommand::TelegramListPeers { query, .. } => emit_control(
+            &env.topic,
+            "peer_list_error",
+            json!({ "error": error, "query": query }),
+        ),
+        SubscriberCommand::TelegramSearchMessages { peer, query, .. } => emit_control(
+            &env.topic,
+            "message_search_error",
+            json!({ "error": error, "peer": peer, "query": query }),
+        ),
+        SubscriberCommand::TelegramListMessages { peer, .. } => emit_control(
+            &env.topic,
+            "message_list_error",
+            json!({ "error": error, "peer": peer }),
+        ),
+        SubscriberCommand::SendMessage { peer, .. } => emit_control(
+            &env.topic,
+            "send_unsupported",
+            json!({ "error": error, "peer": peer }),
+        ),
+        SubscriberCommand::Custom { op, args } if op == "telegram_act" => {
+            let action = args
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let input = args.get("input").unwrap_or(args);
+            emit_control(
+                &env.topic,
+                "telegram_act_error",
+                json!({
+                    "action": action,
+                    "peer": input
+                        .get("to")
+                        .or_else(|| input.get("target"))
+                        .or_else(|| input.get("channel"))
+                        .or_else(|| input.get("chat"))
+                        .or_else(|| input.get("peer"))
+                        .and_then(serde_json::Value::as_str),
+                    "error": error,
+                }),
+            )
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn import_and_connect(
     env: &SkillEnv,
     options: TdataImportOptions,
@@ -975,7 +1112,7 @@ async fn verify_imported_session(
     env: &SkillEnv,
     outcome: &mut TdataImportOutcome,
 ) -> anyhow::Result<Option<Client>> {
-    if let Some(client) = try_resume_session(env).await? {
+    if let SessionResume::Resumed(client) = try_resume_session(env).await? {
         return Ok(Some(client));
     }
 
@@ -987,7 +1124,7 @@ async fn verify_imported_session(
         tried.push(dc_id);
         rewrite_imported_session_dc(env, dc_id)?;
         outcome.dc_id = dc_id;
-        if let Some(client) = try_resume_session(env).await? {
+        if let SessionResume::Resumed(client) = try_resume_session(env).await? {
             return Ok(Some(client));
         }
     }
