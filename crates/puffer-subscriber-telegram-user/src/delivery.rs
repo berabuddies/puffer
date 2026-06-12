@@ -9,13 +9,14 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use grammers_client::types::{Chat, Message};
+use grammers_client::types::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
 
-use crate::events::{build_message_event, emit};
+use crate::events::{build_message_event, emit, message_peer_metadata};
 use crate::notifications::NotificationMuteCache;
+use crate::peer_cache::TelegramPeerCache;
 use crate::state::SkillEnv;
 
 const DELIVERY_SOURCE_LIVE: &str = "live";
@@ -163,9 +164,11 @@ pub(crate) async fn emit_message_if_new(
         );
         return Ok(false);
     }
+    let peer_cache = TelegramPeerCache::load(env).unwrap_or_default();
     let event = build_message_event(
         &env.topic,
         message,
+        Some(&peer_cache),
         notification_muted,
         delivery_source,
         source_received_at_ms,
@@ -236,19 +239,10 @@ fn append_message_diagnostic(
     let path = env.state_dir.join("message-diagnostics.ndjson");
     let now_ms = now_unix_millis();
     let chat = message.chat();
-    let (chat_kind, chat_title, chat_username) = describe_chat(&chat);
-    let chat_is_bot = telegram_chat_is_bot(&chat);
+    let peer_cache = TelegramPeerCache::load(env).unwrap_or_default();
+    let peer = message_peer_metadata(message, Some(&peer_cache));
     let date_ms = i128::from(message.date().timestamp_millis());
-    let (sender_id, sender_username, sender_name, sender_is_bot) = match message.sender() {
-        Some(sender) => (
-            Some(sender.id()),
-            sender.username().map(|value| value.to_string()),
-            Some(chat_display_name(&sender)),
-            telegram_chat_is_bot(&sender),
-        ),
-        None => (None, None, None, false),
-    };
-    if chat_is_bot || sender_is_bot {
+    if peer.chat_is_bot || peer.sender_is_bot {
         return;
     }
     let record = json!({
@@ -256,14 +250,14 @@ fn append_message_diagnostic(
         "stage": stage,
         "delivery_source": delivery_source,
         "chat_id": chat.id(),
-        "chat_kind": chat_kind,
-        "chat_title": chat_title,
-        "chat_username": chat_username,
-        "chat_is_bot": chat_is_bot,
-        "sender_id": sender_id,
-        "sender_username": sender_username,
-        "sender_name": sender_name,
-        "sender_is_bot": sender_is_bot,
+        "chat_kind": peer.chat_kind,
+        "chat_title": peer.chat_title,
+        "chat_username": peer.chat_username,
+        "chat_is_bot": peer.chat_is_bot,
+        "sender_id": peer.sender_id,
+        "sender_username": peer.sender_username,
+        "sender_name": peer.sender_name,
+        "sender_is_bot": peer.sender_is_bot,
         "message_id": message.id(),
         "date_ms": date_ms,
         "source_received_at_ms": source_received_at_ms,
@@ -276,44 +270,6 @@ fn append_message_diagnostic(
         "text_prefix": truncate_text(message.text(), 200),
     });
     crate::diagnostics::append_ndjson(&path, &record);
-}
-
-fn describe_chat(chat: &Chat) -> (&'static str, Option<String>, Option<String>) {
-    match chat {
-        Chat::User(_) => (
-            "user",
-            Some(chat_display_name(chat)),
-            chat.username().map(|value| value.to_string()),
-        ),
-        Chat::Group(_) => (
-            "group",
-            Some(chat.name().to_string()),
-            chat.username().map(|value| value.to_string()),
-        ),
-        Chat::Channel(_) => (
-            "channel",
-            Some(chat.name().to_string()),
-            chat.username().map(|value| value.to_string()),
-        ),
-    }
-}
-
-fn chat_display_name(chat: &Chat) -> String {
-    match chat {
-        Chat::User(user) => user.full_name(),
-        Chat::Group(_) | Chat::Channel(_) => chat.name().to_string(),
-    }
-}
-
-fn telegram_chat_is_bot(chat: &Chat) -> bool {
-    matches!(chat, Chat::User(user) if user.raw.bot)
-        || chat
-            .username()
-            .is_some_and(telegram_username_looks_like_bot)
-}
-
-fn telegram_username_looks_like_bot(username: &str) -> bool {
-    username.to_ascii_lowercase().ends_with("bot")
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {

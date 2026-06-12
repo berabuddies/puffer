@@ -13,8 +13,30 @@ use grammers_client::types::{Chat, Media, Message};
 use puffer_subscriber_runtime::Event;
 use serde_json::{json, Value};
 
+use crate::peer_cache::TelegramPeerCache;
 use crate::polls::{poll_payload, poll_text};
 use crate::reply::reply_header_payload;
+
+/// Normalized Telegram peer fields for one message event.
+#[derive(Debug, Clone)]
+pub(crate) struct MessagePeerMetadata {
+    /// Chat kind: `user`, `group`, or `channel`.
+    pub(crate) chat_kind: &'static str,
+    /// Human-readable chat title.
+    pub(crate) chat_title: Option<String>,
+    /// Chat public username, when any.
+    pub(crate) chat_username: Option<String>,
+    /// Whether the chat is a bot.
+    pub(crate) chat_is_bot: bool,
+    /// Stable sender user id, when Telegram exposes it.
+    pub(crate) sender_id: Option<i64>,
+    /// Sender public username, when any.
+    pub(crate) sender_username: Option<String>,
+    /// Sender display name.
+    pub(crate) sender_name: Option<String>,
+    /// Whether the sender is a bot.
+    pub(crate) sender_is_bot: bool,
+}
 
 /// Writes one [`Event`] to stdout as a single JSON line and flushes.
 ///
@@ -54,29 +76,19 @@ pub fn emit_control(topic: &str, kind: &str, payload: Value) -> anyhow::Result<(
 pub fn build_message_event(
     topic: &str,
     message: &Message,
+    peer_cache: Option<&TelegramPeerCache>,
     notification_muted: bool,
     delivery_source: &str,
     source_received_at_ms: Option<i128>,
 ) -> Event {
     let chat = message.chat();
-    let (chat_kind, chat_title, chat_username) = describe_chat(&chat);
-    let chat_is_bot = telegram_chat_is_bot(&chat);
+    let peer = message_peer_metadata(message, peer_cache);
     let chat_id = chat.id();
     let message_id = message.id();
     let date_ms = message.date().timestamp_millis();
     let date = message.date().to_rfc3339();
     let is_outgoing = message.outgoing();
     let emit_at_ms = now_unix_millis();
-
-    let (sender_id, sender_username, sender_name, sender_is_bot) = match message.sender() {
-        Some(s) => (
-            Some(s.id()),
-            s.username().map(|u| u.to_string()),
-            Some(chat_display_name(&s)),
-            telegram_chat_is_bot(&s),
-        ),
-        None => (None, None, None, false),
-    };
 
     let kind = if matches!(chat, Chat::Channel(_)) {
         "channel_post"
@@ -86,24 +98,24 @@ pub fn build_message_event(
 
     let mut payload = serde_json::Map::new();
     payload.insert("chat_id".to_string(), json!(chat_id));
-    payload.insert("chat_kind".to_string(), json!(chat_kind));
-    if let Some(title) = chat_title {
+    payload.insert("chat_kind".to_string(), json!(peer.chat_kind));
+    if let Some(title) = peer.chat_title {
         payload.insert("chat_title".to_string(), json!(title));
     }
-    if let Some(username) = chat_username {
+    if let Some(username) = peer.chat_username {
         payload.insert("chat_username".to_string(), json!(username));
     }
-    payload.insert("chat_is_bot".to_string(), json!(chat_is_bot));
-    if let Some(id) = sender_id {
+    payload.insert("chat_is_bot".to_string(), json!(peer.chat_is_bot));
+    if let Some(id) = peer.sender_id {
         payload.insert("sender_id".to_string(), json!(id));
     }
-    if let Some(username) = sender_username {
+    if let Some(username) = peer.sender_username {
         payload.insert("sender_username".to_string(), json!(username));
     }
-    if let Some(name) = sender_name {
+    if let Some(name) = peer.sender_name {
         payload.insert("sender_name".to_string(), json!(name));
     }
-    payload.insert("sender_is_bot".to_string(), json!(sender_is_bot));
+    payload.insert("sender_is_bot".to_string(), json!(peer.sender_is_bot));
     payload.insert("message_id".to_string(), json!(message_id));
     payload.insert("date".to_string(), json!(date));
     payload.insert("date_ms".to_string(), json!(date_ms));
@@ -151,6 +163,80 @@ pub fn build_message_event(
     }
 }
 
+/// Builds normalized peer metadata and backfills sparse direct-user updates
+/// from the durable peer cache when Telegram omits display fields.
+pub(crate) fn message_peer_metadata(
+    message: &Message,
+    peer_cache: Option<&TelegramPeerCache>,
+) -> MessagePeerMetadata {
+    let chat = message.chat();
+    let chat_id = chat.id();
+    let (chat_kind, chat_title, chat_username) = describe_chat(&chat);
+    let mut peer = MessagePeerMetadata {
+        chat_kind,
+        chat_title: nonempty_owned(chat_title),
+        chat_username: nonempty_owned(chat_username),
+        chat_is_bot: telegram_chat_is_bot(&chat),
+        sender_id: None,
+        sender_username: None,
+        sender_name: None,
+        sender_is_bot: false,
+    };
+
+    if let Some(sender) = message.sender() {
+        peer.sender_id = Some(sender.id());
+        peer.sender_username = nonempty_owned(sender.username().map(|value| value.to_string()));
+        peer.sender_name = nonempty(chat_display_name(&sender));
+        peer.sender_is_bot = telegram_chat_is_bot(&sender);
+    }
+
+    backfill_message_peer_metadata(&mut peer, chat_id, peer_cache, message.outgoing());
+
+    peer
+}
+
+fn backfill_message_peer_metadata(
+    peer: &mut MessagePeerMetadata,
+    chat_id: i64,
+    peer_cache: Option<&TelegramPeerCache>,
+    is_outgoing: bool,
+) {
+    if peer.chat_title.is_none() {
+        peer.chat_title = peer_cache.and_then(|cache| cache.title_for(peer.chat_kind, chat_id));
+    }
+    if peer.chat_username.is_none() {
+        peer.chat_username =
+            peer_cache.and_then(|cache| cache.username_for(peer.chat_kind, chat_id));
+    }
+    if peer.sender_name.is_none() {
+        peer.sender_name = peer
+            .sender_id
+            .and_then(|id| peer_cache.and_then(|cache| cache.title_for("user", id)));
+    }
+    if peer.sender_username.is_none() {
+        peer.sender_username = peer
+            .sender_id
+            .and_then(|id| peer_cache.and_then(|cache| cache.username_for("user", id)));
+    }
+
+    if peer.chat_kind == "user" {
+        if !is_outgoing {
+            if peer.sender_name.is_none() {
+                peer.sender_name = peer.chat_title.clone();
+            }
+            if peer.sender_username.is_none() {
+                peer.sender_username = peer.chat_username.clone();
+            }
+        }
+        if peer.chat_title.is_none() {
+            peer.chat_title = peer.sender_name.clone();
+        }
+        if peer.chat_username.is_none() {
+            peer.chat_username = peer.sender_username.clone();
+        }
+    }
+}
+
 fn now_unix_millis() -> i128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -190,6 +276,19 @@ fn chat_display_name(chat: &Chat) -> String {
     }
 }
 
+fn nonempty(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn nonempty_owned(value: Option<String>) -> Option<String> {
+    value.and_then(nonempty)
+}
+
 fn telegram_chat_is_bot(chat: &Chat) -> bool {
     matches!(chat, Chat::User(user) if user.raw.bot)
         || chat
@@ -199,4 +298,44 @@ fn telegram_chat_is_bot(chat: &Chat) -> bool {
 
 fn telegram_username_looks_like_bot(username: &str) -> bool {
     username.to_ascii_lowercase().ends_with("bot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{backfill_message_peer_metadata, MessagePeerMetadata};
+    use crate::peer_cache::TelegramPeerCache;
+    use serde_json::json;
+
+    #[test]
+    fn direct_user_sender_name_is_backfilled_from_peer_cache() {
+        let cache: TelegramPeerCache = serde_json::from_value(json!({
+            "version": 1,
+            "peers": [{
+                "id": "6156741935",
+                "numeric_id": 6156741935i64,
+                "kind": "user",
+                "title": "smith john",
+                "usernames": ["johnsmith1847"],
+                "updated_at_ms": 1
+            }]
+        }))
+        .unwrap();
+        let mut peer = MessagePeerMetadata {
+            chat_kind: "user",
+            chat_title: None,
+            chat_username: None,
+            chat_is_bot: false,
+            sender_id: Some(6156741935i64),
+            sender_username: None,
+            sender_name: None,
+            sender_is_bot: false,
+        };
+
+        backfill_message_peer_metadata(&mut peer, 6156741935i64, Some(&cache), false);
+
+        assert_eq!(peer.sender_name.as_deref(), Some("smith john"));
+        assert_eq!(peer.sender_username.as_deref(), Some("johnsmith1847"));
+        assert_eq!(peer.chat_title.as_deref(), Some("smith john"));
+        assert_eq!(peer.chat_username.as_deref(), Some("johnsmith1847"));
+    }
 }

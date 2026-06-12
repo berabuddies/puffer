@@ -139,6 +139,28 @@ impl TelegramPeerCache {
         })
     }
 
+    /// Returns the best cached display title for one peer.
+    pub(crate) fn title_for(&self, kind: &str, numeric_id: i64) -> Option<String> {
+        self.find(kind, numeric_id)
+            .and_then(|record| record.title.clone())
+    }
+
+    /// Returns the best cached public username for one peer.
+    pub(crate) fn username_for(&self, kind: &str, numeric_id: i64) -> Option<String> {
+        self.find(kind, numeric_id).and_then(|record| {
+            record
+                .username
+                .clone()
+                .or_else(|| record.usernames.first().cloned())
+        })
+    }
+
+    fn find(&self, kind: &str, numeric_id: i64) -> Option<&TelegramPeerRecord> {
+        self.peers
+            .iter()
+            .find(|record| record.kind == kind && record.numeric_id == numeric_id)
+    }
+
     fn merge(&mut self, mut candidate: TelegramPeerRecord) {
         candidate.updated_at_ms = now_unix_millis();
         let Some(existing) = self
@@ -220,7 +242,11 @@ const DEFERRED_AVATAR_FETCH_CONCURRENCY: usize = 8;
 /// feed contact-picker UI, so they must never delay live message delivery
 /// (a fresh login on a large account used to spend ~2 minutes downloading
 /// them serially before the update loop could start).
-pub(crate) async fn hydrate_chat_avatars_deferred(env: &SkillEnv, client: &Client, chats: Vec<Chat>) {
+pub(crate) async fn hydrate_chat_avatars_deferred(
+    env: &SkillEnv,
+    client: &Client,
+    chats: Vec<Chat>,
+) {
     if chats.is_empty() {
         return;
     }
@@ -660,7 +686,7 @@ fn now_unix_millis() -> i64 {
 mod tests {
     use super::{
         joined_name, merge_optional_name, phone_key, saved_contact_usernames,
-        telegram_username_from_contact_id,
+        telegram_username_from_contact_id, TelegramPeerCache, TelegramPeerRecord, CACHE_VERSION,
     };
     use crate::state::SkillEnv;
 
@@ -681,6 +707,39 @@ mod tests {
         merge_optional_name(&mut existing, Some("Rin Tohsaka".to_string()));
 
         assert_eq!(existing.as_deref(), Some("Rin Tohsaka"));
+    }
+
+    #[test]
+    fn lookup_returns_cached_title_and_username() {
+        let cache = TelegramPeerCache {
+            version: CACHE_VERSION,
+            peers: vec![TelegramPeerRecord {
+                id: "6156741935".to_string(),
+                numeric_id: 6156741935,
+                kind: "user".to_string(),
+                title: Some("smith john".to_string()),
+                username: None,
+                usernames: vec!["johnsmith1847".to_string()],
+                first_name: None,
+                last_name: None,
+                phone: None,
+                avatar: None,
+                is_bot: false,
+                source: Some("test".to_string()),
+                updated_at_ms: 1,
+                last_message_at_ms: None,
+            }],
+        };
+
+        assert_eq!(
+            cache.title_for("user", 6156741935).as_deref(),
+            Some("smith john")
+        );
+        assert_eq!(
+            cache.username_for("user", 6156741935).as_deref(),
+            Some("johnsmith1847")
+        );
+        assert_eq!(cache.title_for("group", 6156741935), None);
     }
 
     #[test]
