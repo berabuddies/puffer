@@ -167,6 +167,10 @@ fn keyword_filter(
         EventOperator::Matches => keyword_regex_pattern(&values, case_insensitive)?,
         EventOperator::Exists => anyhow::bail!("message text rules do not support exists"),
     };
+    let case_insensitive = match operator {
+        EventOperator::Contains => true,
+        _ => case_insensitive,
+    };
     Ok(FilterSpec::Tagged(TaggedFilterSpec::Regex {
         pattern,
         case_insensitive,

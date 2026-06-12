@@ -88,7 +88,7 @@ fn config_paths_with_bundled_resources(root: &Path) -> ConfigPaths {
 }
 
 #[test]
-fn add_exclude_rule_persists_keyword_filter_and_ignores_legacy_scope() {
+fn add_exclude_rule_persists_case_insensitive_keyword_filter_and_ignores_legacy_scope() {
     let tempdir = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
     let manager = test_manager();
@@ -108,7 +108,7 @@ fn add_exclude_rule_persists_keyword_filter_and_ignores_legacy_scope() {
             "mode": "exclude",
             "keywords": ["作业"],
             "scope": {"field": "chat_id", "value": 7},
-            "case_insensitive": true
+            "case_insensitive": false
         }),
     )
     .unwrap();
@@ -342,7 +342,7 @@ fn field_rule_snapshot_returns_schema_and_latest_filters() {
     assert_eq!(binding["ignore_filters"].as_array().unwrap().len(), 1);
     assert_eq!(
         binding["include_filters"][0]["expression"],
-        ".message.subject | test(\"invoice\")"
+        ".message.subject | test(\"(?i:invoice)\")"
     );
     assert_eq!(
         binding["ignore_filters"][0]["expression"],
@@ -572,7 +572,7 @@ fn command_backed_connectors_expose_monitor_rule_schemas() {
         .unwrap();
     assert_eq!(
         lark_bot_binding["ignore_filters"][0]["expression"],
-        ".sender_open_id | test(\"ou_\")"
+        ".sender_open_id | test(\"(?i:ou_)\")"
     );
     assert!(lark_bot_binding["monitor_rule_schema"]["fields"]
         .as_array()

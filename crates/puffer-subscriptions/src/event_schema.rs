@@ -220,7 +220,7 @@ fn compile_jq_expression(field: &EventField, rule: &EventFieldRule) -> Result<St
             Ok(format!(".{} == {}", field.path, json_literal(value)?))
         }
         EventOperator::Contains => {
-            let value = regex::escape(&rule_value_string(rule)?);
+            let value = format!("(?i:{})", regex::escape(&rule_value_string(rule)?));
             Ok(format!(".{} | test({})", field.path, json_string(&value)?))
         }
         EventOperator::Matches => {
@@ -373,7 +373,7 @@ mod tests {
         assert!(matches!(
             &filter,
             FilterSpec::Tagged(TaggedFilterSpec::Jq { expression })
-                if expression == ".message.subject | test(\"invoice\\\\.\")"
+                if expression == ".message.subject | test(\"(?i:invoice\\\\.)\")"
         ));
         assert!(filter_matches(
             Some(&filter),
@@ -461,6 +461,18 @@ mod tests {
             .unwrap_or_else(|| panic!("missing bundled event schema for {slug}"))
     }
 
+    fn all_bundled_monitor_schemas() -> Vec<(&'static str, EventSchema)> {
+        vec![
+            ("telegram-user", bundled_schema("telegram-user")),
+            ("gmail-browser", bundled_schema("gmail-browser")),
+            ("gcal-browser", bundled_schema("gcal-browser")),
+            ("email", bundled_schema("email")),
+            ("telegram-bot", bundled_connector_schema("telegram-bot")),
+            ("lark-login", bundled_connector_schema("lark-login")),
+            ("lark-bot", bundled_connector_schema("lark-bot")),
+        ]
+    }
+
     fn field_filter(
         schema: &EventSchema,
         field: &str,
@@ -476,6 +488,55 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn payload_with_path_for_test(path: &str, value: Value) -> Value {
+        let mut current = value;
+        for part in path.split('.').rev() {
+            let mut map = serde_json::Map::new();
+            map.insert(part.to_string(), current);
+            current = Value::Object(map);
+        }
+        current
+    }
+
+    #[test]
+    fn bundled_contains_field_rules_match_case_insensitively() {
+        for (schema_slug, schema) in all_bundled_monitor_schemas() {
+            let mut checked = 0;
+            for field in schema
+                .fields
+                .iter()
+                .filter(|field| field.operators.contains(&EventOperator::Contains))
+            {
+                checked += 1;
+                let filter = field_filter(
+                    &schema,
+                    &field.path,
+                    EventOperator::Contains,
+                    Some(json!("MiXeD")),
+                );
+                assert!(
+                    filter_matches(
+                        Some(&filter),
+                        "",
+                        &payload_with_path_for_test(&field.path, json!("prefix mixed suffix")),
+                    ),
+                    "{schema_slug} {} contains rule should ignore case",
+                    field.path
+                );
+                assert!(
+                    !filter_matches(
+                        Some(&filter),
+                        "",
+                        &payload_with_path_for_test(&field.path, json!("prefix plain suffix")),
+                    ),
+                    "{schema_slug} {} contains rule should still require the literal value",
+                    field.path
+                );
+            }
+            assert!(checked > 0, "{schema_slug} should expose contains fields");
+        }
     }
 
     #[test]
@@ -517,6 +578,18 @@ mod tests {
             Some(&outgoing_no),
             "",
             &json!({"is_outgoing": "false"})
+        ));
+
+        let sender_name = field_filter(
+            &telegram,
+            "sender_name",
+            EventOperator::Contains,
+            Some(json!("John")),
+        );
+        assert!(filter_matches(
+            Some(&sender_name),
+            "",
+            &json!({"sender_name": "smith john"})
         ));
 
         let has_media = field_filter(&telegram, "media", EventOperator::Exists, None);
