@@ -506,9 +506,17 @@ pub(super) fn execute_monitor_reply_draft(
     else {
         bail!("monitor task `{}` not found", parsed.task_id);
     };
-    if task.status != "pending" {
+    // Reject only TERMINAL states, mirroring monitor_reply_send. `in_progress`
+    // is a legitimate working state — the action agent drafting the reply (or
+    // a triage TaskUpdate) may have marked the task active; requiring exactly
+    // `pending` dead-ended the whole human-gated flow whenever that happened
+    // (agentenv/monorepo#619 follow-up).
+    if matches!(
+        task.status.as_str(),
+        "completed" | "cancelled" | "canceled" | "failed" | "stopped"
+    ) {
         bail!(
-            "MonitorReplyDraft expected pending monitor task `{}`, got `{}`",
+            "MonitorReplyDraft expected an open monitor task `{}`, got terminal status `{}`",
             parsed.task_id,
             task.status
         );
@@ -752,11 +760,39 @@ fn normalize_monitor_task_metadata(metadata: &mut Map<String, Value>) {
 }
 
 fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
-    metadata
+    let context = metadata
         .get("source_context")
         .or_else(|| metadata.get("sourceContext"))
         .cloned()
-        .or_else(|| derived_monitor_source_context(metadata))
+        .or_else(|| derived_monitor_source_context(metadata));
+    with_verbatim_source_text(metadata, context)
+}
+
+/// Surfaces the server-stamped verbatim event text (`metadata.source_text`,
+/// written by the triage runner) as `source_context.text` when the stored or
+/// derived context lacks one, so reply drafts and approval flows quote the
+/// original wording rather than an LLM paraphrase (agentenv/monorepo#619).
+fn with_verbatim_source_text(
+    metadata: &Map<String, Value>,
+    context: Option<Value>,
+) -> Option<Value> {
+    let mut context = context?;
+    if let Some(object) = context.as_object_mut() {
+        let has_text = object
+            .get("text")
+            .and_then(Value::as_str)
+            .map_or(false, |value| !value.trim().is_empty());
+        if !has_text {
+            if let Some(text) = metadata
+                .get("source_text")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                object.insert("text".to_string(), Value::String(text.to_string()));
+            }
+        }
+    }
+    Some(context)
 }
 
 fn derived_monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
@@ -1815,6 +1851,80 @@ mod tests {
             Some("8759047281")
         );
         assert!(pending.get("source_context_hash").is_some());
+    }
+
+    #[test]
+    fn monitor_reply_draft_allows_in_progress_task() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+        execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({ "taskId": task_id, "status": "in_progress" }),
+        )
+        .unwrap();
+        assert_eq!(
+            load_monitor_task(tmp.path(), &task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "in_progress"
+        );
+        state.set_monitor_reply_scope_for_turn(
+            task_id.clone(),
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        );
+
+        execute_monitor_reply_draft(
+            &mut state,
+            tmp.path(),
+            json!({ "taskId": task_id, "message": "排查结论稍后给出。" }),
+        )
+        .unwrap();
+
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        let pending = task
+            .metadata
+            .get("pending_reply")
+            .and_then(Value::as_object)
+            .expect("in_progress tasks must accept drafts");
+        assert_eq!(
+            pending.get("status").and_then(Value::as_str),
+            Some("draft_ready")
+        );
+    }
+
+    #[test]
+    fn monitor_reply_draft_rejects_terminal_task() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+        // TaskUpdate itself refuses agent-driven completion of human-gated
+        // tasks, so build the terminal state directly in the store (the ignore
+        // flow and reply-completion writeback land tasks here).
+        let path = monitor_tasks_path(tmp.path());
+        let mut store = load_store::<TaskStore>(&path).unwrap();
+        store
+            .tasks
+            .iter_mut()
+            .find(|task| task.task_id == task_id)
+            .unwrap()
+            .status = "completed".to_string();
+        save_store(&path, &store).unwrap();
+        state.set_monitor_reply_scope_for_turn(
+            task_id.clone(),
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        );
+
+        let error = execute_monitor_reply_draft(
+            &mut state,
+            tmp.path(),
+            json!({ "taskId": task_id, "message": "Too late." }),
+        )
+        .expect_err("terminal tasks must not accept drafts");
+
+        assert!(error.to_string().contains("terminal status"));
     }
 
     #[test]

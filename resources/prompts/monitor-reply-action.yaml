@@ -22,3 +22,10 @@ template: |
   - Preserve explicit product names, person names, company names, file names,
     commands, URLs, quoted text, and domain terms exactly; translate only
     surrounding explanatory prose.
+
+  Source fidelity policy:
+  - When the reply references numbers, percentages, amounts, dates, times, or
+    identifiers from the source message, copy them exactly as written in the
+    source context text. Never round, convert, infer, or substitute values
+    from task summaries or other messages; the verbatim source text is
+    authoritative over any paraphrase.

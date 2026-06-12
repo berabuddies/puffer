@@ -643,6 +643,17 @@ fn monitor_task_json(task: MonitorTaskSnapshotRecord) -> Value {
         "ignored": monitor_metadata_bool(&task.metadata, "ignored"),
         "actions": monitor_actions(&task.metadata),
         "possible_ignore_reasons": monitor_ignore_reasons(&task.metadata),
+        // Human-gated reply review state. `monitor_tasks[]` is what bobo's
+        // Home feed renders, so the pending draft must surface HERE — adding
+        // it only to `task_snapshot::task_json` (the `tasks[]` array) leaves
+        // the Review-draft UI unreachable.
+        "source_context": task_snapshot::monitor_source_context(&task.metadata),
+        "completion_policy": task_snapshot::monitor_completion_policy(&task.metadata),
+        "pending_reply": task_snapshot::metadata_value(
+            &task.metadata,
+            &["pending_reply", "pendingReply"],
+            &["reply", "draft"]
+        ),
         "started_at_ms": task.started_at_ms,
         "updated_at_ms": task.updated_at_ms,
     })
@@ -816,7 +827,19 @@ mod tests {
                                     "actionPrompt": "Draft a concise reply to Alice."
                                 }
                             ],
-                            "possibleIgnoreReasons": ["duplicate support ping"]
+                            "possibleIgnoreReasons": ["duplicate support ping"],
+                            "source_context": {
+                                "connector": "telegram-login",
+                                "chat_id": 42
+                            },
+                            "source_text": "回调失败率刚升到 18%，16:00 前给结论。",
+                            "completion_policy": "human_gated_reply",
+                            "pending_reply": {
+                                "id": "draft-monitor-1-1",
+                                "status": "draft_ready",
+                                "version": 1,
+                                "agent_draft_text": "Deployment finished an hour ago."
+                            }
                         },
                         "started_at_ms": 10,
                         "updated_at_ms": 20
@@ -843,6 +866,23 @@ mod tests {
         assert_eq!(
             tasks[0]["possible_ignore_reasons"][0],
             "duplicate support ping"
+        );
+        // The human-gated reply review state must surface on monitor_tasks[]
+        // (the array bobo's Home renders), not only on the tasks[] snapshot.
+        assert_eq!(tasks[0]["source_context"]["chat_id"], 42);
+        // The server-stamped verbatim text rides along on source_context so
+        // UIs can show the original message next to the LLM paraphrase.
+        assert_eq!(
+            tasks[0]["source_context"]["text"],
+            "回调失败率刚升到 18%，16:00 前给结论。"
+        );
+        assert_eq!(tasks[0]["completion_policy"], "human_gated_reply");
+        assert_eq!(tasks[0]["pending_reply"]["id"], "draft-monitor-1-1");
+        assert_eq!(tasks[0]["pending_reply"]["status"], "draft_ready");
+        assert_eq!(tasks[0]["pending_reply"]["version"], 1);
+        assert_eq!(
+            tasks[0]["pending_reply"]["agent_draft_text"],
+            "Deployment finished an hour ago."
         );
         assert_eq!(snapshot["monitor_task_error"], Value::Null);
     }

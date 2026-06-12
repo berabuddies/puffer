@@ -337,7 +337,7 @@ fn metadata_u64(
         })
 }
 
-fn metadata_value(
+pub(super) fn metadata_value(
     metadata: &Map<String, Value>,
     top_level_keys: &[&str],
     monitor_keys: &[&str],
@@ -382,12 +382,41 @@ fn monitor_actions(metadata: &Map<String, Value>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
-    metadata
+pub(super) fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
+    let context = metadata
         .get("source_context")
         .or_else(|| metadata.get("sourceContext"))
         .cloned()
-        .or_else(|| derived_monitor_source_context(metadata))
+        .or_else(|| derived_monitor_source_context(metadata));
+    with_verbatim_source_text(metadata, context)
+}
+
+/// Surfaces the server-stamped verbatim event text (`metadata.source_text`,
+/// written by the triage runner) as `source_context.text` when the stored or
+/// derived context lacks one. Task subject/description are LLM paraphrases;
+/// this field is the ground truth UIs and reply flows can quote
+/// (agentenv/monorepo#619).
+fn with_verbatim_source_text(
+    metadata: &Map<String, Value>,
+    context: Option<Value>,
+) -> Option<Value> {
+    let mut context = context?;
+    if let Some(object) = context.as_object_mut() {
+        let has_text = object
+            .get("text")
+            .and_then(Value::as_str)
+            .map_or(false, |value| !value.trim().is_empty());
+        if !has_text {
+            if let Some(text) = metadata
+                .get("source_text")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                object.insert("text".to_string(), Value::String(text.to_string()));
+            }
+        }
+    }
+    Some(context)
 }
 
 fn derived_monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
@@ -448,7 +477,7 @@ fn derived_monitor_source_context(metadata: &Map<String, Value>) -> Option<Value
     }))
 }
 
-fn monitor_completion_policy(metadata: &Map<String, Value>) -> Option<Value> {
+pub(super) fn monitor_completion_policy(metadata: &Map<String, Value>) -> Option<Value> {
     metadata
         .get("completion_policy")
         .or_else(|| metadata.get("completionPolicy"))

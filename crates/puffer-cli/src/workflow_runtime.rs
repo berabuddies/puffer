@@ -15,7 +15,6 @@ use puffer_workflow::{
     TriggerSpec, WorkflowStore,
 };
 use serde_json::json;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -61,7 +60,6 @@ pub(crate) fn install(
         providers: providers.clone(),
         auth_store: auth_store.clone(),
         lock: Mutex::new(()),
-        triage_sessions: Mutex::new(HashMap::new()),
     });
     install_workflow_runner(runner.clone()).context("failed to install workflow runner")?;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -83,7 +81,6 @@ struct ProcessWorkflowRunner {
     providers: ProviderRegistry,
     auth_store: AuthStore,
     lock: Mutex<()>,
-    triage_sessions: Mutex<HashMap<String, AppState>>,
 }
 
 impl WorkflowActionRunner for ProcessWorkflowRunner {
@@ -164,6 +161,14 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
             let prompt = render_triage_batch_prompt(prompt, &triggers)?;
             let session_key = triage_session_key(model, &triggers);
             let output = self.run_task_agent_prompt_for_session(prompt, model, &session_key)?;
+            // Server-owned grounding: stamp the trigger's verbatim event text
+            // onto any monitor task the triage turn created for this envelope.
+            // The agent only paraphrases the message into task fields, so
+            // without this the original wording (numbers, times, amounts) is
+            // unrecoverable downstream (agentenv/monorepo#619).
+            if let Err(error) = record_monitor_source_text(&self.paths, &triggers[0]) {
+                tracing::warn!(%error, "failed to record verbatim monitor source text");
+            }
             summaries.push(output.summary);
             if let Some(next_usage) = output.usage {
                 merge_usage(&mut usage, next_usage);
@@ -217,19 +222,19 @@ impl ProcessWorkflowRunner {
     ) -> Result<WorkflowActionOutput> {
         let _guard = self.lock.lock().unwrap();
         let cwd = self.paths.workspace_root.clone();
-        let mut sessions = self.triage_sessions.lock().unwrap();
-        if !sessions.contains_key(session_key) {
-            let mut state = self.new_task_app_state(cwd, model)?;
-            state.prompt_cache_key_override = Some(session_key.to_string());
-            sessions.insert(session_key.to_string(), state);
-        }
-        let state = sessions
-            .get_mut(session_key)
-            .expect("triage session inserted above");
+        // Fresh agent state per triage turn. A long-lived session shared by
+        // every turn on the same connection let earlier messages contaminate
+        // later ones — numbers/times were copied from sibling messages in the
+        // accumulated history (agentenv/monorepo#619). Task dedup never needed
+        // session memory (the triage protocol requires TaskList, which reads
+        // the store from disk), and the stable per-connection cache key keeps
+        // prompt-prefix caching effective across fresh sessions.
+        let mut state = self.new_task_app_state(cwd, model)?;
+        state.prompt_cache_key_override = Some(session_key.to_string());
         let mut auth_store = self.auth_store.clone();
         let mut usage = None;
         let output = execute_user_turn_streaming(
-            state,
+            &mut state,
             &self.resources,
             &self.providers,
             &mut auth_store,
@@ -329,6 +334,99 @@ fn triage_session_key(model: Option<&str>, triggers: &[serde_json::Value]) -> St
         .unwrap_or("unknown");
     let model = model.and_then(non_empty_trimmed).unwrap_or("default");
     format!("monitor-triage:{connection}:{model}")
+}
+
+/// Stamps the trigger's verbatim event text onto monitor tasks created for
+/// that envelope: `metadata.source_text`, plus `source_context.text` when the
+/// agent recorded a source context. Server-owned and idempotent — the agent
+/// never writes these, so paraphrase errors in subject/description can always
+/// be checked against (and repaired from) the original wording.
+fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) -> Result<()> {
+    let Some(envelope_id) = trigger
+        .get("envelope_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(text) = trigger
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let path = paths
+        .workspace_config_dir
+        .join("runtime")
+        .join("claude_workflow")
+        .join("monitor_tasks.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()))
+        }
+    };
+    let mut store: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid monitor task store {}", path.display()))?;
+    let Some(tasks) = store
+        .get_mut("tasks")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for task in tasks.iter_mut() {
+        let Some(metadata) = task
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        let task_envelope = metadata
+            .get("monitor_envelope_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim);
+        if task_envelope != Some(envelope_id) {
+            continue;
+        }
+        // `monitor_envelope_id` tracks the task's CURRENT source message —
+        // triage's TaskUpdate re-points it when a follow-up supersedes the
+        // original request (e.g. the same metric reported again with new
+        // numbers). Keep the verbatim text aligned with that envelope:
+        // overwriting is safe because we only ever stamp the text belonging
+        // to the envelope the task currently references.
+        if metadata
+            .get("source_text")
+            .and_then(serde_json::Value::as_str)
+            != Some(text)
+        {
+            metadata.insert(
+                "source_text".to_string(),
+                serde_json::Value::String(text.to_string()),
+            );
+            changed = true;
+        }
+        if let Some(context) = metadata
+            .get_mut("source_context")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if context.get("text").and_then(serde_json::Value::as_str) != Some(text) {
+                context.insert(
+                    "text".to_string(),
+                    serde_json::Value::String(text.to_string()),
+                );
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        std::fs::write(&path, serde_json::to_string_pretty(&store)?)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
 }
 
 struct PufferAgentExecutor {
@@ -781,5 +879,132 @@ mod tests {
             selected_provider_id_for_model("shared-model", Some("openai"), &registry).as_deref(),
             Some("openai")
         );
+    }
+
+    #[test]
+    fn record_monitor_source_text_stamps_matching_tasks_verbatim() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let store_path = paths
+            .workspace_config_dir
+            .join("runtime")
+            .join("claude_workflow")
+            .join("monitor_tasks.json");
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &store_path,
+            serde_json::to_string_pretty(&json!({
+                "tasks": [
+                    {
+                        "task_id": "monitor-1",
+                        "subject": "SLA report request",
+                        "metadata": {
+                            "monitor_envelope_id": "env-1",
+                            "source_context": { "kind": "telegram_direct_message" }
+                        }
+                    },
+                    {
+                        "task_id": "monitor-2",
+                        "subject": "Other task",
+                        "metadata": { "monitor_envelope_id": "env-2" }
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let trigger = json!({
+            "envelope_id": "env-1",
+            "text": "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。"
+        });
+
+        super::record_monitor_source_text(&paths, &trigger).unwrap();
+
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store_path).unwrap()).unwrap();
+        let tasks = store["tasks"].as_array().unwrap();
+        // The matching task gets the verbatim text on both fields…
+        assert_eq!(
+            tasks[0]["metadata"]["source_text"],
+            "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。"
+        );
+        assert_eq!(
+            tasks[0]["metadata"]["source_context"]["text"],
+            "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。"
+        );
+        // …while a different envelope's task is untouched.
+        assert!(tasks[1]["metadata"].get("source_text").is_none());
+
+        // Re-stamping the same envelope is a no-op.
+        super::record_monitor_source_text(&paths, &trigger).unwrap();
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store_path).unwrap()).unwrap();
+        assert_eq!(
+            store["tasks"][0]["metadata"]["source_text"],
+            "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。"
+        );
+    }
+
+    #[test]
+    fn record_monitor_source_text_follows_task_update_re_pointing() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let store_path = paths
+            .workspace_config_dir
+            .join("runtime")
+            .join("claude_workflow")
+            .join("monitor_tasks.json");
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        // A task originally created from env-1 (already stamped with msg1)
+        // that triage's TaskUpdate has re-pointed to a follow-up message.
+        std::fs::write(
+            &store_path,
+            serde_json::to_string_pretty(&json!({
+                "tasks": [
+                    {
+                        "task_id": "monitor-1",
+                        "subject": "失败率升到 15%，18点前给结论",
+                        "metadata": {
+                            "monitor_envelope_id": "env-3",
+                            "source_text": "失败率刚升到 18%，16:00 前给我结论",
+                            "source_context": {
+                                "kind": "telegram_direct_message",
+                                "text": "失败率刚升到 18%，16:00 前给我结论"
+                            }
+                        }
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let trigger = json!({
+            "envelope_id": "env-3",
+            "text": "失败率刚升到 15% 18点前给我结论"
+        });
+
+        super::record_monitor_source_text(&paths, &trigger).unwrap();
+
+        // The verbatim anchor follows the envelope the task now references —
+        // a stale msg1 anchor under a msg3 subject would defeat its purpose.
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store_path).unwrap()).unwrap();
+        assert_eq!(
+            store["tasks"][0]["metadata"]["source_text"],
+            "失败率刚升到 15% 18点前给我结论"
+        );
+        assert_eq!(
+            store["tasks"][0]["metadata"]["source_context"]["text"],
+            "失败率刚升到 15% 18点前给我结论"
+        );
+    }
+
+    #[test]
+    fn record_monitor_source_text_tolerates_missing_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let trigger = json!({ "envelope_id": "env-1", "text": "hello" });
+
+        super::record_monitor_source_text(&paths, &trigger).unwrap();
     }
 }
