@@ -556,9 +556,7 @@ mod tests {
         assert!(prompt.contains("monitor_connector: \"telegram-login\""));
         assert!(prompt.contains("monitor_contact_ids"));
         assert!(prompt.contains("Source fidelity policy"));
-        assert!(prompt.contains(
-            "exactly as written in the current workflow trigger's event text"
-        ));
+        assert!(prompt.contains("exactly as written in the current workflow trigger's event text"));
         assert!(prompt.contains("never change its `status`"));
         assert!(prompt.contains("telegram@alice"));
         assert!(prompt.contains("monitor_envelope_id"));

@@ -35,6 +35,7 @@ use puffer_subscriptions::{
 use puffer_workflow::{RegisterOptions, WorkflowStore};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::fs;
 
 /// Returns the workflow editor snapshot with connector catalog context.
@@ -608,7 +609,12 @@ fn load_monitor_tasks(paths: &ConfigPaths) -> Result<Vec<Value>> {
     };
     let store: MonitorTaskStoreSnapshot = serde_json::from_str(&raw)
         .with_context(|| format!("invalid monitor task store {}", path.display()))?;
-    Ok(store.tasks.into_iter().map(monitor_task_json).collect())
+    let telegram_peer_avatars = crate::daemon_contacts::cached_telegram_peer_avatars(paths);
+    Ok(store
+        .tasks
+        .into_iter()
+        .map(|task| monitor_task_json(task, &telegram_peer_avatars))
+        .collect())
 }
 
 fn monitor_tasks_path(paths: &ConfigPaths) -> std::path::PathBuf {
@@ -619,7 +625,10 @@ fn monitor_tasks_path(paths: &ConfigPaths) -> std::path::PathBuf {
         .join("monitor_tasks.json")
 }
 
-fn monitor_task_json(task: MonitorTaskSnapshotRecord) -> Value {
+fn monitor_task_json(
+    task: MonitorTaskSnapshotRecord,
+    telegram_peer_avatars: &HashMap<String, String>,
+) -> Value {
     json!({
         "task_id": task.task_id,
         "subject": task.subject,
@@ -647,7 +656,10 @@ fn monitor_task_json(task: MonitorTaskSnapshotRecord) -> Value {
         // Home feed renders, so the pending draft must surface HERE — adding
         // it only to `task_snapshot::task_json` (the `tasks[]` array) leaves
         // the Review-draft UI unreachable.
-        "source_context": task_snapshot::monitor_source_context(&task.metadata),
+        "source_context": task_snapshot::monitor_source_context_with_sender_avatars(
+            &task.metadata,
+            telegram_peer_avatars
+        ),
         "completion_policy": task_snapshot::monitor_completion_policy(&task.metadata),
         "pending_reply": task_snapshot::metadata_value(
             &task.metadata,
@@ -885,6 +897,68 @@ mod tests {
             "Deployment finished an hour ago."
         );
         assert_eq!(snapshot["monitor_task_error"], Value::Null);
+    }
+
+    #[test]
+    fn workflow_snapshot_enriches_monitor_sender_avatar_from_telegram_peer_cache() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let avatar = "data:image/jpeg;base64,ZmFrZS1hdmF0YXI=";
+        let account_dir = paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join("telegram-user");
+        std::fs::create_dir_all(&account_dir).unwrap();
+        std::fs::write(
+            account_dir.join("peer-cache.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "peers": [{
+                    "id": "5229190700",
+                    "numeric_id": 5229190700_i64,
+                    "kind": "user",
+                    "title": "Helen",
+                    "username": "helen",
+                    "avatar": avatar,
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let task_path = monitor_tasks_path(&paths);
+        std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &task_path,
+            serde_json::to_string_pretty(&json!({
+                "tasks": [{
+                    "task_id": "monitor-avatar",
+                    "subject": "Reply to Helen",
+                    "description": "Helen asked for the shipping ETA.",
+                    "status": "pending",
+                    "metadata": {
+                        "_monitor": true,
+                        "monitor_connection": "telegram-user",
+                        "monitor_connector": "telegram-login",
+                        "chat_id": "5229190700",
+                        "sender_id": "5229190700",
+                        "sender_username": "helen"
+                    },
+                    "started_at_ms": 10,
+                    "updated_at_ms": 20
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = handle_workflow_list(&paths).unwrap();
+        let tasks = snapshot["monitor_tasks"].as_array().unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["source_context"]["sender"]["avatar_url"], avatar);
     }
 
     #[test]

@@ -50,6 +50,10 @@ const INFERENCE_CONTEXT_LIMIT: usize =
 const HISTORY_CANDIDATE_LIMIT: usize = 1_000;
 const DAY_MS: i128 = 86_400_000;
 
+pub(crate) fn cached_telegram_peer_avatars(paths: &ConfigPaths) -> HashMap<String, String> {
+    read_telegram_peer_avatars(paths)
+}
+
 #[derive(Debug, Clone)]
 struct Candidate {
     id: String,

@@ -2,8 +2,11 @@
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
+use puffer_subscriptions::normalize_contact_id;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -391,6 +394,132 @@ pub(super) fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Va
     with_verbatim_source_text(metadata, context)
 }
 
+pub(super) fn monitor_source_context_with_sender_avatars(
+    metadata: &Map<String, Value>,
+    telegram_peer_avatars: &HashMap<String, String>,
+) -> Option<Value> {
+    monitor_source_context(metadata)
+        .map(|context| with_sender_avatar_url(metadata, context, telegram_peer_avatars))
+}
+
+fn with_sender_avatar_url(
+    metadata: &Map<String, Value>,
+    mut context: Value,
+    telegram_peer_avatars: &HashMap<String, String>,
+) -> Value {
+    if telegram_peer_avatars.is_empty() || context_sender_avatar_url(&context).is_some() {
+        return context;
+    }
+    let Some(avatar) = sender_avatar_url_from_cache(metadata, &context, telegram_peer_avatars)
+    else {
+        return context;
+    };
+    let Some(object) = context.as_object_mut() else {
+        return context;
+    };
+    let sender = object
+        .entry("sender".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(sender) = sender.as_object_mut() else {
+        return context;
+    };
+    sender.insert("avatar_url".to_string(), Value::String(avatar));
+    context
+}
+
+fn context_sender_avatar_url(context: &Value) -> Option<String> {
+    context
+        .get("sender")
+        .and_then(Value::as_object)
+        .and_then(|sender| {
+            scalar_string(sender.get("avatar_url"))
+                .or_else(|| scalar_string(sender.get("avatarUrl")))
+        })
+}
+
+fn sender_avatar_url_from_cache(
+    metadata: &Map<String, Value>,
+    context: &Value,
+    telegram_peer_avatars: &HashMap<String, String>,
+) -> Option<String> {
+    for contact_id in sender_avatar_contact_ids(metadata, context) {
+        if let Some(avatar) = telegram_peer_avatars
+            .get(&contact_id)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(avatar.to_string());
+        }
+    }
+    None
+}
+
+fn sender_avatar_contact_ids(metadata: &Map<String, Value>, context: &Value) -> Vec<String> {
+    let sender = context.get("sender").and_then(Value::as_object);
+    let mut ids = BTreeSet::new();
+    if let Some(sender_id) = sender
+        .and_then(|sender| scalar_string(sender.get("id")))
+        .or_else(|| {
+            metadata_scalar_string(
+                metadata,
+                &["sender_id", "senderId"],
+                &["sender_id", "senderId"],
+            )
+        })
+    {
+        if sender_id
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .is_some()
+        {
+            if let Some(contact_id) = normalize_contact_id(&format!("telegram-user-id@{sender_id}"))
+            {
+                ids.insert(contact_id);
+            }
+        }
+    }
+    if let Some(username) = sender
+        .and_then(|sender| scalar_string(sender.get("username")))
+        .or_else(|| {
+            metadata_scalar_string(
+                metadata,
+                &["sender_username", "senderUsername"],
+                &["sender_username", "senderUsername"],
+            )
+        })
+    {
+        let username = username.trim().trim_start_matches('@');
+        if !username.is_empty() {
+            if let Some(contact_id) = normalize_contact_id(&format!("telegram@{username}")) {
+                ids.insert(contact_id);
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn metadata_scalar_string(
+    metadata: &Map<String, Value>,
+    top_level_keys: &[&str],
+    monitor_keys: &[&str],
+) -> Option<String> {
+    top_level_keys
+        .iter()
+        .find_map(|key| scalar_string(metadata.get(*key)))
+        .or_else(|| {
+            metadata
+                .get("monitor")
+                .and_then(Value::as_object)
+                .and_then(|monitor| {
+                    monitor_keys
+                        .iter()
+                        .find_map(|key| scalar_string(monitor.get(*key)))
+                })
+        })
+}
+
 /// Surfaces the server-stamped verbatim event text (`metadata.source_text`,
 /// written by the triage runner) as `source_context.text` when the stored or
 /// derived context lacks one. Task subject/description are LLM paraphrases;
@@ -556,6 +685,21 @@ fn monitor_ignore_reasons(metadata: &Map<String, Value>) -> Vec<Value> {
 
 fn string_value(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(ToOwned::to_owned)
+}
+
+fn scalar_string(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
