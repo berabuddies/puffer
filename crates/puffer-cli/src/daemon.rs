@@ -5960,6 +5960,9 @@ fn publish_sessionless_turn_error_event(
 ///     cryptic transport-level message.
 ///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
 ///     fired. Mirrors the bail string `"cancelled"`.
+///   * `model_gateway_unavailable` — the OpenAI-compatible model endpoint
+///     was unreachable or reset the TCP connection before returning a
+///     response. The raw transport chain remains in `errorRaw`.
 ///   * `provider_stream_closed` — provider SSE closed before the OpenAI
 ///     Responses stream emitted `response.completed`.
 ///   * `other` — anything we haven't classified.
@@ -5967,6 +5970,21 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     // anyhow walks the chain via Display when you `format!("{:#}", err)`
     let chain = format!("{err:#}");
     let lower = chain.to_ascii_lowercase();
+    if lower.contains("failed to parse sse response")
+        || lower.contains("stream closed before response.completed")
+        || lower.contains("idle timeout waiting for sse")
+    {
+        return (chain, "provider_stream_closed");
+    }
+    if is_model_gateway_transport_error(&lower) {
+        return (
+            "the model gateway is temporarily unavailable or reset the connection before \
+             responding. retry in a few seconds; if it keeps failing, check the model gateway \
+             status or switch models."
+                .to_string(),
+            "model_gateway_unavailable",
+        );
+    }
     if lower.contains("tcp connect error")
         || lower.contains("connection refused")
         || lower.contains("connect: connection refused")
@@ -5982,13 +6000,22 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     if lower == "cancelled" || lower.contains(": cancelled") {
         return (chain, "cancelled");
     }
-    if lower.contains("failed to parse sse response")
-        || lower.contains("stream closed before response.completed")
-        || lower.contains("idle timeout waiting for sse")
-    {
-        return (chain, "provider_stream_closed");
-    }
     (chain, "other")
+}
+
+fn is_model_gateway_transport_error(lower: &str) -> bool {
+    let is_model_endpoint = lower.contains("/v1/responses") || lower.contains("/chat/completions");
+    if !is_model_endpoint {
+        return false;
+    }
+    lower.contains("error sending request")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("connect")
+        || lower.contains("dns")
+        || lower.contains("tls")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -9605,6 +9632,44 @@ models: []
         let (msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "other");
         assert!(msg.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn classify_turn_error_distinguishes_model_gateway_transport_reset() {
+        use super::classify_turn_error;
+
+        let err = anyhow::anyhow!(
+            "error sending request for url \
+             (https://infer-api-test-46cc90.worldrouter.ai/v1/responses): \
+             client error (Connect): Connection reset by peer (os error 54)"
+        )
+        .context("request to https://infer-api-test-46cc90.worldrouter.ai/v1/responses failed");
+
+        let (msg, cat) = classify_turn_error(&err);
+
+        assert_eq!(cat, "model_gateway_unavailable", "{msg}");
+        assert!(msg.contains("model gateway"), "{msg}");
+        assert!(msg.contains("retry"), "{msg}");
+        assert!(!msg.contains("infer-api-test-46cc90"), "{msg}");
+        assert!(!msg.contains("os error 54"), "{msg}");
+
+        let err = anyhow::anyhow!("tcp connect error: Connection refused")
+            .context("request to https://infer-api-test-46cc90.worldrouter.ai/v1/responses failed");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "model_gateway_unavailable", "{msg}");
+    }
+
+    #[test]
+    fn classify_turn_error_keeps_sse_idle_timeout_as_stream_closed() {
+        use super::classify_turn_error;
+
+        let err = anyhow::anyhow!("idle timeout waiting for sse")
+            .context("failed to parse SSE response from https://example.test/v1/responses");
+
+        let (msg, cat) = classify_turn_error(&err);
+
+        assert_eq!(cat, "provider_stream_closed", "{msg}");
+        assert!(msg.contains("idle timeout waiting for sse"), "{msg}");
     }
 
     #[test]
