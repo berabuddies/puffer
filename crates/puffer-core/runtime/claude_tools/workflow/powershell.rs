@@ -58,6 +58,7 @@ pub fn execute_powershell(state: &mut AppState, cwd: &Path, input: Value) -> Res
             received_at: None,
             expires_at: None,
             started_at_ms: Some(now_ms()),
+            created_at_ms: Some(now_ms()),
             updated_at_ms: Some(now_ms()),
             exit_code: None,
         });

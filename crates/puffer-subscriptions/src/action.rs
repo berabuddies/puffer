@@ -69,6 +69,11 @@ pub struct ActionResult {
     pub summary: String,
     /// Optional token usage for agent-backed actions.
     pub usage: Option<ActionUsage>,
+    /// When the agent turn actually started executing (post any runner
+    /// queueing/locking), for latency stats. `None` for non-agent actions.
+    pub turn_started_at_ms: Option<i128>,
+    /// When the agent turn finished executing.
+    pub turn_ended_at_ms: Option<i128>,
 }
 
 impl ActionResult {
@@ -78,6 +83,8 @@ impl ActionResult {
             success: true,
             summary: summary.into(),
             usage: None,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         }
     }
 
@@ -87,6 +94,20 @@ impl ActionResult {
             success: true,
             summary: summary.into(),
             usage,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
+        }
+    }
+
+    /// Builds a successful action result from a workflow runner output,
+    /// carrying its usage and real turn-execution window.
+    pub fn success_from_output(output: WorkflowActionOutput) -> Self {
+        Self {
+            success: true,
+            summary: output.summary,
+            usage: output.usage,
+            turn_started_at_ms: output.turn_started_at_ms,
+            turn_ended_at_ms: output.turn_ended_at_ms,
         }
     }
 
@@ -96,6 +117,8 @@ impl ActionResult {
             success: false,
             summary: summary.into(),
             usage: None,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         }
     }
 }
@@ -129,6 +152,11 @@ pub struct WorkflowActionOutput {
     pub summary: String,
     /// Optional token usage for agent-backed actions.
     pub usage: Option<ActionUsage>,
+    /// When the agent turn actually started executing (post any runner
+    /// queueing/locking). Lets history separate queue wait from turn time.
+    pub turn_started_at_ms: Option<i128>,
+    /// When the agent turn finished executing.
+    pub turn_ended_at_ms: Option<i128>,
 }
 
 impl WorkflowActionOutput {
@@ -137,6 +165,8 @@ impl WorkflowActionOutput {
         Self {
             summary: summary.into(),
             usage: None,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         }
     }
 
@@ -145,7 +175,16 @@ impl WorkflowActionOutput {
         Self {
             summary: summary.into(),
             usage,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         }
+    }
+
+    /// Attaches the real turn-execution window.
+    pub fn with_turn_window(mut self, started_at_ms: i128, ended_at_ms: i128) -> Self {
+        self.turn_started_at_ms = Some(started_at_ms);
+        self.turn_ended_at_ms = Some(ended_at_ms);
+        self
     }
 }
 
@@ -449,7 +488,7 @@ impl BuiltinActionDispatcher {
         let trigger = trigger_payload(envelope);
         match self.resolved_workflow_runner() {
             Some(runner) => match runner.run_workflow(slug, trigger) {
-                Ok(output) => ActionResult::success_with_usage(output.summary, output.usage),
+                Ok(output) => ActionResult::success_from_output(output),
                 Err(error) => {
                     ActionResult::failure(format!("run_workflow `{slug}` failed: {error:#}"))
                 }
@@ -470,7 +509,7 @@ impl BuiltinActionDispatcher {
         let trigger = trigger_payload(envelope);
         match self.resolved_workflow_runner() {
             Some(runner) => match runner.run_tool_action(tool, rendered, trigger) {
-                Ok(output) => ActionResult::success_with_usage(output.summary, output.usage),
+                Ok(output) => ActionResult::success_from_output(output),
                 Err(error) => {
                     ActionResult::failure(format!("tool_call `{tool}` failed: {error:#}"))
                 }
@@ -504,7 +543,7 @@ impl BuiltinActionDispatcher {
                         summary = %output.summary,
                         "triage_agent action completed"
                     );
-                    ActionResult::success_with_usage(output.summary, output.usage)
+                    ActionResult::success_from_output(output)
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -552,7 +591,7 @@ impl BuiltinActionDispatcher {
                         summary = %output.summary,
                         "triage_agent batch action completed"
                     );
-                    ActionResult::success_with_usage(output.summary, output.usage)
+                    ActionResult::success_from_output(output)
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -700,6 +739,8 @@ fn dispatch_batch_sequential<D: ActionDispatcher + ?Sized>(
             success: false,
             summary,
             usage,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         }
     }
 }

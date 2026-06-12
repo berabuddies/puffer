@@ -84,6 +84,7 @@ pub(super) fn execute_task_create(
         received_at: received_at.map(|(value, _)| value),
         expires_at: expires_at.map(|(value, _)| value),
         started_at_ms: Some(now_ms()),
+        created_at_ms: Some(now_ms()),
         updated_at_ms: Some(now_ms()),
         exit_code: None,
     };
@@ -789,6 +790,11 @@ fn with_verbatim_source_text(
                 .filter(|value| !value.trim().is_empty())
             {
                 object.insert("text".to_string(), Value::String(text.to_string()));
+            }
+        }
+        if object.get("message_id").and_then(Value::as_i64).is_none() {
+            if let Some(message_id) = metadata.get("source_message_id").and_then(Value::as_i64) {
+                object.insert("message_id".to_string(), Value::from(message_id));
             }
         }
     }
@@ -1851,6 +1857,19 @@ mod tests {
             Some("8759047281")
         );
         assert!(pending.get("source_context_hash").is_some());
+    }
+
+    #[test]
+    fn task_create_stamps_server_owned_created_at() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
+
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        // created_at_ms is the stable creation stamp for latency stats —
+        // updated_at_ms is clobbered by every TaskUpdate and started_at_ms
+        // doubles as the in_progress transition stamp.
+        assert!(task.created_at_ms.is_some());
+        assert_eq!(task.created_at_ms, task.updated_at_ms);
     }
 
     #[test]

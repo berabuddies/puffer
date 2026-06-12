@@ -156,11 +156,20 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
     ) -> Result<WorkflowActionOutput> {
         let mut summaries = Vec::new();
         let mut usage = None;
+        let mut turn_window: Option<(i128, i128)> = None;
         for trigger in triggers {
             let triggers = vec![trigger];
             let prompt = render_triage_batch_prompt(prompt, &triggers)?;
             let session_key = triage_session_key(model, &triggers);
             let output = self.run_task_agent_prompt_for_session(prompt, model, &session_key)?;
+            if let (Some(started), Some(ended)) =
+                (output.turn_started_at_ms, output.turn_ended_at_ms)
+            {
+                turn_window = Some(match turn_window {
+                    Some((first, _)) => (first, ended),
+                    None => (started, ended),
+                });
+            }
             // Server-owned grounding: stamp the trigger's verbatim event text
             // onto any monitor task the triage turn created for this envelope.
             // The agent only paraphrases the message into task fields, so
@@ -174,10 +183,11 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
                 merge_usage(&mut usage, next_usage);
             }
         }
-        Ok(WorkflowActionOutput::with_usage(
-            summaries.join("\n"),
-            usage,
-        ))
+        let mut output = WorkflowActionOutput::with_usage(summaries.join("\n"), usage);
+        if let Some((started, ended)) = turn_window {
+            output = output.with_turn_window(started, ended);
+        }
+        Ok(output)
     }
 
     fn ignore_analysis_agent(
@@ -233,6 +243,9 @@ impl ProcessWorkflowRunner {
         state.prompt_cache_key_override = Some(session_key.to_string());
         let mut auth_store = self.auth_store.clone();
         let mut usage = None;
+        // Post-lock stamp: history's run window starts at router dispatch, so
+        // this is what separates queue/lock wait from actual turn time.
+        let turn_started_at_ms = now_unix_ms();
         let output = execute_user_turn_streaming(
             &mut state,
             &self.resources,
@@ -253,10 +266,10 @@ impl ProcessWorkflowRunner {
                 }
             },
         )?;
-        Ok(WorkflowActionOutput::with_usage(
-            output.assistant_text,
-            usage,
-        ))
+        Ok(
+            WorkflowActionOutput::with_usage(output.assistant_text, usage)
+                .with_turn_window(turn_started_at_ms, now_unix_ms()),
+        )
     }
 
     fn run_task_agent_prompt_without_tools(
@@ -325,6 +338,14 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
     ))
 }
 
+/// Current Unix time in milliseconds (i128, matching workflow history).
+fn now_unix_ms() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i128
+}
+
 fn triage_session_key(model: Option<&str>, triggers: &[serde_json::Value]) -> String {
     let connection = triggers
         .first()
@@ -336,11 +357,14 @@ fn triage_session_key(model: Option<&str>, triggers: &[serde_json::Value]) -> St
     format!("monitor-triage:{connection}:{model}")
 }
 
-/// Stamps the trigger's verbatim event text onto monitor tasks created for
-/// that envelope: `metadata.source_text`, plus `source_context.text` when the
-/// agent recorded a source context. Server-owned and idempotent — the agent
-/// never writes these, so paraphrase errors in subject/description can always
-/// be checked against (and repaired from) the original wording.
+/// Stamps the trigger's verbatim source grounding onto monitor tasks created
+/// for that envelope: the exact event text (`metadata.source_text`, plus
+/// `source_context.text`) and the source message id
+/// (`metadata.source_message_id`, plus `source_context.message_id`, used to
+/// send approved replies as a Telegram reply to the triggering message —
+/// agentenv/monorepo#630). Server-owned — the agent never writes these, so
+/// paraphrase errors can always be checked against the original wording and
+/// replies thread to the right message.
 fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) -> Result<()> {
     let Some(envelope_id) = trigger
         .get("envelope_id")
@@ -357,6 +381,10 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
     else {
         return Ok(());
     };
+    let message_id = trigger
+        .get("payload")
+        .and_then(|payload| payload.get("message_id"))
+        .and_then(serde_json::Value::as_i64);
     let path = paths
         .workspace_config_dir
         .join("runtime")
@@ -409,6 +437,19 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
             );
             changed = true;
         }
+        if let Some(message_id) = message_id {
+            if metadata
+                .get("source_message_id")
+                .and_then(serde_json::Value::as_i64)
+                != Some(message_id)
+            {
+                metadata.insert(
+                    "source_message_id".to_string(),
+                    serde_json::Value::from(message_id),
+                );
+                changed = true;
+            }
+        }
         if let Some(context) = metadata
             .get_mut("source_context")
             .and_then(serde_json::Value::as_object_mut)
@@ -419,6 +460,17 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
                     serde_json::Value::String(text.to_string()),
                 );
                 changed = true;
+            }
+            if let Some(message_id) = message_id {
+                if context.get("message_id").and_then(serde_json::Value::as_i64)
+                    != Some(message_id)
+                {
+                    context.insert(
+                        "message_id".to_string(),
+                        serde_json::Value::from(message_id),
+                    );
+                    changed = true;
+                }
             }
         }
     }
@@ -915,7 +967,8 @@ mod tests {
         .unwrap();
         let trigger = json!({
             "envelope_id": "env-1",
-            "text": "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。"
+            "text": "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。",
+            "payload": { "message_id": 6836 }
         });
 
         super::record_monitor_source_text(&paths, &trigger).unwrap();
@@ -932,6 +985,9 @@ mod tests {
             tasks[0]["metadata"]["source_context"]["text"],
             "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。"
         );
+        // The source message id rides along for reply threading (#630).
+        assert_eq!(tasks[0]["metadata"]["source_message_id"], 6836);
+        assert_eq!(tasks[0]["metadata"]["source_context"]["message_id"], 6836);
         // …while a different envelope's task is untouched.
         assert!(tasks[1]["metadata"].get("source_text").is_none());
 

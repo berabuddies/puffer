@@ -44,6 +44,11 @@ pub(super) struct StoredTask {
     pub(super) expires_at: Option<String>,
     #[serde(default)]
     pub(super) started_at_ms: Option<u64>,
+    /// Server-stamped creation time for latency stats. Never touched after
+    /// creation, unlike `updated_at_ms` (clobbered on every update) and
+    /// `started_at_ms` (doubles as the in_progress transition stamp).
+    #[serde(default)]
+    pub(super) created_at_ms: Option<u64>,
     #[serde(default)]
     pub(super) updated_at_ms: Option<u64>,
     #[serde(default)]

@@ -833,6 +833,7 @@ mod tests {
                                 "chat_id": 42
                             },
                             "source_text": "回调失败率刚升到 18%，16:00 前给结论。",
+                            "source_message_id": 6836,
                             "completion_policy": "human_gated_reply",
                             "pending_reply": {
                                 "id": "draft-monitor-1-1",
@@ -876,6 +877,7 @@ mod tests {
             tasks[0]["source_context"]["text"],
             "回调失败率刚升到 18%，16:00 前给结论。"
         );
+        assert_eq!(tasks[0]["source_context"]["message_id"], 6836);
         assert_eq!(tasks[0]["completion_policy"], "human_gated_reply");
         assert_eq!(tasks[0]["pending_reply"]["id"], "draft-monitor-1-1");
         assert_eq!(tasks[0]["pending_reply"]["status"], "draft_ready");
