@@ -64,7 +64,15 @@ pub(crate) async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Session
                 class,
                 json!({ "error": detail }),
             );
-            return Ok(SessionResume::Transient(detail));
+            // connect runs initConnection, so a server-invalidated key can
+            // surface here as an auth-class error (AUTH_KEY_UNREGISTERED) —
+            // misreading it as Transient would trap the user in an offline
+            // retry loop instead of routing them to re-login.
+            return Ok(if class == "auth" {
+                SessionResume::AuthRequired
+            } else {
+                SessionResume::Transient(detail)
+            });
         }
     };
     match client.is_authorized().await {
