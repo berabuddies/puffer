@@ -360,20 +360,20 @@ fn field_rules_require_schema_and_known_fields_but_keywords_do_not() {
     let tempdir = tempfile::tempdir().unwrap();
     let paths = config_paths_with_bundled_resources(tempdir.path());
     let manager = test_manager();
-    let no_schema_connection = "rule-noschema-bot";
+    let no_schema_connection = "rule-noschema-slack";
     let _ = manager
         .connection_store()
         .create(ConnectionRecord::authenticated(
             no_schema_connection,
-            "telegram-bot",
-            "Telegram bot",
+            "slack-login",
+            "Slack",
         ));
     manager
         .store()
         .upsert(monitor_binding_for_connector(
             &format!("monitor-{no_schema_connection}"),
             no_schema_connection,
-            "telegram-bot",
+            "slack-login",
         ))
         .unwrap();
 
@@ -440,4 +440,143 @@ fn field_rules_require_schema_and_known_fields_but_keywords_do_not() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("not declared"));
+}
+
+#[test]
+fn command_backed_connectors_expose_monitor_rule_schemas() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = config_paths_with_bundled_resources(tempdir.path());
+    let manager = test_manager();
+
+    let telegram_bot_connection = "rule-schema-telegram-bot";
+    let _ = manager
+        .connection_store()
+        .create(ConnectionRecord::authenticated(
+            telegram_bot_connection,
+            "telegram-bot",
+            "Telegram bot",
+        ));
+    manager
+        .store()
+        .upsert(monitor_binding_for_connector(
+            &format!("monitor-{telegram_bot_connection}"),
+            telegram_bot_connection,
+            "telegram-bot",
+        ))
+        .unwrap();
+    let snapshot = handle_monitor_rule_add(
+        &paths,
+        &json!({
+            "connection_slug": telegram_bot_connection,
+            "mode": "exclude",
+            "kind": "field",
+            "field": "is_group",
+            "operator": "equals",
+            "value": true
+        }),
+    )
+    .unwrap();
+    let telegram_binding = snapshot["workflow_bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|binding| binding["connection_slug"] == telegram_bot_connection)
+        .unwrap();
+    assert_eq!(
+        telegram_binding["ignore_filters"][0]["expression"],
+        ".is_group == true"
+    );
+    assert!(telegram_binding["monitor_rule_schema"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["path"] == "is_group"));
+
+    let lark_connection = "rule-schema-lark";
+    let _ = manager
+        .connection_store()
+        .create(ConnectionRecord::authenticated(
+            lark_connection,
+            "lark-login",
+            "Lark",
+        ));
+    manager
+        .store()
+        .upsert(monitor_binding_for_connector(
+            &format!("monitor-{lark_connection}"),
+            lark_connection,
+            "lark-login",
+        ))
+        .unwrap();
+    let snapshot = handle_monitor_rule_add(
+        &paths,
+        &json!({
+            "connection_slug": lark_connection,
+            "mode": "include",
+            "kind": "field",
+            "field": "message_type",
+            "operator": "equals",
+            "value": "text"
+        }),
+    )
+    .unwrap();
+    let lark_binding = snapshot["workflow_bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|binding| binding["connection_slug"] == lark_connection)
+        .unwrap();
+    assert_eq!(
+        lark_binding["include_filters"][0]["expression"],
+        ".message_type == \"text\""
+    );
+    assert!(lark_binding["monitor_rule_schema"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["path"] == "sender_open_id"));
+
+    let lark_bot_connection = "rule-schema-lark-bot";
+    let _ = manager
+        .connection_store()
+        .create(ConnectionRecord::authenticated(
+            lark_bot_connection,
+            "lark-bot",
+            "Lark bot",
+        ));
+    manager
+        .store()
+        .upsert(monitor_binding_for_connector(
+            &format!("monitor-{lark_bot_connection}"),
+            lark_bot_connection,
+            "lark-bot",
+        ))
+        .unwrap();
+    let snapshot = handle_monitor_rule_add(
+        &paths,
+        &json!({
+            "connection_slug": lark_bot_connection,
+            "mode": "exclude",
+            "kind": "field",
+            "field": "sender_open_id",
+            "operator": "contains",
+            "value": "ou_"
+        }),
+    )
+    .unwrap();
+    let lark_bot_binding = snapshot["workflow_bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|binding| binding["connection_slug"] == lark_bot_connection)
+        .unwrap();
+    assert_eq!(
+        lark_bot_binding["ignore_filters"][0]["expression"],
+        ".sender_open_id | test(\"ou_\")"
+    );
+    assert!(lark_bot_binding["monitor_rule_schema"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["path"] == "message_type"));
 }

@@ -106,7 +106,7 @@ pub struct EventFieldRule {
     pub value: Option<Value>,
 }
 
-/// Loads `event_schema.json` from a subscriber manifest directory.
+/// Loads `event_schema.json` from a schema metadata directory.
 pub fn load_event_schema_from_dir(dir: &Path) -> Result<Option<EventSchema>> {
     let path = dir.join("event_schema.json");
     if !path.exists() {
@@ -422,12 +422,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bundled_command_connector_event_schemas_are_valid() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        for slug in ["telegram-bot", "lark-login", "lark-bot"] {
+            let schema =
+                load_event_schema_from_dir(&root.join("resources").join("connectors").join(slug))
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("missing bundled event schema for {slug}"));
+            assert_eq!(schema.version, 1);
+            assert!(
+                !schema.fields.is_empty(),
+                "bundled event schema for {slug} has no fields"
+            );
+        }
+    }
+
     fn bundled_schema(slug: &str) -> EventSchema {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
             .expect("workspace root");
         load_event_schema_from_dir(&root.join("resources").join("subscribers").join(slug))
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing bundled event schema for {slug}"))
+    }
+
+    fn bundled_connector_schema(slug: &str) -> EventSchema {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        load_event_schema_from_dir(&root.join("resources").join("connectors").join(slug))
             .unwrap()
             .unwrap_or_else(|| panic!("missing bundled event schema for {slug}"))
     }
@@ -615,6 +644,71 @@ mod tests {
             Some(&regex),
             "",
             &json!({"message": {"subject": "status update"}})
+        ));
+    }
+
+    #[test]
+    fn bundled_command_connector_field_matrix_matches_representative_payloads() {
+        let telegram_bot = bundled_connector_schema("telegram-bot");
+        let lark_login = bundled_connector_schema("lark-login");
+        let lark_bot = bundled_connector_schema("lark-bot");
+
+        let group_chat = field_filter(
+            &telegram_bot,
+            "is_group",
+            EventOperator::Equals,
+            Some(json!(true)),
+        );
+        assert!(filter_matches(
+            Some(&group_chat),
+            "",
+            &json!({"is_group": true})
+        ));
+        assert!(!filter_matches(
+            Some(&group_chat),
+            "",
+            &json!({"is_group": "true"})
+        ));
+
+        let bot_not_mentioned = field_filter(
+            &telegram_bot,
+            "bot_mentioned",
+            EventOperator::Equals,
+            Some(json!(false)),
+        );
+        assert!(filter_matches(
+            Some(&bot_not_mentioned),
+            "",
+            &json!({"bot_mentioned": false})
+        ));
+
+        let lark_message_type = field_filter(
+            &lark_login,
+            "message_type",
+            EventOperator::Equals,
+            Some(json!("text")),
+        );
+        assert!(filter_matches(
+            Some(&lark_message_type),
+            "",
+            &json!({"message_type": "text"})
+        ));
+        assert!(!filter_matches(
+            Some(&lark_message_type),
+            "",
+            &json!({"message_type": "image"})
+        ));
+
+        let lark_sender = field_filter(
+            &lark_bot,
+            "sender_open_id",
+            EventOperator::Contains,
+            Some(json!("ou_")),
+        );
+        assert!(filter_matches(
+            Some(&lark_sender),
+            "",
+            &json!({"sender_open_id": "ou_demo"})
         ));
     }
 

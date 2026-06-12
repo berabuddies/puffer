@@ -9,6 +9,7 @@ use puffer_subscriptions::{
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 struct MonitorRuleAddParams {
@@ -305,10 +306,34 @@ fn monitor_rule_schema_for_connection(
     template: &puffer_subscriptions::ConnectorTemplate,
 ) -> Result<Option<EventSchema>> {
     let roots = super::subscriber_manifest_roots(paths);
-    let Some(dir) = connection_subscriber_manifest_dir(&roots, connection, template) else {
-        return Ok(None);
-    };
-    load_event_schema_from_dir(&dir)
+    if let Some(dir) = connection_subscriber_manifest_dir(&roots, connection, template) {
+        if let Some(schema) = load_event_schema_from_dir(&dir)? {
+            return Ok(Some(schema));
+        }
+    }
+    for dir in connector_event_schema_dirs(paths, &template.slug) {
+        if let Some(schema) = load_event_schema_from_dir(&dir)? {
+            return Ok(Some(schema));
+        }
+    }
+    Ok(None)
+}
+
+fn connector_event_schema_dirs(paths: &ConfigPaths, connector_slug: &str) -> [PathBuf; 3] {
+    [
+        paths
+            .workspace_config_dir
+            .join("connectors")
+            .join(connector_slug),
+        paths
+            .user_config_dir
+            .join("connectors")
+            .join(connector_slug),
+        paths
+            .builtin_resources_dir
+            .join("connectors")
+            .join(connector_slug),
+    ]
 }
 
 fn parse_rule_mode(mode: &str) -> Result<MonitorRuleMode> {
