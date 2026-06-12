@@ -131,6 +131,8 @@ pub(crate) fn install(
     if let Some(classifier) = build_anthropic_classifier(auth_store, anthropic_base_url) {
         builder = builder.with_classifier(classifier);
     }
+    builder =
+        builder.with_self_report(crate::daemon_workflows::build_self_report_handler(paths));
     builder = builder.with_connection_auth_checker(Arc::new(BuiltinConnectionAuthChecker {
         paths: paths.clone(),
     }));

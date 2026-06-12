@@ -78,11 +78,7 @@ pub fn build_message_event(
         None => (None, None, None, false),
     };
 
-    let kind = if matches!(chat, Chat::Channel(_)) {
-        "channel_post"
-    } else {
-        "message"
-    };
+    let kind = message_event_kind(is_outgoing, matches!(chat, Chat::Channel(_)));
 
     let mut payload = serde_json::Map::new();
     payload.insert("chat_id".to_string(), json!(chat_id));
@@ -151,6 +147,21 @@ pub fn build_message_event(
     }
 }
 
+/// Returns the event `kind` for a Telegram message.
+///
+/// Outgoing (self-sent) messages use the dedicated `message_self` kind so the
+/// router diverts them to the self-report completion lane and never into triage
+/// (#569). Keep this string in sync with `puffer_subscriptions::SELF_MESSAGE_KIND`.
+fn message_event_kind(is_outgoing: bool, is_channel: bool) -> &'static str {
+    if is_outgoing {
+        "message_self"
+    } else if is_channel {
+        "channel_post"
+    } else {
+        "message"
+    }
+}
+
 fn now_unix_millis() -> i128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -199,4 +210,22 @@ fn telegram_chat_is_bot(chat: &Chat) -> bool {
 
 fn telegram_username_looks_like_bot(username: &str) -> bool {
     username.to_ascii_lowercase().ends_with("bot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_event_kind;
+
+    #[test]
+    fn outgoing_messages_use_the_self_kind() {
+        // Keep in sync with `puffer_subscriptions::SELF_MESSAGE_KIND`.
+        assert_eq!(message_event_kind(true, false), "message_self");
+        assert_eq!(message_event_kind(true, true), "message_self");
+    }
+
+    #[test]
+    fn incoming_messages_keep_their_normal_kind() {
+        assert_eq!(message_event_kind(false, false), "message");
+        assert_eq!(message_event_kind(false, true), "channel_post");
+    }
 }

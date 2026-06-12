@@ -4,6 +4,7 @@
 use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::classify::{Classifier, ClassifyDecision, NullClassifier};
 use crate::contacts::contact_filter_matches;
+use crate::self_report::{is_self_message, SelfReportHandler};
 use crate::history::{
     now_ms, DedupDecision, WorkflowActionLog, WorkflowBindingRunStatus, WorkflowHistoryStore,
     MAX_FAILED_ATTEMPTS,
@@ -83,6 +84,7 @@ impl SubscriptionRouter {
         history_store: Option<Arc<WorkflowHistoryStore>>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
+        self_report: Option<Arc<dyn SelfReportHandler>>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let stats = Arc::new(RouterStats::default());
@@ -95,6 +97,7 @@ impl SubscriptionRouter {
                 history_store,
                 dispatcher,
                 classifier,
+                self_report,
                 shutdown_rx,
                 stats_for_task,
             )
@@ -116,6 +119,7 @@ impl SubscriptionRouter {
             None,
             Arc::new(BuiltinActionDispatcher::new()),
             Arc::new(NullClassifier),
+            None,
         )
     }
 
@@ -139,6 +143,7 @@ async fn run(
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_report: Option<Arc<dyn SelfReportHandler>>,
     mut shutdown_rx: watch::Receiver<bool>,
     stats: Arc<RouterStats>,
 ) {
@@ -149,6 +154,15 @@ async fn run(
             maybe = rx.recv() => {
                 let Some(envelope) = maybe else { break; };
                 if envelope.event.control {
+                    continue;
+                }
+                // Self-sent (outgoing) messages must never enter triage (#569).
+                // They are diverted to the self-report lane, which may complete a
+                // matching open monitor task in the same conversation.
+                if is_self_message(&envelope) {
+                    if let Some(handler) = self_report.clone() {
+                        spawn_self_report(envelope, handler);
+                    }
                     continue;
                 }
                 stats.events_seen.fetch_add(1, Ordering::Relaxed);
@@ -197,6 +211,13 @@ fn spawn_envelope_processor(
             stats.events_matched.fetch_add(1, Ordering::Relaxed);
         }
     });
+}
+
+/// Runs the self-report handler for a self-sent message off the router loop.
+/// The handler may make a blocking LLM call, so it runs on the blocking pool and
+/// never delays normal event processing. Failures are swallowed by the handler.
+fn spawn_self_report(envelope: EventEnvelope, handler: Arc<dyn SelfReportHandler>) {
+    task::spawn_blocking(move || handler.handle(&envelope));
 }
 
 async fn process_envelope_blocking(

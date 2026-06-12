@@ -252,6 +252,17 @@ pub trait WorkflowActionRunner: Send + Sync {
         let _ = (prompt, model, trigger);
         anyhow::bail!("workflow ignore analysis is not installed in this runtime")
     }
+
+    /// Runs a single no-tools completion with `model` and returns the
+    /// assistant's text reply. `model` is a `<provider>/<model>` selector (the
+    /// monitor's configured model), or `None` to use the runtime default.
+    ///
+    /// Used by the self-report completion judge so it reasons with the *same*
+    /// model the user chose for the monitor, never a hardcoded one.
+    fn complete_text(&self, model: Option<&str>, prompt: &str) -> Result<String> {
+        let _ = (model, prompt);
+        anyhow::bail!("workflow text completion is not installed in this runtime")
+    }
 }
 
 /// Trait for executing connector actions from background workflow dispatch.

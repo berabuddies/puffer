@@ -134,17 +134,12 @@ pub(crate) async fn emit_message_if_new(
     let notification_silent = message.silent();
     let is_outgoing = message.outgoing();
     if should_suppress_message(is_outgoing, notification_muted, notification_silent) {
-        // Outgoing (self-sent) messages are recorded as seen but never emitted
-        // into the triage pipeline: otherwise the user's own messages spin up a
-        // triage turn (burning credits) and can be misread as incoming tasks.
-        let stage = if is_outgoing {
-            "suppressed_outgoing"
-        } else {
-            "suppressed"
-        };
+        // Incoming messages in muted/silent chats are recorded as seen but not
+        // emitted, per the user's notification settings. (Outgoing messages are
+        // never suppressed here — see below.)
         append_message_diagnostic(
             env,
-            stage,
+            "suppressed",
             message,
             delivery_source,
             source_received_at_ms,
@@ -159,10 +154,15 @@ pub(crate) async fn emit_message_if_new(
             is_outgoing,
             notification_muted,
             notification_silent,
-            "skipped Telegram message (outgoing or muted/silent)"
+            "skipped Telegram message (muted/silent)"
         );
         return Ok(false);
     }
+    // Outgoing (self-sent) messages ARE emitted, but `build_message_event` tags
+    // them with the `message_self` kind. The router diverts that kind to the
+    // self-report completion lane and never into triage, so the user's own
+    // messages still cannot spin up a triage turn (#569) — yet they remain
+    // observable for auto-completing a matching open monitor task.
     let event = build_message_event(
         &env.topic,
         message,
@@ -171,9 +171,10 @@ pub(crate) async fn emit_message_if_new(
         source_received_at_ms,
     );
     emit(&event)?;
+    let emitted_stage = if is_outgoing { "emitted_self" } else { "emitted" };
     append_message_diagnostic(
         env,
-        "emitted",
+        emitted_stage,
         message,
         delivery_source,
         source_received_at_ms,
@@ -208,16 +209,20 @@ fn message_notifications_suppressed(notification_muted: bool, notification_silen
     notification_muted || notification_silent
 }
 
-/// Whether a message should be recorded as seen but NOT emitted into the triage
-/// pipeline. Outgoing (self-sent) messages are always suppressed so the user's
-/// own messages never trigger a triage turn (the #569 credit-burn bug); muted /
-/// silent chats are suppressed per the user's notification settings.
+/// Whether an *incoming* message should be recorded as seen but NOT emitted, per
+/// the user's notification settings (muted / silent chats).
+///
+/// Outgoing (self-sent) messages are NOT suppressed here: they are emitted on the
+/// `message_self` kind so they can complete a matching open monitor task. The
+/// #569 "no triage for self-messages" guarantee now lives at the router (which
+/// diverts `message_self` to the self-report lane), not in a drop at this layer —
+/// so an outgoing message is never suppressed regardless of mute/silent state.
 fn should_suppress_message(
     is_outgoing: bool,
     notification_muted: bool,
     notification_silent: bool,
 ) -> bool {
-    is_outgoing || message_notifications_suppressed(notification_muted, notification_silent)
+    !is_outgoing && message_notifications_suppressed(notification_muted, notification_silent)
 }
 
 fn message_chat_key(message: &Message) -> String {
@@ -366,15 +371,19 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_messages_are_suppressed() {
-        // #569: the user's own (outgoing) messages must be suppressed from the
-        // triage pipeline even when the chat is not muted/silent.
-        assert!(should_suppress_message(true, false, false));
-        assert!(should_suppress_message(true, true, false));
-        assert!(should_suppress_message(true, false, true));
+    fn outgoing_messages_are_emitted_on_self_lane_not_suppressed() {
+        // Outgoing (self-sent) messages are emitted (on the `message_self` kind)
+        // so they can complete a matching open monitor task. They are never
+        // suppressed here, regardless of mute/silent state — the #569 "no triage
+        // for self-messages" guarantee now lives at the router, which diverts
+        // `message_self` to the self-report lane.
+        assert!(!should_suppress_message(true, false, false));
+        assert!(!should_suppress_message(true, true, false));
+        assert!(!should_suppress_message(true, false, true));
         // Incoming messages still follow the notification-suppression rules.
         assert!(!should_suppress_message(false, false, false));
         assert!(should_suppress_message(false, true, false));
         assert!(should_suppress_message(false, false, true));
     }
 }
+

@@ -17,6 +17,7 @@ use crate::proxy::{
     AgentProxyStore,
 };
 use crate::router::{process_envelope_batch_result, process_envelope_result, SubscriptionRouter};
+use crate::self_report::{is_self_message, SelfReportHandler};
 use crate::spec::ActionSpec;
 use crate::store::SubscriptionStore;
 use anyhow::Result;
@@ -69,6 +70,7 @@ pub struct SubscriptionManagerBuilder {
     proxy_store_path: PathBuf,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_report: Option<Arc<dyn SelfReportHandler>>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
 }
 
@@ -102,6 +104,7 @@ impl SubscriptionManagerBuilder {
             proxy_store_path,
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
+            self_report: None,
             auth_checker: None,
         }
     }
@@ -148,6 +151,12 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the self-report handler used for outgoing (self-sent) messages.
+    pub fn with_self_report(mut self, self_report: Arc<dyn SelfReportHandler>) -> Self {
+        self.self_report = Some(self_report);
+        self
+    }
+
     /// Override the process-provided connection auth checker.
     pub fn with_connection_auth_checker(mut self, checker: Arc<dyn ConnectionAuthChecker>) -> Self {
         self.auth_checker = Some(checker);
@@ -173,11 +182,13 @@ impl SubscriptionManagerBuilder {
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
+        let self_report = self.self_report.clone();
         let bus = self.bus.clone();
         let store_for_router = store.clone();
         let history_for_router = history_store.clone();
         let dispatcher_for_router = dispatcher.clone();
         let classifier_for_router = classifier.clone();
+        let self_report_for_router = self_report.clone();
         let router = {
             let _runtime_guard = handle.enter();
             SubscriptionRouter::spawn(
@@ -186,6 +197,7 @@ impl SubscriptionManagerBuilder {
                 Some(history_for_router),
                 dispatcher_for_router,
                 classifier_for_router,
+                self_report_for_router,
             )
         };
         let manager = SubscriptionManager {
@@ -198,6 +210,7 @@ impl SubscriptionManagerBuilder {
             proxy_store,
             dispatcher,
             classifier,
+            self_report,
             auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
             subscribers: Mutex::new(HashMap::new()),
@@ -221,6 +234,7 @@ pub struct SubscriptionManager {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_report: Option<Arc<dyn SelfReportHandler>>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
     subscribers: Mutex<HashMap<String, SubscriberHandle>>,
@@ -395,6 +409,7 @@ impl SubscriptionManager {
                         proxy_store: self.proxy_store.clone(),
                         dispatcher: self.dispatcher.clone(),
                         classifier: self.classifier.clone(),
+                        self_report: self.self_report.clone(),
                     });
                 if let Some(handle) = block_on_manager_handle(
                     &self.handle,
@@ -799,6 +814,7 @@ struct ManagerConnectorEventProcessor {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_report: Option<Arc<dyn SelfReportHandler>>,
 }
 
 impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
@@ -809,6 +825,12 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
         envelope: &EventEnvelope,
     ) -> Result<()> {
         self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
+        // Outgoing (self-sent) messages bypass triage (#569) and are offered to
+        // the self-report lane instead.
+        if is_self_message(envelope) {
+            self.dispatch_self_report(envelope);
+            return Ok(());
+        }
         let result = process_envelope_result(
             envelope,
             &self.store,
@@ -835,8 +857,18 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
         for envelope in envelopes {
             self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
         }
+        // Divert outgoing (self-sent) messages to the self-report lane; only
+        // incoming messages continue to triage (#569).
+        let mut triage_envelopes: Vec<EventEnvelope> = Vec::with_capacity(envelopes.len());
+        for envelope in envelopes {
+            if is_self_message(envelope) {
+                self.dispatch_self_report(envelope);
+            } else {
+                triage_envelopes.push(envelope.clone());
+            }
+        }
         let result = process_envelope_batch_result(
-            envelopes,
+            &triage_envelopes,
             &self.store,
             Some(&self.history_store),
             &self.dispatcher,
@@ -854,6 +886,15 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
 }
 
 impl ManagerConnectorEventProcessor {
+    /// Offers a self-sent message to the self-report handler when one is
+    /// configured. Best-effort: the handler swallows its own errors so a
+    /// self-report never fails connector event processing.
+    fn dispatch_self_report(&self, envelope: &EventEnvelope) {
+        if let Some(handler) = &self.self_report {
+            handler.handle(envelope);
+        }
+    }
+
     fn process_agent_proxy(
         &self,
         connector_slug: &str,

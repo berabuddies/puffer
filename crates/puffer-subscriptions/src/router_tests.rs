@@ -922,7 +922,7 @@ mod tests {
             Arc::new(BuiltinActionDispatcher::with_storage_root(dir.path()));
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
         let router =
-            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier);
+            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier, None);
 
         bus.publish(EventEnvelope {
             envelope_id: "env-race".into(),
@@ -998,6 +998,7 @@ mod tests {
             Some(history.clone()),
             dispatcher,
             classifier,
+            None,
         );
 
         bus.publish(EventEnvelope {
@@ -1067,7 +1068,7 @@ mod tests {
         });
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
         let router =
-            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier);
+            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier, None);
 
         for index in 0..2 {
             bus.publish(EventEnvelope {

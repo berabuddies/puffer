@@ -200,6 +200,11 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         let prompt = format!("{prompt}\n\nWorkflow trigger:\n```json\n{trigger}\n```");
         self.run_task_agent_prompt_without_tools(prompt, model)
     }
+
+    fn complete_text(&self, model: Option<&str>, prompt: &str) -> Result<String> {
+        let output = self.run_task_agent_prompt_without_tools(prompt.to_string(), model)?;
+        Ok(output.summary)
+    }
 }
 
 impl ProcessWorkflowRunner {

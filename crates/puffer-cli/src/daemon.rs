@@ -1465,6 +1465,12 @@ async fn dispatch_request(
         "monitor_rule_delete" | "task_monitor_rule_delete" => respond!(
             crate::daemon_workflows::handle_monitor_rule_delete(&state.paths, &params)
         ),
+        "monitor_completion_phrase_add" | "task_monitor_completion_phrase_add" => respond!(
+            crate::daemon_workflows::handle_monitor_completion_phrase_add(&state.paths, &params)
+        ),
+        "monitor_completion_phrase_delete" | "task_monitor_completion_phrase_delete" => respond!(
+            crate::daemon_workflows::handle_monitor_completion_phrase_delete(&state.paths, &params)
+        ),
         "monitor_task_complete" | "task_monitor_complete" => respond!(
             crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
         ),
