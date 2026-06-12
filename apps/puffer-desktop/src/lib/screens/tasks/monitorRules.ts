@@ -183,10 +183,11 @@ function parsedRule(
   details: MonitorRuleDetail[]
 ): { detail: MonitorRuleDetail; operator: MonitorRuleOperator; valueLabel: string } {
   if (rule.type === "regex" && typeof rule.pattern === "string") {
+    const parsed = parseRegexRule(rule.pattern);
     return {
       detail: MESSAGE_TEXT_DETAIL,
-      operator: "contains",
-      valueLabel: regexRuleLabel(rule.pattern)
+      operator: parsed.operator,
+      valueLabel: parsed.valueLabel
     };
   }
   if (rule.type === "jq" && typeof rule.expression === "string") {
@@ -215,6 +216,15 @@ function parseJqExpression(
     };
   }
 
+  const existsMatch = expression.match(/^\.(?<path>[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*) \| exists$/);
+  if (existsMatch?.groups) {
+    return {
+      detail: detailByPath(details, existsMatch.groups.path),
+      operator: "exists",
+      valueLabel: ""
+    };
+  }
+
   const testMatch = expression.match(/^\.(?<path>[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*) \| test\("(?<pattern>(?:\\.|[^"\\])*)"\)$/);
   if (testMatch?.groups) {
     const detail = detailByPath(details, testMatch.groups.path);
@@ -222,10 +232,18 @@ function parseJqExpression(
     if (detail.type === "exists" && pattern === ".+") {
       return { detail, operator: "exists", valueLabel: "" };
     }
+    const containsLiteral = caseInsensitiveRegexLiteral(pattern);
+    if (containsLiteral !== null) {
+      return {
+        detail,
+        operator: "contains",
+        valueLabel: decodeRegexLiteral(containsLiteral)
+      };
+    }
     return {
       detail,
-      operator: "contains",
-      valueLabel: displayRegexLiteral(pattern)
+      operator: "matches",
+      valueLabel: pattern
     };
   }
   return null;
@@ -257,6 +275,27 @@ function regexRuleLabel(pattern: string): string {
     .map((keyword) => keyword.trim())
     .filter(Boolean)
     .join(", ");
+}
+
+function parseRegexRule(pattern: string): { operator: MonitorRuleOperator; valueLabel: string } {
+  const equalsMatch = pattern.match(/^\^\(\?:(?<inner>.*)\)\$$/s);
+  if (equalsMatch?.groups) {
+    return {
+      operator: "equals",
+      valueLabel: regexRuleLabel(equalsMatch.groups.inner)
+    };
+  }
+  const matchesMatch = pattern.match(/^\(\?:(?<inner>.*)\)$/s);
+  if (matchesMatch?.groups) {
+    return {
+      operator: "matches",
+      valueLabel: matchesMatch.groups.inner
+    };
+  }
+  return {
+    operator: "contains",
+    valueLabel: regexRuleLabel(pattern)
+  };
 }
 
 function fallbackRuleSummary(rule: WorkflowFilterRule): string {
@@ -316,10 +355,10 @@ function decodeRegexLiteral(pattern: string): string {
 }
 
 function displayRegexLiteral(pattern: string): string {
-  return decodeRegexLiteral(stripCaseInsensitiveRegexWrapper(pattern));
+  return decodeRegexLiteral(caseInsensitiveRegexLiteral(pattern) ?? pattern);
 }
 
-function stripCaseInsensitiveRegexWrapper(pattern: string): string {
+function caseInsensitiveRegexLiteral(pattern: string): string | null {
   const match = pattern.match(/^\(\?i:(?<inner>.*)\)$/s);
-  return match?.groups?.inner ?? pattern;
+  return match?.groups?.inner ?? null;
 }
