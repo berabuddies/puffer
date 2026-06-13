@@ -49,6 +49,23 @@ const RUNTIME_A11Y_AUTOSTART_PATH: &str = "/tmp/puffer-a11y-autostart";
 /// In-container path the connector pushes [`RUNTIME_A11Y_APPLY_SH`] to.
 const RUNTIME_A11Y_APPLY_PATH: &str = "/tmp/puffer-apply-runtime-a11y.sh";
 
+/// Bash run as ROOT before any runtime `apt-get`: if the Debian mirror doesn't
+/// resolve, prepend a public resolver as primary and force DNS-over-TCP. Some
+/// container DNS setups can't resolve external hosts (or block outbound UDP:53)
+/// even when raw egress works, which otherwise hangs/fails apt. No-op when DNS
+/// already works, and the change reverts on the next container restart. Mirrors
+/// `wechat-vz/apply-runtime-a11y.sh`'s `ensure_dns`.
+const APT_DNS_PRELUDE: &str = "if ! getent hosts deb.debian.org >/dev/null 2>&1; then \
+     orig=\"$(grep -vE '^nameserver 8\\.8\\.8\\.8$|^options use-vc$' /etc/resolv.conf 2>/dev/null)\"; \
+     printf 'nameserver 8.8.8.8\\n%s\\noptions use-vc\\n' \"$orig\" > /etc/resolv.conf 2>/dev/null || true; \
+   fi; ";
+
+/// apt-get options shared by the runtime install helpers: force IPv4, retry the
+/// flaky mirror, bound the per-request timeout, and WAIT for the dpkg lock rather
+/// than erroring when the base image's own boot apt holds it.
+const APT_OPTS: &str =
+    "-o Acquire::ForceIPv4=true -o Acquire::Retries=8 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=120";
+
 /// Shell prelude that resolves `DISPLAY` inside the container exactly like the
 /// WechatOnCloud panel: honor an existing `$DISPLAY`, else take the first
 /// `/tmp/.X11-unix/X*` socket, else fall back to `:1`.
@@ -455,7 +472,7 @@ impl WechatInstance {
         }
         let _ = cmd.status().await;
         if self.runtime == Runtime::Container {
-            self.container_image_present(cfg).await
+            self.image_present(&cfg.image).await
         } else {
             Ok(self
                 .docker(&["image", "inspect", &cfg.image])
@@ -650,14 +667,6 @@ impl WechatInstance {
         .unwrap_or(false)
     }
 
-    /// Stops the instance container (kept, with its volume, for a later start).
-    #[allow(dead_code)] // lifecycle API; used by stop/teardown paths
-    pub(crate) async fn stop_container(&self) -> Result<()> {
-        let name = self.container_name();
-        let _ = self.docker(&["stop", "-t", "5", &name]).await?;
-        Ok(())
-    }
-
     /// Brings the selected runtime up and ready before any container op, so the
     /// user never has to open a terminal. Docker launches the engine; Apple
     /// `container` starts (and, on a Homebrew install, repairs) its apiserver.
@@ -757,11 +766,6 @@ impl WechatInstance {
             .await?
             .status
             .success())
-    }
-
-    /// Reports whether `cfg.image` is present in the runtime's image store.
-    async fn container_image_present(&self, cfg: &InstanceConfig) -> Result<bool> {
-        self.image_present(&cfg.image).await
     }
 
     /// Ensures the Docker engine is reachable, starting it if not so the user
@@ -951,6 +955,14 @@ impl WechatInstance {
     /// container, installing it as root on first use. The WechatOnCloud image
     /// ships xdotool/xclip but no screen-capture tool.
     pub(crate) async fn ensure_screenshot_tool(&self) -> Result<()> {
+        // The screenshot tool feeds ONLY the vision path (screen reads + the
+        // optional act delivery/recipient vision checks). With vision off — the
+        // default; the no-vision a11y path handles those — it is never used, so
+        // skip the install entirely. This also avoids wasting the caller's time
+        // budget on a (possibly slow, network-dependent) apt that isn't needed.
+        if !super::read::vision_allowed() {
+            return Ok(());
+        }
         let name = self.container_name();
         let probe = self
             .docker(&[
@@ -966,20 +978,16 @@ impl WechatInstance {
         if String::from_utf8_lossy(&probe.stdout).trim() == "yes" {
             return Ok(());
         }
-        // Install as root (the runtime `abc` user cannot apt-get). Wait out any
-        // concurrent apt (e.g. the dbread-deps install) first so the two root
-        // apt-get runs don't collide on the dpkg lock.
+        // Install as root (the runtime `abc` user cannot apt-get). Ensure DNS,
+        // then wait out any concurrent apt holding the dpkg OR apt-lists lock (the
+        // base image runs its own boot apt) before installing.
+        let script = format!(
+            "{APT_DNS_PRELUDE}\
+             for i in $(seq 1 90); do fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done; \
+             apt-get {APT_OPTS} update && apt-get {APT_OPTS} install -y --no-install-recommends imagemagick"
+        );
         let output = self
-            .docker(&[
-                "exec",
-                "--user",
-                "root",
-                &name,
-                "bash",
-                "-lc",
-                "for i in $(seq 1 60); do fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 2; done; \
-                 apt-get update && apt-get install -y --no-install-recommends imagemagick",
-            ])
+            .docker(&["exec", "--user", "root", &name, "bash", "-lc", &script])
             .await?;
         if !output.status.success() {
             bail!(
@@ -1112,14 +1120,19 @@ impl WechatInstance {
         if probe.status.success() {
             return Ok(());
         }
-        // Wait out any concurrent apt (e.g. the screenshot-tool install), then
-        // install via apt (pip is not present and bookworm is PEP-668 managed).
-        let script = "for i in $(seq 1 60); do fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 2; done; \
-             apt-get update >/dev/null 2>&1; \
-             apt-get install -y --no-install-recommends python3-pycryptodome python3-zstandard >/dev/null 2>&1; \
-             python3 -c 'import importlib.util,sys;sys.exit(0 if importlib.util.find_spec(\"Cryptodome\") or importlib.util.find_spec(\"Crypto\") else 1)'";
+        // Ensure DNS, wait out any concurrent apt holding the dpkg OR apt-lists
+        // lock, then install via apt (pip is not present and bookworm is PEP-668
+        // managed). The baked image pre-installs these, so this only runs on the
+        // base-image runtime-a11y path.
+        let script = format!(
+            "{APT_DNS_PRELUDE}\
+             for i in $(seq 1 90); do fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done; \
+             apt-get {APT_OPTS} update >/dev/null 2>&1; \
+             apt-get {APT_OPTS} install -y --no-install-recommends python3-pycryptodome python3-zstandard >/dev/null 2>&1; \
+             python3 -c 'import importlib.util,sys;sys.exit(0 if importlib.util.find_spec(\"Cryptodome\") or importlib.util.find_spec(\"Crypto\") else 1)'"
+        );
         let output = self
-            .docker(&["exec", "--user", "root", &name, "bash", "-lc", script])
+            .docker(&["exec", "--user", "root", &name, "bash", "-lc", &script])
             .await?;
         if !output.status.success() {
             bail!(
@@ -1130,28 +1143,6 @@ impl WechatInstance {
         Ok(())
     }
 
-    /// Reports whether the native WeChat process is running inside the container.
-    #[allow(dead_code)] // used by the DB-read key-extraction + re-login watcher
-    pub(crate) async fn wechat_process_running(&self) -> Result<bool> {
-        // `pgrep` returns non-zero (exit 1) when nothing matches, which exec_bash
-        // would surface as an error, so swallow that into a boolean explicitly.
-        let name = self.container_name();
-        let output = self
-            .docker(&[
-                "exec",
-                "--user",
-                "abc",
-                &name,
-                "bash",
-                "-lc",
-                "pgrep -f /config/wechat/opt/wechat/wechat >/dev/null 2>&1 && echo yes || echo no",
-            ])
-            .await?;
-        if !output.status.success() {
-            return Ok(false);
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
-    }
 
     /// Checks whether WeChat is logged in by the LIVE visible-window width: the
     /// QR/login window is small (~280x380) while the logged-in main window is

@@ -220,11 +220,18 @@ async fn prepare(instance: &WechatInstance) -> Option<String> {
             instance.name()
         ));
     }
-    if let Err(error) = instance.ensure_screenshot_tool().await {
-        return Some(format!("screenshot tool unavailable: {error:#}"));
+    // The screenshot tool + capture sizing serve ONLY the vision poll path. In DB
+    // mode (the default) the monitor reads the decrypted chat DB, so they are not
+    // needed — and a failed install (e.g. restricted container network) must NOT
+    // idle the whole monitor before it ever polls. Require them only when actually
+    // polling via vision.
+    if !dbread::enabled() {
+        if let Err(error) = instance.ensure_screenshot_tool().await {
+            return Some(format!("screenshot tool unavailable: {error:#}"));
+        }
+        // Enlarge the screen + WeChat window so captures are sharp enough to read.
+        let _ = instance.prepare_capture().await;
     }
-    // Enlarge the screen + WeChat window so captures are sharp enough to read.
-    let _ = instance.prepare_capture().await;
     None
 }
 
