@@ -99,8 +99,12 @@ pub fn build_message_event(
     let mut payload = serde_json::Map::new();
     payload.insert("chat_id".to_string(), json!(chat_id));
     payload.insert("chat_kind".to_string(), json!(peer.chat_kind));
-    if let Some(title) = peer.chat_title {
+    if let Some(title) = peer.chat_title.as_deref() {
+        let group_channel_name = group_channel_name(&peer);
         payload.insert("chat_title".to_string(), json!(title));
+        if let Some(name) = group_channel_name {
+            payload.insert("group_channel_name".to_string(), json!(name));
+        }
     }
     if let Some(username) = peer.chat_username {
         payload.insert("chat_username".to_string(), json!(username));
@@ -148,9 +152,11 @@ pub fn build_message_event(
     if let Some(reply_count) = message.reply_count() {
         payload.insert("reply_count".to_string(), json!(reply_count));
     }
-    if let Some(Media::Poll(poll)) = message.media() {
-        payload.insert("media".to_string(), json!(poll_text(&poll)));
-        payload.insert("poll".to_string(), poll_payload(&poll));
+    if let Some(media) = message.media() {
+        payload.insert("media".to_string(), json!(message_media_label(&media)));
+        if let Media::Poll(poll) = media {
+            payload.insert("poll".to_string(), poll_payload(&poll));
+        }
     }
 
     Event {
@@ -244,6 +250,30 @@ fn now_unix_millis() -> i128 {
         .as_millis() as i128
 }
 
+fn message_media_label(media: &Media) -> String {
+    match media {
+        Media::Photo(_) => "photo".to_string(),
+        Media::Document(_) => "document".to_string(),
+        Media::Sticker(_) => "sticker".to_string(),
+        Media::Contact(_) => "contact".to_string(),
+        Media::Poll(poll) => poll_text(poll),
+        Media::Geo(_) => "location".to_string(),
+        Media::Dice(dice) => format!("dice {}", dice.emoji()),
+        Media::Venue(_) => "venue".to_string(),
+        Media::GeoLive(_) => "live location".to_string(),
+        Media::WebPage(_) => "web page".to_string(),
+        _ => "media".to_string(),
+    }
+}
+
+fn group_channel_name(peer: &MessagePeerMetadata) -> Option<&str> {
+    if matches!(peer.chat_kind, "group" | "channel") {
+        peer.chat_title.as_deref()
+    } else {
+        None
+    }
+}
+
 /// Returns `(chat_kind, chat_title, chat_username)` describing a chat.
 ///
 /// `chat_kind` is always one of `"user"`, `"group"`, `"channel"`. For user
@@ -302,9 +332,45 @@ fn telegram_username_looks_like_bot(username: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{backfill_message_peer_metadata, MessagePeerMetadata};
+    use super::{
+        backfill_message_peer_metadata, group_channel_name, message_media_label,
+        MessagePeerMetadata,
+    };
     use crate::peer_cache::TelegramPeerCache;
+    use grammers_client::types::{media::Photo, Media};
+    use grammers_tl_types as tl;
     use serde_json::json;
+
+    #[test]
+    fn message_media_label_identifies_photos() {
+        let photo = Media::Photo(Photo::from_raw(tl::types::PhotoEmpty { id: 42 }.into()));
+
+        assert_eq!(message_media_label(&photo), "photo");
+    }
+
+    #[test]
+    fn group_channel_name_skips_direct_chats() {
+        let mut peer = MessagePeerMetadata {
+            chat_kind: "user",
+            chat_title: Some("smith john".to_string()),
+            chat_username: None,
+            chat_is_bot: false,
+            sender_id: None,
+            sender_username: None,
+            sender_name: None,
+            sender_is_bot: false,
+        };
+
+        assert_eq!(group_channel_name(&peer), None);
+
+        peer.chat_kind = "group";
+        peer.chat_title = Some("Puffer Internal".to_string());
+        assert_eq!(group_channel_name(&peer), Some("Puffer Internal"));
+
+        peer.chat_kind = "channel";
+        peer.chat_title = Some("Puffer Updates".to_string());
+        assert_eq!(group_channel_name(&peer), Some("Puffer Updates"));
+    }
 
     #[test]
     fn direct_user_sender_name_is_backfilled_from_peer_cache() {

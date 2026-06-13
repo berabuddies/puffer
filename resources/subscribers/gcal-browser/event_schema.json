@@ -8,12 +8,6 @@
   ],
   "fields": [
     {
-      "path": "account",
-      "label": "Account",
-      "type": "string",
-      "operators": ["contains", "equals", "matches"]
-    },
-    {
       "path": "event.title",
       "label": "Event title",
       "type": "string",
@@ -32,22 +26,10 @@
       "operators": ["contains", "equals", "matches"]
     },
     {
-      "path": "event.id",
-      "label": "Event ID",
-      "type": "string",
-      "operators": ["contains", "equals"]
-    },
-    {
       "path": "event.url",
       "label": "Event URL",
       "type": "string",
       "operators": ["contains", "equals"]
-    },
-    {
-      "path": "event.index",
-      "label": "Row index",
-      "type": "number",
-      "operators": ["equals"]
     }
   ]
 }

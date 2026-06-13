@@ -215,8 +215,10 @@ pub fn sender_is_allowed(from_lc: &str, allowed: &[String]) -> bool {
 /// Flattened view of the fields we extract from an inbound email.
 struct ParsedEmail {
     from: String,
+    sender_name: String,
     subject: String,
     body: String,
+    has_attachment: bool,
     message_id: Option<String>,
     thread_id: String,
     date_ms: Option<i64>,
@@ -228,11 +230,16 @@ impl ParsedEmail {
     fn from_raw(raw: &[u8]) -> Option<Self> {
         let parsed = MessageParser::default().parse(raw)?;
 
-        let from = parsed
-            .from()
-            .and_then(|addrs| addrs.first())
+        let from_addr = parsed.from().and_then(|addrs| addrs.first());
+        let from = from_addr
             .and_then(|addr| addr.address())
             .unwrap_or("")
+            .to_string();
+        let sender_name = from_addr
+            .and_then(|addr| addr.name())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&from)
             .to_string();
 
         let subject = parsed.subject().unwrap_or("").to_string();
@@ -240,6 +247,7 @@ impl ParsedEmail {
             .body_text(0)
             .map(|s| s.into_owned())
             .unwrap_or_default();
+        let has_attachment = parsed.attachment_count() > 0;
         let message_id = parsed.message_id().map(|s| s.to_string());
 
         let thread_id = parsed
@@ -254,8 +262,10 @@ impl ParsedEmail {
 
         Some(Self {
             from,
+            sender_name,
             subject,
             body,
+            has_attachment,
             message_id,
             thread_id,
             date_ms,
@@ -276,9 +286,14 @@ fn build_message_event(topic: &str, config: &EmailConfig, uid: u32, email: &Pars
     let preview: String = email.body.chars().take(1024).collect();
 
     let mut payload = Map::new();
+    payload.insert(
+        "sender_name".to_string(),
+        Value::String(email.sender_name.clone()),
+    );
     payload.insert("from".to_string(), Value::String(email.from.clone()));
     payload.insert("subject".to_string(), Value::String(email.subject.clone()));
     payload.insert("body_preview".to_string(), Value::String(preview));
+    payload.insert("has_attachment".to_string(), json!(email.has_attachment));
     if let Some(mid) = email.message_id.as_ref() {
         payload.insert("message_id".to_string(), Value::String(mid.clone()));
     }
@@ -290,6 +305,7 @@ fn build_message_event(topic: &str, config: &EmailConfig, uid: u32, email: &Pars
         payload.insert("date_ms".to_string(), json!(date_ms));
     }
     payload.insert("uid".to_string(), json!(uid));
+    payload.insert("unread".to_string(), json!(true));
 
     Event {
         topic: topic.to_string(),
@@ -298,5 +314,67 @@ fn build_message_event(topic: &str, config: &EmailConfig, uid: u32, email: &Pars
         dedup_key: Some(format!("{}:{}", config.username, uid)),
         text,
         payload: Value::Object(payload),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_message_event, ParsedEmail};
+    use crate::config::EmailConfig;
+
+    fn config() -> EmailConfig {
+        EmailConfig {
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 587,
+            username: "me@example.com".to_string(),
+            password: "secret".to_string(),
+            from_address: "me@example.com".to_string(),
+            allowed_senders: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn message_event_exposes_gmail_aligned_sender_and_unread_fields() {
+        let raw = b"From: John Smith <john@example.com>\r\n\
+Subject: Invoice due\r\n\
+Message-ID: <m1@example.com>\r\n\
+\r\n\
+Please pay this invoice";
+        let email = ParsedEmail::from_raw(raw).expect("parsed email");
+
+        let event = build_message_event("email", &config(), 7, &email);
+
+        assert_eq!(event.payload["sender_name"], "John Smith");
+        assert_eq!(event.payload["from"], "john@example.com");
+        assert_eq!(event.payload["subject"], "Invoice due");
+        assert_eq!(event.payload["body_preview"], "Please pay this invoice");
+        assert_eq!(event.payload["unread"], true);
+        assert_eq!(event.payload["has_attachment"], false);
+    }
+
+    #[test]
+    fn message_event_marks_mime_attachments() {
+        let raw = b"From: John Smith <john@example.com>\r\n\
+Subject: Invoice due\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"b\"\r\n\
+\r\n\
+--b\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+Please pay this invoice\r\n\
+--b\r\n\
+Content-Type: application/pdf; name=\"invoice.pdf\"\r\n\
+Content-Disposition: attachment; filename=\"invoice.pdf\"\r\n\
+\r\n\
+PDF bytes\r\n\
+--b--";
+        let email = ParsedEmail::from_raw(raw).expect("parsed email");
+
+        let event = build_message_event("email", &config(), 8, &email);
+
+        assert_eq!(event.payload["has_attachment"], true);
     }
 }

@@ -6,24 +6,6 @@
   ],
   "fields": [
     {
-      "path": "chat_id",
-      "label": "Chat ID",
-      "type": "string",
-      "operators": ["contains", "equals", "matches"]
-    },
-    {
-      "path": "sender_open_id",
-      "label": "Sender open ID",
-      "type": "string",
-      "operators": ["contains", "equals", "matches"]
-    },
-    {
-      "path": "message_id",
-      "label": "Message ID",
-      "type": "string",
-      "operators": ["contains", "equals"]
-    },
-    {
       "path": "message_type",
       "label": "Message type",
       "type": "enum",
@@ -42,10 +24,14 @@
       ]
     },
     {
-      "path": "create_time",
-      "label": "Created at",
-      "type": "string",
-      "operators": ["contains", "equals"]
+      "path": "chat_type",
+      "label": "Chat type",
+      "type": "enum",
+      "operators": ["equals"],
+      "values": [
+        { "value": "p2p", "label": "Direct message" },
+        { "value": "group", "label": "Group chat" }
+      ]
     }
   ]
 }

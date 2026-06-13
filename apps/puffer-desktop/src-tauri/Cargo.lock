@@ -4063,6 +4063,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "shell-words",
  "thiserror 2.0.18",
  "time",

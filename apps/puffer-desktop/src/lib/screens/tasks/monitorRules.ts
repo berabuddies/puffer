@@ -75,7 +75,17 @@ const BOOLEAN_VALUES: MonitorRuleSchemaValue[] = [
 
 export function monitorRuleDetails(schema: MonitorRuleSchema | null | undefined): MonitorRuleDetail[] {
   const fields = (schema?.fields ?? []).map(detailFromSchemaField);
-  return [MESSAGE_TEXT_DETAIL, ...fields];
+  return [{ ...MESSAGE_TEXT_DETAIL, label: eventTextLabel(schema) }, ...fields];
+}
+
+export function eventTextLabel(schema: MonitorRuleSchema | null | undefined): string {
+  if (schema?.event_source === "gmail-browser" || schema?.event_source === "email") {
+    return "Email content";
+  }
+  if (schema?.event_source === "gcal-browser") {
+    return "Event content";
+  }
+  return "Message text";
 }
 
 export function detailFromSchemaField(field: MonitorRuleSchemaField, index = 0): MonitorRuleDetail {
@@ -185,7 +195,7 @@ function parsedRule(
   if (rule.type === "regex" && typeof rule.pattern === "string") {
     const parsed = parseRegexRule(rule.pattern);
     return {
-      detail: MESSAGE_TEXT_DETAIL,
+      detail: detailByPath(details, MESSAGE_TEXT_PATH),
       operator: parsed.operator,
       valueLabel: parsed.valueLabel
     };

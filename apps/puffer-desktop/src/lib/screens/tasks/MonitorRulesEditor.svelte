@@ -50,6 +50,7 @@
   let activeBindingSlug = "";
 
   let details = $derived(monitorRuleDetails(schema));
+  let eventTextDetail = $derived(details.find((detail) => detail.target === "event_text"));
   let payloadDetails = $derived(details.filter((detail) => detail.target === "payload"));
   let selectedDetail = $derived(details.find((detail) => detail.path === selectedPath) ?? details[0] ?? null);
   let selectedOperators = $derived(selectedDetail?.operators ?? []);
@@ -186,7 +187,7 @@
           <label>
             <span>Message detail</span>
             <select aria-label="Message detail" value={selectedPath} onchange={onDetailChange}>
-              <option value={MESSAGE_TEXT_PATH}>Message text</option>
+              <option value={MESSAGE_TEXT_PATH}>{eventTextDetail?.label ?? "Message text"}</option>
               {#each payloadDetails as detail (detail.path)}
                 <option value={detail.path}>{detail.label}</option>
               {/each}
@@ -272,7 +273,7 @@
           <label>
             <span>Message detail</span>
             <select aria-label="Message detail" value={selectedPath} onchange={onDetailChange}>
-              <option value={MESSAGE_TEXT_PATH}>Message text</option>
+              <option value={MESSAGE_TEXT_PATH}>{eventTextDetail?.label ?? "Message text"}</option>
               {#each payloadDetails as detail (detail.path)}
                 <option value={detail.path}>{detail.label}</option>
               {/each}

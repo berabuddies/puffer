@@ -1,7 +1,7 @@
 //! JSON snapshot helpers for workflow daemon responses.
 
 use puffer_subscriptions::ConnectionRecord;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Returns the Desktop-facing JSON for one connector connection.
 pub(super) fn connection_snapshot_json(

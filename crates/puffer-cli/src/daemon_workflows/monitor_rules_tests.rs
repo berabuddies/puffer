@@ -534,7 +534,7 @@ fn command_backed_connectors_expose_monitor_rule_schemas() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|field| field["path"] == "sender_open_id"));
+        .any(|field| field["path"] == "chat_type"));
 
     let lark_bot_connection = "rule-schema-lark-bot";
     let _ = manager
@@ -558,9 +558,9 @@ fn command_backed_connectors_expose_monitor_rule_schemas() {
             "connection_slug": lark_bot_connection,
             "mode": "exclude",
             "kind": "field",
-            "field": "sender_open_id",
-            "operator": "contains",
-            "value": "ou_"
+            "field": "chat_type",
+            "operator": "equals",
+            "value": "group"
         }),
     )
     .unwrap();
@@ -572,7 +572,7 @@ fn command_backed_connectors_expose_monitor_rule_schemas() {
         .unwrap();
     assert_eq!(
         lark_bot_binding["ignore_filters"][0]["expression"],
-        ".sender_open_id | test(\"(?i:ou_)\")"
+        ".chat_type == \"group\""
     );
     assert!(lark_bot_binding["monitor_rule_schema"]["fields"]
         .as_array()

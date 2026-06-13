@@ -63,8 +63,8 @@ pub use contacts::{
     SLACK_CONTACT_PREFIX, TELEGRAM_CONTACT_PREFIX,
 };
 pub use event_schema::{
-    EventField, EventFieldRule, EventFieldType, EventFieldValue, EventOperator, EventSchema,
-    EventTextField, compile_event_field_rule, load_event_schema_from_dir, validate_event_schema,
+    compile_event_field_rule, load_event_schema_from_dir, validate_event_schema, EventField,
+    EventFieldRule, EventFieldType, EventFieldValue, EventOperator, EventSchema, EventTextField,
 };
 pub use history::{
     now_ms, WorkflowActionLog, WorkflowBindingRun, WorkflowBindingRunStatus, WorkflowHistoryStore,

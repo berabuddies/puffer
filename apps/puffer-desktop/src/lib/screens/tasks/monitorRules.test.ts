@@ -14,7 +14,7 @@ import type {
   WorkflowBinding,
   WorkflowFilterRule
 } from "../../types";
-import { monitorRuleChipsForMode } from "./monitorRules";
+import { monitorRuleChipsForMode, monitorRuleDetails } from "./monitorRules";
 
 type SchemaCase = {
   slug: string;
@@ -32,6 +32,98 @@ const SCHEMAS: SchemaCase[] = [
 ];
 
 describe("monitor rule chip labels", () => {
+  test("customizes event text labels per connector", () => {
+    const cases: Array<{ schema: MonitorRuleSchema; label: string }> = [
+      { schema: telegramUserSchemaJson as MonitorRuleSchema, label: "Message text" },
+      { schema: gmailSchemaJson as MonitorRuleSchema, label: "Email content" },
+      { schema: gcalSchemaJson as MonitorRuleSchema, label: "Event content" },
+      { schema: emailSchemaJson as MonitorRuleSchema, label: "Email content" },
+      { schema: telegramBotSchemaJson as MonitorRuleSchema, label: "Message text" },
+      { schema: larkLoginSchemaJson as MonitorRuleSchema, label: "Message text" },
+      { schema: larkBotSchemaJson as MonitorRuleSchema, label: "Message text" }
+    ];
+
+    for (const { schema, label } of cases) {
+      expect(monitorRuleDetails(schema)[0].label).toBe(label);
+      const [chip] = monitorRuleChipsForMode(
+        bindingWithRule(schema.event_source ?? "connector", "include", {
+          type: "regex",
+          pattern: "invoice",
+          case_insensitive: true
+        }),
+        "include",
+        schema
+      );
+      expect(chip.title).toBe(`${label} contains invoice`);
+    }
+  });
+
+  test("keeps Telegram chat fields user-facing", () => {
+    const fields = telegramUserSchemaJson.fields ?? [];
+
+    expect(fields.find((field) => field.path === "group_channel_name")?.label).toBe("Group/Channel Name");
+    expect(fields.some((field) => field.path === "chat_title")).toBe(false);
+    expect(fields.some((field) => field.path === "chat_username")).toBe(false);
+    expect(fields.some((field) => field.path === "is_outgoing")).toBe(false);
+  });
+
+  test("keeps Gmail fields focused on user-facing message details", () => {
+    const fields = gmailSchemaJson.fields ?? [];
+
+    expect(fields.map((field) => [field.path, field.label])).toEqual([
+      ["message.sender", "Sender name"],
+      ["message.fromEmail", "From email"],
+      ["message.subject", "Subject"],
+      ["message.snippet", "Snippet"],
+      ["message.unread", "Unread"],
+      ["message.hasAttachment", "Has attachment"]
+    ]);
+    expect(fields.some((field) => field.path === "account")).toBe(false);
+    expect(fields.some((field) => field.path === "message.threadId")).toBe(false);
+    expect(fields.some((field) => field.path === "message.url")).toBe(false);
+  });
+
+  test("keeps Email fields aligned with Gmail user-facing message details", () => {
+    const fields = emailSchemaJson.fields ?? [];
+
+    expect(emailSchemaJson.text_fields?.map((field) => field.label)).toEqual(["Subject", "Snippet"]);
+    expect(fields.map((field) => [field.path, field.label])).toEqual([
+      ["sender_name", "Sender name"],
+      ["from", "From email"],
+      ["subject", "Subject"],
+      ["body_preview", "Snippet"],
+      ["unread", "Unread"],
+      ["has_attachment", "Has attachment"]
+    ]);
+    expect(fields.some((field) => field.path === "thread_id")).toBe(false);
+    expect(fields.some((field) => field.path === "message_id")).toBe(false);
+    expect(fields.some((field) => field.path === "uid")).toBe(false);
+    expect(fields.some((field) => field.path === "date_ms")).toBe(false);
+  });
+
+  test("keeps GCal fields focused on user-facing event details", () => {
+    const fields = gcalSchemaJson.fields ?? [];
+
+    expect(fields.some((field) => field.path === "account")).toBe(false);
+    expect(fields.some((field) => field.path === "event.id")).toBe(false);
+    expect(fields.some((field) => field.path === "event.index")).toBe(false);
+  });
+
+  test("keeps Lark fields limited to stable user-facing event fields", () => {
+    for (const schema of [larkLoginSchemaJson, larkBotSchemaJson]) {
+      const fields = schema.fields ?? [];
+
+      expect(fields.map((field) => [field.path, field.label])).toEqual([
+        ["message_type", "Message type"],
+        ["chat_type", "Chat type"]
+      ]);
+      expect(fields.some((field) => field.path === "chat_id")).toBe(false);
+      expect(fields.some((field) => field.path === "sender_open_id")).toBe(false);
+      expect(fields.some((field) => field.path === "message_id")).toBe(false);
+      expect(fields.some((field) => field.path === "create_time")).toBe(false);
+    }
+  });
+
   test("render message text rules without generated regex wrappers", () => {
     const cases: Array<{
       name: string;
@@ -64,11 +156,13 @@ describe("monitor rule chip labels", () => {
     ];
 
     for (const testCase of cases) {
-      for (const { slug } of SCHEMAS) {
+      for (const { slug, schema } of SCHEMAS) {
+        const detailLabel = monitorRuleDetails(schema)[0].label;
+        const title = testCase.title.replace("Message text", detailLabel);
         for (const mode of ["include", "exclude"] satisfies MonitorRuleMode[]) {
-          const [chip] = monitorRuleChipsForMode(bindingWithRule(slug, mode, testCase.rule), mode, null);
+          const [chip] = monitorRuleChipsForMode(bindingWithRule(slug, mode, testCase.rule), mode, schema);
 
-          expect(chip.title, `${slug} ${testCase.name} ${mode}`).toBe(testCase.title);
+          expect(chip.title, `${slug} ${testCase.name} ${mode}`).toBe(title);
           expect(chip.operatorLabel, `${slug} ${testCase.name} ${mode}`).toBe(testCase.operatorLabel);
           expect(chip.valueLabel, `${slug} ${testCase.name} ${mode}`).toBe(testCase.valueLabel);
           expect(chip.title, `${slug} ${testCase.name} ${mode}`).not.toContain("^(?:");

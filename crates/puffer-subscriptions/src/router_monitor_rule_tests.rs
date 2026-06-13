@@ -282,21 +282,21 @@ mod monitor_rule_tests {
                 "telegram-login",
                 "telegram-user",
                 bundled_schema("telegram-user"),
-                30,
+                25,
             ),
             (
                 "gmail-browser",
                 "gmail-browser",
                 bundled_schema("gmail-browser"),
-                24,
+                19,
             ),
             (
                 "gcal-browser",
                 "gcal-browser",
                 bundled_schema("gcal-browser"),
-                20,
+                14,
             ),
-            ("email", "email", bundled_schema("email"), 17),
+            ("email", "email", bundled_schema("email"), 19),
             (
                 "telegram-bot",
                 "telegram-bot",
@@ -307,13 +307,13 @@ mod monitor_rule_tests {
                 "lark-login",
                 "lark-login",
                 bundled_connector_schema("lark-login"),
-                23,
+                15,
             ),
             (
                 "lark-bot",
                 "lark-bot",
                 bundled_connector_schema("lark-bot"),
-                23,
+                15,
             ),
         ]
     }
@@ -729,14 +729,14 @@ mod monitor_rule_tests {
             cases.extend(schema_cases);
         }
 
-        assert_eq!(per_connector["telegram-user"], 30);
-        assert_eq!(per_connector["gmail-browser"], 24);
-        assert_eq!(per_connector["gcal-browser"], 20);
-        assert_eq!(per_connector["email"], 17);
+        assert_eq!(per_connector["telegram-user"], 25);
+        assert_eq!(per_connector["gmail-browser"], 19);
+        assert_eq!(per_connector["gcal-browser"], 14);
+        assert_eq!(per_connector["email"], 19);
         assert_eq!(per_connector["telegram-bot"], 15);
-        assert_eq!(per_connector["lark-login"], 23);
-        assert_eq!(per_connector["lark-bot"], 23);
-        assert_eq!(cases.len(), 152);
+        assert_eq!(per_connector["lark-login"], 15);
+        assert_eq!(per_connector["lark-bot"], 15);
+        assert_eq!(cases.len(), 122);
 
         let mut mode_template_count = 0;
         let mut expected_actions = 0;
@@ -812,8 +812,8 @@ mod monitor_rule_tests {
             }
         }
 
-        assert_eq!(mode_template_count, 304);
-        assert_eq!(expected_actions, 300);
+        assert_eq!(mode_template_count, 244);
+        assert_eq!(expected_actions, 240);
         assert_eq!(recording.topics.lock().unwrap().len(), expected_actions);
     }
 

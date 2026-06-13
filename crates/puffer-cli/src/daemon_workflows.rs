@@ -28,14 +28,14 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
-    ActionSpec, ConnectionRecord, ConnectorTemplate, FilterSpec, SubscriberManifestRoots,
-    TaggedFilterSpec, WorkflowBindingSpec, WorkflowBindingStatus, connection_subscriber_manifest,
-    connection_workflow_trigger_supported, connector_runtime_hints,
-    connector_workflow_trigger_supported, suggested_connection_slug,
+    connection_subscriber_manifest, connection_workflow_trigger_supported, connector_runtime_hints,
+    connector_workflow_trigger_supported, suggested_connection_slug, ActionSpec, ConnectionRecord,
+    ConnectorTemplate, FilterSpec, SubscriberManifestRoots, TaggedFilterSpec, WorkflowBindingSpec,
+    WorkflowBindingStatus,
 };
 use puffer_workflow::{RegisterOptions, WorkflowStore};
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use snapshot_json::connection_snapshot_json;
 use std::fs;
 
@@ -869,12 +869,10 @@ mod tests {
         assert_eq!(value["action_type"], "triage_agent");
         assert_eq!(value["model"], "openai/gpt-5.4");
         assert_eq!(value["monitor"], true);
-        assert!(
-            value["monitor_memory_path"]
-                .as_str()
-                .unwrap()
-                .ends_with("runtime/monitors/telegram-user.md")
-        );
+        assert!(value["monitor_memory_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("runtime/monitors/telegram-user.md"));
     }
 
     #[test]

@@ -563,23 +563,6 @@ mod tests {
             &json!({"chat_kind": "user"})
         ));
 
-        let outgoing_no = field_filter(
-            &telegram,
-            "is_outgoing",
-            EventOperator::Equals,
-            Some(json!(false)),
-        );
-        assert!(filter_matches(
-            Some(&outgoing_no),
-            "",
-            &json!({"is_outgoing": false})
-        ));
-        assert!(!filter_matches(
-            Some(&outgoing_no),
-            "",
-            &json!({"is_outgoing": "false"})
-        ));
-
         let sender_name = field_filter(
             &telegram,
             "sender_name",
@@ -590,6 +573,23 @@ mod tests {
             Some(&sender_name),
             "",
             &json!({"sender_name": "smith john"})
+        ));
+
+        let group_channel_name = field_filter(
+            &telegram,
+            "group_channel_name",
+            EventOperator::Contains,
+            Some(json!("Puffer")),
+        );
+        assert!(filter_matches(
+            Some(&group_channel_name),
+            "",
+            &json!({"chat_kind": "group", "group_channel_name": "Puffer Internal"})
+        ));
+        assert!(!filter_matches(
+            Some(&group_channel_name),
+            "",
+            &json!({"chat_kind": "user", "chat_title": "Puffer Friend"})
         ));
 
         let has_media = field_filter(&telegram, "media", EventOperator::Exists, None);
@@ -639,20 +639,38 @@ mod tests {
             &json!({"message": {"unread": "true"}})
         ));
 
-        let uid = field_filter(&email, "uid", EventOperator::Equals, Some(json!(123)));
-        assert!(filter_matches(Some(&uid), "", &json!({"uid": 123})));
-        assert!(!filter_matches(Some(&uid), "", &json!({"uid": "123"})));
-
-        let row_index = field_filter(&gcal, "event.index", EventOperator::Equals, Some(json!(2)));
+        let gmail_has_attachment = field_filter(
+            &gmail,
+            "message.hasAttachment",
+            EventOperator::Equals,
+            Some(json!(true)),
+        );
         assert!(filter_matches(
-            Some(&row_index),
+            Some(&gmail_has_attachment),
             "",
-            &json!({"event": {"index": 2}})
+            &json!({"message": {"hasAttachment": true}})
         ));
         assert!(!filter_matches(
-            Some(&row_index),
+            Some(&gmail_has_attachment),
             "",
-            &json!({"event": {"index": "2"}})
+            &json!({"message": {"hasAttachment": false}})
+        ));
+
+        let email_has_attachment = field_filter(
+            &email,
+            "has_attachment",
+            EventOperator::Equals,
+            Some(json!(true)),
+        );
+        assert!(filter_matches(
+            Some(&email_has_attachment),
+            "",
+            &json!({"has_attachment": true})
+        ));
+        assert!(!filter_matches(
+            Some(&email_has_attachment),
+            "",
+            &json!({"has_attachment": "true"})
         ));
 
         let event_title = field_filter(
@@ -772,16 +790,21 @@ mod tests {
             &json!({"message_type": "image"})
         ));
 
-        let lark_sender = field_filter(
+        let lark_chat_type = field_filter(
             &lark_bot,
-            "sender_open_id",
-            EventOperator::Contains,
-            Some(json!("ou_")),
+            "chat_type",
+            EventOperator::Equals,
+            Some(json!("group")),
         );
         assert!(filter_matches(
-            Some(&lark_sender),
+            Some(&lark_chat_type),
             "",
-            &json!({"sender_open_id": "ou_demo"})
+            &json!({"chat_type": "group"})
+        ));
+        assert!(!filter_matches(
+            Some(&lark_chat_type),
+            "",
+            &json!({"chat_type": "p2p"})
         ));
     }
 
