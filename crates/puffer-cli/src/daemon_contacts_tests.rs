@@ -3,6 +3,7 @@ use super::daemon_contacts_telegram::{
     TelegramDiagMessage,
 };
 use super::*;
+use grammers_session::Session;
 use puffer_config::ConfigPaths;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -698,6 +699,64 @@ fn contacts_list_uses_telegram_peer_cache_without_message_diagnostics() {
     assert!(!candidates
         .iter()
         .any(|candidate| candidate["id"] == "telegram@announcements"));
+}
+
+#[test]
+fn contacts_list_filters_current_telegram_user_from_peer_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+
+    let session = Session::new();
+    session.set_user(42, 2, false);
+    let session_path = account_dir.join("telegram.session");
+    std::fs::File::create(&session_path).unwrap();
+    session.save_to_file(&session_path).unwrap();
+
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                {
+                    "id": "42",
+                    "numeric_id": 42_i64,
+                    "kind": "user",
+                    "title": "Me Myself",
+                    "username": "me",
+                    "first_name": "Me",
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                },
+                {
+                    "id": "43",
+                    "numeric_id": 43_i64,
+                    "kind": "user",
+                    "title": "Alice",
+                    "username": "alice",
+                    "first_name": "Alice",
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let result = handle_contacts_list(&paths, &json!({ "limit": 10 })).unwrap();
+    let candidates = result["candidates"].as_array().unwrap();
+
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram-user-id@42"));
+    assert!(candidates.iter().any(|candidate| {
+        candidate["id"] == "telegram-user-id@43" && candidate["name"] == "Alice"
+    }));
 }
 
 #[test]

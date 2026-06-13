@@ -1,7 +1,7 @@
 //! Telegram peer-cache helpers for contact ranking.
 
 use super::{
-    merge_candidate_last_message_at_ms, merge_telegram_name,
+    merge_candidate_last_message_at_ms, merge_telegram_name, normalize_contact_id,
     read_telegram_primary_peer_metadata_from_account, Candidate,
 };
 use anyhow::{Context, Result};
@@ -35,7 +35,11 @@ pub(super) fn collect_telegram_peer_cache_candidates(
     account_dir: &Path,
     by_id: &mut HashMap<String, Candidate>,
 ) {
+    let self_contact_id = telegram_session_user_contact_id(account_dir);
     for (id, metadata) in read_telegram_primary_peer_metadata_from_account(account_dir) {
+        if self_contact_id.as_deref() == Some(id.as_str()) {
+            continue;
+        }
         let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
             id,
             name: metadata.name.clone(),
@@ -54,6 +58,13 @@ pub(super) fn collect_telegram_peer_cache_candidates(
             entry.avatar = metadata.avatar;
         }
     }
+}
+
+fn telegram_session_user_contact_id(account_dir: &Path) -> Option<String> {
+    let user = Session::load_file(account_dir.join("telegram.session"))
+        .ok()?
+        .get_user()?;
+    normalize_contact_id(&format!("telegram-user-id@{}", user.id))
 }
 
 pub(super) fn hydrate_telegram_peer_cache_if_needed(paths: &ConfigPaths, account_dir: &Path) {
