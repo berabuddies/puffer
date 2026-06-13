@@ -20,8 +20,10 @@ use std::path::Path;
 mod daemon_contacts_telegram_peer_cache;
 use daemon_contacts_telegram_peer_cache::{
     collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache,
-    hydrate_telegram_peer_cache_if_needed, hydrate_telegram_recent_peer_cache_if_needed,
-    telegram_recent_dialog_cache_ready, TelegramPeerCacheHydrationMode,
+    hydrate_telegram_peer_cache_if_needed, hydrate_telegram_recent_peer_cache,
+    hydrate_telegram_recent_peer_cache_if_needed,
+    telegram_recent_dialog_cache_claims_target_satisfied, telegram_recent_dialog_cache_ready,
+    TelegramPeerCacheHydrationMode,
 };
 
 #[cfg(test)]
@@ -203,31 +205,14 @@ pub(super) fn recent_telegram_contacts(
             ready = false;
             continue;
         }
-        for (id, metadata) in read_telegram_primary_peer_metadata_from_account(&account_dir) {
-            if id == "telegram-user-id@777000" {
-                continue;
-            }
-            let Some(last_message_at_ms) = metadata.last_message_at_ms else {
-                continue;
-            };
-            let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
-                id,
-                name: metadata.name.clone(),
-                avatar: metadata.avatar.clone(),
-                score: 0.01,
-                last_message_at_ms: Some(last_message_at_ms),
-                context: Vec::new(),
-            });
-            entry.score = entry.score.max(0.01);
-            merge_candidate_last_message_at_ms(
-                &mut entry.last_message_at_ms,
-                Some(last_message_at_ms),
-            );
-            merge_telegram_name(&mut entry.name, &metadata.name);
-            if entry.avatar.is_none() {
-                entry.avatar = metadata.avatar;
-            }
+        let mut account_candidates = collect_recent_telegram_account_candidates(&account_dir);
+        if account_candidates.len() < limit
+            && telegram_recent_dialog_cache_claims_target_satisfied(&account_dir, limit)
+        {
+            hydrate_telegram_recent_peer_cache(paths, &account_dir, limit);
+            account_candidates = collect_recent_telegram_account_candidates(&account_dir);
         }
+        merge_recent_telegram_candidates(&mut by_id, account_candidates);
     }
     let mut candidates = by_id.into_values().collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
@@ -238,6 +223,58 @@ pub(super) fn recent_telegram_contacts(
     });
     candidates.truncate(limit);
     Ok(TelegramRecentContacts { ready, candidates })
+}
+
+fn collect_recent_telegram_account_candidates(account_dir: &Path) -> HashMap<String, Candidate> {
+    let mut by_id = HashMap::new();
+    for (id, metadata) in read_telegram_primary_peer_metadata_from_account(account_dir) {
+        if id == "telegram-user-id@777000" {
+            continue;
+        }
+        let Some(last_message_at_ms) = metadata.last_message_at_ms else {
+            continue;
+        };
+        let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
+            id,
+            name: metadata.name.clone(),
+            avatar: metadata.avatar.clone(),
+            score: 0.01,
+            last_message_at_ms: Some(last_message_at_ms),
+            context: Vec::new(),
+        });
+        entry.score = entry.score.max(0.01);
+        merge_candidate_last_message_at_ms(&mut entry.last_message_at_ms, Some(last_message_at_ms));
+        merge_telegram_name(&mut entry.name, &metadata.name);
+        if entry.avatar.is_none() {
+            entry.avatar = metadata.avatar;
+        }
+    }
+    by_id
+}
+
+fn merge_recent_telegram_candidates(
+    by_id: &mut HashMap<String, Candidate>,
+    candidates: HashMap<String, Candidate>,
+) {
+    for (id, candidate) in candidates {
+        match by_id.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                let existing = existing.get_mut();
+                existing.score = existing.score.max(candidate.score);
+                merge_candidate_last_message_at_ms(
+                    &mut existing.last_message_at_ms,
+                    candidate.last_message_at_ms,
+                );
+                merge_telegram_name(&mut existing.name, &candidate.name);
+                if existing.avatar.is_none() {
+                    existing.avatar = candidate.avatar;
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(candidate);
+            }
+        }
+    }
 }
 
 fn telegram_dialog_hydration_ready(account_dir: &Path) -> bool {
