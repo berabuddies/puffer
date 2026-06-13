@@ -70,32 +70,31 @@ fn is_lark_connection(connection: &ConnectionRecord) -> bool {
 
 /// Best-effort FULL teardown of a WeChat connection (container + data + state).
 ///
-/// Each WeChat connection owns its own container (`puffer-wechat-<slug>`), so
-/// deleting the connection removes the container (`stop` then `rm` — the
-/// `--restart unless-stopped` policy could otherwise resurrect a bare `rm -f`),
-/// its named data volume (the login + chat data at `/config`), and the
-/// per-instance state files. Delete is a full reset: no account data is left
-/// behind and a later re-add starts fresh (new QR scan). Errors are logged.
+/// Each WeChat connection owns its own container (`puffer-wechat-<slug>`).
+/// Removing the connection is a SOFT remove: the container, its named data volume,
+/// the image, and the per-instance state are all KEPT — the container is only
+/// STOPPED. So a later re-connect (same slug) is a fast start that just needs a
+/// fresh QR scan (a restart re-binds the WeChat device, which signs the previous
+/// session out), instead of a rebuild + WeChat re-download. We deliberately do NOT
+/// delete the container/volume/image. Errors are logged.
 fn cleanup_wechat_container(connection: &ConnectionRecord) {
     if !connection.connector_slug.starts_with("wechat-") {
         return;
     }
     let container = format!("puffer-wechat-{}", connection.slug);
-    // The instance's runtime can drift between create and delete (a WECHAT_RUNTIME
-    // change, installing/removing `container`, an OS upgrade), and the container +
-    // its named data volume live on whichever runtime created them. Tear down on
-    // every present runtime (Docker, plus Apple `container` when installed) — the
-    // others harmlessly no-op — so a drift can't silently leak the container and
-    // its login/chat data.
-    for (bin, is_container) in crate::wechat_connector::teardown_runtimes() {
-        teardown_one_runtime(&bin, is_container, &container);
+    // The instance may live on Docker or Apple `container` (runtime can drift),
+    // so stop it on every present runtime — the others harmlessly no-op. STOP only
+    // (keep the container + data volume + image) so the next connect is a fast
+    // start + re-scan, not a rebuild/re-download.
+    for (bin, _is_container) in crate::wechat_connector::teardown_runtimes() {
+        let _ = std::process::Command::new(&bin)
+            .args(["stop", "-t", "5", &container])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
-    // Remove per-instance state files (config/policy/seen/lock + the cached DB keys).
-    if let Some(dir) = wechat_state_dir() {
-        for suffix in ["json", "policy.json", "seen.json", "policy.lock", "ui.lock", "dbkey"] {
-            let _ = std::fs::remove_file(dir.join(format!("{}.{suffix}", connection.slug)));
-        }
-    }
+    // Keep the per-instance state (config/policy/seen/dbkey) for a fast re-connect.
 }
 
 /// Stops and removes the container + its named data volume on ONE runtime
@@ -104,6 +103,9 @@ fn cleanup_wechat_container(connection: &ConnectionRecord) {
 /// is benign (that runtime simply doesn't hold this instance), but any other
 /// failure is logged so a genuine leak is visible. Stop precedes rm because
 /// Docker's `--restart unless-stopped` could otherwise resurrect a bare `rm -f`.
+/// Retained for an explicit hard-delete path; connection remove is now soft (stop
+/// + keep), so this is not on the default delete path.
+#[allow(dead_code)]
 fn teardown_one_runtime(bin: &str, is_container: bool, container: &str) {
     let _ = Command::new(bin)
         .args(["stop", "-t", "3", container])
@@ -158,7 +160,10 @@ fn teardown_one_runtime(bin: &str, is_container: bool, container: &str) {
 }
 
 /// Resolves the connector's per-instance state dir (must match where the
-/// connector writes: `WECHAT_STATE_DIR`, else `~/.puffer/wechat`).
+/// connector writes: `WECHAT_STATE_DIR`, else `~/.puffer/wechat`). Retained for
+/// the hard-delete path; the default connection remove is now soft (it keeps the
+/// per-instance state for a fast re-connect), so this is not on that path.
+#[allow(dead_code)]
 fn wechat_state_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("WECHAT_STATE_DIR") {
         if !dir.trim().is_empty() {

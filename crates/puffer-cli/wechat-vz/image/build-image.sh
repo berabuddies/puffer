@@ -9,14 +9,20 @@
 # "lacks AT-SPI"). The ~670MB WeChat blob is never committed to the repo.
 #
 #   ./build-image.sh                            # build into the Docker image store
-#   WECHAT_RUNTIME=container ./build-image.sh   # also load it into Apple container's store
+#   WECHAT_RUNTIME=container ./build-image.sh   # build into Apple container's store
 #   WECHAT_DEB_URL=<url> ./build-image.sh        # build a specific WeChat .deb
 #   WECHAT_ATSPI_IMAGE=name:tag ./build-image.sh # override the image tag
+#   WECHAT_BUILD_DNS=8.8.8.8 ./build-image.sh    # DNS for `container build`'s VM
+#   WECHAT_BUILD_RETRIES=2 ./build-image.sh      # `container build` retry count
 #
-# Built with Docker; for the container runtime it is then loaded into container's
-# separate OCI store via `docker save | container image load` (no inner builder VM
-# needed — `container image load` takes the archive). Works on macOS (no dpkg) and
-# Linux.
+# The .deb fetch + extract is Docker-free (curl + bsdtar). The image itself is
+# built with the SELECTED runtime's native builder: `docker build` for docker,
+# `container build` (in its own builder VM) for Apple `container` — so neither
+# runtime needs the other installed. `container build`'s builder VM has spottier
+# apt-mirror reachability than Docker, so its build is retried (and the Dockerfile
+# hardens apt with ForceIPv4 + retries); if it still fails the connector falls
+# back to the base image + runtime accessibility setup. Works on macOS (no dpkg)
+# and Linux.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -52,19 +58,33 @@ cp -a "$work/opt/wechat/." wc411/
 TAG="${WECHAT_ATSPI_IMAGE:-puffer-wechat-atspi:${VER:-latest}}"
 echo "[build] WeChat ${VER:-unknown} -> $(du -sh wc411 | cut -f1); tag $TAG"
 
-echo "[build] building $TAG with docker"
-"$DOCKER" build -t "$TAG" .
-
 if [ "$RUNTIME" = "container" ]; then
-    # Apple `container` keeps its own OCI image store (separate from Docker's).
-    # Build with Docker above, then load the result in — `container image load`
-    # accepts the docker archive, so no inner builder VM is involved.
-    echo "[build] loading $TAG into Apple container's image store"
+    # Apple `container` keeps its own OCI image store (separate from Docker's) and
+    # builds with `container build` (a buildkit instance in its own VM) — so this
+    # path needs no Docker. The builder VM's apt-mirror reachability is spottier
+    # than Docker's, so point it at a public resolver (--dns) and retry a few
+    # times; the Dockerfile additionally hardens apt (ForceIPv4 + retries). If it
+    # still fails, build-image.sh exits non-zero and the connector falls back to
+    # the base image + runtime accessibility setup (no Docker either way).
+    echo "[build] building $TAG with Apple container (container build --dns)"
     "$CONTAINER" system start >/dev/null 2>&1 || true
-    save="$(mktemp -t wechat-atspi)"  # BSD mktemp: a prefix; load reads by content, no .tar needed
-    "$DOCKER" save "$TAG" -o "$save"
-    "$CONTAINER" image load -i "$save"
-    rm -f "$save"
+    dns="${WECHAT_BUILD_DNS:-8.8.8.8}"
+    retries="${WECHAT_BUILD_RETRIES:-2}"
+    attempt=1
+    until "$CONTAINER" build --dns "$dns" -t "$TAG" .; do
+        if [ "$attempt" -ge "$retries" ]; then
+            echo "[build] container build failed after $attempt attempt(s)." >&2
+            echo "[build] (the builder VM likely could not reach the apt mirrors; the" >&2
+            echo "[build]  connector falls back to the base image + runtime a11y setup.)" >&2
+            exit 1
+        fi
+        attempt=$((attempt + 1))
+        echo "[build] container build failed; retrying ($attempt/$retries)…" >&2
+        sleep 3
+    done
+else
+    echo "[build] building $TAG with docker"
+    "$DOCKER" build -t "$TAG" .
 fi
 
 echo

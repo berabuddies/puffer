@@ -6,7 +6,11 @@ FROM ghcr.io/gloridust/wechat-on-cloud:latest
 
 # AT-SPI accessibility stack (bus launcher + the gi.Atspi binding the client
 # registers against) and dbus for the session bus.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# ForceIPv4 + retries + a timeout make the apt step survive a flaky build network
+# (Apple `container`'s build VM in particular has spotty mirror reachability;
+# harmless under Docker).
+RUN apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=8 -o Acquire::http::Timeout=30 update \
+    && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
         at-spi2-core gir1.2-atspi-2.0 python3-gi dbus-x11 \
     && rm -rf /var/lib/apt/lists/*
 

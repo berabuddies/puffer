@@ -28,6 +28,27 @@ use super::config::InstanceConfig;
 /// `WECHAT_IMAGE`.
 pub(crate) const DEFAULT_IMAGE: &str = "puffer-wechat-atspi:4.1.1.7";
 
+/// The pullable WechatOnCloud base image. It ships WeChat + the desktop but NO
+/// accessibility stack. When the baked a11y image can't be built (e.g. Apple
+/// `container`'s build VM can't reach the apt mirrors), the connector pulls this
+/// and layers the a11y stack on at runtime (see [`WechatInstance::ensure_runtime_a11y`])
+/// — a fully Docker-free path. Override with `WECHAT_BASE_IMAGE`.
+const BASE_IMAGE: &str = "ghcr.io/gloridust/wechat-on-cloud:latest";
+
+/// The a11y-enabled openbox autostart, embedded so the runtime-a11y fallback can
+/// push it into a base container. This is the SAME script the baked image bakes
+/// in (one source of truth): it sets the accessibility env + brings up the
+/// session D-Bus / AT-SPI bus BEFORE (re)launching WeChat.
+const RUNTIME_A11Y_AUTOSTART: &str = include_str!("../../wechat-vz/image/autostart");
+/// The runtime-a11y apply script (apt the a11y stack + install the autostart),
+/// embedded and pushed into the base container.
+const RUNTIME_A11Y_APPLY_SH: &str = include_str!("../../wechat-vz/apply-runtime-a11y.sh");
+/// In-container path the connector pushes [`RUNTIME_A11Y_AUTOSTART`] to (matches
+/// the apply script's default `A11Y_AUTOSTART_SRC`).
+const RUNTIME_A11Y_AUTOSTART_PATH: &str = "/tmp/puffer-a11y-autostart";
+/// In-container path the connector pushes [`RUNTIME_A11Y_APPLY_SH`] to.
+const RUNTIME_A11Y_APPLY_PATH: &str = "/tmp/puffer-apply-runtime-a11y.sh";
+
 /// Shell prelude that resolves `DISPLAY` inside the container exactly like the
 /// WechatOnCloud panel: honor an existing `$DISPLAY`, else take the first
 /// `/tmp/.X11-unix/X*` socket, else fall back to `:1`.
@@ -47,6 +68,16 @@ const DISPLAY_PRELUDE: &str = concat!(
 pub(crate) enum Runtime {
     Docker,
     Container,
+}
+
+/// How [`WechatInstance::ensure_image`] resolved the image to actually run: the
+/// image reference plus whether the accessibility stack must be layered on at
+/// runtime (true only for the base-image fallback; the baked image already has
+/// it). [`WechatInstance::ensure_container`] runs the container from `image` and,
+/// when `runtime_a11y` is set, applies the a11y setup after creating it.
+struct ImagePlan {
+    image: String,
+    runtime_a11y: bool,
 }
 
 /// Resolves the runtime + its CLI binary from
@@ -82,7 +113,40 @@ fn auto_container_bin() -> Option<String> {
     if !cfg!(target_os = "macos") || macos_major_version() < 26 {
         return None;
     }
-    container_bin_override().or_else(locate_container_bin)
+    container_bin_override()
+        .or_else(locate_container_bin)
+        .or_else(brew_install_container)
+}
+
+/// On macOS 26+ where `auto` should use Apple `container` but it isn't installed,
+/// install it once via Homebrew — the user only runs the app, no terminal. Best
+/// effort, at most once per process: returns the resolved binary on success, or
+/// `None` (→ Docker fallback). Opt out with `WECHAT_AUTO_INSTALL_CONTAINER=0`.
+fn brew_install_container() -> Option<String> {
+    use std::sync::OnceLock;
+    static DONE: OnceLock<Option<String>> = OnceLock::new();
+    DONE.get_or_init(|| {
+        if matches!(std::env::var("WECHAT_AUTO_INSTALL_CONTAINER").as_deref(), Ok("0")) {
+            return None;
+        }
+        let brew = which_on_path("brew").or_else(|| {
+            ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+                .into_iter()
+                .find(|p| is_executable_file(Path::new(p)))
+                .map(str::to_string)
+        })?;
+        eprintln!(
+            "wechat: Apple `container` not found — installing it via Homebrew (one-time, a few \
+             minutes). Set WECHAT_AUTO_INSTALL_CONTAINER=0 to skip and use Docker."
+        );
+        let _ = std::process::Command::new(&brew).args(["install", "container"]).status();
+        // The 1.0.0 bottle mislocated its plugins (apiserver crash-loop); the fix
+        // shipped in 1.0.0_1, so update + upgrade past it.
+        let _ = std::process::Command::new(&brew).arg("update").status();
+        let _ = std::process::Command::new(&brew).args(["upgrade", "container"]).status();
+        locate_container_bin()
+    })
+    .clone()
 }
 
 /// `WECHAT_CONTAINER_BIN`, if set and non-empty.
@@ -235,61 +299,71 @@ impl WechatInstance {
         Ok(self.docker(&["inspect", &name]).await?.status.success())
     }
 
-    /// Ensures the WeChat image is present locally. Resolution order:
-    /// 1. already present (`docker image inspect`),
-    /// 2. build from a local context if `WECHAT_BUILD_CONTEXT` points at one
-    ///    (the WechatOnCloud `docker/` dir) — used to override the default image,
-    /// 3. otherwise `docker pull` (the default image is published at
-    ///    `ghcr.io/gloridust/wechat-on-cloud:latest`).
-    /// A clear, actionable error is returned when none succeed.
-    async fn ensure_image(&self, cfg: &InstanceConfig) -> Result<()> {
+    /// Ensures a runnable WeChat image is present locally and returns the
+    /// [`ImagePlan`] (the image to run + whether to layer a11y on at runtime).
+    ///
+    /// Priority is the baked a11y image (`cfg.image`): already present → `pull` →
+    /// `load` from `WECHAT_CONTAINER_IMAGE_TAR` → `build` it. If the baked image
+    /// can't be obtained, fall back (Docker-free) to the pullable BASE image plus
+    /// runtime accessibility setup — and persist that choice so later runs skip
+    /// straight to it. A clear, actionable error is returned only when even the
+    /// base image can't be pulled.
+    async fn ensure_image(&self, cfg: &InstanceConfig) -> Result<ImagePlan> {
+        // A config that already fell back carries the base image + flag; honor it
+        // without re-attempting the (failed) baked build.
+        let on_base = cfg.image == base_image();
+        let keep = ImagePlan { image: cfg.image.clone(), runtime_a11y: cfg.runtime_a11y };
+
         if self.runtime == Runtime::Container {
-            // `container` has its own image store (separate from Docker's) and no
-            // local Dockerfile `build` step. Resolution order: already present →
-            // `pull` (when the image is a registry reference) → `load` from a
-            // configured OCI archive (`WECHAT_CONTAINER_IMAGE_TAR`, for an offline
-            // / bundled image). A clear error is returned when none succeed.
-            if self.container_image_present(cfg).await? {
-                return Ok(());
+            // `container` has its own image store (separate from Docker's).
+            // Resolution: already present → `pull` (registry ref) → `load` from a
+            // configured OCI archive (`WECHAT_CONTAINER_IMAGE_TAR`).
+            if self.image_present(&cfg.image).await? {
+                return Ok(keep);
             }
             let _ = self.docker(&["image", "pull", &cfg.image]).await;
-            if self.container_image_present(cfg).await? {
-                return Ok(());
+            if self.image_present(&cfg.image).await? {
+                return Ok(keep);
             }
             if let Ok(tar) = std::env::var("WECHAT_CONTAINER_IMAGE_TAR") {
                 let tar = tar.trim();
                 if !tar.is_empty() {
                     let _ = self.docker(&["image", "load", "-i", tar]).await;
-                    if self.container_image_present(cfg).await? {
-                        return Ok(());
+                    if self.image_present(&cfg.image).await? {
+                        return Ok(keep);
                     }
                 }
             }
+            // Priority: build the baked a11y image (skipped if the config already
+            // targets the base image — that build doesn't apply to it).
+            if !on_base && self.try_build_atspi_image(cfg).await? {
+                return Ok(ImagePlan { image: cfg.image.clone(), runtime_a11y: false });
+            }
+            // Fallback: base image + runtime a11y (fully Docker-free).
+            if let Some(plan) = self.fall_back_to_base(cfg).await? {
+                return Ok(plan);
+            }
             bail!(
                 "wechat image `{}` is not in the `container` image store and could not be \
-                 fetched: `container image pull` failed (set WECHAT_IMAGE to a registry \
-                 reference for an auto-pull) and no WECHAT_CONTAINER_IMAGE_TAR was set to an \
-                 OCI archive of it (produce one with `container image save`/`docker save`). \
-                 The Docker image store is separate from `container`'s.",
-                cfg.image
+                 obtained: `container image pull` failed, no WECHAT_CONTAINER_IMAGE_TAR OCI \
+                 archive was set, building the baked a11y image failed, and the base image \
+                 `{}` could not be pulled either. Check the machine's network / registry \
+                 access (the `container` image store is separate from Docker's).",
+                cfg.image,
+                base_image()
             );
         }
-        if self
-            .docker(&["image", "inspect", &cfg.image])
-            .await?
-            .status
-            .success()
-        {
-            return Ok(());
+
+        // Docker runtime.
+        if self.image_present(&cfg.image).await? {
+            return Ok(keep);
         }
         if let Ok(context) = std::env::var("WECHAT_BUILD_CONTEXT") {
             let context = context.trim();
             if !context.is_empty() {
-                let output = self
-                    .docker(&["build", "-t", &cfg.image, context])
-                    .await?;
+                let output = self.docker(&["build", "-t", &cfg.image, context]).await?;
                 if output.status.success() {
-                    return Ok(());
+                    return Ok(keep);
                 }
                 bail!(
                     "failed to build wechat image `{}` from {context}: {}",
@@ -298,20 +372,97 @@ impl WechatInstance {
                 );
             }
         }
-        let output = self.docker(&["pull", &cfg.image]).await?;
-        if output.status.success() {
-            return Ok(());
+        let pull = self.docker(&["pull", &cfg.image]).await?;
+        if pull.status.success() {
+            return Ok(keep);
+        }
+        if !on_base && self.try_build_atspi_image(cfg).await? {
+            return Ok(ImagePlan { image: cfg.image.clone(), runtime_a11y: false });
+        }
+        if let Some(plan) = self.fall_back_to_base(cfg).await? {
+            return Ok(plan);
         }
         bail!(
             "wechat image `{}` is not available: not built locally, no WECHAT_BUILD_CONTEXT \
-             set to build it, and `docker pull` failed ({}). The WechatOnCloud images are not \
-             published to a registry — build the image once with \
-             `docker build -t {} <path-to>/WechatOnCloud/docker`, or set WECHAT_BUILD_CONTEXT \
-             to that directory so puffer builds it.",
+             set to build it, `docker pull` failed ({}), and the base image `{}` could not be \
+             pulled for the runtime-accessibility fallback either.",
             cfg.image,
-            String::from_utf8_lossy(&output.stderr).trim(),
-            cfg.image
+            String::from_utf8_lossy(&pull.stderr).trim(),
+            base_image()
         )
+    }
+
+    /// The Docker-free fallback when the baked a11y image can't be obtained: pull
+    /// the base image and, on success, persist the choice (image := base,
+    /// `runtime_a11y` := true) so later runs go straight to it, returning the plan
+    /// to run base + layer a11y on at runtime. `None` (caller bails) if the base
+    /// image can't be pulled or the fallback is disabled (`WECHAT_RUNTIME_A11Y=0`).
+    async fn fall_back_to_base(&self, cfg: &InstanceConfig) -> Result<Option<ImagePlan>> {
+        if matches!(std::env::var("WECHAT_RUNTIME_A11Y").as_deref(), Ok("0")) {
+            return Ok(None);
+        }
+        let base = base_image();
+        eprintln!(
+            "wechat: the baked accessibility image is unavailable; falling back to the base \
+             image `{base}` + a one-time runtime accessibility setup (Docker-free)…"
+        );
+        // Pull (the docker `pull`/container `image pull` verbs differ; container
+        // accepts `image pull`, docker accepts both, so use `image pull` for both).
+        let _ = self.docker(&["image", "pull", &base]).await;
+        if !self.image_present(&base).await? {
+            return Ok(None);
+        }
+        // Persist so the act/subscribe paths and later starts skip the failed
+        // baked build and re-apply a11y on the base image. Best-effort.
+        let mut updated = cfg.clone();
+        updated.image = base.clone();
+        updated.runtime_a11y = true;
+        if let Err(error) = updated.save() {
+            eprintln!("wechat: could not persist the runtime-a11y fallback config: {error:#}");
+        }
+        Ok(Some(ImagePlan { image: base, runtime_a11y: true }))
+    }
+
+    /// Auto-builds the AT-SPI WeChat image when it is missing. That image bakes the
+    /// accessibility stack + WeChat and is in no registry, so a fresh machine can't
+    /// `pull` it. Invokes the repo build pipeline (`wechat-vz/image/build-image.sh`:
+    /// fetches the latest Universal WeChat .deb, layers the a11y stack, tags it as
+    /// `cfg.image`) with the selected runtime's native builder — `docker build` for
+    /// Docker, `container build` (its own builder VM) for Apple `container`, so
+    /// neither runtime needs the other. Returns whether the image is present
+    /// afterwards. Best-effort; the build context is the crate's source tree, so a
+    /// packaged binary with no source tree skips this (the caller then falls back
+    /// to the base image + runtime accessibility setup).
+    async fn try_build_atspi_image(&self, cfg: &InstanceConfig) -> Result<bool> {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/wechat-vz/image/build-image.sh");
+        if !Path::new(script).exists() {
+            return Ok(false);
+        }
+        eprintln!(
+            "wechat: image `{}` not found — building it now (first run fetches WeChat + builds; \
+             several minutes)…",
+            cfg.image
+        );
+        let runtime = if self.runtime == Runtime::Container { "container" } else { "docker" };
+        let mut cmd = Command::new("bash");
+        cmd.arg(script)
+            .env("WECHAT_RUNTIME", runtime)
+            .env("WECHAT_ATSPI_IMAGE", &cfg.image)
+            .env("DOCKER_BIN", env_or("DOCKER_BIN", "docker"))
+            .kill_on_drop(true);
+        if self.runtime == Runtime::Container {
+            cmd.env("WECHAT_CONTAINER_BIN", &self.docker_bin);
+        }
+        let _ = cmd.status().await;
+        if self.runtime == Runtime::Container {
+            self.container_image_present(cfg).await
+        } else {
+            Ok(self
+                .docker(&["image", "inspect", &cfg.image])
+                .await?
+                .status
+                .success())
+        }
     }
 
     /// Ensures the container is running: starts it if stopped, creates it (and
@@ -321,6 +472,11 @@ impl WechatInstance {
         // The engine/runtime itself may be off on a fresh machine — start it first.
         self.ensure_runtime_ready().await?;
         if self.is_running().await? {
+            // Running already; if this is a runtime-a11y (base-image) instance,
+            // make sure the a11y stack is in place (idempotent fast no-op once up).
+            if cfg.runtime_a11y {
+                self.ensure_runtime_a11y().await?;
+            }
             return Ok(());
         }
         let name = self.container_name();
@@ -331,19 +487,32 @@ impl WechatInstance {
         if self.container_exists().await? {
             let output = self.docker(&["start", &name]).await?;
             if output.status.success() {
+                if cfg.runtime_a11y {
+                    self.ensure_runtime_a11y().await?;
+                }
                 return Ok(());
             }
             // Stale/inconsistent record — remove it so the recreate below is clean.
             let _ = self.docker(&["rm", "-f", &name]).await;
         }
-        self.ensure_image(cfg).await?;
-        self.create_container(cfg).await
+        let plan = self.ensure_image(cfg).await?;
+        self.create_container(cfg, &plan.image).await?;
+        // The base-image fallback ships no accessibility stack — layer it on now
+        // (apt the a11y stack + install the a11y autostart, then restart so WeChat
+        // (re)launches under it). The baked image already has it, so this is a
+        // no-op for the normal path.
+        if plan.runtime_a11y {
+            self.ensure_runtime_a11y().await?;
+        }
+        Ok(())
     }
 
-    /// Creates and starts a fresh container, recovering from a name conflict
-    /// (a leftover container by the same name) by removing it and retrying once.
-    async fn create_container(&self, cfg: &InstanceConfig) -> Result<()> {
-        let args = run_args(cfg, self.runtime);
+    /// Creates and starts a fresh container from `image` (the [`ImagePlan`]'s
+    /// resolved image, which may be the baked a11y image or the base-image
+    /// fallback), recovering from a name conflict (a leftover container by the
+    /// same name) by removing it and retrying once.
+    async fn create_container(&self, cfg: &InstanceConfig, image: &str) -> Result<()> {
+        let args = run_args(cfg, self.runtime, image);
         let mut output = self.docker_args(&args).await?;
         // Apple `container`: the very first `run` on a fresh setup fails until a
         // VM kernel is configured. Install the recommended kernel once, then
@@ -380,6 +549,105 @@ impl WechatInstance {
             );
         }
         bail!("failed to create wechat container `{}`: {stderr}", cfg.container_name())
+    }
+
+    /// Layers the AT-SPI accessibility stack onto a base-image container at
+    /// runtime (the Docker-free fallback for when the baked a11y image can't be
+    /// built). Idempotent and cheap once a11y is live: it first probes the live
+    /// a11y bus and returns immediately if it is up. Otherwise it pushes + runs
+    /// the apply script (apt the a11y stack + install the a11y openbox autostart)
+    /// and, if that changed anything, restarts the container so openbox brings up
+    /// the bus and (re)launches WeChat under the accessibility env.
+    async fn ensure_runtime_a11y(&self) -> Result<()> {
+        if self.runtime_a11y_live().await {
+            return Ok(());
+        }
+        eprintln!(
+            "wechat: setting up accessibility inside the container (one-time; installs the \
+             AT-SPI stack, ~1 min)…"
+        );
+        // Push the a11y autostart (single source of truth, shared with the baked
+        // image) and the apply script as `abc`; the apply script then runs as root.
+        self.exec_bash_stdin(
+            &format!("cat > {RUNTIME_A11Y_AUTOSTART_PATH}"),
+            RUNTIME_A11Y_AUTOSTART.as_bytes(),
+        )
+        .await
+        .context("push the a11y autostart into the container")?;
+        self.exec_bash_stdin(
+            &format!("cat > {RUNTIME_A11Y_APPLY_PATH}"),
+            RUNTIME_A11Y_APPLY_SH.as_bytes(),
+        )
+        .await
+        .context("push the runtime-a11y apply script into the container")?;
+
+        let name = self.container_name();
+        let output = self
+            .docker(&["exec", "--user", "root", &name, "bash", RUNTIME_A11Y_APPLY_PATH])
+            .await?;
+        if !output.status.success() {
+            bail!(
+                "runtime accessibility setup failed in `{name}`: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("A11Y_READY=0") {
+            // The a11y stack didn't install (e.g. the runtime container couldn't
+            // reach the apt mirrors). Don't fail bringup — login + DB reads still
+            // work — but warn: the no-vision operate path (send) needs it, and
+            // with vision off it will otherwise fail closed with a vaguer error.
+            eprintln!(
+                "wechat: WARNING — could not install the accessibility stack in the container; \
+                 message-send (the no-vision operate path) will not work until it installs. \
+                 Check the container's network/apt access."
+            );
+        }
+        let changed = stdout.contains("A11Y_CHANGED=1");
+        if changed {
+            // Restart so the boot hook installs our autostart and openbox launches
+            // WeChat under the a11y env. WeChat may not be installed yet (the setup
+            // flow installs it next); the autostart brings up the bus first and
+            // waits for the binary, so a11y is ready either way.
+            let _ = self.docker(&["stop", "-t", "5", &name]).await;
+            let started = self.docker(&["start", &name]).await?;
+            if !started.status.success() {
+                bail!(
+                    "could not restart `{name}` after accessibility setup: {}",
+                    String::from_utf8_lossy(&started.stderr).trim()
+                );
+            }
+            // Best-effort: wait for the a11y bus to come up. Not fatal if it lags —
+            // the setup flow's window/login waits tolerate a slow desktop, and the
+            // next call re-checks. Bounded so a wedged boot doesn't hang setup.
+            for _ in 0..40 {
+                if self.runtime_a11y_live().await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reports whether the in-container AT-SPI bus is live: the bus launcher is
+    /// running and the autostart recorded its session-bus address. This reflects
+    /// the ACTUAL running container (correct even after a recreate reset the
+    /// rootfs), so it is a reliable idempotency guard for [`Self::ensure_runtime_a11y`].
+    async fn runtime_a11y_live(&self) -> bool {
+        let name = self.container_name();
+        self.docker(&[
+            "exec",
+            "--user",
+            "abc",
+            &name,
+            "bash",
+            "-lc",
+            "pgrep -f at-spi-bus-launcher >/dev/null 2>&1 && [ -s /run/wechat/dbus-addr ]",
+        ])
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false)
     }
 
     /// Stops the instance container (kept, with its volume, for a later start).
@@ -480,13 +748,20 @@ impl WechatInstance {
         Some(addr.split('/').next().unwrap_or(addr).to_string())
     }
 
-    /// Reports whether `cfg.image` is present in `container`'s image store.
-    async fn container_image_present(&self, cfg: &InstanceConfig) -> Result<bool> {
+    /// Reports whether `image` is present in the selected runtime's image store.
+    /// Both `docker` and `container` answer `image inspect <ref>` with success iff
+    /// the image is local.
+    async fn image_present(&self, image: &str) -> Result<bool> {
         Ok(self
-            .docker(&["image", "inspect", &cfg.image])
+            .docker(&["image", "inspect", image])
             .await?
             .status
             .success())
+    }
+
+    /// Reports whether `cfg.image` is present in the runtime's image store.
+    async fn container_image_present(&self, cfg: &InstanceConfig) -> Result<bool> {
+        self.image_present(&cfg.image).await
     }
 
     /// Ensures the Docker engine is reachable, starting it if not so the user
@@ -940,7 +1215,7 @@ impl WechatInstance {
 /// (data volume at `/config`, 1g shm, `seccomp=unconfined`, restart policy,
 /// PUID/PGID/TZ/CUSTOM_USER/PASSWORD) but, having no panel, publishes the
 /// KasmVNC web port to localhost so puffer's own browser pane can reach it.
-fn run_args(cfg: &InstanceConfig, runtime: Runtime) -> Vec<String> {
+fn run_args(cfg: &InstanceConfig, runtime: Runtime, image: &str) -> Vec<String> {
     let container = cfg.container_name();
     let volume = cfg.volume_name();
     let mut args: Vec<String> = vec!["run".into(), "-d".into()];
@@ -1003,7 +1278,7 @@ fn run_args(cfg: &InstanceConfig, runtime: Runtime) -> Vec<String> {
     // Apple `container` reaches the desktop at the container's vmnet IP (see
     // `desktop_authority`), so it needs no published host port — and `-p` would
     // also collide on the host port with a Docker instance of the same slug.
-    args.push(cfg.image.clone());
+    args.push(image.to_string());
     args
 }
 
@@ -1013,6 +1288,12 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+/// The pullable base image for the runtime-a11y fallback (`WECHAT_BASE_IMAGE`
+/// override, else [`BASE_IMAGE`]).
+fn base_image() -> String {
+    env_or("WECHAT_BASE_IMAGE", BASE_IMAGE)
 }
 
 /// Whether a `container run` failure is the fresh-setup "no VM kernel" error,
@@ -1062,8 +1343,9 @@ mod tests {
             puid: "1000".to_string(),
             pgid: "1000".to_string(),
             tz: "Asia/Shanghai".to_string(),
+            runtime_a11y: false,
         };
-        let args = run_args(&cfg, Runtime::Docker);
+        let args = run_args(&cfg, Runtime::Docker, &cfg.image);
         let joined = args.join(" ");
         assert!(args.starts_with(&["run".to_string(), "-d".to_string()]));
         assert!(joined.contains("--name puffer-wechat-default"));
@@ -1092,8 +1374,9 @@ mod tests {
             puid: "1000".to_string(),
             pgid: "1000".to_string(),
             tz: "Asia/Shanghai".to_string(),
+            runtime_a11y: false,
         };
-        let joined = run_args(&cfg, Runtime::Container).join(" ");
+        let joined = run_args(&cfg, Runtime::Container, &cfg.image).join(" ");
         // Apple `container`: volume via --mount, none of the docker-only flags.
         assert!(joined.contains("--mount type=volume,source=puffer-wechat-default,target=/config"));
         assert!(!joined.contains(" -v "));
@@ -1107,5 +1390,27 @@ mod tests {
         assert!(!joined.contains("PUID"));
         assert!(!joined.contains("PGID"));
         assert!(joined.contains("-e CUSTOM_USER=woc"));
+    }
+
+    #[test]
+    fn run_args_uses_the_plan_image_not_cfg_image() {
+        // The runtime-a11y fallback runs the BASE image while cfg.image still
+        // names the (unobtainable) baked image — so run_args must honor the
+        // explicit image it is handed, not cfg.image.
+        let cfg = InstanceConfig {
+            instance: "default".to_string(),
+            image: "puffer-wechat-atspi:4.1.1.7".to_string(),
+            host_port: 37042,
+            kasm_user: "woc".to_string(),
+            kasm_password: "pw".to_string(),
+            puid: "1000".to_string(),
+            pgid: "1000".to_string(),
+            tz: "Asia/Shanghai".to_string(),
+            runtime_a11y: true,
+        };
+        let base = "ghcr.io/gloridust/wechat-on-cloud:latest";
+        let args = run_args(&cfg, Runtime::Container, base);
+        assert_eq!(args.last().unwrap(), base);
+        assert!(!args.iter().any(|a| a == &cfg.image));
     }
 }

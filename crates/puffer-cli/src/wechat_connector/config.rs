@@ -39,6 +39,15 @@ pub(crate) struct InstanceConfig {
     pub(crate) pgid: String,
     /// Container timezone (`TZ`).
     pub(crate) tz: String,
+    /// Whether this instance runs the bare base image and has the accessibility
+    /// stack layered on at RUNTIME (the Docker-free fallback used when the baked
+    /// a11y image can't be built — e.g. Apple `container`'s build VM can't reach
+    /// the apt mirrors). Set on the first bringup that falls back, and persisted
+    /// so later starts (and the act/subscribe paths) re-apply a11y on the base
+    /// image. `false` for the normal baked-image instances. Defaults to `false`
+    /// for configs written before this field existed.
+    #[serde(default)]
+    pub(crate) runtime_a11y: bool,
 }
 
 impl InstanceConfig {
@@ -77,6 +86,9 @@ impl InstanceConfig {
             puid: env_or("WECHAT_PUID", "1000"),
             pgid: env_or("WECHAT_PGID", "1000"),
             tz: env_or("WECHAT_TZ", "Asia/Shanghai"),
+            // A fresh instance targets the baked a11y image; the runtime-a11y
+            // fallback flips this on disk only if building/pulling that fails.
+            runtime_a11y: false,
         }
     }
 
@@ -173,6 +185,7 @@ mod tests {
             puid: "1000".to_string(),
             pgid: "1000".to_string(),
             tz: "Asia/Shanghai".to_string(),
+            runtime_a11y: false,
         }
     }
 
