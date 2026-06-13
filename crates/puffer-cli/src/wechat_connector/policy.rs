@@ -87,7 +87,8 @@ struct PolicyState {
     day_index: u64,
     /// Sends recorded on `day_index`.
     day_count: u32,
-    /// Epoch ms of recent sends, pruned to the last 60s (per-minute window).
+    /// Epoch ms of recent sends; pruned to the last 60s on each check/record
+    /// (per-minute window), so between calls it may hold older entries.
     recent_sends_ms: Vec<u64>,
     /// Epoch ms of the most recent send.
     last_send_ms: u64,
@@ -254,7 +255,7 @@ impl Policy {
 
     /// Records a successful send and persists state. Done under an exclusive
     /// file lock with a fresh re-read so concurrent `act` processes merge their
-    /// increments instead of clobbering each other's counts (M1).
+    /// increments instead of clobbering each other's counts.
     pub(crate) fn record_send(&mut self, recipient: &str, text: &str) -> Result<()> {
         let now = now_ms();
         let _guard = FileLock::acquire(&self.instance);
@@ -275,7 +276,7 @@ impl Policy {
         self.state.recent_sends_ms.push(now);
         self.state
             .recent_sends_ms
-            .retain(|&ts| now.saturating_sub(ts) < 60_000); // M3: prune here too
+            .retain(|&ts| now.saturating_sub(ts) < 60_000); // prune here too (record path)
         let r = recipient.trim();
         if !r.is_empty() {
             self.state.recent_recipients.push((r.to_string(), now));
@@ -359,7 +360,7 @@ impl Policy {
     }
 
     /// Atomically persists state: write a temp file in the same dir, then rename
-    /// over the target (M2) so a crash mid-write cannot truncate/corrupt it.
+    /// over the target so a crash mid-write cannot truncate/corrupt it.
     fn save(&self) -> Result<()> {
         let path = state_path(&self.instance)?;
         if let Some(parent) = path.parent() {
@@ -469,7 +470,7 @@ fn ui_lock_path(instance: &str) -> Option<PathBuf> {
 
 /// Normalizes message text for duplicate detection: collapse all whitespace,
 /// strip surrounding punctuation/quotes, and casefold — so trivial variants of
-/// the same message still count as duplicates (M13).
+/// the same message still count as duplicates.
 fn normalize_content(text: &str) -> String {
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed

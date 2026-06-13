@@ -14,8 +14,11 @@
 //! 5. register the connection.
 //!
 //! The data volume persists the login across restarts, so the scan is one-time.
-//! Deleting the connection wipes that volume (full reset), so re-adding a deleted
-//! connection requires a fresh scan.
+//! Deleting the connection only STOPS the container (its volume, image, and
+//! per-instance state are kept for a fast re-connect; see
+//! `connection_delete::cleanup_wechat_container`). A later re-connect still needs
+//! a fresh scan because the restart re-binds the WeChat device, signing the
+//! previous session out.
 
 use crate::daemon::{DaemonState, ServerEnvelope};
 use crate::wechat_connector::{InstanceConfig, WechatInstance};
@@ -330,7 +333,7 @@ impl SetupFlow {
         // open_desktop already authenticated with the credentialed URL), so the
         // user-facing `browserUrl` must be credential-free — never leak the KasmVNC
         // user/password in the URL sent to the client.
-        payload.insert("browserUrl".to_string(), json!(display.clone()));
+        payload.insert("browserUrl".to_string(), json!(display));
         self.state.publish_event(ServerEnvelope::Event {
             event: self.channel.clone(),
             payload: Value::Object(payload),

@@ -2,18 +2,21 @@
 //! account running inside a managed Docker desktop (KasmVNC + native WeChat).
 //!
 //! Unlike API-backed connectors, WeChat has no message API: this bridge drives
-//! the *running* client through `docker exec` — `xdotool`/`xclip` for input and
-//! a screen grab for reads — with human-like timing to stay unobtrusive. The
-//! three protocol ops mirror the lark bridge:
+//! the *running* client through `docker`/`container exec` (Docker or Apple
+//! `container`) — `xdotool`/`xclip` for input, the AT-SPI accessibility tree for
+//! locating UI, and the decrypted chat DB for reads (screen-grab vision is an
+//! opt-in fallback) — with human-like timing to stay unobtrusive. Protocol ops:
 //!
 //! * `auth-ok`   — is the container up and WeChat logged in? prints `{"ok":bool}`
 //! * `act`       — read one JSON action from stdin, perform it, print a response
 //! * `subscribe` — stream inbound messages as NDJSON [`ConnectorSubscribeFrame`]s
+//! * `db-probe` / `bringup` — diagnostics (validate the DB reader; ensure the
+//!   container is up); see [`run`].
 //!
 //! The target instance is selected by the CONNECTION SLUG passed to each op
 //! (e.g. `wechat-user`), which maps to a container named `puffer-wechat-<slug>`
-//! (see [`WechatInstance::for_connection`]). `DOCKER_BIN` overrides the docker
-//! binary.
+//! (see [`WechatInstance::for_connection`]). `DOCKER_BIN` / `WECHAT_CONTAINER_BIN`
+//! override the runtime binary.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};

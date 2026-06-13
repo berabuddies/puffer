@@ -1,10 +1,11 @@
-//! `subscribe` — the monitor loop. Read-only: it screenshots the WeChat desktop
-//! and asks the configured vision model what's on screen; it never sends input.
+//! `subscribe` — the monitor loop. Read-only: it never sends input.
 //!
 //! Flow: parse the subscribe command (connection slug → instance), bring the
-//! container up, confirm login, then poll. Each poll screenshots the screen,
-//! skips the vision call if the screen is byte-identical to last time, otherwise
-//! extracts messages and emits a [`ConnectorSubscribeFrame::Event`] per NEW one.
+//! container up, confirm login, then poll. The DEFAULT read path is the decrypted
+//! chat-DB reader (`poll_db`), which emits a [`ConnectorSubscribeFrame::Event`]
+//! per NEW message; when the DB reader is disabled it falls back to the vision
+//! path (`poll_once`: screenshot, skip if byte-identical to last time, else ask
+//! the vision model to extract messages).
 //!
 //! Robustness:
 //! - dedup keys are PERSISTED (`<slug>.seen.json`) so a daemon restart does not
@@ -94,13 +95,12 @@ pub(crate) async fn run() -> Result<()> {
     if db_mode {
         write_frame(&health("ok", "using direct chat-DB reader".to_string())).await.ok();
     }
-    let seen = SeenStore::load(instance.name());
+    let mut seen = SeenStore::load(instance.name());
     // DB mode + a persisted `seen` means RESTART: start primed so the first poll
     // emits rows not in `seen` (messages missed while down) instead of re-seeding
     // them; a first run (empty `seen`) primes silently. Vision keeps silent priming
     // — the screen holds arbitrary read history, so "unseen" rows aren't new.
     let mut primed = db_mode && !seen.is_empty();
-    let mut seen = seen;
     let mut last_shot = String::new();
     let mut logged_in = true;
     let mut cursor = 0.0_f64;
@@ -397,8 +397,8 @@ impl SeenStore {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            if let Ok(raw) = serde_json::to_string(&Vec::from(self.order.clone())) {
-                let tmp = path.with_extension("seen.tmp");
+            if let Ok(raw) = serde_json::to_string(&self.order) {
+                let tmp = path.with_extension("json.tmp");
                 if std::fs::write(&tmp, raw).is_ok() {
                     let _ = std::fs::rename(&tmp, path);
                 }

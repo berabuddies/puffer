@@ -1,15 +1,15 @@
-//! Reads WeChat messages from a screenshot using the configured (codex/OpenAI)
-//! vision model.
+//! OPT-IN vision/screen-reading fallback: reads WeChat UI from a screenshot via
+//! the configured (codex/OpenAI) vision model.
 //!
-//! The connector event protocol carries only TEXT (the host extracts
-//! `payload.text`), so the bridge must convert the screen to text itself rather
-//! than forwarding an image. We send the WeChat window screenshot to the
+//! This is NOT the default path. By default the connector locates UI via the
+//! AT-SPI accessibility tree (see `atspi.rs`) and the monitor reads messages from
+//! the decrypted chat DB (see `dbread.rs`/`subscribe.rs`); vision here is gated
+//! behind `WECHAT_ALLOW_VISION=1` (see [`vision_allowed`]) and used only as an
+//! explicit fallback. When enabled, we send the WeChat window screenshot to the
 //! OpenAI-compatible relay configured in `~/.puffer/config.toml`
 //! (`openai_base_url` + `default_model`) with the API key from
-//! `~/.puffer/auth.json`, and ask for the visible messages as JSON.
-//!
-//! This is intentionally read-only (no input is sent to WeChat), so monitoring
-//! is the "safe" half of the connector.
+//! `~/.puffer/auth.json`, and ask for the visible content as JSON. Read-only — no
+//! input is sent to WeChat.
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -325,7 +325,7 @@ opens a chat/contact/group/feature whose name matches the requested target, NOT 
 Respond with ONLY compact JSON: {\"x\":<int>,\"y\":<int>} giving the pixel center of that row, or \
 {\"found\":false} if there is no such local result.";
     let user = format!("Target name: {recipient}. Give the click coordinates of its local result row.");
-    let content = vision_complete(&system, &user, png)?;
+    let content = vision_complete(system, &user, png)?;
     if std::env::var("WECHAT_DEBUG_VISION").map(|v| v.trim() == "1").unwrap_or(false) {
         eprintln!("wechat read_result_coords raw reply: {content}");
     }

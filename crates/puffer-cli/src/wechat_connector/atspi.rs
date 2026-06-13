@@ -81,7 +81,7 @@ pub(crate) async fn open_chat_is(instance: &WechatInstance, recipient: &str) -> 
 }
 
 /// Confirms delivery: the just-sent `body` appears as a message bubble in the
-/// chat history (right pane; bubbles start at x ~= 273).
+/// chat history (right pane; bubbles begin around x ~= 270, matching `--min-x`).
 pub(crate) async fn body_in_history(instance: &WechatInstance, body: &str) -> Result<bool> {
     // Match a leading slice of the body (timestamps/suffixes may differ). Restrict
     // to a message bubble (list-item) in the right pane, so the input-box echo or

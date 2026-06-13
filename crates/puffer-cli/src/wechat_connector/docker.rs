@@ -197,19 +197,40 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 /// Runtimes whose teardown should be attempted when deleting a WeChat connection:
-/// Docker always (the universal fallback), plus Apple `container` when its CLI is
-/// installed. The instance's runtime can drift between create and delete (a
-/// `WECHAT_RUNTIME` change, installing/removing `container`, an OS upgrade), and
-/// the container + its named data volume live on whichever runtime created them —
-/// so cleaning every present runtime (the others harmlessly no-op) prevents a
-/// silent leak of the container and its login/chat data. Each entry is
+/// each of Docker and Apple `container` *when its CLI is installed*. The instance's
+/// runtime can drift between create and delete (a `WECHAT_RUNTIME` change,
+/// installing/removing a runtime, an OS upgrade), and the container + its named
+/// data volume live on whichever runtime created them — so cleaning every PRESENT
+/// runtime (the others harmlessly no-op) prevents a silent leak of the container
+/// and its login/chat data. A runtime that isn't installed can't hold an instance,
+/// so it is skipped entirely (no point spawning a missing binary — this keeps the
+/// Docker-free Apple `container` path from ever invoking `docker`). Each entry is
 /// `(binary, is_container)`.
 pub(crate) fn teardown_runtimes() -> Vec<(String, bool)> {
-    let mut runtimes = vec![(env_or("DOCKER_BIN", "docker"), false)];
+    let mut runtimes = Vec::new();
+    if let Some(bin) = locate_docker_bin() {
+        runtimes.push((bin, false));
+    }
     if let Some(bin) = container_bin_override().or_else(locate_container_bin) {
         runtimes.push((bin, true));
     }
     runtimes
+}
+
+/// Absolute path / name of the `docker` CLI from `DOCKER_BIN`, `PATH`, or the
+/// standard install locations, or `None` if Docker is not installed (so a
+/// Docker-free machine never tries to spawn it).
+fn locate_docker_bin() -> Option<String> {
+    if let Some(bin) = std::env::var("DOCKER_BIN").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        return Some(bin);
+    }
+    if let Some(path) = which_on_path("docker") {
+        return Some(path);
+    }
+    ["/usr/local/bin/docker", "/opt/homebrew/bin/docker"]
+        .into_iter()
+        .find(|path| is_executable_file(Path::new(path)))
+        .map(str::to_string)
 }
 
 /// Absolute path of `bin` if it is found on `PATH`.
@@ -471,15 +492,7 @@ impl WechatInstance {
             cmd.env("WECHAT_CONTAINER_BIN", &self.docker_bin);
         }
         let _ = cmd.status().await;
-        if self.runtime == Runtime::Container {
-            self.image_present(&cfg.image).await
-        } else {
-            Ok(self
-                .docker(&["image", "inspect", &cfg.image])
-                .await?
-                .status
-                .success())
-        }
+        self.image_present(&cfg.image).await
     }
 
     /// Ensures the container is running: starts it if stopped, creates it (and
@@ -1143,7 +1156,6 @@ impl WechatInstance {
         Ok(())
     }
 
-
     /// Checks whether WeChat is logged in by the LIVE visible-window width: the
     /// QR/login window is small (~280x380) while the logged-in main window is
     /// wide (~854x655+). The on-disk `/config/xwechat_files/wxid_*` marker is NOT
@@ -1153,11 +1165,6 @@ impl WechatInstance {
         if !self.is_running().await? {
             return Ok(false);
         }
-        // Live signal: the QR/login window is small (~280x380); the logged-in
-        // main window is large (~854x655). The on-disk `wxid_*` marker is NOT a
-        // reliable signal — it persists in the data volume after logout/recreate,
-        // so a freshly recreated container shows the QR yet still has the marker.
-        // A wide, visible WeChat window means we are actually logged in now.
         let width = self.max_wechat_window_width().await.unwrap_or(0);
         Ok(width >= self.main_window_min_width())
     }

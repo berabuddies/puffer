@@ -17,13 +17,15 @@ log() { echo "[guest-setup] $*"; }
 
 # --- 1. Accessibility stack (the AT-SPI operate path) ------------------------
 ensure_pkgs() {
+  # The locator (a11y_locate.py) uses the gi.Atspi GObject-introspection binding,
+  # NOT pyatspi — match the binding the baked image / apply-runtime-a11y.sh install.
   command -v at-spi-bus-launcher >/dev/null 2>&1 \
-    && python3 -c 'import pyatspi' >/dev/null 2>&1 \
+    && python3 -c 'import gi; gi.require_version("Atspi", "2.0"); from gi.repository import Atspi' >/dev/null 2>&1 \
     && return 0
   log "installing AT-SPI stack"
   for i in $(seq 1 60); do fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 2; done
   apt-get update -qq
-  apt-get install -y -qq at-spi2-core python3-pyatspi dbus-x11 >/dev/null
+  apt-get install -y -qq at-spi2-core gir1.2-atspi-2.0 python3-gi dbus-x11 >/dev/null
 }
 
 # Accessibility env MUST be in WeChat's environment before it launches, so the

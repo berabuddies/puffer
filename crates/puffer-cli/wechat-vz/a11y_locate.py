@@ -213,7 +213,6 @@ def cmd_state(args):
 
 
 def cmd_wait(args):
-    deadline = None  # set on first loop to avoid importing time at module top in restricted envs
     start = time.monotonic()
     while True:
         acc = find_first(args.role, args.name, args.contains, args.app, args.state,

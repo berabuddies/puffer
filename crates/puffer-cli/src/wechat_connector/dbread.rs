@@ -48,7 +48,7 @@ pub(crate) struct DbMessage {
     #[serde(default)]
     pub(crate) outgoing: bool,
     /// wxids @-mentioned by this message (from the `source` XML `<atuserlist>`),
-    /// empty for non-mention / non-group messages.
+    /// empty for messages with no @-mentions.
     #[serde(default)]
     pub(crate) at_users: Vec<String>,
     /// Whether the logged-in user is among the @-mentioned (i.e. "someone @'d me").
@@ -307,15 +307,6 @@ def validate(page1,enc):
     salt=page1[:16]; mk=mac_key(enc,salt)
     h=hmac.new(mk,page1[16:4032],hashlib.sha512); h.update(struct.pack('<I',1))
     return h.digest()==page1[4032:4096]
-
-def find_key(page1,cands):
-    salt=page1[:16]; pref=[]; rest=[]
-    for hx in cands:
-        for enc,cs in cand_keys(hx):
-            (pref if cs==salt else rest).append(enc)
-    for enc in pref+rest:
-        if validate(page1,enc): return enc
-    return None
 
 def decrypt(path,enc):
     data=open(path,'rb').read()

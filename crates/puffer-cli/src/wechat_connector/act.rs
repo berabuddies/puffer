@@ -165,8 +165,6 @@ pub(crate) async fn send_message(
         // whole send (it would re-blast the earlier messages). The "partial
         // send"/"not retrying" marker makes run_act classify this non-retryable.
         if sent > 0 {
-            // The __WECHAT_PARTIAL_SEND__ sentinel marks this non-retryable in
-            // run_act (a retry would re-blast the messages that already went out).
             bail!(
                 "__WECHAT_PARTIAL_SEND__ partial WeChat send to {recipient}: {sent} message(s) \
                  already delivered; not retrying to avoid duplicates ({error:#})"
@@ -862,8 +860,9 @@ async fn verify_open_chat(instance: &WechatInstance, recipient: &str) -> Result<
 /// nick (e.g. search "Bob" → header "✦Bob✦"), and group headers append a member
 /// count. The reverse (requested contains header) is deliberately NOT accepted:
 /// a shorter/truncated header like "Bob" must not confirm a request for "Bob
-/// Smith". `open_chat` vision-locates the row, so this is the sanity backstop;
-/// the `confirm_open_chat_is` fallback handles decorative names.
+/// Smith". `open_chat` navigates via the accessibility tree (vision only as a
+/// fallback), so this is the sanity backstop; the `confirm_open_chat_is` fallback
+/// handles decorative names.
 fn title_matches(title: &str, recipient: &str) -> bool {
     let t = normalize(title);
     let r = normalize(recipient);
