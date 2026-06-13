@@ -12,24 +12,6 @@
       "label": "Event title",
       "type": "string",
       "operators": ["contains", "equals", "matches"]
-    },
-    {
-      "path": "event.when",
-      "label": "When",
-      "type": "string",
-      "operators": ["contains", "equals", "matches"]
-    },
-    {
-      "path": "event.location",
-      "label": "Location",
-      "type": "string",
-      "operators": ["contains", "equals", "matches"]
-    },
-    {
-      "path": "event.url",
-      "label": "Event URL",
-      "type": "string",
-      "operators": ["contains", "equals"]
     }
   ]
 }

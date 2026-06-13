@@ -117,9 +117,13 @@ describe("monitor rule chip labels", () => {
   test("keeps GCal fields focused on user-facing event details", () => {
     const fields = gcalSchemaJson.fields ?? [];
 
+    expect(fields.map((field) => [field.path, field.label])).toEqual([["event.title", "Event title"]]);
     expect(fields.some((field) => field.path === "account")).toBe(false);
     expect(fields.some((field) => field.path === "event.id")).toBe(false);
     expect(fields.some((field) => field.path === "event.index")).toBe(false);
+    expect(fields.some((field) => field.path === "event.when")).toBe(false);
+    expect(fields.some((field) => field.path === "event.location")).toBe(false);
+    expect(fields.some((field) => field.path === "event.url")).toBe(false);
   });
 
   test("keeps Lark fields limited to stable user-facing event fields", () => {
