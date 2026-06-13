@@ -301,7 +301,7 @@ mod monitor_rule_tests {
                 "telegram-bot",
                 "telegram-bot",
                 bundled_connector_schema("telegram-bot"),
-                15,
+                7,
             ),
             (
                 "lark-login",
@@ -733,10 +733,10 @@ mod monitor_rule_tests {
         assert_eq!(per_connector["gmail-browser"], 19);
         assert_eq!(per_connector["gcal-browser"], 14);
         assert_eq!(per_connector["email"], 19);
-        assert_eq!(per_connector["telegram-bot"], 15);
+        assert_eq!(per_connector["telegram-bot"], 7);
         assert_eq!(per_connector["lark-login"], 15);
         assert_eq!(per_connector["lark-bot"], 15);
-        assert_eq!(cases.len(), 122);
+        assert_eq!(cases.len(), 114);
 
         let mut mode_template_count = 0;
         let mut expected_actions = 0;
@@ -812,8 +812,8 @@ mod monitor_rule_tests {
             }
         }
 
-        assert_eq!(mode_template_count, 244);
-        assert_eq!(expected_actions, 240);
+        assert_eq!(mode_template_count, 228);
+        assert_eq!(expected_actions, 224);
         assert_eq!(recording.topics.lock().unwrap().len(), expected_actions);
     }
 

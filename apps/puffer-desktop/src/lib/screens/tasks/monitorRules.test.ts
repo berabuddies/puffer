@@ -67,6 +67,19 @@ describe("monitor rule chip labels", () => {
     expect(fields.some((field) => field.path === "is_outgoing")).toBe(false);
   });
 
+  test("keeps Telegram bot fields limited to user-facing message routing details", () => {
+    const fields = telegramBotSchemaJson.fields ?? [];
+
+    expect(fields.map((field) => [field.path, field.label])).toEqual([
+      ["is_group", "Group chat"],
+      ["bot_mentioned", "Bot mentioned"]
+    ]);
+    expect(fields.some((field) => field.path === "conversation_id")).toBe(false);
+    expect(fields.some((field) => field.path === "user_id")).toBe(false);
+    expect(fields.some((field) => field.path === "thread_id")).toBe(false);
+    expect(fields.some((field) => field.path === "from_bot")).toBe(false);
+  });
+
   test("keeps Gmail fields focused on user-facing message details", () => {
     const fields = gmailSchemaJson.fields ?? [];
 

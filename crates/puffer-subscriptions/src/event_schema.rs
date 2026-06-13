@@ -744,6 +744,15 @@ mod tests {
         let lark_login = bundled_connector_schema("lark-login");
         let lark_bot = bundled_connector_schema("lark-bot");
 
+        assert_eq!(
+            telegram_bot
+                .fields
+                .iter()
+                .map(|field| field.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["is_group", "bot_mentioned"]
+        );
+
         let group_chat = field_filter(
             &telegram_bot,
             "is_group",
