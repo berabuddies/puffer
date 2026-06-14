@@ -5673,6 +5673,7 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
             payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
         });
 
+        #[cfg(unix)]
         if crate::daemon_wechat_browser_setup::connect_args_are_wechat(&connect_args) {
             let outcome = crate::daemon_wechat_browser_setup::execute_wechat_setup(
                 setup_state.clone(),

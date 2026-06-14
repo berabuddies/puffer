@@ -28,6 +28,7 @@ pub(crate) fn handle_workflow_connection_delete(
         .cloned();
     if let Some(connection) = connection.as_ref() {
         clear_external_auth_for_connection(connection, &connections)?;
+        #[cfg(unix)]
         cleanup_wechat_container(connection);
     }
     manager.connection_store().delete(slug)?;
@@ -77,6 +78,7 @@ fn is_lark_connection(connection: &ConnectionRecord) -> bool {
 /// fresh QR scan (a restart re-binds the WeChat device, which signs the previous
 /// session out), instead of a rebuild + WeChat re-download. We deliberately do NOT
 /// delete the container/volume/image. Errors are logged.
+#[cfg(unix)]
 fn cleanup_wechat_container(connection: &ConnectionRecord) {
     if !connection.connector_slug.starts_with("wechat-") {
         return;
