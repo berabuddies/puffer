@@ -126,10 +126,8 @@ type SessionDetailOverrides = {
 
 type FakeMediaSelection = {
   providerId: string;
-  modelId: string;
-  operation: "generate";
-  adapter: string;
-  parameters: Record<string, string>;
+  logicalModelId: string;
+  selections: Record<string, string>;
 };
 
 type FakeMediaSettings = {
@@ -151,20 +149,26 @@ export type FakeMediaCapability = {
   modelDisplayName: string;
   kind: "image" | "video";
   operation: string;
-  adapter: string;
-  parameters: Array<{
-    name: string;
-    label: string;
-    values: string[];
-    default: string;
-    requestField: string | null;
-    wireType: "string" | "number";
-  }>;
-  defaults: Record<string, string>;
+  adapter?: string;
+  axes: FakeMediaCapabilityAxis[];
   status: string;
   source: string;
   reason: string | null;
   checkedAtMs: number;
+};
+
+export type FakeMediaAxisControl =
+  | { enum: { values: string[]; default: string } }
+  | { range: { min: number; max: number; step: number; default: number } }
+  | { bool: { default: boolean } };
+
+export type FakeMediaCapabilityAxis = {
+  id: string;
+  label: string;
+  role: "param" | "selector" | string;
+  control: FakeMediaAxisControl;
+  requestField: string | null;
+  wireType: "string" | "number" | string;
 };
 
 export type FakeDaemonSessionInput = {
@@ -242,7 +246,7 @@ function normalizeMediaSettings(value: unknown): FakeMediaSettings {
 }
 
 function cloneMediaSelection(selection: FakeMediaSelection | null): FakeMediaSelection | null {
-  return selection ? { ...selection, parameters: { ...selection.parameters } } : null;
+  return selection ? { ...selection, selections: { ...selection.selections } } : null;
 }
 
 function normalizeMediaSelection(value: unknown): FakeMediaSelection | null {
@@ -250,21 +254,21 @@ function normalizeMediaSelection(value: unknown): FakeMediaSelection | null {
   const record = value as JsonRecord;
   if (
     typeof record.providerId !== "string" ||
-    typeof record.modelId !== "string" ||
-    record.operation !== "generate" ||
-    typeof record.adapter !== "string" ||
-    !record.parameters ||
-    typeof record.parameters !== "object" ||
-    Array.isArray(record.parameters)
+    typeof record.logicalModelId !== "string" ||
+    record.modelId !== undefined ||
+    record.adapter !== undefined ||
+    record.parameters !== undefined ||
+    record.defaults !== undefined ||
+    !record.selections ||
+    typeof record.selections !== "object" ||
+    Array.isArray(record.selections)
   ) {
     return null;
   }
   return {
     providerId: record.providerId,
-    modelId: record.modelId,
-    operation: record.operation,
-    adapter: record.adapter,
-    parameters: normalizeStringRecord(record.parameters)
+    logicalModelId: record.logicalModelId,
+    selections: normalizeStringRecord(record.selections)
   };
 }
 
@@ -287,37 +291,34 @@ export function defaultFakeMediaCapabilities(): FakeMediaCapability[] {
       kind: "image",
       operation: "generate",
       adapter: "images_json",
-      parameters: [
+      axes: [
         {
-          name: "size",
+          id: "size",
           label: "Size",
-          values: ["1024x1024", "1024x1536", "1536x1024"],
-          default: "1024x1024",
+          role: "param",
+          control: {
+            enum: { values: ["1024x1024", "1024x1536", "1536x1024"], default: "1024x1024" }
+          },
           requestField: "size",
           wireType: "string"
         },
         {
-          name: "quality",
+          id: "quality",
           label: "Quality",
-          values: ["auto", "low", "medium", "high"],
-          default: "auto",
+          role: "param",
+          control: { enum: { values: ["auto", "low", "medium", "high"], default: "auto" } },
           requestField: "quality",
           wireType: "string"
         },
         {
-          name: "output_format",
+          id: "output_format",
           label: "Output format",
-          values: ["png", "jpeg", "webp"],
-          default: "png",
+          role: "param",
+          control: { enum: { values: ["png", "jpeg", "webp"], default: "png" } },
           requestField: "output_format",
           wireType: "string"
         }
       ],
-      defaults: {
-        size: "1024x1024",
-        quality: "auto",
-        output_format: "png"
-      },
       status: "available",
       source: "fake-daemon",
       reason: null,
@@ -329,12 +330,21 @@ export function defaultFakeMediaCapabilities(): FakeMediaCapability[] {
 function cloneMediaCapability(capability: FakeMediaCapability): FakeMediaCapability {
   return {
     ...capability,
-    parameters: capability.parameters.map((parameter) => ({
-      ...parameter,
-      values: [...parameter.values]
-    })),
-    defaults: { ...capability.defaults }
+    axes: capability.axes.map((axis) => ({
+      ...axis,
+      control: cloneMediaAxisControl(axis.control)
+    }))
   };
+}
+
+function cloneMediaAxisControl(control: FakeMediaAxisControl): FakeMediaAxisControl {
+  if ("enum" in control) {
+    return { enum: { values: [...control.enum.values], default: control.enum.default } };
+  }
+  if ("range" in control) {
+    return { range: { ...control.range } };
+  }
+  return { bool: { ...control.bool } };
 }
 
 function contactsQuery(params: JsonRecord): string {
@@ -2417,17 +2427,16 @@ export class FakeDaemon {
     }
     const settings = this.settingsConfig.media[kind];
     if (!settings) {
-      throw new Error(`${kind} media provider/model/adapter is not configured.`);
+      throw new Error(`${kind} media provider/model is not configured.`);
     }
     const capability = capabilities.find(
       (item) =>
         item.providerId === settings.providerId &&
-        item.modelId === settings.modelId &&
-        item.adapter === settings.adapter
+        item.modelId === settings.logicalModelId
     );
     if (!capability) {
       throw new Error(
-        `selected ${kind} model unavailable: ${settings.providerId}/${settings.modelId} via ${settings.adapter}`
+        `selected ${kind} model unavailable: ${settings.providerId}/${settings.logicalModelId}`
       );
     }
     const jobId = `media-job-${Date.now().toString(36)}`;
@@ -2439,7 +2448,7 @@ export class FakeDaemon {
       artifacts,
       kind: fixture?.kind ?? kind,
       providerId: fixture?.providerId ?? settings.providerId,
-      modelId: fixture?.modelId ?? settings.modelId,
+      modelId: fixture?.modelId ?? settings.logicalModelId,
       status: fixture?.status ?? "queued",
       prompt: fixture?.prompt ?? prompt
     };

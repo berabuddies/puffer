@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use puffer_config::{
     load_config, save_user_config, ConfigPaths, MediaGenerationConfig, PufferConfig,
 };
-use puffer_core::{generated_media_timeline_attachments, GeneratedMediaTimelineAttachment};
+use puffer_media::{generated_media_timeline_attachments, GeneratedMediaTimelineAttachment};
 use puffer_provider_registry::{
     detect_import_candidates, AuthMode, AuthStore, ExternalImportCandidate, ExternalImportFamily,
     ExternalImportSource, ProviderRegistry, StoredCredential,
@@ -450,10 +450,8 @@ fn media_selection_dto(
         .as_ref()
         .map(|selection| MediaGenerationSettingsDto {
             provider_id: selection.provider_id.clone(),
-            model_id: selection.model_id.clone(),
-            operation: selection.operation.clone(),
-            adapter: selection.adapter.clone(),
-            parameters: selection.parameters.clone(),
+            logical_model_id: selection.logical_model_id.clone(),
+            selections: selection.selections.clone(),
         })
 }
 

@@ -591,6 +591,23 @@
   }
 }
 
+/* Inline "preparing/loading" indicator for the connector status note. */
+.pf-settings-note.busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pf-note-spinner {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+  border-top-color: var(--muted-foreground);
+  animation: pf-connector-spin 0.8s linear infinite;
+}
+
 .pf-connector-question-actions {
   display: flex;
   justify-content: flex-end;

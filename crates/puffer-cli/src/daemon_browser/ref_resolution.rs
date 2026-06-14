@@ -31,7 +31,7 @@ const HELPERS: &str = r#"  const normalizeText = (value) => String(value ?? '').
     if (tag === 'select') return 'combobox';
     return tag;
   };
-  const selector = 'a,button,input,textarea,select,summary,[role],[contenteditable="true"],[tabindex],label';
+  const selector = 'a,button,input,textarea,select,summary,iframe,[role],[contenteditable="true"],[tabindex],label';
   const normalizeHref = (value) => normalizeText(value || '');
   const resolveLabelTarget = (node, editableSelector) => {
     if (!node) return null;
@@ -126,6 +126,17 @@ const HELPERS: &str = r#"  const normalizeText = (value) => String(value ?? '').
     return score;
   };
   const findTarget = (target) => {
+    // Exact handles stashed by the last snapshot beat signature matching:
+    // signature lookup depends on snapshot-time viewport coordinates, which
+    // every scrollIntoView invalidates, and indistinguishable elements (four
+    // anonymous hosted-payment-field containers) then resolve to the wrong
+    // node or to nothing (#633).
+    const storedRefs = window.__puffer_agent_refs__;
+    const stored = storedRefs && storedRefs.byRef ? storedRefs.byRef[target.ref] : null;
+    if (stored && stored.isConnected) {
+      const style = getComputedStyle(stored);
+      if (style.display !== 'none' && style.visibility !== 'hidden') return stored;
+    }
     const hit = document.elementFromPoint(target.x, target.y);
     const hitTarget = hit ? resolveLabelTarget(hit, 'a,button,input,textarea,select,summary,[role],[contenteditable="true"],[tabindex],label') : null;
     if (elementMatchesTarget(hitTarget || hit, target)) {
@@ -191,13 +202,26 @@ pub(super) fn fill_expression(target: &BrowserElementRef, text: &str) -> Result<
         target,
         &format!(
             r#"  const targetEl = refElement.closest('input, textarea, [contenteditable="true"]') || refElement;
-  // A cross-origin payment iframe (e.g. Shopify hosted card fields) renders its
-  // real <input> in a separate document the top frame can't reach. Resolving a
-  // ref to the IFRAME shell and "filling" it would silently set value on the
-  // wrong element and report success — that's how #580 placed orders with no
-  // card. Reject it instead of pretending the fill worked.
-  if (targetEl.tagName === 'IFRAME') {{
-    throw new Error('Target resolves to a cross-origin IFRAME (e.g. a hosted payment field); its input cannot be filled from the top document');
+  // A hosted payment field (e.g. Shopify/Stripe PCI card fields) renders its
+  // real <input> inside a cross-origin iframe the top document can't reach.
+  // Setting a value on the shell would silently fill the wrong element and
+  // report success — that's how #580 placed orders with no card. Hand the
+  // fill back to the runtime instead: it focuses the frame with a real mouse
+  // click and types through trusted browser input (#633).
+  const editable = ('value' in targetEl) || targetEl.isContentEditable;
+  const hostedFrame = targetEl.tagName === 'IFRAME'
+    ? targetEl
+    : (!editable && targetEl.querySelector ? targetEl.querySelector('iframe') : null);
+  if (hostedFrame) {{
+    hostedFrame.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+    const rect = hostedFrame.getBoundingClientRect();
+    if (!(rect.width > 1 && rect.height > 1)) {{
+      throw new Error('Target resolves to a hosted field iframe with no clickable area');
+    }}
+    window.__puffer_hosted_fill__ = {{ frame: hostedFrame }};
+    const x = Math.min(Math.max(rect.left + rect.width / 2, 0), Math.max(window.innerWidth - 1, 0));
+    const y = Math.min(Math.max(rect.top + rect.height / 2, 0), Math.max(window.innerHeight - 1, 0));
+    return {{ hostedFrameFill: true, x, y }};
   }}
   const expected = {text};
   if ('value' in targetEl) {{
@@ -344,6 +368,36 @@ pub(super) fn scroll_into_view_expression(target: &BrowserElementRef) -> Result<
   return true;
 "#,
     )
+}
+
+/// Builds the script that checks whether focus reached the pending hosted
+/// field iframe stashed by [`fill_expression`].
+pub(super) fn hosted_fill_focus_check_expression() -> &'static str {
+    r#"(() => {
+  const pending = window.__puffer_hosted_fill__;
+  if (!pending || !pending.frame || !pending.frame.isConnected) {
+    return { focused: false, reason: 'no pending hosted fill frame' };
+  }
+  return { focused: document.activeElement === pending.frame };
+})()"#
+}
+
+/// Builds the script that re-reads a fresh viewport center point for the
+/// pending hosted fill frame. Used between click retries: right after a
+/// scroll the browser-side hit test can lag the new layout by a frame, so a
+/// click at correct coordinates may still land in the parent document.
+pub(super) fn hosted_fill_point_expression() -> &'static str {
+    r#"(() => {
+  const pending = window.__puffer_hosted_fill__;
+  if (!pending || !pending.frame || !pending.frame.isConnected) {
+    throw new Error('no pending hosted fill frame');
+  }
+  pending.frame.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  const rect = pending.frame.getBoundingClientRect();
+  const x = Math.min(Math.max(rect.left + rect.width / 2, 0), Math.max(window.innerWidth - 1, 0));
+  const y = Math.min(Math.max(rect.top + rect.height / 2, 0), Math.max(window.innerHeight - 1, 0));
+  return { x, y };
+})()"#
 }
 
 fn ref_script(target: &BrowserElementRef, body: &str) -> Result<String> {

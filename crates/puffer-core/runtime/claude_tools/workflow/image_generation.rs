@@ -1,11 +1,10 @@
-use crate::runtime::media::planner::validate_image_generation_count;
 use crate::AppState;
-use crate::{
-    generate_exact_image_with_cache, resolved_exact_image_parameters_with_cache,
-    ExactImageGenerationRequest, ExactMediaDiscoveryCache,
-};
 use anyhow::{bail, Context, Result};
 use puffer_config::MediaGenerationConfig;
+use puffer_media::{
+    generate_exact_image_with_cache, validate_image_generation_count, ExactImageGenerationRequest,
+    ExactMediaDiscoveryCache,
+};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -31,7 +30,8 @@ struct ImageGenerationInput {
     prompt_reference: Option<String>,
     #[serde(default)]
     aspect: Option<String>,
-    count: u8,
+    #[serde(default)]
+    count: Option<u8>,
     #[serde(default)]
     purpose: Option<String>,
     #[serde(default)]
@@ -42,10 +42,9 @@ struct ImageGenerationInput {
 struct ImageRequest {
     provider: String,
     model: String,
-    adapter: String,
     prompt: String,
     parameters: BTreeMap<String, String>,
-    count: u8,
+    count: Option<u8>,
     purpose: Option<String>,
     retry_from_error: Option<Value>,
 }
@@ -57,6 +56,7 @@ struct ImageGenerationArtifactResult {
     path: PathBuf,
     mime_type: String,
     byte_count: u64,
+    remote_source_url: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -86,22 +86,9 @@ pub fn execute_image_generation(
         .media
         .image
         .as_ref()
-        .context("image media provider/model/adapter is not configured")?;
-    let mut request = build_image_request(cwd, parsed, settings)?;
+        .context("image media provider/model is not configured")?;
+    let request = build_image_request(cwd, parsed, settings)?;
     let media_context = media_context.context("ImageGeneration media runtime is not configured")?;
-    request.parameters = resolved_exact_image_parameters_with_cache(
-        media_context.providers,
-        media_context.auth_store,
-        &ExactImageGenerationRequest {
-            provider_id: request.provider.clone(),
-            model_id: request.model.clone(),
-            adapter: request.adapter.clone(),
-            prompt: request.prompt.clone(),
-            parameters: request.parameters.clone(),
-            count: request.count,
-        },
-        media_context.discovery_cache,
-    )?;
     let generated = generate_exact_image_with_cache(
         media_context.providers,
         media_context.auth_store,
@@ -109,7 +96,6 @@ pub fn execute_image_generation(
         ExactImageGenerationRequest {
             provider_id: request.provider.clone(),
             model_id: request.model.clone(),
-            adapter: request.adapter.clone(),
             prompt: request.prompt.clone(),
             parameters: request.parameters.clone(),
             count: request.count,
@@ -125,6 +111,7 @@ pub fn execute_image_generation(
             path: artifact.path,
             mime_type: artifact.mime_type,
             byte_count: artifact.byte_count,
+            remote_source_url: artifact.remote_source_url,
         })
         .collect();
 
@@ -146,15 +133,16 @@ fn build_image_request(
     input: ImageGenerationInput,
     settings: &MediaGenerationConfig,
 ) -> Result<ImageRequest> {
-    validate_image_generation_count(input.count)?;
     let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
-    let (provider, model, adapter) = required_provider_model_adapter(settings)?;
-    let mut parameters = settings.parameters.clone();
+    let (provider, model) = required_provider_model(settings)?;
+    // Persisted axis selections; the runtime resolves them against the logical
+    // model's axes/variants. The adapter is derived from the capability.
+    let mut parameters = settings.selections.clone();
+    apply_count_override(&mut parameters, input.count)?;
     apply_aspect_parameter(&mut parameters, input.aspect.as_deref())?;
     Ok(ImageRequest {
         provider,
         model,
-        adapter,
         prompt,
         parameters,
         count: input.count,
@@ -163,29 +151,32 @@ fn build_image_request(
     })
 }
 
-fn required_provider_model_adapter(
-    settings: &MediaGenerationConfig,
-) -> Result<(String, String, String)> {
+fn required_provider_model(settings: &MediaGenerationConfig) -> Result<(String, String)> {
     let provider = settings.provider_id.trim();
-    let model = settings.model_id.trim();
-    let adapter = settings.adapter.trim();
-    if provider.is_empty() || model.is_empty() || adapter.is_empty() {
-        bail!("image media provider/model/adapter is not configured");
+    let model = settings.logical_model_id.trim();
+    if provider.is_empty() || model.is_empty() {
+        bail!("image media provider/model is not configured");
     }
-    Ok((provider.to_string(), model.to_string(), adapter.to_string()))
+    Ok((provider.to_string(), model.to_string()))
 }
 
 fn image_generation_output(result: &ImageGenerationResult) -> Result<String> {
     Ok(serde_json::to_string_pretty(&json!({
         "jobId": result.job_id,
         "requestedCount": result.requested_count,
-        "artifacts": result.artifacts.iter().map(|artifact| json!({
-            "artifactId": artifact.artifact_id,
-            "index": artifact.index,
-            "path": artifact.path,
-            "mimeType": artifact.mime_type,
-            "size": artifact.byte_count
-        })).collect::<Vec<_>>(),
+        "artifacts": result.artifacts.iter().map(|artifact| {
+            let mut value = json!({
+                "artifactId": artifact.artifact_id,
+                "index": artifact.index,
+                "path": artifact.path,
+                "mimeType": artifact.mime_type,
+                "size": artifact.byte_count
+            });
+            if let Some(url) = &artifact.remote_source_url {
+                value["remoteSourceUrl"] = json!(url);
+            }
+            value
+        }).collect::<Vec<_>>(),
         "provider": result.provider,
         "model": result.model,
         "status": result.status,
@@ -230,21 +221,11 @@ fn prompt_fragment(cwd: &Path, value: &str, field: &str) -> Result<String> {
     Ok(prompt.to_string())
 }
 
-fn image_size(aspect: Option<&str>) -> Result<&'static str> {
+fn image_ratio(aspect: Option<&str>) -> Result<&'static str> {
     let Some(aspect) = aspect.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok("1024x1024");
+        return Ok("Auto");
     };
     match aspect.to_ascii_lowercase().as_str() {
-        "square" | "1:1" | "1024x1024" => Ok("1024x1024"),
-        "landscape" | "wide" | "horizontal" | "16:9" | "3:2" | "1536x1024" => Ok("1536x1024"),
-        "portrait" | "vertical" | "9:16" | "2:3" | "1024x1536" => Ok("1024x1536"),
-        "auto" => Ok("auto"),
-        other => bail!("unsupported ImageGeneration aspect `{other}`"),
-    }
-}
-
-fn image_aspect_ratio(aspect: &str) -> Result<&'static str> {
-    match aspect.trim().to_ascii_lowercase().as_str() {
         "square" | "1:1" | "1024x1024" => Ok("1:1"),
         "landscape" | "wide" | "horizontal" | "16:9" | "1536x1024" => Ok("16:9"),
         "portrait" | "vertical" | "9:16" | "1024x1536" => Ok("9:16"),
@@ -253,16 +234,21 @@ fn image_aspect_ratio(aspect: &str) -> Result<&'static str> {
         "4:3" => Ok("4:3"),
         "3:4" => Ok("3:4"),
         "21:9" => Ok("21:9"),
-        "auto" => Ok("auto"),
+        "auto" => Ok("Auto"),
         other => bail!("unsupported ImageGeneration aspect `{other}`"),
     }
 }
 
-fn is_dimension_size(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1024x1024" | "1536x1024" | "1024x1536" | "auto"
-    )
+fn apply_count_override(
+    parameters: &mut BTreeMap<String, String>,
+    count: Option<u8>,
+) -> Result<()> {
+    let Some(count) = count else {
+        return Ok(());
+    };
+    validate_image_generation_count(count)?;
+    parameters.insert("output".to_string(), count.to_string());
+    Ok(())
 }
 
 fn apply_aspect_parameter(
@@ -272,20 +258,8 @@ fn apply_aspect_parameter(
     let Some(aspect) = aspect.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(());
     };
-    if parameters.contains_key("aspect_ratio") {
-        parameters.insert(
-            "aspect_ratio".to_string(),
-            image_aspect_ratio(aspect)?.to_string(),
-        );
-        return Ok(());
-    }
-    if let Some(current_size) = parameters.get("size") {
-        if is_dimension_size(current_size) {
-            parameters.insert("size".to_string(), image_size(Some(aspect))?.to_string());
-        }
-        return Ok(());
-    }
-    bail!("selected image model does not support ImageGeneration aspect")
+    parameters.insert("ratio".to_string(), image_ratio(Some(aspect))?.to_string());
+    Ok(())
 }
 
 fn safe_relative_path(value: &str) -> bool {
@@ -304,9 +278,10 @@ mod tests {
     use crate::runtime::claude_tools::{execute_tool, ProviderToolContext};
     use indexmap::IndexMap;
     use puffer_provider_registry::{
-        AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
-        MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType,
-        ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
+        AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaExecutionDescriptor,
+        MediaExecutionKind, MediaKindDescriptor, MediaMap, MediaModelDescriptor, MediaOperation,
+        MediaSizeMap, ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor,
+        ProviderRegistry, Variant, Variants, WireType,
     };
     use puffer_resources::LoadedResources;
     use puffer_session_store::SessionMetadata;
@@ -323,13 +298,11 @@ mod tests {
     fn image_settings() -> MediaGenerationConfig {
         MediaGenerationConfig {
             provider_id: "openai".to_string(),
-            model_id: "gpt-image-1".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
-                ("size".to_string(), "1024x1024".to_string()),
-                ("quality".to_string(), "auto".to_string()),
-                ("output_format".to_string(), "png".to_string()),
+            logical_model_id: "gpt-image-1".to_string(),
+            selections: BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "1".to_string()),
             ]),
         }
     }
@@ -375,38 +348,58 @@ mod tests {
                         base_url: None,
                         path: "/custom/images".to_string(),
                         batch: puffer_provider_registry::MediaBatchDescriptor::default(),
+                        prompt_format: Default::default(),
                     }),
                     models: vec![MediaModelDescriptor {
                         id: "exact-image-model".to_string(),
                         display_name: Some("Exact Image Model".to_string()),
+                        max_outputs: Some(9),
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: vec![
-                            MediaParameterSpec {
-                                name: "size".to_string(),
-                                label: "Size".to_string(),
-                                values: vec!["1024x1024".to_string(), "1536x1024".to_string()],
-                                default: "1024x1024".to_string(),
-                                request_field: Some("size".to_string()),
-                                wire_type: MediaParameterWireType::String,
+                        axes: vec![
+                            Axis {
+                                id: "mode".to_string(),
+                                label: "Mode".to_string(),
+                                role: AxisRole::Param,
+                                control: ControlKind::Enum {
+                                    values: vec!["1K SD".to_string()],
+                                    default: "1K SD".to_string(),
+                                },
+                                request_field: None,
+                                wire_type: WireType::String,
                             },
-                            MediaParameterSpec {
-                                name: "quality".to_string(),
-                                label: "Quality".to_string(),
-                                values: vec!["auto".to_string(), "high".to_string()],
-                                default: "auto".to_string(),
-                                request_field: Some("quality".to_string()),
-                                wire_type: MediaParameterWireType::String,
-                            },
-                            MediaParameterSpec {
-                                name: "output_format".to_string(),
-                                label: "Output format".to_string(),
-                                values: vec!["png".to_string(), "webp".to_string()],
-                                default: "png".to_string(),
-                                request_field: Some("output_format".to_string()),
-                                wire_type: MediaParameterWireType::String,
+                            Axis {
+                                id: "ratio".to_string(),
+                                label: "Ratio".to_string(),
+                                role: AxisRole::Param,
+                                control: ControlKind::Enum {
+                                    values: vec!["1:1".to_string(), "16:9".to_string()],
+                                    default: "1:1".to_string(),
+                                },
+                                request_field: None,
+                                wire_type: WireType::String,
                             },
                         ],
+                        variants: Variants::Single(Variant {
+                            model_id: "exact-image-model".to_string(),
+                            base_params: BTreeMap::from([
+                                ("quality".to_string(), "auto".to_string()),
+                                ("output_format".to_string(), "png".to_string()),
+                            ]),
+                        }),
+                        media_map: Some(MediaMap {
+                            ratio: None,
+                            size: Some(MediaSizeMap {
+                                field: "size".to_string(),
+                                values: BTreeMap::from([(
+                                    "1K SD".to_string(),
+                                    BTreeMap::from([
+                                        ("1:1".to_string(), Some("1024x1024".to_string())),
+                                        ("16:9".to_string(), Some("1536x1024".to_string())),
+                                    ]),
+                                )]),
+                            }),
+                        }),
                     }],
                 }),
                 video: None,
@@ -416,64 +409,9 @@ mod tests {
         registry
     }
 
-    fn chat_router_registry(base_url: String) -> ProviderRegistry {
-        let mut registry = ProviderRegistry::new();
-        registry.register(ProviderDescriptor {
-            id: "openrouter".to_string(),
-            display_name: "OpenRouter".to_string(),
-            base_url,
-            default_api: "openai-completions".to_string(),
-            auth_modes: vec![AuthMode::ApiKey],
-            headers: IndexMap::new(),
-            query_params: IndexMap::new(),
-            chat_completions_path: None,
-            discovery: None,
-            media: Some(ProviderMediaDescriptor {
-                image: Some(MediaKindDescriptor {
-                    discovery: None,
-                    execution: Some(MediaExecutionDescriptor {
-                        adapter: MediaExecutionKind::ChatImageOutput,
-                        base_url: None,
-                        path: "/chat/completions".to_string(),
-                        batch: puffer_provider_registry::MediaBatchDescriptor::default(),
-                    }),
-                    models: Vec::new(),
-                }),
-                video: None,
-            }),
-            models: Vec::<ModelDescriptor>::new(),
-        });
-        registry
-    }
-
-    fn discovered_chat_image_cache() -> ExactMediaDiscoveryCache {
-        ExactMediaDiscoveryCache::from_inner_for_test(
-            crate::runtime::media::resolver::MediaDiscoveryCache {
-                image_models: vec![crate::runtime::media::resolver::CachedImageMediaModel {
-                    provider_id: "openrouter".to_string(),
-                    model: MediaModelDescriptor {
-                        id: "openrouter/image-chat".to_string(),
-                        display_name: Some("Image Chat".to_string()),
-                        execution: None,
-                        operations: vec![MediaOperation::Generate],
-                        parameters: Vec::new(),
-                    },
-                    source: "provider_discovery".to_string(),
-                }],
-            },
-            1_000,
-        )
-    }
-
     fn auth_store() -> AuthStore {
         let mut auth_store = AuthStore::default();
         auth_store.set_api_key("exact-provider", "sk-test");
-        auth_store
-    }
-
-    fn openrouter_auth_store() -> AuthStore {
-        let mut auth_store = AuthStore::default();
-        auth_store.set_api_key("openrouter", "sk-test");
         auth_store
     }
 
@@ -532,41 +470,16 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
-    fn spawn_chat_image_generation_server() -> (String, thread::JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("request");
-            let request_text = read_http_request(&mut stream);
-            let body = json!({
-                "choices": [{
-                    "message": {
-                        "images": [{"b64_json": "aW1hZ2UtYnl0ZXM="}]
-                    }
-                }]
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).expect("response");
-            request_text
-        });
-        (format!("http://{address}"), handle)
-    }
-
     #[path = "image_generation_tool_tests.rs"]
     mod tool_tests;
 
     #[test]
-    fn maps_common_aspects_to_image_sizes() {
-        assert_eq!(image_size(None).unwrap(), "1024x1024");
-        assert_eq!(image_size(Some("landscape")).unwrap(), "1536x1024");
-        assert_eq!(image_size(Some("portrait")).unwrap(), "1024x1536");
-        assert_eq!(image_size(Some("auto")).unwrap(), "auto");
-        assert!(image_size(Some("panorama")).is_err());
+    fn maps_common_aspects_to_canonical_ratios() {
+        assert_eq!(image_ratio(Some("landscape")).unwrap(), "16:9");
+        assert_eq!(image_ratio(Some("portrait")).unwrap(), "9:16");
+        assert_eq!(image_ratio(Some("square")).unwrap(), "1:1");
+        assert_eq!(image_ratio(Some("auto")).unwrap(), "Auto");
+        assert!(image_ratio(Some("panorama")).is_err());
     }
 
     #[test]
@@ -613,31 +526,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(parsed.prompt_reference.as_deref(), Some("prompts.md"));
-        assert_eq!(parsed.count, 2);
+        assert_eq!(parsed.count, Some(2));
     }
 
     #[test]
-    fn rejects_missing_image_generation_count() {
-        let error = serde_json::from_value::<ImageGenerationInput>(json!({
+    fn parses_missing_image_generation_count_for_settings_default() {
+        let parsed = serde_json::from_value::<ImageGenerationInput>(json!({
             "prompt": "panel 1 action"
         }))
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("missing field `count`"));
+        assert_eq!(parsed.count, None);
     }
 
     #[test]
     fn rejects_image_generation_count_outside_supported_range_at_tool_boundary() {
         let dir = tempdir().unwrap();
 
-        for count in [0, 5] {
+        for count in [0, 10] {
             let error = build_image_request(
                 dir.path(),
                 ImageGenerationInput {
                     prompt: "make a visual summary".to_string(),
                     prompt_reference: None,
                     aspect: None,
-                    count,
+                    count: Some(count),
                     purpose: None,
                     retry_from_error: None,
                 },
@@ -647,7 +560,7 @@ mod tests {
 
             assert_eq!(
                 error.to_string(),
-                "image generation count must be between 1 and 4"
+                "image generation count must be between 1 and 9"
             );
         }
     }
@@ -675,7 +588,7 @@ mod tests {
                 prompt: "prompt.md".to_string(),
                 prompt_reference: None,
                 aspect: Some("square".to_string()),
-                count: 1,
+                count: None,
                 purpose: Some("test".to_string()),
                 retry_from_error: None,
             },
@@ -684,20 +597,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.prompt, "make a visual summary");
-        assert_eq!(request.parameters["size"], "1024x1024");
+        assert_eq!(request.parameters["ratio"], "1:1");
     }
 
     #[test]
-    fn builds_request_maps_aspect_to_aspect_ratio_parameter() {
+    fn builds_request_maps_aspect_to_canonical_ratio_selection() {
         let dir = tempdir().unwrap();
         let settings = MediaGenerationConfig {
             provider_id: "minimax".to_string(),
-            model_id: "image-01".to_string(),
-            operation: "generate".to_string(),
-            adapter: "minimax_image".to_string(),
-            parameters: BTreeMap::from([
-                ("aspect_ratio".to_string(), "1:1".to_string()),
-                ("response_format".to_string(), "base64".to_string()),
+            logical_model_id: "image-01".to_string(),
+            selections: BTreeMap::from([
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "1".to_string()),
             ]),
         };
 
@@ -707,7 +618,7 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: Some("landscape".to_string()),
-                count: 1,
+                count: None,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -715,85 +626,21 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(request.parameters["aspect_ratio"], "16:9");
+        assert_eq!(request.parameters["ratio"], "16:9");
+        assert!(!request.parameters.contains_key("aspect_ratio"));
         assert!(!request.parameters.contains_key("size"));
     }
 
     #[test]
-    fn builds_request_preserves_model_specific_size_tokens_for_aspect() {
+    fn explicit_count_overrides_persisted_output_selection() {
         let dir = tempdir().unwrap();
-        let settings = MediaGenerationConfig {
-            provider_id: "byteplus".to_string(),
-            model_id: "seedream-4-5-251128".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
-                ("size".to_string(), "2K".to_string()),
-                ("output_format".to_string(), "png".to_string()),
-            ]),
-        };
-
-        let request = build_image_request(
-            dir.path(),
-            ImageGenerationInput {
-                prompt: "make a visual summary".to_string(),
-                prompt_reference: None,
-                aspect: Some("portrait".to_string()),
-                count: 1,
-                purpose: None,
-                retry_from_error: None,
-            },
-            &settings,
-        )
-        .unwrap();
-
-        assert_eq!(request.parameters["size"], "2K");
-    }
-
-    #[test]
-    fn builds_request_rejects_aspect_when_selected_model_has_no_aspect_parameter() {
-        let dir = tempdir().unwrap();
-        let settings = MediaGenerationConfig {
-            provider_id: "openrouter".to_string(),
-            model_id: "image-chat".to_string(),
-            operation: "generate".to_string(),
-            adapter: "chat_image_output".to_string(),
-            parameters: BTreeMap::new(),
-        };
-
-        let error = build_image_request(
-            dir.path(),
-            ImageGenerationInput {
-                prompt: "make a visual summary".to_string(),
-                prompt_reference: None,
-                aspect: Some("square".to_string()),
-                count: 1,
-                purpose: None,
-                retry_from_error: None,
-            },
-            &settings,
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "selected image model does not support ImageGeneration aspect"
-        );
-    }
-
-    #[test]
-    fn builds_request_from_media_settings_instead_of_env_model() {
-        let dir = tempdir().unwrap();
-        std::env::set_var("PUFFER_IMAGE_MODEL", "legacy-env-model");
         let settings = MediaGenerationConfig {
             provider_id: "openai".to_string(),
-            model_id: "configured-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
-                ("size".to_string(), "1024x1024".to_string()),
-                ("quality".to_string(), "high".to_string()),
-                ("output_format".to_string(), "webp".to_string()),
+            logical_model_id: "gpt-image-1".to_string(),
+            selections: BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "3".to_string()),
             ]),
         };
 
@@ -803,7 +650,70 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: None,
-                count: 1,
+                count: Some(2),
+                purpose: None,
+                retry_from_error: None,
+            },
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(request.parameters["output"], "2");
+        assert_eq!(request.count, Some(2));
+    }
+
+    #[test]
+    fn missing_count_keeps_persisted_output_selection() {
+        let dir = tempdir().unwrap();
+        let settings = MediaGenerationConfig {
+            provider_id: "openai".to_string(),
+            logical_model_id: "gpt-image-1".to_string(),
+            selections: BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "3".to_string()),
+            ]),
+        };
+
+        let request = build_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "make a visual summary".to_string(),
+                prompt_reference: None,
+                aspect: None,
+                count: None,
+                purpose: None,
+                retry_from_error: None,
+            },
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(request.parameters["output"], "3");
+        assert_eq!(request.count, None);
+    }
+
+    #[test]
+    fn builds_request_from_media_settings_instead_of_env_model() {
+        let dir = tempdir().unwrap();
+        std::env::set_var("PUFFER_IMAGE_MODEL", "legacy-env-model");
+        let settings = MediaGenerationConfig {
+            provider_id: "openai".to_string(),
+            logical_model_id: "configured-image-model".to_string(),
+            selections: BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "16:9".to_string()),
+                ("output".to_string(), "1".to_string()),
+            ]),
+        };
+
+        let request = build_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "make a visual summary".to_string(),
+                prompt_reference: None,
+                aspect: None,
+                count: None,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -813,7 +723,7 @@ mod tests {
 
         assert_eq!(request.provider, "openai");
         assert_eq!(request.model, "configured-image-model");
-        assert_eq!(request.parameters["quality"], "high");
+        assert_eq!(request.parameters["ratio"], "16:9");
         std::env::remove_var("PUFFER_IMAGE_MODEL");
     }
 
@@ -822,13 +732,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let settings = MediaGenerationConfig {
             provider_id: "exact-provider".to_string(),
-            model_id: "exact-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
-                ("size".to_string(), "1024x1024".to_string()),
-                ("quality".to_string(), "auto".to_string()),
-                ("output_format".to_string(), "png".to_string()),
+            logical_model_id: "exact-image-model".to_string(),
+            selections: BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "1".to_string()),
             ]),
         };
 
@@ -838,7 +746,7 @@ mod tests {
                 prompt: "make a visual summary".to_string(),
                 prompt_reference: None,
                 aspect: None,
-                count: 1,
+                count: None,
                 purpose: None,
                 retry_from_error: None,
             },
@@ -889,7 +797,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "image media provider/model/adapter is not configured"
+            "image media provider/model is not configured"
         );
     }
 
@@ -902,13 +810,11 @@ mod tests {
         let mut state = test_state(
             MediaGenerationConfig {
                 provider_id: "exact-provider".to_string(),
-                model_id: "stale-image-model".to_string(),
-                operation: "generate".to_string(),
-                adapter: "images_json".to_string(),
-                parameters: BTreeMap::from([
-                    ("size".to_string(), "1024x1024".to_string()),
-                    ("quality".to_string(), "auto".to_string()),
-                    ("output_format".to_string(), "png".to_string()),
+                logical_model_id: "stale-image-model".to_string(),
+                selections: BTreeMap::from([
+                    ("mode".to_string(), "1K SD".to_string()),
+                    ("ratio".to_string(), "1:1".to_string()),
+                    ("output".to_string(), "1".to_string()),
                 ]),
             },
             dir.path(),
@@ -926,10 +832,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(
-            error.to_string(),
-            "selected image model unavailable: exact-provider/stale-image-model via images_json"
-        );
+        assert!(error.to_string().contains("stale-image-model"), "{error}");
     }
 
     #[test]
@@ -942,13 +845,11 @@ mod tests {
         let mut state = test_state(
             MediaGenerationConfig {
                 provider_id: "exact-provider".to_string(),
-                model_id: "exact-image-model".to_string(),
-                operation: "generate".to_string(),
-                adapter: "images_json".to_string(),
-                parameters: BTreeMap::from([
-                    ("size".to_string(), "1024x1024".to_string()),
-                    ("quality".to_string(), "auto".to_string()),
-                    ("output_format".to_string(), "png".to_string()),
+                logical_model_id: "exact-image-model".to_string(),
+                selections: BTreeMap::from([
+                    ("mode".to_string(), "1K SD".to_string()),
+                    ("ratio".to_string(), "1:1".to_string()),
+                    ("output".to_string(), "1".to_string()),
                 ]),
             },
             dir.path(),
@@ -993,5 +894,33 @@ mod tests {
         assert_eq!(parsed["model"], "exact-image-model");
         assert_eq!(parsed["status"], "succeeded");
         assert_eq!(parsed["purpose"], "test");
+    }
+
+    #[test]
+    fn image_output_surfaces_remote_source_url_when_present() {
+        let out = image_generation_output(&ImageGenerationResult {
+            job_id: "job-1".into(),
+            requested_count: 1,
+            artifacts: vec![ImageGenerationArtifactResult {
+                artifact_id: "a1".into(),
+                index: 0,
+                path: PathBuf::from("p.png"),
+                mime_type: "image/png".into(),
+                byte_count: 3,
+                remote_source_url: Some("https://img.example/p.png".into()),
+            }],
+            provider: "minimax".into(),
+            model: "m".into(),
+            status: "succeeded".into(),
+            parameters: BTreeMap::new(),
+            purpose: None,
+            retry_from_error: false,
+        })
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            parsed["artifacts"][0]["remoteSourceUrl"],
+            "https://img.example/p.png"
+        );
     }
 }

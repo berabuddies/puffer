@@ -236,6 +236,8 @@ pub struct SkillSpec {
     pub context: Option<String>,
     #[serde(default)]
     pub disable_model_invocation: bool,
+    #[serde(default, alias = "requires-action", alias = "requiresAction")]
+    pub requires_action: bool,
     #[serde(default)]
     pub verification: Option<SkillVerificationSpec>,
 }
@@ -254,6 +256,7 @@ impl Default for SkillSpec {
             effort: None,
             context: None,
             disable_model_invocation: false,
+            requires_action: false,
             verification: None,
         }
     }
@@ -493,7 +496,7 @@ pub struct IdeSpec {
 }
 
 /// Declares a provider pack loaded from YAML.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderPack {
     pub id: String,
     pub display_name: String,
@@ -558,6 +561,25 @@ pub struct LoadedResources {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_provider_registry::{ControlKind, MediaModelDescriptor, WireType};
+
+    fn axis<'a>(
+        model: &'a MediaModelDescriptor,
+        axis_id: &str,
+    ) -> &'a puffer_provider_registry::Axis {
+        model
+            .axes
+            .iter()
+            .find(|axis| axis.id == axis_id)
+            .unwrap_or_else(|| panic!("{} should declare axis {axis_id}", model.id))
+    }
+
+    fn enum_axis_values<'a>(model: &'a MediaModelDescriptor, axis_id: &str) -> &'a [String] {
+        match &axis(model, axis_id).control {
+            ControlKind::Enum { values, .. } => values,
+            other => panic!("{} axis {axis_id} should be enum, got {other:?}", model.id),
+        }
+    }
 
     /// Confirms the bundled `zhipu.yaml` parses as a `ProviderPack`
     /// and that `chat_completions_path` flows from yaml through to
@@ -629,34 +651,54 @@ mod tests {
                 .map(|execution| execution.path.as_str()),
             Some("/v1/images/generations")
         );
-        assert!(image.models.iter().any(|model| {
-            model.id == "gpt-image-1"
-                && model
-                    .operations
-                    .contains(&puffer_provider_registry::MediaOperation::Generate)
-                && model.parameters.iter().any(|parameter| {
-                    parameter.name == "size" && parameter.values.contains(&"1024x1024".to_string())
-                })
-                && model.parameters.iter().any(|parameter| {
-                    parameter.name == "quality" && parameter.values.contains(&"auto".to_string())
-                })
-                && model.parameters.iter().any(|parameter| {
-                    parameter.name == "output_format"
-                        && parameter.values.contains(&"png".to_string())
-                })
-        }));
+        let gpt_image_1 = image
+            .models
+            .iter()
+            .find(|model| model.id == "gpt-image-1")
+            .expect("OpenAI should include GPT Image 1");
+        assert!(gpt_image_1
+            .operations
+            .contains(&puffer_provider_registry::MediaOperation::Generate));
+        assert_eq!(gpt_image_1.max_outputs, Some(9));
+        assert!(enum_axis_values(gpt_image_1, "mode").contains(&"1K SD".to_string()));
+        assert!(enum_axis_values(gpt_image_1, "ratio").contains(&"2:3".to_string()));
+        let gpt_image_1_size_map = gpt_image_1
+            .media_map
+            .as_ref()
+            .and_then(|media_map| media_map.size.as_ref())
+            .expect("gpt-image-1 should map canonical selections to size");
+        assert_eq!(gpt_image_1_size_map.field, "size");
+        assert_eq!(
+            gpt_image_1_size_map.values["1K SD"]["1:1"].as_deref(),
+            Some("1024x1024")
+        );
+        match &gpt_image_1.variants {
+            puffer_provider_registry::Variants::Single(variant) => {
+                assert_eq!(
+                    variant.base_params.get("quality").map(String::as_str),
+                    Some("auto")
+                );
+                assert_eq!(
+                    variant.base_params.get("output_format").map(String::as_str),
+                    Some("png")
+                );
+            }
+            other => panic!("gpt-image-1 should use one variant, got {other:?}"),
+        }
         let gpt_image_2 = image
             .models
             .iter()
             .find(|model| model.id == "gpt-image-2")
             .expect("OpenAI should include the current GPT Image 2 model");
-        let size = gpt_image_2
-            .parameters
-            .iter()
-            .find(|parameter| parameter.name == "size")
-            .expect("gpt-image-2 size parameter");
-        assert!(size.values.contains(&"2048x2048".to_string()));
-        assert!(size.values.contains(&"3840x2160".to_string()));
+        let gpt_image_2_size_map = gpt_image_2
+            .media_map
+            .as_ref()
+            .and_then(|media_map| media_map.size.as_ref())
+            .expect("gpt-image-2 should map canonical selections to size");
+        assert_eq!(
+            gpt_image_2_size_map.values["2K HD"]["1:1"].as_deref(),
+            Some("2048x2048")
+        );
         assert!(!image.models.iter().any(|model| model.id == "auto"));
     }
 
@@ -782,24 +824,17 @@ mod tests {
             .and_then(|media| media.video.as_ref())
             .expect("byteplus video media descriptor");
 
-        for model_id in [
-            "dreamina-seedance-2-0-260128",
-            "dreamina-seedance-2-0-fast-260128",
-        ] {
+        for model_id in ["dreamina-seedance-2-0", "dreamina-seedance-2-0-fast"] {
             let model = video
                 .models
                 .iter()
                 .find(|model| model.id == model_id)
                 .unwrap_or_else(|| panic!("byteplus video should include {model_id}"));
-            let duration = model
-                .parameters
-                .iter()
-                .find(|parameter| parameter.name == "duration_seconds")
-                .unwrap_or_else(|| panic!("{model_id} should declare duration_seconds"));
+            let duration = axis(model, "duration");
             assert_eq!(duration.request_field.as_deref(), Some("duration"));
             assert_eq!(
                 duration.wire_type,
-                puffer_provider_registry::MediaParameterWireType::Number,
+                WireType::Number,
                 "{model_id} duration must serialize as a JSON number, not a string",
             );
         }
@@ -965,9 +1000,24 @@ mod tests {
             descriptor.models.iter().any(|model| model.id == "auto"),
             "WorldRouter should expose the auto routing fallback model"
         );
-        assert!(
-            descriptor.media.is_none(),
-            "WorldRouter auto chat routing must not become an image capability"
+        let image = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .expect("WorldRouter should expose exact image generation models");
+        let ids = image
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            std::collections::BTreeSet::from([
+                "gemini-2.5-flash-image",
+                "gemini-3-pro-image-preview",
+                "gemini-3.1-flash-image-preview",
+                "gpt-image-2",
+            ])
         );
     }
 }

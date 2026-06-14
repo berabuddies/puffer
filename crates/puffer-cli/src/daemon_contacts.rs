@@ -50,6 +50,16 @@ const INFERENCE_CONTEXT_LIMIT: usize =
 const HISTORY_CANDIDATE_LIMIT: usize = 1_000;
 const DAY_MS: i128 = 86_400_000;
 
+pub(crate) fn cached_telegram_peer_avatars(paths: &ConfigPaths) -> HashMap<String, String> {
+    read_telegram_peer_avatars(paths)
+}
+
+/// Cached Telegram peer display names, keyed like the avatar map (contact-id
+/// aliases). Used to surface sender names on monitor task source contexts.
+pub(crate) fn cached_telegram_peer_names(paths: &ConfigPaths) -> HashMap<String, String> {
+    read_telegram_peer_names(paths)
+}
+
 #[derive(Debug, Clone)]
 struct Candidate {
     id: String,

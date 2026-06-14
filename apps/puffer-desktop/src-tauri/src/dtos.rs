@@ -1,6 +1,7 @@
 use puffer_session_store::{
     AttachmentState, MessageActor, SessionStore, StoredAttachment, StoredAttachmentKind,
 };
+use puffer_provider_registry::{AxisRole, ControlKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -427,10 +428,8 @@ pub(crate) struct MediaSettingsDto {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaGenerationSettingsDto {
     pub provider_id: String,
-    pub model_id: String,
-    pub operation: String,
-    pub adapter: String,
-    pub parameters: BTreeMap<String, String>,
+    pub logical_model_id: String,
+    pub selections: BTreeMap<String, String>,
 }
 
 /// Describes one verified media generation capability.
@@ -444,23 +443,21 @@ pub(crate) struct MediaCapabilityInfoDto {
     pub kind: String,
     pub operation: String,
     pub adapter: String,
-    pub parameters: Vec<MediaCapabilityParameterDto>,
-    pub defaults: BTreeMap<String, String>,
+    pub axes: Vec<MediaCapabilityAxisDto>,
     pub status: String,
     pub source: String,
     pub reason: Option<String>,
     pub checked_at_ms: u64,
 }
 
-/// Describes one selectable media parameter.
+/// Describes one selectable media axis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct MediaCapabilityParameterDto {
-    pub name: String,
+pub(crate) struct MediaCapabilityAxisDto {
+    pub id: String,
     pub label: String,
-    pub values: Vec<String>,
-    pub default: String,
-    pub request_field: Option<String>,
+    pub role: AxisRole,
+    pub control: ControlKind,
 }
 
 /// Describes aggregate loaded resource counts.

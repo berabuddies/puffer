@@ -31,7 +31,10 @@ const MONITOR_RUNTIME_LANGUAGE_POLICY: &str = r#"Monitor source-language runtime
 - For Chinese source text, write those fields in Chinese. Do not translate them into English just because the workflow prompt, schemas, or tool names are English.
 - For English source text, keep those fields in English.
 - If the source text is mixed-language or unclear, prefer the human/user language evident in the source text or owner context; otherwise preserve the user's wording and avoid defaulting to English.
-- Preserve explicit product names, code identifiers, URLs, and quoted text exactly when appropriate."#;
+- Preserve explicit product names, code identifiers, URLs, and quoted text exactly when appropriate.
+- Copy every number, percentage, amount, date, time, duration, and identifier into task fields exactly as written in the current source event text. Never round, convert, infer, or substitute values, and never reuse values from other messages or prior context.
+- When the source message contains critical values, quote the relevant sentence verbatim inside the task description instead of paraphrasing it.
+- When updating an existing monitor task with TaskUpdate, never change its status; update content fields only. Task lifecycle is owned by the daemon and user actions."#;
 
 /// Aggregate counters surfaced by workflow and connection status views.
 #[derive(Debug, Default)]

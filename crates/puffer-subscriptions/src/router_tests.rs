@@ -309,6 +309,8 @@ mod tests {
         assert!(prompts[0].contains("Monitor source-language runtime guard"));
         assert!(prompts[0].contains("For Chinese source text"));
         assert!(prompts[0].contains("subject, description, actions[].actionPrompt"));
+        assert!(prompts[0].contains("exactly as written in the current source event text"));
+        assert!(prompts[0].contains("never change its status"));
         match store.get("monitor-telegram-user").unwrap().action {
             ActionSpec::TriageAgent { prompt, .. } => assert_eq!(prompt, "legacy monitor prompt"),
             _ => panic!("expected triage agent"),

@@ -1,10 +1,10 @@
 use crate::AppState;
-use crate::{
+use anyhow::{bail, Context, Result};
+use puffer_config::MediaGenerationConfig;
+use puffer_media::{
     generate_exact_media_with_cache, ExactMediaDiscoveryCache, ExactMediaGenerationRequest,
     ExactMediaGenerationResult,
 };
-use anyhow::{bail, Context, Result};
-use puffer_config::MediaGenerationConfig;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
@@ -39,7 +39,6 @@ struct VideoRequest {
     provider: String,
     model: String,
     operation: String,
-    adapter: String,
     prompt: String,
     image_references: Vec<String>,
     parameters: BTreeMap<String, String>,
@@ -60,7 +59,7 @@ pub fn execute_video_generation(
         .media
         .video
         .as_ref()
-        .context("video media provider/model/adapter is not configured")?;
+        .context("video media provider/model is not configured")?;
     let request = build_video_request(cwd, parsed, settings)?;
     let media_context = media_context.context("VideoGeneration media runtime is not configured")?;
     let generated = generate_exact_media_with_cache(
@@ -80,14 +79,15 @@ fn build_video_request(
 ) -> Result<VideoRequest> {
     let prompt = prompt_text(cwd, &input.prompt)?;
     let image_references = validate_video_image_references(&input.image_references)?;
-    let (provider, model, operation, adapter) = required_video_selection(settings)?;
-    let mut parameters = settings.parameters.clone();
+    let (provider, model) = required_video_selection(settings)?;
+    // Merge the persisted axis selections with any per-call overrides; the
+    // runtime resolves these against the logical model's axes/variants.
+    let mut parameters = settings.selections.clone();
     parameters.extend(input.parameters);
     Ok(VideoRequest {
         provider,
         model,
-        operation,
-        adapter,
+        operation: "generate".to_string(),
         prompt,
         image_references,
         parameters,
@@ -127,11 +127,10 @@ fn exact_media_request(request: &VideoRequest) -> ExactMediaGenerationRequest {
         provider_id: request.provider.clone(),
         model_id: request.model.clone(),
         operation: request.operation.clone(),
-        adapter: request.adapter.clone(),
         prompt: request.prompt.clone(),
         image_references: request.image_references.clone(),
         parameters: request.parameters.clone(),
-        count: 1,
+        count: None,
     }
 }
 
@@ -196,30 +195,22 @@ fn video_generation_output(
         "provider": result.provider_id,
         "model": result.model_id,
         "status": result.status,
+        "providerJobId": result.provider_job_id,
+        "remoteStatus": result.remote_status,
+        "error": result.error,
+        "diagnostic": result.diagnostic,
         "parameters": parameters,
         "purpose": purpose
     }))?)
 }
 
-fn required_video_selection(
-    settings: &MediaGenerationConfig,
-) -> Result<(String, String, String, String)> {
+fn required_video_selection(settings: &MediaGenerationConfig) -> Result<(String, String)> {
     let provider = settings.provider_id.trim();
-    let model = settings.model_id.trim();
-    let operation = settings.operation.trim();
-    let adapter = settings.adapter.trim();
-    if provider.is_empty() || model.is_empty() || adapter.is_empty() {
-        bail!("video media provider/model/adapter is not configured");
+    let model = settings.logical_model_id.trim();
+    if provider.is_empty() || model.is_empty() {
+        bail!("video media provider/model is not configured");
     }
-    if operation.is_empty() {
-        bail!("video media operation is not configured");
-    }
-    Ok((
-        provider.to_string(),
-        model.to_string(),
-        operation.to_string(),
-        adapter.to_string(),
-    ))
+    Ok((provider.to_string(), model.to_string()))
 }
 
 fn prompt_text(cwd: &Path, value: &str) -> Result<String> {
@@ -261,10 +252,12 @@ mod tests {
     use crate::AppState;
     use indexmap::IndexMap;
     use puffer_config::MediaGenerationConfig;
+    use puffer_media::MediaFailureDiagnostic;
     use puffer_provider_registry::{
-        AuthMode, AuthStore, MediaExecutionDescriptor, MediaExecutionKind, MediaKindDescriptor,
-        MediaModelDescriptor, MediaOperation, MediaParameterSpec, MediaParameterWireType,
-        ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry,
+        AuthMode, AuthStore, Axis, AxisRole, ControlKind, MediaExecutionDescriptor,
+        MediaExecutionKind, MediaKindDescriptor, MediaModelDescriptor, MediaOperation,
+        ModelDescriptor, ProviderDescriptor, ProviderMediaDescriptor, ProviderRegistry, Variant,
+        Variants, WireType,
     };
     use puffer_resources::LoadedResources;
     use puffer_session_store::SessionMetadata;
@@ -284,10 +277,8 @@ mod tests {
     fn video_settings() -> MediaGenerationConfig {
         MediaGenerationConfig {
             provider_id: "relaydance".to_string(),
-            model_id: "doubao-seedance-2-0-720p".to_string(),
-            operation: "generate".to_string(),
-            adapter: "relaydance_video".to_string(),
-            parameters: BTreeMap::from([
+            logical_model_id: "doubao-seedance-2-0-720p".to_string(),
+            selections: BTreeMap::from([
                 ("duration_seconds".to_string(), "5".to_string()),
                 ("aspect_ratio".to_string(), "16:9".to_string()),
                 ("resolution".to_string(), "720p".to_string()),
@@ -337,63 +328,79 @@ mod tests {
                         base_url: None,
                         path: "/v1/video/generations".to_string(),
                         batch: puffer_provider_registry::MediaBatchDescriptor::default(),
+                        prompt_format: Default::default(),
                     }),
                     models: vec![MediaModelDescriptor {
                         id: "doubao-seedance-2-0-720p".to_string(),
                         display_name: Some("Seedance 2.0".to_string()),
+                        max_outputs: None,
                         execution: None,
                         operations: vec![MediaOperation::Generate],
-                        parameters: vec![
-                            MediaParameterSpec {
-                                name: "duration_seconds".to_string(),
+                        axes: vec![
+                            Axis {
+                                id: "duration_seconds".to_string(),
                                 label: "Duration".to_string(),
-                                values: vec![
-                                    "4".to_string(),
-                                    "5".to_string(),
-                                    "6".to_string(),
-                                    "7".to_string(),
-                                    "8".to_string(),
-                                    "9".to_string(),
-                                    "10".to_string(),
-                                    "11".to_string(),
-                                    "12".to_string(),
-                                    "13".to_string(),
-                                    "14".to_string(),
-                                    "15".to_string(),
-                                ],
-                                default: "5".to_string(),
+                                role: AxisRole::Param,
+                                control: ControlKind::Enum {
+                                    values: vec![
+                                        "4".to_string(),
+                                        "5".to_string(),
+                                        "6".to_string(),
+                                        "7".to_string(),
+                                        "8".to_string(),
+                                        "9".to_string(),
+                                        "10".to_string(),
+                                        "11".to_string(),
+                                        "12".to_string(),
+                                        "13".to_string(),
+                                        "14".to_string(),
+                                        "15".to_string(),
+                                    ],
+                                    default: "5".to_string(),
+                                },
                                 request_field: Some("seconds".to_string()),
-                                wire_type: MediaParameterWireType::String,
+                                wire_type: WireType::String,
                             },
-                            MediaParameterSpec {
-                                name: "resolution".to_string(),
+                            Axis {
+                                id: "resolution".to_string(),
                                 label: "Resolution".to_string(),
-                                values: vec![
-                                    "480p".to_string(),
-                                    "720p".to_string(),
-                                    "1080p".to_string(),
-                                ],
-                                default: "720p".to_string(),
+                                role: AxisRole::Param,
+                                control: ControlKind::Enum {
+                                    values: vec![
+                                        "480p".to_string(),
+                                        "720p".to_string(),
+                                        "1080p".to_string(),
+                                    ],
+                                    default: "720p".to_string(),
+                                },
                                 request_field: Some("metadata.resolution".to_string()),
-                                wire_type: MediaParameterWireType::String,
+                                wire_type: WireType::String,
                             },
-                            MediaParameterSpec {
-                                name: "aspect_ratio".to_string(),
+                            Axis {
+                                id: "aspect_ratio".to_string(),
                                 label: "Aspect ratio".to_string(),
-                                values: vec![
-                                    "16:9".to_string(),
-                                    "4:3".to_string(),
-                                    "1:1".to_string(),
-                                    "3:4".to_string(),
-                                    "9:16".to_string(),
-                                    "21:9".to_string(),
-                                    "adaptive".to_string(),
-                                ],
-                                default: "16:9".to_string(),
+                                role: AxisRole::Param,
+                                control: ControlKind::Enum {
+                                    values: vec![
+                                        "16:9".to_string(),
+                                        "4:3".to_string(),
+                                        "1:1".to_string(),
+                                        "3:4".to_string(),
+                                        "9:16".to_string(),
+                                        "21:9".to_string(),
+                                        "adaptive".to_string(),
+                                    ],
+                                    default: "16:9".to_string(),
+                                },
                                 request_field: Some("metadata.ratio".to_string()),
-                                wire_type: MediaParameterWireType::String,
+                                wire_type: WireType::String,
                             },
                         ],
+                        variants: Variants::Single(Variant {
+                            model_id: "doubao-seedance-2-0-720p".to_string(),
+                            base_params: ::std::collections::BTreeMap::new(),
+                        }),
+                        media_map: None,
                     }],
                 }),
             }),
@@ -524,12 +531,32 @@ mod tests {
         }
     }
 
+    fn assert_null_diagnostic_fields(value: &Value) {
+        for key in ["providerJobId", "remoteStatus", "error", "diagnostic"] {
+            assert_eq!(value.get(key), Some(&Value::Null));
+        }
+    }
+
+    fn assert_workflow_output_hides_internal_fields(value: &Value) {
+        for key in [
+            "remoteGetUrl",
+            "prompt",
+            "adapter",
+            "rawPayload",
+            "providerResponseBody",
+            "credential",
+            "apiKey",
+        ] {
+            assert!(value.get(key).is_none(), "unexpected `{key}` in {value}");
+        }
+    }
+
     #[test]
     fn execute_rejects_missing_video_provider_model_config() {
         let dir = tempdir().unwrap();
         let registry = ProviderRegistry::new();
         let auth_store = AuthStore::default();
-        let discovery_cache = crate::ExactMediaDiscoveryCache::empty();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(None, dir.path());
 
         let error = execute_video_generation(
@@ -546,7 +573,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "video media provider/model/adapter is not configured"
+            "video media provider/model is not configured"
         );
     }
 
@@ -699,7 +726,6 @@ mod tests {
 
         assert_eq!(request.provider, "relaydance");
         assert_eq!(request.model, "doubao-seedance-2-0-720p");
-        assert_eq!(request.adapter, "relaydance_video");
         assert_eq!(request.parameters["duration_seconds"], "5");
         assert_eq!(request.parameters["aspect_ratio"], "9:16");
         assert_eq!(request.parameters["resolution"], "1080p");
@@ -711,12 +737,89 @@ mod tests {
     }
 
     #[test]
+    fn output_includes_failed_job_diagnostics() {
+        let result = ExactMediaGenerationResult {
+            job_id: "job-1".to_string(),
+            requested_count: 1,
+            artifacts: Vec::new(),
+            kind: "video".to_string(),
+            provider_id: "worldrouter".to_string(),
+            model_id: "seedance-2.0-fast".to_string(),
+            status: "failed".to_string(),
+            provider_job_id: Some("task-123".to_string()),
+            remote_status: Some("failed".to_string()),
+            error: Some("The service encountered an unexpected internal error.".to_string()),
+            diagnostic: Some(MediaFailureDiagnostic {
+                kind: "video".to_string(),
+                provider_id: "worldrouter".to_string(),
+                adapter: Some("worldrouter_video".to_string()),
+                model_id: Some("seedance-2.0-fast".to_string()),
+                phase: Some("poll".to_string()),
+                provider_job_id: Some("task-123".to_string()),
+                remote_status: Some("failed".to_string()),
+                http_status: None,
+                provider_code: None,
+                request_id: None,
+                error: "The service encountered an unexpected internal error.".to_string(),
+                hint: Some("Provider or upstream service returned an internal error; retry later or compare another provider.".to_string()),
+            }),
+        };
+
+        let output = video_generation_output(
+            &result,
+            &BTreeMap::from([
+                ("duration".to_string(), "5".to_string()),
+                ("resolution".to_string(), "480p".to_string()),
+            ]),
+            None,
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let object = parsed.as_object().unwrap();
+        assert_eq!(object.get("providerJobId"), Some(&json!("task-123")));
+        assert_eq!(object.get("remoteStatus"), Some(&json!("failed")));
+        assert_eq!(
+            object.get("error"),
+            Some(&json!(
+                "The service encountered an unexpected internal error."
+            ))
+        );
+        assert_eq!(object["diagnostic"]["provider"], json!("worldrouter"));
+        assert_eq!(object["diagnostic"]["adapter"], json!("worldrouter_video"));
+        assert_eq!(object["diagnostic"]["phase"], json!("poll"));
+        assert_workflow_output_hides_internal_fields(&parsed);
+    }
+
+    #[test]
+    fn output_includes_null_diagnostics_when_absent() {
+        let result = ExactMediaGenerationResult {
+            job_id: "job-1".to_string(),
+            requested_count: 1,
+            artifacts: Vec::new(),
+            kind: "video".to_string(),
+            provider_id: "provider-1".to_string(),
+            model_id: "model-1".to_string(),
+            status: "succeeded".to_string(),
+            provider_job_id: None,
+            remote_status: None,
+            error: None,
+            diagnostic: None,
+        };
+
+        let output = video_generation_output(&result, &BTreeMap::new(), None).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_null_diagnostic_fields(&parsed);
+    }
+
+    #[test]
     fn execute_uses_exact_video_generation_and_returns_artifacts() {
         let (base_url, server) = spawn_relaydance_video_server();
         let dir = tempdir().unwrap();
         let registry = video_registry(base_url);
         let auth_store = auth_store();
-        let discovery_cache = crate::ExactMediaDiscoveryCache::empty();
+        let discovery_cache = ExactMediaDiscoveryCache::empty();
         let mut state = test_state(Some(video_settings()), dir.path());
 
         let output = execute_video_generation(
@@ -751,6 +854,11 @@ mod tests {
         assert_eq!(parsed["model"], "doubao-seedance-2-0-720p");
         assert_eq!(parsed["status"], "succeeded");
         assert_eq!(parsed["purpose"], "short launch clip");
+        let object = parsed.as_object().unwrap();
+        assert_eq!(object.get("providerJobId"), Some(&json!("task-1")));
+        assert_eq!(object.get("remoteStatus"), Some(&json!("completed")));
+        assert_eq!(object.get("error"), Some(&serde_json::Value::Null));
+        assert_workflow_output_hides_internal_fields(&parsed);
         assert_eq!(parsed["parameters"]["duration_seconds"], "5");
         assert_eq!(parsed["parameters"]["resolution"], "720p");
         assert_eq!(parsed["parameters"]["aspect_ratio"], "9:16");

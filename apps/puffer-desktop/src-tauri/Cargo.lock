@@ -700,6 +700,7 @@ dependencies = [
  "portable-pty",
  "puffer-config",
  "puffer-core",
+ "puffer-media",
  "puffer-provider-registry",
  "puffer-resources",
  "puffer-runner-local",
@@ -4041,6 +4042,7 @@ dependencies = [
  "psl",
  "puffer-config",
  "puffer-mcp-oauth",
+ "puffer-media",
  "puffer-observability",
  "puffer-provider-openai",
  "puffer-provider-registry",
@@ -4096,6 +4098,20 @@ dependencies = [
  "tracing",
  "url",
  "webbrowser",
+]
+
+[[package]]
+name = "puffer-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "puffer-provider-registry",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "uuid",
 ]
 
 [[package]]

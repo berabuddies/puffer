@@ -112,6 +112,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         email_template(),
         gmail_browser_template(),
         gcal_browser_template(),
+        wechat_login_template(),
     ]
 }
 
@@ -131,6 +132,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "gcal-browser" => "gcal-browser".to_string(),
         "lark-login" => "lark-user".to_string(),
         "lark-bot" => "lark-bot".to_string(),
+        "wechat-login" => "wechat-user".to_string(),
         "discord-bot" => "discord-bot".to_string(),
         "matrix-bot" => "matrix-bot".to_string(),
         "slack-app" => "slack-app".to_string(),
@@ -300,6 +302,153 @@ fn lark_bot_template() -> ConnectorTemplate {
         output_schema: message_output_schema(),
         actions: lark_cli_actions(),
     }
+}
+
+/// WeChat personal account over a managed Docker desktop (KasmVNC + native
+/// WeChat). Puffer drives the running client through `docker exec` (xdotool /
+/// xclip / screenshot) with human-like input timing; there is no WeChat API,
+/// so `monitor` reads the screen and `act` simulates a real user. The user
+/// scans the QR in the embedded browser pane to log in.
+fn wechat_login_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "wechat-login".to_string(),
+        description: "WeChat personal account over a managed Docker desktop \
+            (monitor + act as you, human-like input)"
+            .to_string(),
+        skill: "wechat".to_string(),
+        binary: "puffer __connector wechat-user".to_string(),
+        command: vec![
+            "puffer".to_string(),
+            "__connector".to_string(),
+            "wechat-user".to_string(),
+        ],
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: message_output_schema(),
+        actions: wechat_actions(),
+    }
+}
+
+/// WeChat connector actions: `send_message` plus group-mention and mark-read.
+/// (Money + mass/broadcast operations are intentionally NOT exposed — they are
+/// hard-blocked in the bridge dispatcher.)
+fn wechat_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = send_message_actions();
+    // Override the shared send_message with a WeChat-specific schema/description:
+    // WeChat has no message-ids, so `reply_to`/`quote` is the quoted message TEXT
+    // (a snippet), not a platform id — distinct from lark/telegram.
+    if let Some(send) = actions.get_mut("send_message") {
+        send.description =
+            "Send a WeChat message: `text` and/or media (`image`/`file`/`media`/`files`, local \
+             paths or http(s) URLs). Optional `reply_to`/`quote` = the quoted message TEXT (a \
+             snippet to find on screen; WeChat has NO message ids, so a numeric id is rejected)."
+                .to_string();
+        send.input_schema = wechat_message_action_schema();
+    }
+    for action in [
+        wechat_action_definition(
+            "mention",
+            "Send a group message that @-mentions one or more members (field `mention`: a name or array of names)",
+            "external_message_send",
+            "Send an @-mention message in an external WeChat group",
+            true,
+        ),
+        wechat_action_definition(
+            "react",
+            "Send a 拍一拍 (pat/nudge) to a member by right-clicking their avatar and choosing \
+             拍一拍 (field `on`: whom to pat; defaults to the chat's other party). WeChat has no \
+             per-message emoji reactions",
+            "external_message_interaction",
+            "Send a 拍一拍 (pat) in an external WeChat chat",
+            true,
+        ),
+        wechat_action_definition(
+            "mark_read",
+            "Open a WeChat chat (marks it read); no message is sent",
+            "external_message_read",
+            "Open/read an external WeChat conversation",
+            false,
+        ),
+        wechat_action_definition(
+            "logout",
+            "Log out of WeChat via the client UI, KEEPING the container and local \
+             data (distinct from deleting the connection, which wipes everything). \
+             Re-login is a fresh QR scan",
+            "external_account_profile",
+            "Log out of the external WeChat account (keep data)",
+            true,
+        ),
+        wechat_action_definition(
+            "read_history",
+            "Read the last N messages of a chat from the local DB (fields `chat`, `limit`); \
+             read-only, requires the direct DB reader",
+            "external_message_read",
+            "Read external WeChat chat history",
+            false,
+        ),
+    ] {
+        actions.insert(action.slug.clone(), action);
+    }
+    actions
+}
+
+fn wechat_action_definition(
+    slug: &str,
+    description: &str,
+    category: &str,
+    summary: &str,
+    external_side_effect: bool,
+) -> ConnectorActionDefinition {
+    ConnectorActionDefinition {
+        slug: slug.to_string(),
+        description: description.to_string(),
+        input_schema: wechat_message_action_schema(),
+        output_schema: wechat_action_output_schema(),
+        permission: ConnectorPermissionDefinition {
+            category: category.to_string(),
+            summary: summary.to_string(),
+            external_side_effect,
+        },
+    }
+}
+
+/// Input schema documenting the WeChat-specific action fields (the connector
+/// does not validate input, so this is for agent discoverability). Permissive
+/// (`additionalProperties: true`) since different actions use different keys.
+fn wechat_message_action_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "to": { "description": "Recipient: a contact or group display name (also accepts target/contact/chat).", "type": "string" },
+            "text": { "description": "Message text (alias: message). Optional when sending media-only.", "type": "string" },
+            "caption": { "description": "Caption sent as a following text message with media.", "type": "string" },
+            "image": { "description": "Image to send inline: a local path or http(s) URL (or an array).", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}] },
+            "file": { "description": "File to send as a document card: a local path or http(s) URL (or an array).", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}] },
+            "media": { "description": "Image/file path(s)/URL(s), or attachment object(s) {path|url, kind, caption}.", "oneOf": [{"type": "string"}, {"type": "object"}, {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object"}]}}] },
+            "files": { "description": "Array of media paths/URLs.", "type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object"}]} },
+            "reply_to": { "description": "Quote/reply target = the quoted message TEXT (a snippet to locate on screen). WeChat has NO message ids; a numeric id is rejected. (alias: quote)", "type": "string" },
+            "mention": { "description": "For the `mention` action: a member name or array of names to @ in a group.", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}] },
+            "on": { "description": "For the `react` (拍一拍) action: which member to pat; defaults to the chat's other party.", "type": "string" },
+            "chat": { "description": "For `read_history`: the chat (contact/group name or wxid/*@chatroom) to read.", "type": "string" },
+            "limit": { "description": "For `read_history`: number of recent messages to return.", "type": "integer" }
+        },
+        "additionalProperties": true
+    })
+}
+
+/// Output schema matching what the WeChat bridge actually returns.
+fn wechat_action_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "success": { "type": "boolean" },
+            "summary": { "type": "string" },
+            "output": { "type": "object" }
+        },
+        "required": ["success", "summary"]
+    })
 }
 
 /// `lark-cli` connector actions: `send_message` plus reaction actions.

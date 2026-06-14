@@ -41,11 +41,12 @@ use super::openai::conversation::{
 use super::plan_events::stream_events_for_tool_invocations;
 use super::reflection::{ReflectionConfig, ReflectionTraceEvent, ReflectionTracker};
 use super::request_tool_filter::RequestToolFilter;
+use super::skill_obligation::{NoToolDecision, SkillActionObligation};
 use super::tool_batch::execute_tool_batch;
 use super::tool_executor::ToolExecutionBackend;
 use super::{
-    enforce_tool_result_budget, process_tool_result, run_turn_hooks, CancelToken, ToolCallRequest,
-    ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport, MAX_TOOL_RESULT_CHARS,
+    run_turn_hooks, CancelToken, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
+    TurnUsageReport,
 };
 use crate::AppState;
 
@@ -184,6 +185,7 @@ pub(crate) fn run_streaming_loop(
     session.pre_loop_inject(&mut items);
 
     let mut invocations: Vec<ToolInvocation> = Vec::new();
+    let mut obligation = SkillActionObligation::default();
     let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
     // Carries the most recent assistant text across iterations so the
     // `max_turns` break path can return whatever reasoning the model
@@ -316,13 +318,14 @@ pub(crate) fn run_streaming_loop(
         if let Some(max_turns) = inputs.max_turns {
             if turn_index >= max_turns {
                 agent_span.set_str("puffer.subagent.max_turns_reached", "true");
+                let assistant_text = obligation.fail_if_pending().unwrap_or(last_assistant_text);
                 agent_span.set_content(
                     puffer_observability::LANGFUSE_TRACE_OUTPUT,
                     puffer_observability::ContentKind::Output,
-                    &last_assistant_text,
+                    &assistant_text,
                 );
                 return Ok(TurnExecution {
-                    assistant_text: last_assistant_text,
+                    assistant_text,
                     tool_invocations: invocations,
                     reflection_traces,
                 });
@@ -611,24 +614,28 @@ pub(crate) fn run_streaming_loop(
 
         // No tool calls → final assistant text, run hooks, return.
         if turn.tool_calls.is_empty() {
-            run_turn_hooks(
-                inputs.resources,
-                &cwd,
-                &turn.assistant_text,
-                invocations.len(),
-            );
+            let assistant_text = match obligation.no_tool_decision() {
+                NoToolDecision::Complete => turn.assistant_text,
+                NoToolDecision::ContinueWithReminder(reminder) => {
+                    items.extend(turn.pre_tool_items);
+                    items.push(ConversationItem::user_message(reminder));
+                    continue;
+                }
+                NoToolDecision::FailNotStarted(message) => message,
+            };
+            run_turn_hooks(inputs.resources, &cwd, &assistant_text, invocations.len());
             agent_span.set_content(
                 puffer_observability::LANGFUSE_TRACE_OUTPUT,
                 puffer_observability::ContentKind::Output,
-                &turn.assistant_text,
+                &assistant_text,
             );
             agent_span.set_content(
                 "puffer.output",
                 puffer_observability::ContentKind::Output,
-                &turn.assistant_text,
+                &assistant_text,
             );
             return Ok(TurnExecution {
-                assistant_text: turn.assistant_text,
+                assistant_text,
                 tool_invocations: invocations,
                 reflection_traces,
             });
@@ -664,6 +671,7 @@ pub(crate) fn run_streaming_loop(
                 return Err(error);
             }
         };
+        obligation.observe_invocations(inputs.resources, &new_invocations);
 
         if !new_invocations.is_empty() {
             on_event(TurnStreamEvent::ToolInvocations(new_invocations.clone()));

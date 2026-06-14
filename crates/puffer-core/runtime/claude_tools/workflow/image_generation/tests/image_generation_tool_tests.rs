@@ -1,19 +1,21 @@
 use super::*;
 
 #[test]
-fn execute_uses_discovery_cache_for_chat_image_output_model() {
-    let (base_url, server) = spawn_chat_image_generation_server();
+fn execute_uses_exact_media_context_for_configured_model() {
+    let (base_url, server) = spawn_image_generation_server();
     let dir = tempdir().unwrap();
-    let registry = chat_router_registry(base_url);
-    let auth_store = openrouter_auth_store();
-    let discovery_cache = discovered_chat_image_cache();
+    let registry = registry_with_provider(base_url);
+    let auth_store = auth_store();
+    let discovery_cache = ExactMediaDiscoveryCache::empty();
     let mut state = test_state(
         MediaGenerationConfig {
-            provider_id: "openrouter".to_string(),
-            model_id: "openrouter/image-chat".to_string(),
-            operation: "generate".to_string(),
-            adapter: "chat_image_output".to_string(),
-            parameters: BTreeMap::new(),
+            provider_id: "exact-provider".to_string(),
+            logical_model_id: "exact-image-model".to_string(),
+            selections: BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "1".to_string()),
+            ]),
         },
         dir.path(),
     );
@@ -31,13 +33,13 @@ fn execute_uses_discovery_cache_for_chat_image_output_model() {
     .unwrap();
 
     let request_text = server.join().expect("server");
-    assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
-    assert!(request_text.contains("\"model\":\"openrouter/image-chat\""));
+    assert!(request_text.starts_with("POST /custom/images HTTP/1.1"));
+    assert!(request_text.contains("\"model\":\"exact-image-model\""));
     let parsed: Value = serde_json::from_str(&output).unwrap();
     let artifact_path = PathBuf::from(parsed["artifacts"][0]["path"].as_str().unwrap());
     assert_eq!(fs::read(&artifact_path).unwrap(), b"image-bytes");
-    assert_eq!(parsed["provider"], "openrouter");
-    assert_eq!(parsed["model"], "openrouter/image-chat");
+    assert_eq!(parsed["provider"], "exact-provider");
+    assert_eq!(parsed["model"], "exact-image-model");
     assert_eq!(parsed["status"], "succeeded");
 }
 
@@ -50,13 +52,11 @@ fn dispatcher_passes_media_context_to_image_generation_tool() {
     let mut state = test_state(
         MediaGenerationConfig {
             provider_id: "exact-provider".to_string(),
-            model_id: "exact-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "images_json".to_string(),
-            parameters: BTreeMap::from([
-                ("size".to_string(), "1024x1024".to_string()),
-                ("quality".to_string(), "auto".to_string()),
-                ("output_format".to_string(), "png".to_string()),
+            logical_model_id: "exact-image-model".to_string(),
+            selections: BTreeMap::from([
+                ("mode".to_string(), "1K SD".to_string()),
+                ("ratio".to_string(), "1:1".to_string()),
+                ("output".to_string(), "1".to_string()),
             ]),
         },
         dir.path(),
@@ -98,6 +98,7 @@ fn image_generation_output_includes_artifacts_array() {
                 path: PathBuf::from("/tmp/image-1.png"),
                 mime_type: "image/png".to_string(),
                 byte_count: 10,
+                remote_source_url: None,
             },
             ImageGenerationArtifactResult {
                 artifact_id: "artifact-2".to_string(),
@@ -105,6 +106,7 @@ fn image_generation_output_includes_artifacts_array() {
                 path: PathBuf::from("/tmp/image-2.png"),
                 mime_type: "image/png".to_string(),
                 byte_count: 11,
+                remote_source_url: None,
             },
         ],
         provider: "openai".to_string(),

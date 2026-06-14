@@ -32,6 +32,13 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// WeChat's `act` path drives the LIVE client with deliberate human-like pacing
+/// (think-time, a length-scaled compose pause, simulated mouse paths, navigate +
+/// verify + delivery check), so a single real send legitimately takes ~40-60s —
+/// far longer than an API connector's call. Give it a roomier ceiling so a real
+/// send is not killed mid-flight. Other connectors keep the tight 30s; this
+/// ceiling only bounds a stuck call, never a fast API one.
+const WECHAT_ACTION_TIMEOUT: Duration = Duration::from_secs(150);
 const COMMAND_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const COMMAND_RESTART_RESENDS: usize = 2;
 
@@ -576,10 +583,17 @@ impl SubscriptionManager {
         template: &crate::catalog::ConnectorTemplate,
         request: &ConnectorActionRequest,
     ) -> Result<Option<ConnectorActionResponse>> {
+        // WeChat's human-paced act path needs a roomier ceiling than fast API
+        // connectors (see WECHAT_ACTION_TIMEOUT); pick per connector.
+        let timeout = if template.slug.starts_with("wechat") {
+            WECHAT_ACTION_TIMEOUT
+        } else {
+            CONNECTOR_COMMAND_TIMEOUT
+        };
         let template = template.clone();
         let request = request.clone();
         block_on_manager_handle(&self.handle, async move {
-            connector_process::run_action(&template, &request, CONNECTOR_COMMAND_TIMEOUT).await
+            connector_process::run_action(&template, &request, timeout).await
         })
     }
 

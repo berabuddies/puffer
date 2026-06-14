@@ -37,6 +37,7 @@ pub(super) fn parse_input_event(value: &Value) -> Result<BrowserInputEvent> {
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
             modifiers: optional_u32(value, "modifiers").unwrap_or(0),
+            commands: Vec::new(),
         }),
         "text" => Ok(BrowserInputEvent::Text {
             text: required_string(value, "text")?,

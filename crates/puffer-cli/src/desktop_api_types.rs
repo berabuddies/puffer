@@ -548,10 +548,8 @@ pub(crate) struct MediaSettingsDto {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaGenerationSettingsDto {
     pub(crate) provider_id: String,
-    pub(crate) model_id: String,
-    pub(crate) operation: String,
-    pub(crate) adapter: String,
-    pub(crate) parameters: std::collections::BTreeMap<String, String>,
+    pub(crate) logical_model_id: String,
+    pub(crate) selections: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -564,22 +562,23 @@ pub(crate) struct MediaCapabilityInfoDto {
     pub(crate) kind: String,
     pub(crate) operation: String,
     pub(crate) adapter: String,
-    pub(crate) parameters: Vec<MediaCapabilityParameterDto>,
-    pub(crate) defaults: std::collections::BTreeMap<String, String>,
+    pub(crate) axes: Vec<MediaCapabilityAxisDto>,
     pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) reason: Option<String>,
     pub(crate) checked_at_ms: u64,
 }
 
+/// One user-facing axis of a logical media model. `control` carries the typed
+/// `ControlKind` JSON (`{"enum": {...}}` / `{"range": {...}}` / `{"bool": {...}}`),
+/// while provider request fields remain backend-only resolver details.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct MediaCapabilityParameterDto {
-    pub(crate) name: String,
+pub(crate) struct MediaCapabilityAxisDto {
+    pub(crate) id: String,
     pub(crate) label: String,
-    pub(crate) values: Vec<String>,
-    pub(crate) default: String,
-    pub(crate) request_field: Option<String>,
+    pub(crate) role: String,
+    pub(crate) control: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize)]

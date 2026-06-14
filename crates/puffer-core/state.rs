@@ -1,4 +1,3 @@
-use crate::media_runtime::ExactMediaDiscoveryCache;
 use crate::memory::ProjectMemoryContext;
 use crate::permissions::browser_action::browser_permission_value_for_tool_call;
 use crate::permissions::browser_grants::BrowserGrantScopeKind;
@@ -6,6 +5,7 @@ use crate::permissions::SessionPermissionState;
 use crate::runner_adapter::LocalToolRunner;
 use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
+use puffer_media::ExactMediaDiscoveryCache;
 use puffer_runner_api::ToolRunner;
 use puffer_session_store::{
     ClaudeReadSnapshotEvent, MessageActor, MessageActorKind, SessionMetadata, SessionRecord,

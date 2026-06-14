@@ -9,7 +9,8 @@ description: |-
 
   Use one ImageGeneration call for one logical image-generation request. When
   the user asks for multiple images from one prompt, set count to the requested
-  number instead of issuing multiple count=1 calls. The tool reads a
+  number instead of issuing multiple count=1 calls. When count is omitted, the
+  persisted image Output setting is used. The tool reads a
   workspace-relative prompt file when the prompt value names one; otherwise it
   treats prompt as literal text. The result includes one media job id and one
   artifact entry per persisted image file.
@@ -30,9 +31,9 @@ input_schema:
       description: Aspect ratio such as square, landscape, portrait, 1:1, 16:9, 9:16, or auto.
     count:
       type: integer
-      description: Number of images to generate in one request. Must be between 1 and 4.
+      description: Optional number of images to generate in one request. Must be between 1 and 9 when provided.
       minimum: 1
-      maximum: 4
+      maximum: 9
     purpose:
       type: string
       description: Optional caller purpose preserved in the result metadata.
@@ -40,7 +41,6 @@ input_schema:
       description: Optional previous error payload for retrying the same prompt.
   required:
     - prompt
-    - count
   additionalProperties: false
 metadata:
   may_spawn_processes: false

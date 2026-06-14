@@ -6,15 +6,27 @@ use serde_json::json;
 
 use crate::state::{default_init_params, resolve_api_credentials, PersistedCredentials, SkillEnv};
 
-/// Tries to open and connect an already-authenticated session. Returns
-/// `Ok(None)` when the session file is missing auth material or the client
-/// is not currently authorized.
-pub(crate) async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<Client>> {
+/// Outcome of attempting to resume a persisted session. Callers MUST treat
+/// `Transient` differently from `AuthRequired`: on a transient failure the
+/// on-disk session is likely still valid and only the network/DC was
+/// unreachable — claiming "not authenticated" parks a healthy account behind
+/// a re-login it doesn't need (agentenv/monorepo#626).
+pub(crate) enum SessionResume {
+    /// Connected and authorized.
+    Resumed(Client),
+    /// The session genuinely lacks auth material (fresh login required).
+    AuthRequired,
+    /// Infrastructure failure (network/DC unreachable); retryable on demand.
+    Transient(String),
+}
+
+/// Tries to open and connect an already-authenticated session.
+pub(crate) async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<SessionResume> {
     let session = Session::load_file_or_create(&env.session_path)
         .with_context(|| format!("load session file {}", env.session_path.display()))?;
     if !session.signed_in() {
         crate::health::report_resume_failed(env, "not_signed_in", false, "none", json!({}));
-        return Ok(None);
+        return Ok(SessionResume::AuthRequired);
     }
 
     let persisted = PersistedCredentials::load(&env.credentials_path()).unwrap_or_default();
@@ -28,7 +40,9 @@ pub(crate) async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<
                 "config",
                 json!({ "error": error.to_string() }),
             );
-            return Ok(None);
+            // Needs user intervention (a fresh login re-persists the API
+            // credentials), so route it through the login path.
+            return Ok(SessionResume::AuthRequired);
         }
     };
 
@@ -50,14 +64,22 @@ pub(crate) async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<
                 class,
                 json!({ "error": detail }),
             );
-            return Ok(None);
+            // connect runs initConnection, so a server-invalidated key can
+            // surface here as an auth-class error (AUTH_KEY_UNREGISTERED) —
+            // misreading it as Transient would trap the user in an offline
+            // retry loop instead of routing them to re-login.
+            return Ok(if class == "auth" {
+                SessionResume::AuthRequired
+            } else {
+                SessionResume::Transient(detail)
+            });
         }
     };
     match client.is_authorized().await {
-        Ok(true) => Ok(Some(client)),
+        Ok(true) => Ok(SessionResume::Resumed(client)),
         Ok(false) => {
             crate::health::report_resume_failed(env, "key_invalidated", true, "auth", json!({}));
-            Ok(None)
+            Ok(SessionResume::AuthRequired)
         }
         Err(err) => {
             let detail = err.to_string();
@@ -69,7 +91,11 @@ pub(crate) async fn try_resume_session(env: &SkillEnv) -> anyhow::Result<Option<
                 class,
                 json!({ "error": detail }),
             );
-            Ok(None)
+            if class == "auth" {
+                Ok(SessionResume::AuthRequired)
+            } else {
+                Ok(SessionResume::Transient(detail))
+            }
         }
     }
 }

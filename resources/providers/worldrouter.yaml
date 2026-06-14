@@ -12,6 +12,103 @@ discovery:
   context_window: 200000
   max_output_tokens: 16384
   supports_reasoning: true
+media:
+  image:
+    discovery:
+      adapter: static
+    execution:
+      adapter: images_json
+      path: /images/generations
+      batch:
+        mode: per_image
+    models:
+      - id: gpt-image-2
+        display_name: GPT Image 2
+        operations:
+          - generate
+        max_outputs: 9
+        axes:
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1", "3:2", "2:3"], default: "1:1" } }
+        media_map:
+          ratio:
+            field: size
+            values:
+              "1:1": "1024x1024"
+              "3:2": "1536x1024"
+              "2:3": "1024x1536"
+        variants: { model_id: gpt-image-2 }
+      - id: gemini-2.5-flash-image
+        display_name: Gemini 2.5 Flash Image
+        execution:
+          adapter: gemini_generate_content
+          base_url: https://inference-api.worldrouter.ai
+          path: /v1beta/models/{model}:generateContent
+          batch:
+            mode: per_image
+        operations:
+          - generate
+        max_outputs: 9
+        axes:
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1"], default: "1:1" }, request_field: aspectRatio }
+        variants: { model_id: gemini-2.5-flash-image }
+      - id: gemini-3-pro-image-preview
+        display_name: Gemini 3 Pro Image Preview
+        execution:
+          adapter: gemini_generate_content
+          base_url: https://inference-api.worldrouter.ai
+          path: /v1beta/models/{model}:generateContent
+          batch:
+            mode: per_image
+        operations:
+          - generate
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K", "2K", "4K"], default: "2K" }, request_field: imageSize }
+        variants: { model_id: gemini-3-pro-image-preview }
+      - id: gemini-3.1-flash-image-preview
+        display_name: Gemini 3.1 Flash Image Preview
+        execution:
+          adapter: gemini_generate_content
+          base_url: https://inference-api.worldrouter.ai
+          path: /v1beta/models/{model}:generateContent
+          batch:
+            mode: per_image
+        operations:
+          - generate
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["0.5K", "1K", "2K", "4K"], default: "2K" }, request_field: imageSize }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1"], default: "1:1" }, request_field: aspectRatio }
+        variants: { model_id: gemini-3.1-flash-image-preview }
+  video:
+    discovery:
+      adapter: static
+    execution:
+      adapter: worldrouter_video
+      base_url: https://inference-api.worldrouter.ai
+      path: /api/v3/contents/generations/tasks
+      prompt_format: content_array
+    models:
+      - id: seedance-2.0
+        display_name: Seedance 2.0
+        operations:
+          - generate
+        axes:
+          - { id: resolution, label: Mode, role: selector, control: !enum { values: ["720p", "1080p"], default: "1080p" } }
+          - { id: duration, label: Duration, role: param, control: !range { min: 5.0, max: 10.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
+        variants:
+          selector: resolution
+          map:
+            "720p": { model_id: seedance-2.0, base_params: { resolution: "720p" } }
+            "1080p": { model_id: seedance-2.0, base_params: { resolution: "1080p" } }
+      - id: seedance-2.0-fast
+        display_name: Seedance 2.0 Fast
+        operations:
+          - generate
+        axes:
+          - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p"], default: "720p" }, request_field: resolution }
+          - { id: duration, label: Duration, role: param, control: !range { min: 5.0, max: 10.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
+        variants: { model_id: seedance-2.0-fast }
 models:
   - id: auto
     display_name: Auto

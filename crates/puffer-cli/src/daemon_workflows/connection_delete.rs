@@ -28,6 +28,7 @@ pub(crate) fn handle_workflow_connection_delete(
         .cloned();
     if let Some(connection) = connection.as_ref() {
         clear_external_auth_for_connection(connection, &connections)?;
+        cleanup_wechat_container(connection);
     }
     manager.connection_store().delete(slug)?;
     delete_monitor_for_connection(paths, manager.as_ref(), slug)?;
@@ -65,6 +66,35 @@ fn external_auth_clear_commands(
 
 fn is_lark_connection(connection: &ConnectionRecord) -> bool {
     connection.connector_slug.starts_with("lark-")
+}
+
+/// Best-effort FULL teardown of a WeChat connection (container + data + state).
+///
+/// Each WeChat connection owns its own container (`puffer-wechat-<slug>`).
+/// Removing the connection is a SOFT remove: the container, its named data volume,
+/// the image, and the per-instance state are all KEPT — the container is only
+/// STOPPED. So a later re-connect (same slug) is a fast start that just needs a
+/// fresh QR scan (a restart re-binds the WeChat device, which signs the previous
+/// session out), instead of a rebuild + WeChat re-download. We deliberately do NOT
+/// delete the container/volume/image. Errors are logged.
+fn cleanup_wechat_container(connection: &ConnectionRecord) {
+    if !connection.connector_slug.starts_with("wechat-") {
+        return;
+    }
+    let container = format!("puffer-wechat-{}", connection.slug);
+    // The instance may live on Docker or Apple `container` (runtime can drift),
+    // so stop it on every present runtime — the others harmlessly no-op. STOP only
+    // (keep the container + data volume + image) so the next connect is a fast
+    // start + re-scan, not a rebuild/re-download.
+    for (bin, _is_container) in crate::wechat_connector::teardown_runtimes() {
+        let _ = std::process::Command::new(&bin)
+            .args(["stop", "-t", "5", &container])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    // Keep the per-instance state (config/policy/seen/dbkey) for a fast re-connect.
 }
 
 fn run_external_auth_clear_command(command: &[String]) -> Result<()> {

@@ -1,0 +1,20 @@
+#!/usr/bin/with-contenv bash
+# Runs as root at container start (linuxserver /custom-cont-init.d). Prepares the
+# a11y prerequisites and seeds the baked AT-SPI-capable WeChat into /config so the
+# stock downloader never replaces it with a non-a11y build.
+
+# a11y bus socket lives under /config/.cache/at-spi — it MUST be abc-writable
+# (root-owned .cache is exactly what blocked the bus in testing).
+mkdir -p /config/.cache && chown -R abc:abc /config/.cache 2>/dev/null || true
+
+# Where autostart records the session D-Bus address for the connector's exec.
+mkdir -p /run/wechat && chown abc:abc /run/wechat 2>/dev/null || true
+
+# Seed the baked WeChat if not already installed.
+if [ ! -x /config/wechat/opt/wechat/wechat ]; then
+    echo "[seed] installing the baked AT-SPI WeChat into /config/wechat"
+    mkdir -p /config/wechat/opt/wechat
+    cp -a /opt/wechat-pinned/. /config/wechat/opt/wechat/
+    echo "atspi-baked" > /config/wechat/.woc-version
+    chown -R abc:abc /config/wechat
+fi

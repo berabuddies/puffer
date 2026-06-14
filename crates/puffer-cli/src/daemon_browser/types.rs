@@ -59,6 +59,10 @@ pub(crate) enum BrowserInputEvent {
         code: String,
         text: Option<String>,
         modifiers: u32,
+        /// Browser editing commands (e.g. `selectAll`) attached to the key
+        /// event. Routed renderer-side, so they work in focused cross-origin
+        /// frames where macOS-style shortcut translation never happens.
+        commands: Vec<String>,
     },
     Text {
         text: String,

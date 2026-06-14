@@ -21,6 +21,7 @@ portable-pty = "0.9.0"
 notify = "6"
 puffer-config = { path = "../../../crates/puffer-config" }
 puffer-core = { path = "../../../crates/puffer-core" }
+puffer-media = { path = "../../../crates/puffer-media" }
 puffer-provider-registry = { path = "../../../crates/puffer-provider-registry" }
 puffer-resources = { path = "../../../crates/puffer-resources" }
 puffer-runner-local = { path = "../../../crates/puffer-runner-local" }

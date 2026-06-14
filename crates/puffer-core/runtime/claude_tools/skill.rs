@@ -33,6 +33,20 @@ fn normalize_skill_name(raw: &str) -> Result<String> {
     Ok(without_alias.to_string())
 }
 
+fn parse_skill_tool_input(input: Value) -> Result<SkillToolInput> {
+    let mut parsed: SkillToolInput = serde_json::from_value(input)?;
+    parsed.skill = normalize_skill_name(&parsed.skill)?;
+    Ok(parsed)
+}
+
+/// Extracts the normalized user-requested skill name from raw `Skill` tool JSON.
+pub(crate) fn skill_name_from_tool_input(input: &str) -> Option<String> {
+    let input = serde_json::from_str::<Value>(input).ok()?;
+    parse_skill_tool_input(input)
+        .ok()
+        .map(|parsed| parsed.skill)
+}
+
 /// Executes Claude-style `Skill` tool input and installs any verified Lambda gate.
 ///
 /// The returned inline command payload is suitable for model consumption in the
@@ -42,8 +56,8 @@ pub fn execute_claude_skill_tool(
     resources: &LoadedResources,
     input: Value,
 ) -> Result<String> {
-    let parsed: SkillToolInput = serde_json::from_value(input)?;
-    let normalized_skill = normalize_skill_name(&parsed.skill)?;
+    let parsed = parse_skill_tool_input(input)?;
+    let normalized_skill = parsed.skill.clone();
     let skill = skill_by_name(resources, &normalized_skill)
         .ok_or_else(|| anyhow!("unknown skill `{normalized_skill}`"))?;
 
@@ -204,6 +218,28 @@ mod tests {
         )
         .unwrap();
         assert!(output.contains("<command-name>review-pr</command-name>"));
+    }
+
+    #[test]
+    fn parses_skill_name_from_tool_input() {
+        assert_eq!(
+            skill_name_from_tool_input(r#"{"skill":"review-pr"}"#),
+            Some("review-pr".to_string())
+        );
+        assert_eq!(
+            skill_name_from_tool_input(r#"{"skill":"/review-pr"}"#),
+            Some("review-pr".to_string())
+        );
+        assert_eq!(
+            skill_name_from_tool_input(r#"{"skill":"/skill:review-pr"}"#),
+            Some("review-pr".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_from_tool_input_rejects_invalid_input() {
+        assert_eq!(skill_name_from_tool_input("not json"), None);
+        assert_eq!(skill_name_from_tool_input(r#"{"skill":""}"#), None);
     }
 
     #[test]

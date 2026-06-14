@@ -23,6 +23,15 @@ description: |-
   append text at the current cursor/selection and can duplicate existing field
   contents when retried.
 
+  Hosted payment fields (card number, expiry, CVV inside cross-origin PCI
+  iframes such as Shopify or Stripe checkout) appear in snapshots as `iframe`
+  refs named like "Field container for: Card number". Use `fill` on that ref:
+  the runtime focuses the frame with a real click, clears it, and types the
+  value through trusted input. The frame's value cannot be read back, so
+  verify acceptance through the page's own validation messages in the next
+  snapshot. Do not use `evaluate` to reach into these frames; the top
+  document cannot access them.
+
   For page readiness, use `open` or `navigate` followed by `snapshot`,
   `screenshot`, `domInspect`, or a targeted browser action. Do not wait for
   network idle after navigation. Modern sites often keep telemetry, beacon,
@@ -105,7 +114,7 @@ input_schema:
       description: Optional caller question preserved for screenshot-style verified skill contracts.
     key:
       type: string
-      description: Keyboard key for press, keydown, or keyup.
+      description: Keyboard key for press, keydown, or keyup. Supports modifier combos like Meta+A, Ctrl+Shift+Z. Select-all combos (Meta+A / Ctrl+A) are routed as real editing commands, so they work inside focused cross-origin frames.
     script:
       type: string
       description: JavaScript expression for evaluate actions.

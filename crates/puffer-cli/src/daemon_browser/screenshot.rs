@@ -306,7 +306,7 @@ fn remove_screenshot_annotation_expression() -> &'static str {
 })()"#
 }
 
-fn snapshot_expression() -> &'static str {
+pub(super) fn snapshot_expression() -> &'static str {
     r#"(() => {
   const isVisible = (el) => {
     const style = getComputedStyle(el);
@@ -334,8 +334,15 @@ fn snapshot_expression() -> &'static str {
     if (tag === 'select') return 'combobox';
     return tag;
   };
-  const selector = 'a,button,input,textarea,select,summary,[role],[contenteditable="true"],[tabindex],label';
-  const elements = Array.from(document.querySelectorAll(selector)).filter(isVisible).slice(0, 120).map((el, index) => {
+  const selector = 'a,button,input,textarea,select,summary,iframe,[role],[contenteditable="true"],[tabindex],label';
+  // Named iframes are kept so hosted payment fields (Shopify/Stripe PCI card
+  // inputs render inside titled cross-origin iframes) surface as addressable,
+  // meaningfully-named refs; anonymous tracking/ad frames stay out.
+  const nodes = Array.from(document.querySelectorAll(selector))
+    .filter(isVisible)
+    .filter((el) => el.tagName !== 'IFRAME' || nameFor(el) !== '')
+    .slice(0, 120);
+  const elements = nodes.map((el, index) => {
     const rect = el.getBoundingClientRect();
     return {
       ref: `@e${index + 1}`,
@@ -347,6 +354,13 @@ fn snapshot_expression() -> &'static str {
       y: rect.top + rect.height / 2
     };
   });
+  // Stash exact handles so later ref actions resolve this element directly
+  // instead of re-deriving it from now-stale viewport coordinates.
+  try {
+    const byRef = {};
+    nodes.forEach((el, index) => { byRef[`@e${index + 1}`] = el; });
+    window.__puffer_agent_refs__ = { byRef };
+  } catch (error) {}
   return {
     url: location.href,
     title: document.title,

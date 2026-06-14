@@ -33,6 +33,10 @@ pub(crate) struct ReplySendTarget {
     pub connector_slug: String,
     pub connection_slug: String,
     pub chat_id: String,
+    /// Source message to thread the reply onto (Telegram `reply_to`).
+    /// Stamped server-side from the trigger envelope; `None` for tasks that
+    /// predate the stamping or when the reply fallback stripped it.
+    pub reply_to_message_id: Option<i32>,
 }
 
 pub(crate) trait MonitorReplySender: Send + Sync {
@@ -45,12 +49,15 @@ struct DispatcherMonitorReplySender;
 
 impl MonitorReplySender for DispatcherMonitorReplySender {
     fn send_monitor_reply(&self, target: &ReplySendTarget, message: &str) -> Result<Value> {
-        let input = json!({
+        let mut input = json!({
             "connection_slug": target.connection_slug,
             "connector_slug": target.connector_slug,
             "chat_id": target.chat_id,
             "message": message,
         });
+        if let Some(reply_to) = target.reply_to_message_id {
+            input["reply_to"] = json!(reply_to);
+        }
         let envelope = synthetic_envelope(&target.connection_slug, &input);
         let dispatcher = BuiltinActionDispatcher::new();
         let result = dispatcher.dispatch(
@@ -197,6 +204,17 @@ pub(crate) fn handle_monitor_reply_send_with_sender(
         .with_context(|| format!("failed to write {}", path.display()))?;
 
     let send_result = sender.send_monitor_reply(&target, &message);
+    // Reply threading is best-effort garnish: when Telegram rejects the
+    // reply target (source message deleted since triage), deliver the
+    // approved text as a plain message rather than failing the send.
+    let send_result = match send_result {
+        Err(error) if target.reply_to_message_id.is_some() && is_reply_target_error(&error) => {
+            let mut plain = target.clone();
+            plain.reply_to_message_id = None;
+            sender.send_monitor_reply(&plain, &message)
+        }
+        other => other,
+    };
     let mut store = read_monitor_store(&path)?;
     let task = find_task_mut(&mut store, &task_id)?;
     let metadata = task
@@ -385,11 +403,15 @@ fn validate_pending_reply_provenance(
 }
 
 fn metadata_source_context(metadata: &Map<String, Value>) -> Option<Value> {
-    metadata
+    let context = metadata
         .get("source_context")
         .or_else(|| metadata.get("sourceContext"))
         .cloned()
-        .or_else(|| derived_metadata_source_context(metadata))
+        .or_else(|| derived_metadata_source_context(metadata));
+    // Apply the same server-stamped field merge the draft snapshot got
+    // (task_tools::monitor_source_context), so the provenance hash compares
+    // like with like when the context was derived rather than stored.
+    super::task_snapshot::with_verbatim_source_text(metadata, context)
 }
 
 fn derived_metadata_source_context(metadata: &Map<String, Value>) -> Option<Value> {
@@ -438,6 +460,13 @@ fn value_to_string(value: &Value) -> Option<String> {
     }
 }
 
+/// Telegram rejects replies whose target message no longer exists (e.g.
+/// MSG_ID_INVALID / REPLY_MESSAGE_ID_INVALID classes).
+fn is_reply_target_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_uppercase();
+    text.contains("MSG_ID") || text.contains("REPLY")
+}
+
 fn source_context_hash(source_context: &Value) -> Result<String> {
     let raw = serde_json::to_vec(source_context).context("failed to encode source context")?;
     let digest = Sha256::digest(raw);
@@ -449,6 +478,13 @@ fn reply_target_from_pending(pending: &Map<String, Value>) -> Result<ReplySendTa
         .get("source_context_snapshot")
         .or_else(|| pending.get("sourceContextSnapshot"))
         .context("pending reply missing source context snapshot")?;
+    // Best-effort reply threading: thread onto the human-reviewed snapshot's
+    // source message when it fits Telegram's i32 message-id space.
+    let reply_to_message_id = source
+        .get("message_id")
+        .or_else(|| source.get("messageId"))
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok());
     let connector_slug = source
         .get("connector_slug")
         .or_else(|| source.get("connectorSlug"))
@@ -475,6 +511,7 @@ fn reply_target_from_pending(pending: &Map<String, Value>) -> Result<ReplySendTa
         connector_slug,
         connection_slug,
         chat_id,
+        reply_to_message_id,
     })
 }
 
@@ -586,6 +623,30 @@ mod tests {
         }
     }
 
+    struct ReplyRejectingSender {
+        calls: Arc<Mutex<Vec<(ReplySendTarget, String)>>>,
+    }
+
+    impl MonitorReplySender for ReplyRejectingSender {
+        fn send_monitor_reply(
+            &self,
+            target: &ReplySendTarget,
+            message: &str,
+        ) -> anyhow::Result<Value> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((target.clone(), message.to_string()));
+            if target.reply_to_message_id.is_some() {
+                anyhow::bail!("send via telegram-user failed: rpc error 400: MSG_ID_INVALID")
+            }
+            Ok(json!({
+                "message_id": "telegram-message-1",
+                "summary": "sent"
+            }))
+        }
+    }
+
     struct FailingSender;
 
     impl MonitorReplySender for FailingSender {
@@ -680,6 +741,22 @@ mod tests {
         })
     }
 
+    fn telegram_source_context_with_message_id() -> Value {
+        json!({
+            "kind": "telegram_direct_message",
+            "connection_slug": "telegram-user",
+            "connector_slug": "telegram-login",
+            "summary": "Telegram direct message from chat_id 8759047281",
+            "delivery_target": {
+                "type": "telegram_chat",
+                "chat_id": "8759047281"
+            },
+            "sender": {},
+            "text": "请排查 api-prod 服务 500 错误",
+            "message_id": 6836
+        })
+    }
+
     fn task_with_draft() -> Value {
         task_with_draft_from_source_context(telegram_source_context())
     }
@@ -737,6 +814,102 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn send_threads_reply_onto_snapshot_source_message() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        write_store(
+            &paths,
+            json!({"tasks": [task_with_draft_from_source_context(
+                telegram_source_context_with_message_id()
+            )]}),
+        );
+        let sender = RecordingSender::default();
+
+        handle_monitor_reply_send_with_sender(
+            &paths,
+            &json!({
+                "task_id": "monitor-1",
+                "draft_id": "draft-1",
+                "version": 2,
+                "message": "Draft text",
+                "client_request_id": "req-1",
+            }),
+            &sender,
+        )
+        .unwrap();
+
+        let calls = sender.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.reply_to_message_id, Some(6836));
+    }
+
+    #[test]
+    fn send_falls_back_to_plain_message_when_reply_target_rejected() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        write_store(
+            &paths,
+            json!({"tasks": [task_with_draft_from_source_context(
+                telegram_source_context_with_message_id()
+            )]}),
+        );
+        let sender = ReplyRejectingSender {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        handle_monitor_reply_send_with_sender(
+            &paths,
+            &json!({
+                "task_id": "monitor-1",
+                "draft_id": "draft-1",
+                "version": 2,
+                "message": "Draft text",
+                "client_request_id": "req-1",
+            }),
+            &sender,
+        )
+        .unwrap();
+
+        // First attempt threads the reply; the deleted-source rejection is
+        // retried once as a plain message so delivery still succeeds.
+        let calls = sender.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0.reply_to_message_id, Some(6836));
+        assert_eq!(calls[1].0.reply_to_message_id, None);
+        let store = read_store(&paths);
+        assert_eq!(store["tasks"][0]["status"], "completed");
+        assert_eq!(
+            store["tasks"][0]["metadata"]["pending_reply"]["status"],
+            "sent"
+        );
+    }
+
+    #[test]
+    fn send_without_source_message_id_stays_plain() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        write_store(&paths, json!({"tasks": [task_with_draft()]}));
+        let sender = RecordingSender::default();
+
+        handle_monitor_reply_send_with_sender(
+            &paths,
+            &json!({
+                "task_id": "monitor-1",
+                "draft_id": "draft-1",
+                "version": 2,
+                "message": "Draft text",
+                "client_request_id": "req-1",
+            }),
+            &sender,
+        )
+        .unwrap();
+
+        let calls = sender.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.reply_to_message_id, None);
     }
 
     #[test]

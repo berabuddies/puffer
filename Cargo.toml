@@ -11,6 +11,7 @@ members = [
     "crates/puffer-connector-telegram",
     "crates/puffer-core",
     "crates/puffer-logging",
+    "crates/puffer-media",
     "crates/puffer-mcp-oauth",
     "crates/puffer-observability",
     "crates/puffer-provider-openai",

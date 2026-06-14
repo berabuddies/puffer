@@ -1,7 +1,7 @@
 //! Telegram peer-cache helpers for contact ranking.
 
 use super::{
-    merge_candidate_last_message_at_ms, merge_telegram_name,
+    merge_candidate_last_message_at_ms, merge_telegram_name, normalize_contact_id,
     read_telegram_primary_peer_metadata_from_account, Candidate,
 };
 use anyhow::{Context, Result};
@@ -35,7 +35,11 @@ pub(super) fn collect_telegram_peer_cache_candidates(
     account_dir: &Path,
     by_id: &mut HashMap<String, Candidate>,
 ) {
+    let self_contact_id = telegram_session_user_contact_id(account_dir);
     for (id, metadata) in read_telegram_primary_peer_metadata_from_account(account_dir) {
+        if self_contact_id.as_deref() == Some(id.as_str()) {
+            continue;
+        }
         let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
             id,
             name: metadata.name.clone(),
@@ -54,6 +58,13 @@ pub(super) fn collect_telegram_peer_cache_candidates(
             entry.avatar = metadata.avatar;
         }
     }
+}
+
+fn telegram_session_user_contact_id(account_dir: &Path) -> Option<String> {
+    let user = Session::load_file(account_dir.join("telegram.session"))
+        .ok()?
+        .get_user()?;
+    normalize_contact_id(&format!("telegram-user-id@{}", user.id))
 }
 
 pub(super) fn hydrate_telegram_peer_cache_if_needed(paths: &ConfigPaths, account_dir: &Path) {
@@ -91,6 +102,14 @@ pub(super) fn hydrate_telegram_recent_peer_cache_if_needed(
     if !account_dir.join("telegram.session").exists() {
         return;
     }
+    hydrate_telegram_recent_peer_cache(paths, account_dir, limit);
+}
+
+pub(super) fn hydrate_telegram_recent_peer_cache(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    limit: usize,
+) {
     if let Err(error) =
         hydrate_telegram_recent_peer_cache_from_session_blocking(paths, account_dir, limit)
     {
@@ -111,6 +130,32 @@ pub(super) fn telegram_recent_dialog_cache_ready(account_dir: &Path) -> bool {
         .ok()
         .and_then(|marker| marker.get("ready").and_then(Value::as_bool))
         .unwrap_or(false)
+}
+
+pub(super) fn telegram_recent_dialog_cache_claims_target_satisfied(
+    account_dir: &Path,
+    limit: usize,
+) -> bool {
+    let target = limit
+        .max(RECENT_DIALOG_TARGET_MIN)
+        .min(RECENT_DIALOG_TARGET_MAX);
+    let path = account_dir.join(RECENT_DIALOG_CACHE_FILE);
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(marker) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    if marker.get("ready").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    let Some(marker_target) = marker.get("target").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(direct_users_seen) = marker.get("direct_users_seen").and_then(Value::as_u64) else {
+        return false;
+    };
+    marker_target as usize >= target && direct_users_seen as usize >= target
 }
 
 fn telegram_peer_cache_needs_hydration(account_dir: &Path) -> bool {
@@ -223,6 +268,15 @@ fn hydrate_telegram_recent_peer_cache_from_session_blocking(
     account_dir: &Path,
     limit: usize,
 ) -> Result<()> {
+    #[cfg(test)]
+    if let Some(result) = TEST_HYDRATOR.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|hydrator| hydrator(paths, account_dir))
+    }) {
+        return result;
+    }
+
     let (sender, receiver) = mpsc::channel();
     let paths = paths.clone();
     let account_dir = account_dir.to_path_buf();

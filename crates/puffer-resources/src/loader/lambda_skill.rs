@@ -1,6 +1,6 @@
 use super::{
-    first_descriptive_line, frontmatter_string, normalize_skill_name, runner_path_exists,
-    split_frontmatter,
+    first_descriptive_line, frontmatter_bool, frontmatter_string, normalize_skill_name,
+    runner_path_exists, split_frontmatter,
 };
 use crate::model::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind};
 use anyhow::{anyhow, Context, Result};
@@ -249,6 +249,8 @@ fn load_lambda_skill_dir(
     let host_tool_bindings = host_tool_bindings_for_skill(spec, &name);
     let disable_model_invocation =
         spec.disable_model_invocation || lambda_skill_disabled_by_manifest(spec, &name);
+    let requires_action =
+        frontmatter_bool(&frontmatter, &["requires-action", "requiresAction"]).unwrap_or(false);
 
     Ok(Some(LoadedItem {
         value: SkillSpec {
@@ -263,6 +265,7 @@ fn load_lambda_skill_dir(
             effort: spec.effort.clone(),
             context: spec.context.clone(),
             disable_model_invocation,
+            requires_action,
             verification: Some(SkillVerificationSpec {
                 system: "lambda-skill".to_string(),
                 source_path: Some(lambda_source_path.display().to_string()),

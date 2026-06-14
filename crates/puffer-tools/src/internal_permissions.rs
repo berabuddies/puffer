@@ -118,6 +118,9 @@ pub struct InternalToolExecutionResponse {
     /// Human-readable denial or failure reason.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Optional structured execution diagnostic.
+    #[serde(default)]
+    pub diagnostic: Option<serde_json::Value>,
 }
 
 impl InternalToolExecutionResponse {
@@ -127,6 +130,7 @@ impl InternalToolExecutionResponse {
             success: true,
             output: Some(output.into()),
             reason: None,
+            diagnostic: None,
         }
     }
 
@@ -136,6 +140,20 @@ impl InternalToolExecutionResponse {
             success: false,
             output: None,
             reason: Some(reason.into()),
+            diagnostic: None,
+        }
+    }
+
+    /// Builds a failed execution response with a structured diagnostic.
+    pub fn failure_with_diagnostic(
+        reason: impl Into<String>,
+        diagnostic: serde_json::Value,
+    ) -> Self {
+        Self {
+            success: false,
+            output: None,
+            reason: Some(reason.into()),
+            diagnostic: Some(diagnostic),
         }
     }
 }
@@ -347,5 +365,23 @@ mod tests {
         assert!(response.success);
         assert_eq!(response.output.as_deref(), Some(r#"{"status":"ok"}"#));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn execution_failure_serializes_diagnostic() {
+        let response = InternalToolExecutionResponse::failure_with_diagnostic(
+            "submit failed",
+            serde_json::json!({
+                "kind": "video",
+                "provider": "worldrouter",
+                "phase": "submit",
+                "error": "low credits"
+            }),
+        );
+
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["success"], false);
+        assert_eq!(value["reason"], "submit failed");
+        assert_eq!(value["diagnostic"]["provider"], "worldrouter");
     }
 }

@@ -59,6 +59,17 @@ use pending::PendingKind;
 
 const CEF_REMOTE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Whether something is accepting TCP connections on the loopback CEF DevTools
+/// port. A short connect timeout so a missing CEF runtime (e.g. `tauri dev`, which
+/// doesn't stage CEF) falls back to the Chrome screencast backend fast instead of
+/// blocking the open for the full CEF startup timeout.
+fn cef_remote_port_listening(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(700)).is_ok()
+}
+
 #[derive(Clone)]
 pub(super) struct BrowserRootSession {
     inner: Arc<Mutex<BrowserRootState>>,
@@ -152,15 +163,31 @@ impl BrowserRootSession {
             );
             return Ok(None);
         };
+        // Fast probe first: if nothing is listening on the CEF DevTools port —
+        // e.g. the app was launched via `tauri dev`, where the embedded CEF
+        // runtime is not staged (only release bundles stage it) — fall back to the
+        // Chrome screencast backend IMMEDIATELY instead of polling the full
+        // CEF_REMOTE_START_TIMEOUT (30s) and then erroring. That 30s error is what
+        // the desktop surfaces as "Puffer daemon request timed out: browser_open".
+        if !cef_remote_port_listening(port) {
+            log_browser_backend(format!(
+                "CEF DevTools port {port} is not listening; using Chrome screencast fallback"
+            ));
+            return Ok(None);
+        }
         log_browser_backend(format!(
             "trying native CEF DevTools on loopback port {port}"
         ));
         let browser_ws = match read_remote_devtools_ws_url(port, CEF_REMOTE_START_TIMEOUT) {
             Ok(browser_ws) => browser_ws,
+            // The port was reachable but the DevTools handshake never completed —
+            // fall back to Chrome rather than failing the whole open.
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("native CEF DevTools on loopback port {port} was not reachable")
-                });
+                log_browser_backend(format!(
+                    "CEF DevTools on port {port} did not complete its handshake ({error:#}); \
+                     using Chrome screencast fallback"
+                ));
+                return Ok(None);
             }
         };
         let reusable_targets =

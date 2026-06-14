@@ -173,6 +173,8 @@ fn build_using_tools_section(enabled_tools: &BTreeSet<String>) -> String {
     let bash_tool =
         preferred_tool_name(enabled_tools, &["Bash", "bash", "PowerShell"]).unwrap_or("Bash");
     let task_tool = preferred_tool_name(enabled_tools, &["TaskCreate", "TodoWrite"]);
+    let connector_act = preferred_tool_name(enabled_tools, &["ConnectorAct"]);
+    let connector_list = preferred_tool_name(enabled_tools, &["ConnectorList", "ConnectionList"]);
 
     let mut provided_tool_subitems = Vec::new();
     if let Some(read_tool) = read_tool {
@@ -214,6 +216,11 @@ fn build_using_tools_section(enabled_tools: &BTreeSet<String>) -> String {
         ));
         items.push(format!(
             "Do NOT use the {task_tool} tool when the task is trivial, single-step, purely conversational, or can be completed in fewer than 3 steps. In those cases, just do the work directly without creating a task."
+        ));
+    }
+    if let (Some(connector_act), Some(list)) = (connector_act, connector_list) {
+        items.push(format!(
+            "When the user's request EXPLICITLY names an external messaging, chat, or email app or account (e.g. \"send a WeChat message in the xx group\", \"reply on Telegram\", \"post in Slack\", \"email ...\"), FIRST call {list} to find the matching connector connection, then perform the action with {connector_act}. Do NOT drive a local desktop app, AppleScript/osascript, or shell automation for this — use the connector. Only fall back to other means if no matching connector connection exists. If the request does NOT name such an app, do NOT route it through a connector or go looking for one."
         ));
     }
     items.push("You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.".to_string());

@@ -3,6 +3,7 @@ use super::daemon_contacts_telegram::{
     TelegramDiagMessage,
 };
 use super::*;
+use grammers_session::Session;
 use puffer_config::ConfigPaths;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -698,6 +699,153 @@ fn contacts_list_uses_telegram_peer_cache_without_message_diagnostics() {
     assert!(!candidates
         .iter()
         .any(|candidate| candidate["id"] == "telegram@announcements"));
+}
+
+#[test]
+fn contacts_list_filters_current_telegram_user_from_peer_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+
+    let session = Session::new();
+    session.set_user(42, 2, false);
+    let session_path = account_dir.join("telegram.session");
+    std::fs::File::create(&session_path).unwrap();
+    session.save_to_file(&session_path).unwrap();
+
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                {
+                    "id": "42",
+                    "numeric_id": 42_i64,
+                    "kind": "user",
+                    "title": "Me Myself",
+                    "username": "me",
+                    "first_name": "Me",
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                },
+                {
+                    "id": "43",
+                    "numeric_id": 43_i64,
+                    "kind": "user",
+                    "title": "Alice",
+                    "username": "alice",
+                    "first_name": "Alice",
+                    "is_bot": false,
+                    "updated_at_ms": 1_700_000_000_000_i64
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let result = handle_contacts_list(&paths, &json!({ "limit": 10 })).unwrap();
+    let candidates = result["candidates"].as_array().unwrap();
+
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram-user-id@42"));
+    assert!(candidates.iter().any(|candidate| {
+        candidate["id"] == "telegram-user-id@43" && candidate["name"] == "Alice"
+    }));
+}
+
+fn telegram_peer_cache_user(id: i64, title: &str, last_message_at_ms: i64) -> Value {
+    json!({
+        "id": id.to_string(),
+        "numeric_id": id,
+        "kind": "user",
+        "title": title,
+        "first_name": title,
+        "is_bot": false,
+        "last_message_at_ms": last_message_at_ms,
+        "updated_at_ms": last_message_at_ms
+    })
+}
+
+#[test]
+fn contacts_list_repairs_recent_cache_when_service_user_consumed_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    std::fs::write(
+        account_dir.join("recent-dialog-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "ready": true,
+            "direct_users_seen": 5,
+            "target": 5
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                telegram_peer_cache_user(777000, "Telegram", 1_700_000_005_000_i64),
+                telegram_peer_cache_user(1, "Alice", 1_700_000_004_000_i64),
+                telegram_peer_cache_user(2, "Bob", 1_700_000_003_000_i64),
+                telegram_peer_cache_user(3, "Cara", 1_700_000_002_000_i64),
+                telegram_peer_cache_user(4, "Dina", 1_700_000_001_000_i64)
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let _guard = super::daemon_contacts_telegram::install_test_telegram_peer_cache_hydrator({
+        let calls = std::sync::Arc::clone(&calls);
+        move |_paths, account_dir| {
+            *calls.lock().unwrap() += 1;
+            std::fs::write(
+                account_dir.join("peer-cache.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "version": 1,
+                    "peers": [
+                        telegram_peer_cache_user(777000, "Telegram", 1_700_000_006_000_i64),
+                        telegram_peer_cache_user(1, "Alice", 1_700_000_005_000_i64),
+                        telegram_peer_cache_user(2, "Bob", 1_700_000_004_000_i64),
+                        telegram_peer_cache_user(3, "Cara", 1_700_000_003_000_i64),
+                        telegram_peer_cache_user(4, "Dina", 1_700_000_002_000_i64),
+                        telegram_peer_cache_user(5, "Eli", 1_700_000_001_000_i64)
+                    ]
+                }))
+                .unwrap(),
+            )?;
+            Ok(())
+        }
+    });
+
+    let result = handle_contacts_list(
+        &paths,
+        &json!({ "connector": "telegram", "sort": "recent", "limit": 5 }),
+    )
+    .unwrap();
+    let candidates = result["candidates"].as_array().unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(candidates.len(), 5);
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram-user-id@777000"));
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram-user-id@5" && candidate["name"] == "Eli"));
 }
 
 #[test]

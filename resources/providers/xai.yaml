@@ -25,42 +25,20 @@ media:
         display_name: Grok Imagine Image Quality
         operations:
           - generate
-        parameters:
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1", auto]
-            default: auto
-            request_field: aspect_ratio
-          - name: resolution
-            label: Resolution
-            values: [1k, 2k]
-            default: 1k
-            request_field: resolution
-          - name: response_format
-            label: Response format
-            values: [url, b64_json]
-            default: url
-            request_field: response_format
+        axes:
+          - { id: aspect_ratio, label: "Aspect ratio", role: param, control: !enum { values: ["1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1", "auto"], default: "auto" }, request_field: aspect_ratio }
+          - { id: resolution, label: "Resolution", role: param, control: !enum { values: ["1k", "2k"], default: "1k" }, request_field: resolution }
+          - { id: response_format, label: "Response format", role: param, control: !enum { values: ["url", "b64_json"], default: "url" }, request_field: response_format }
+        variants: { model_id: grok-imagine-image-quality }
       - id: grok-imagine-image
         display_name: Grok Imagine Image
         operations:
           - generate
-        parameters:
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1", auto]
-            default: auto
-            request_field: aspect_ratio
-          - name: resolution
-            label: Resolution
-            values: [1k, 2k]
-            default: 1k
-            request_field: resolution
-          - name: response_format
-            label: Response format
-            values: [url, b64_json]
-            default: url
-            request_field: response_format
+        axes:
+          - { id: aspect_ratio, label: "Aspect ratio", role: param, control: !enum { values: ["1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1", "auto"], default: "auto" }, request_field: aspect_ratio }
+          - { id: resolution, label: "Resolution", role: param, control: !enum { values: ["1k", "2k"], default: "1k" }, request_field: resolution }
+          - { id: response_format, label: "Response format", role: param, control: !enum { values: ["url", "b64_json"], default: "url" }, request_field: response_format }
+        variants: { model_id: grok-imagine-image }
 models:
   - id: grok-code-fast-1
     display_name: Grok Code Fast 1

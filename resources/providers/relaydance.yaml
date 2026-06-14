@@ -19,195 +19,131 @@ media:
       adapter: relaydance_video
       path: /v1/video/generations
     models:
-      - id: doubao-seedance-2-0-720p
-        display_name: Seedance 2.0 720p
+      - id: doubao-seedance-2-0
+        display_name: Seedance 2.0
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["720p"]
-            default: "720p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
-      - id: doubao-seedance-2-0-1080p
-        display_name: Seedance 2.0 1080p
-        operations:
-          - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["1080p"]
-            default: "1080p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
-      - id: doubao-seedance-2-0-fast-260128
+        axes:
+          - { id: resolution, label: Mode, role: selector, control: !enum { values: ["720p", "1080p"], default: "1080p" } }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: seconds, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "16:9" } }
+        media_map:
+          ratio:
+            field: metadata.ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants:
+          selector: resolution
+          map:
+            "720p": { model_id: doubao-seedance-2-0-720p, base_params: { "metadata.resolution": "720p" } }
+            "1080p": { model_id: doubao-seedance-2-0-1080p, base_params: { "metadata.resolution": "1080p" } }
+      - id: doubao-seedance-2-0-fast
         display_name: Seedance 2.0 Fast
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p"]
-            default: "720p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
-      - id: seedance-1-5-pro-no-audio
-        display_name: Seedance 1.5 Pro No Audio
+        axes:
+          - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p"], default: "720p" }, request_field: metadata.resolution }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: seconds, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "16:9" } }
+        media_map:
+          ratio:
+            field: metadata.ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants: { model_id: doubao-seedance-2-0-fast-260128 }
+      - id: seedance-1-5-pro
+        display_name: Seedance 1.5 Pro
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p", "1080p"]
-            default: "1080p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
-      - id: seedance-1-5-pro-with-audio
-        display_name: Seedance 1.5 Pro With Audio
-        operations:
-          - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p", "1080p"]
-            default: "1080p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
+        axes:
+          - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p", "1080p"], default: "1080p" }, request_field: metadata.resolution }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 12.0, step: 1.0, default: 5.0 }, request_field: seconds, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "16:9" } }
+          - { id: audio, label: Native audio, role: selector, control: !bool { default: true } }
+        media_map:
+          ratio:
+            field: metadata.ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants:
+          selector: audio
+          map:
+            "true": { model_id: seedance-1-5-pro-with-audio }
+            "false": { model_id: seedance-1-5-pro-no-audio }
       - id: seedance-nsfw
         display_name: Seedance NSFW
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["720p"]
-            default: "720p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
-      - id: seedance-nsfw-720p
-        display_name: Seedance NSFW 720p
-        operations:
-          - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["720p"]
-            default: "720p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
-      - id: seedance-nsfw-1080p
-        display_name: Seedance NSFW 1080p
-        operations:
-          - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["1080p"]
-            default: "1080p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
+        axes:
+          - { id: resolution, label: Mode, role: selector, control: !enum { values: ["720p", "1080p"], default: "1080p" } }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: seconds, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "16:9" } }
+        media_map:
+          ratio:
+            field: metadata.ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants:
+          selector: resolution
+          map:
+            "720p": { model_id: seedance-nsfw-720p, base_params: { "metadata.resolution": "720p" } }
+            "1080p": { model_id: seedance-nsfw-1080p, base_params: { "metadata.resolution": "1080p" } }
       - id: seedance-fast-nsfw
         display_name: Seedance Fast NSFW
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p"]
-            default: "720p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
+        axes:
+          - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p"], default: "720p" }, request_field: metadata.resolution }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: seconds, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "16:9" } }
+        media_map:
+          ratio:
+            field: metadata.ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants: { model_id: seedance-fast-nsfw }
       - id: grok-imagine-video
         display_name: Grok Imagine Video
         operations:
           - generate
+        variants: { model_id: grok-imagine-video }
       - id: grok-imagine-video-1.5-preview
         display_name: Grok Imagine Video 1.5 Preview
         operations:
           - generate
+        variants: { model_id: grok-imagine-video-1.5-preview }
       - id: happyhorse-1.0-t2v
         display_name: HappyHorse 1.0 Text to Video
         operations:
           - generate
+        variants: { model_id: happyhorse-1.0-t2v }

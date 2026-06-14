@@ -67,6 +67,7 @@ urlencoding = "2.1.3"
 uuid.workspace = true
 puffer-config = { path = "../puffer-config" }
 puffer-mcp-oauth = { path = "../puffer-mcp-oauth" }
+puffer-media = { path = "../puffer-media" }
 puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }

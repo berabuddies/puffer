@@ -141,24 +141,58 @@ pub struct StatusLineConfig {
 /// Configures media generation defaults shared by UI and runtime tools.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MediaConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_media_selection")]
     pub image: Option<MediaGenerationConfig>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_media_selection")]
     pub video: Option<MediaGenerationConfig>,
 }
 
-/// Configures one default media generation selection.
+/// Deserializes a persisted media selection leniently: a previously persisted
+/// concrete selection (old `model_id`/`adapter`/`parameters` shape, no
+/// `logical_model_id`) is treated as absent and resets to provider defaults on
+/// first run, rather than failing the whole config load. No backward-compat
+/// shim — the old fields are simply ignored.
+fn lenient_media_selection<'de, D>(
+    deserializer: D,
+) -> Result<Option<MediaGenerationConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Raw {
+        #[serde(default, alias = "providerId")]
+        provider_id: String,
+        #[serde(default, alias = "logicalModelId")]
+        logical_model_id: String,
+        #[serde(default)]
+        selections: BTreeMap<String, String>,
+    }
+    let raw = Option::<Raw>::deserialize(deserializer)?;
+    Ok(raw.and_then(|raw| {
+        if raw.provider_id.trim().is_empty() || raw.logical_model_id.trim().is_empty() {
+            None
+        } else {
+            Some(MediaGenerationConfig {
+                provider_id: raw.provider_id,
+                logical_model_id: raw.logical_model_id,
+                selections: raw.selections,
+            })
+        }
+    }))
+}
+
+/// Configures one default media generation selection as a logical model plus
+/// the user's per-axis selections. The concrete upstream model id, adapter, and
+/// request parameters are resolved at use time from the provider capability
+/// model (see `resolve_media_request`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MediaGenerationConfig {
     #[serde(alias = "providerId")]
     pub provider_id: String,
-    #[serde(alias = "modelId")]
-    pub model_id: String,
-    #[serde(default = "default_media_operation")]
-    pub operation: String,
-    pub adapter: String,
+    #[serde(alias = "logicalModelId")]
+    pub logical_model_id: String,
     #[serde(default)]
-    pub parameters: BTreeMap<String, String>,
+    pub selections: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -313,10 +347,6 @@ fn default_editor_mode() -> String {
 
 fn default_remote_runner_wait_for_ready() -> bool {
     true
-}
-
-fn default_media_operation() -> String {
-    "generate".to_string()
 }
 
 fn default_memory_enabled() -> bool {
@@ -656,7 +686,42 @@ mod tests {
     }
 
     #[test]
-    fn media_config_parses_unified_image_and_video_selections() {
+    fn media_generation_config_stores_logical_selection() {
+        let toml = r#"
+app_name = "Puffer"
+theme = "system"
+mascot = { id = "none", display_name = "None", enabled = false }
+ui = { no_alt_screen = false, tmux_golden_mode = false }
+
+[media.image]
+provider_id = "openai"
+logical_model_id = "gpt-image-1"
+selections = { size = "1024x1024", quality = "auto" }
+
+[media.video]
+provider_id = "relaydance"
+logical_model_id = "seedance-1-5-pro"
+
+[media.video.selections]
+audio = "true"
+resolution = "1080p"
+duration = "5"
+"#;
+
+        let parsed: PufferConfig = toml::from_str(toml).expect("config parses");
+        let image = parsed.media.image.as_ref().unwrap();
+        assert_eq!(image.logical_model_id, "gpt-image-1");
+        assert_eq!(image.selections["size"], "1024x1024");
+        let video = parsed.media.video.as_ref().unwrap();
+        assert_eq!(video.logical_model_id, "seedance-1-5-pro");
+        assert_eq!(video.selections["audio"], "true");
+    }
+
+    #[test]
+    fn old_concrete_media_config_resets_to_absent() {
+        // A previously persisted concrete selection (old model_id/adapter/
+        // parameters shape, no logical_model_id) must load as absent rather
+        // than failing the whole config.
         let toml = r#"
 app_name = "Puffer"
 theme = "system"
@@ -668,28 +733,19 @@ provider_id = "openai"
 model_id = "gpt-image-1"
 operation = "generate"
 adapter = "images_json"
-parameters = { size = "1024x1024", quality = "auto", output_format = "png" }
-
-[media.video]
-provider_id = "replicate"
-model_id = "owner/video-version"
-operation = "generate"
-adapter = "replicate_video"
-parameters = { aspect_ratio = "16:9", duration_seconds = "5" }
+parameters = { size = "1024x1024" }
 "#;
-
         let parsed: PufferConfig = toml::from_str(toml).expect("config parses");
-        assert_eq!(parsed.media.image.as_ref().unwrap().adapter, "images_json");
-        assert_eq!(
-            parsed
-                .media
-                .video
-                .as_ref()
-                .unwrap()
-                .parameters
-                .get("duration_seconds"),
-            Some(&"5".to_string())
-        );
+        assert!(parsed.media.image.is_none());
+        assert!(parsed.media.video.is_none());
+    }
+
+    #[test]
+    fn media_generation_config_accepts_camel_case_aliases() {
+        let json = r#"{ "providerId": "openai", "logicalModelId": "gpt-image-1", "selections": { "size": "1024x1024" } }"#;
+        let parsed: MediaGenerationConfig = serde_json::from_str(json).expect("json parses");
+        assert_eq!(parsed.provider_id, "openai");
+        assert_eq!(parsed.logical_model_id, "gpt-image-1");
     }
 
     #[test]
@@ -724,10 +780,8 @@ parameters = { aspect_ratio = "16:9", duration_seconds = "5" }
         user.effort_level = Some("high".to_string());
         user.media.image = Some(MediaGenerationConfig {
             provider_id: "user-image-provider".to_string(),
-            model_id: "user-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "user-adapter".to_string(),
-            parameters: BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
+            logical_model_id: "user-image-model".to_string(),
+            selections: BTreeMap::from([("size".to_string(), "1024x1024".to_string())]),
         });
         save_user_config(&paths, &user).expect("user config");
 
@@ -741,10 +795,8 @@ parameters = { aspect_ratio = "16:9", duration_seconds = "5" }
         workspace.theme = "harbor".to_string();
         workspace.media.image = Some(MediaGenerationConfig {
             provider_id: "workspace-image-provider".to_string(),
-            model_id: "workspace-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "workspace-adapter".to_string(),
-            parameters: BTreeMap::new(),
+            logical_model_id: "workspace-image-model".to_string(),
+            selections: BTreeMap::new(),
         });
         save_workspace_config(&paths, &workspace).expect("workspace config");
 
@@ -938,10 +990,8 @@ tmux_golden_mode = false
         });
         workspace_config.media.image = Some(MediaGenerationConfig {
             provider_id: "workspace-image-provider".to_string(),
-            model_id: "workspace-image-model".to_string(),
-            operation: "generate".to_string(),
-            adapter: "workspace-adapter".to_string(),
-            parameters: BTreeMap::new(),
+            logical_model_id: "workspace-image-model".to_string(),
+            selections: BTreeMap::new(),
         });
         save_workspace_config(&paths, &workspace_config).expect("workspace config");
 

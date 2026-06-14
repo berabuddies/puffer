@@ -106,12 +106,17 @@ fn execute_parent_internal_tool(tool_id: &str, input: Value) -> Result<()> {
         input,
     })?;
     if !response.success {
-        anyhow::bail!(
-            "{tool_id} internal tool failed: {}",
-            response
-                .reason
-                .unwrap_or_else(|| "unknown error".to_string())
-        );
+        let reason = response
+            .reason
+            .unwrap_or_else(|| "unknown error".to_string());
+        if let Some(diagnostic) = response.diagnostic {
+            let diagnostic = serde_json::to_string_pretty(&serde_json::json!({
+                "status": "failed",
+                "diagnostic": diagnostic
+            }))?;
+            anyhow::bail!("{tool_id} internal tool failed: {reason}\n{diagnostic}");
+        }
+        anyhow::bail!("{tool_id} internal tool failed: {reason}");
     }
     if let Some(output) = response.output {
         println!("{output}");

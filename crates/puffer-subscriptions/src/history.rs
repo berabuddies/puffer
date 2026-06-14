@@ -161,8 +161,11 @@ impl WorkflowHistoryStore {
             action: action_kind(action).to_string(),
             status,
             summary: result.summary.clone(),
-            started_at_ms,
-            ended_at_ms,
+            // Prefer the runner's real turn-execution window: the run-level
+            // window starts at router dispatch, so the difference between the
+            // two is queue/lock wait (latency stats, agentenv/monorepo#619).
+            started_at_ms: result.turn_started_at_ms.unwrap_or(started_at_ms),
+            ended_at_ms: result.turn_ended_at_ms.unwrap_or(ended_at_ms),
             usage: result.usage,
         };
         self.append_event_outcome(binding, envelope, log, status, started_at_ms, ended_at_ms)
@@ -223,8 +226,10 @@ impl WorkflowHistoryStore {
             action: action.clone(),
             status,
             summary: result.summary.clone(),
-            started_at_ms,
-            ended_at_ms,
+            // See append_action_result: action-log rows carry the real turn
+            // window; the run keeps the dispatch-to-finish window.
+            started_at_ms: result.turn_started_at_ms.unwrap_or(started_at_ms),
+            ended_at_ms: result.turn_ended_at_ms.unwrap_or(ended_at_ms),
             usage: result.usage,
         };
         let mut guard = self.inner.lock().unwrap();
@@ -516,6 +521,8 @@ mod tests {
                 cache_read_tokens: 4,
                 cache_creation_tokens: 0,
             }),
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         };
         let run = store
             .append_action_result(
@@ -534,6 +541,35 @@ mod tests {
         assert_eq!(run.status, WorkflowBindingRunStatus::Completed);
         assert_eq!(run.action_log[0].usage.unwrap().spent_tokens(), 9);
         assert_eq!(store.list_for("demo").len(), 1);
+    }
+
+    #[test]
+    fn action_log_prefers_real_turn_window_over_dispatch_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowHistoryStore::load(temp.path().join("history.json")).unwrap();
+        // Dispatched at t=100, but the agent turn only ran 150..=190 (the
+        // 100..150 gap is runner queue/lock wait).
+        let started = store
+            .append_action_started(&binding(), &envelope(), &triage(), 100)
+            .unwrap();
+        let result = ActionResult {
+            success: true,
+            summary: "triaged".into(),
+            usage: None,
+            turn_started_at_ms: Some(150),
+            turn_ended_at_ms: Some(190),
+        };
+        let run = store
+            .complete_action_result(started.idx, &triage(), &result, 100, 200)
+            .unwrap()
+            .unwrap();
+
+        // Run keeps the dispatch-to-finish window…
+        assert_eq!(run.started_at_ms, 100);
+        assert_eq!(run.ended_at_ms, 200);
+        // …while the action row records when the turn actually executed.
+        assert_eq!(run.action_log[0].started_at_ms, 150);
+        assert_eq!(run.action_log[0].ended_at_ms, 190);
     }
 
     #[test]
@@ -570,6 +606,8 @@ mod tests {
                 success: false,
                 summary: "boom".into(),
                 usage: None,
+                turn_started_at_ms: None,
+                turn_ended_at_ms: None,
             };
             store
                 .complete_action_result(started.idx, &triage(), &result, 10, 30)
@@ -614,6 +652,8 @@ mod tests {
             success: true,
             summary: "ok".into(),
             usage: None,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         };
         // idx 1 is the running run
         store
@@ -659,6 +699,8 @@ mod tests {
             success: false,
             summary: "triage_agent failed: endpoint down".into(),
             usage: None,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         };
         store
             .complete_action_result(started.idx, &triage(), &result, 10, 30)
@@ -696,6 +738,8 @@ mod tests {
             success: true,
             summary: "created task".into(),
             usage: None,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         };
         store
             .complete_action_result(started.idx, &triage(), &result, 10, 30)
@@ -767,6 +811,8 @@ mod tests {
             success: true,
             summary: "created task".into(),
             usage: None,
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         };
         store
             .complete_action_result(started.idx, &triage(), &result, 100, 200)
@@ -810,6 +856,8 @@ mod tests {
                 cache_read_tokens: 4,
                 cache_creation_tokens: 0,
             }),
+            turn_started_at_ms: None,
+            turn_ended_at_ms: None,
         };
         let completed = store
             .complete_action_result(started.idx, &action, &result, 10, 30)

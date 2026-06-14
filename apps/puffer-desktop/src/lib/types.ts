@@ -346,10 +346,8 @@ export type MediaSettings = {
 
 export type MediaGenerationSettings = {
   providerId: string;
-  modelId: string;
-  operation: "generate";
-  adapter: string;
-  parameters: Record<string, string>;
+  logicalModelId: string;
+  selections: Record<string, string>;
 };
 
 export type MediaKind = "image" | "video";
@@ -380,6 +378,18 @@ export type GenerateMediaResult = {
   prompt: string;
 };
 
+export type MediaCapabilityControl =
+  | { enum: { values: string[]; default: string } }
+  | { range: { min: number; max: number; step: number; default: number } }
+  | { bool: { default: boolean } };
+
+export type MediaCapabilityAxisInfo = {
+  id: string;
+  label: string;
+  role: "param" | "selector" | string;
+  control: MediaCapabilityControl;
+};
+
 export type MediaCapabilityInfo = {
   providerId: string;
   providerDisplayName: string;
@@ -387,22 +397,11 @@ export type MediaCapabilityInfo = {
   modelDisplayName: string;
   kind: MediaKind;
   operation: string;
-  adapter: string;
-  parameters: MediaCapabilityParameterInfo[];
-  defaults: Record<string, string>;
+  axes: MediaCapabilityAxisInfo[];
   status: "available" | "unavailable" | "unknown" | string;
   source: string;
   reason: string | null;
   checkedAtMs: number;
-};
-
-export type MediaCapabilityParameterInfo = {
-  name: string;
-  label: string;
-  values: string[];
-  default: string;
-  requestField: string | null;
-  wireType: "string" | "number";
 };
 
 export type ResourceCounts = {

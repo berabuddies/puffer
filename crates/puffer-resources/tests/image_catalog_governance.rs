@@ -1,6 +1,7 @@
 use puffer_provider_registry::{
-    MediaBatchMode, MediaDiscoveryKind, MediaExecutionKind, MediaModelDescriptor, MediaOperation,
-    MediaParameterWireType, ProviderDescriptor,
+    AxisRole, ControlKind, MediaBatchMode, MediaDiscoveryKind, MediaExecutionKind,
+    MediaModelDescriptor, MediaOperation, ProviderDescriptor, Variants, WireType,
+    CANONICAL_MEDIA_RATIOS,
 };
 use puffer_resources::ProviderPack;
 use std::{
@@ -38,6 +39,10 @@ const IMAGE_PROVIDER_YAMLS: &[(&str, &str)] = &[
         "vercel-ai-gateway",
         include_str!("../../../resources/providers/vercel-ai-gateway.yaml"),
     ),
+    (
+        "worldrouter",
+        include_str!("../../../resources/providers/worldrouter.yaml"),
+    ),
 ];
 
 const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
@@ -74,10 +79,6 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
         include_str!("../../../resources/providers/lmstudio.yaml"),
     ),
     (
-        "minicpm5",
-        include_str!("../../../resources/providers/minicpm5.yaml"),
-    ),
-    (
         "minimax",
         include_str!("../../../resources/providers/minimax.yaml"),
     ),
@@ -96,6 +97,10 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
     (
         "openrouter",
         include_str!("../../../resources/providers/openrouter.yaml"),
+    ),
+    (
+        "qwen35",
+        include_str!("../../../resources/providers/qwen35.yaml"),
     ),
     (
         "relaydance",
@@ -123,10 +128,21 @@ const ALL_PROVIDER_YAMLS: &[(&str, &str)] = &[
 const SEEDANCE_VIDEO_DURATIONS: &[&str] = &[
     "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
 ];
-const SEEDANCE_VIDEO_RATIOS: &[&str] = &["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"];
+const SEEDANCE_VIDEO_RATIOS: &[&str] = &["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
 const SEEDANCE_VIDEO_RESOLUTIONS: &[&str] = &["480p", "720p", "1080p"];
 const SEEDANCE_FAST_VIDEO_RESOLUTIONS: &[&str] = &["480p", "720p"];
 const SEEDANCE_15_VIDEO_DURATIONS: &[&str] = &["4", "5", "6", "7", "8", "9", "10", "11", "12"];
+const TASK5_CANONICAL_IMAGE_PROVIDER_IDS: &[&str] =
+    &["openai", "minimax", "minimax-cn", "byteplus"];
+const RAW_IMAGE_AXIS_IDS: &[&str] = &[
+    "size",
+    "quality",
+    "output_format",
+    "response_format",
+    "sequential_image_generation",
+    "aspect_ratio",
+    "resolution",
+];
 
 fn provider_descriptor(provider_id: &str, yaml: &str) -> ProviderDescriptor {
     let pack: ProviderPack = serde_yaml::from_str(yaml)
@@ -188,7 +204,7 @@ fn assert_select_parameter(
         values,
         default,
         request_field,
-        MediaParameterWireType::String,
+        WireType::String,
     );
 }
 
@@ -199,25 +215,210 @@ fn assert_select_parameter_with_wire_type(
     values: &[&str],
     default: &str,
     request_field: &str,
-    wire_type: MediaParameterWireType,
+    wire_type: WireType,
 ) {
-    let parameter = model
-        .parameters
-        .iter()
-        .find(|parameter| parameter.name == name)
-        .unwrap_or_else(|| panic!("{} should declare parameter {name}", model.id));
-
-    assert_eq!(parameter.label, label);
-    assert_eq!(
-        parameter.values,
-        values
-            .iter()
-            .map(|value| value.to_string())
-            .collect::<Vec<_>>()
+    assert_enum_axis(
+        model,
+        name,
+        label,
+        values,
+        default,
+        AxisRole::Param,
+        Some(request_field),
+        wire_type,
     );
-    assert_eq!(parameter.default, default);
-    assert_eq!(parameter.request_field.as_deref(), Some(request_field));
-    assert_eq!(parameter.wire_type, wire_type);
+}
+
+fn assert_enum_axis(
+    model: &MediaModelDescriptor,
+    name: &str,
+    label: &str,
+    values: &[&str],
+    default: &str,
+    role: AxisRole,
+    request_field: Option<&str>,
+    wire_type: WireType,
+) {
+    let axis = model
+        .axes
+        .iter()
+        .find(|axis| axis.id == name)
+        .unwrap_or_else(|| panic!("{} should declare axis {name}", model.id));
+
+    assert_eq!(axis.label, label);
+    assert_eq!(axis.role, role);
+    assert_eq!(axis.request_field.as_deref(), request_field);
+    assert_eq!(axis.wire_type, wire_type);
+    match &axis.control {
+        ControlKind::Enum {
+            values: actual,
+            default: actual_default,
+        } => {
+            assert_eq!(
+                actual,
+                &values
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(actual_default, default);
+        }
+        other => panic!("{} axis {name} should be enum, got {other:?}", model.id),
+    }
+}
+
+fn assert_range_parameter(
+    model: &MediaModelDescriptor,
+    name: &str,
+    label: &str,
+    min: f64,
+    max: f64,
+    step: f64,
+    default: f64,
+    request_field: &str,
+) {
+    let axis = model
+        .axes
+        .iter()
+        .find(|axis| axis.id == name)
+        .unwrap_or_else(|| panic!("{} should declare axis {name}", model.id));
+
+    assert_eq!(axis.label, label);
+    assert_eq!(axis.role, AxisRole::Param);
+    assert_eq!(axis.request_field.as_deref(), Some(request_field));
+    assert_eq!(axis.wire_type, WireType::Number);
+    match &axis.control {
+        ControlKind::Range {
+            min: actual_min,
+            max: actual_max,
+            step: actual_step,
+            default: actual_default,
+        } => {
+            assert_eq!(
+                (*actual_min, *actual_max, *actual_step, *actual_default),
+                (min, max, step, default)
+            );
+        }
+        other => panic!("{} axis {name} should be range, got {other:?}", model.id),
+    }
+}
+
+fn assert_bool_axis(
+    model: &MediaModelDescriptor,
+    name: &str,
+    label: &str,
+    default: bool,
+    role: AxisRole,
+) {
+    let axis = model
+        .axes
+        .iter()
+        .find(|axis| axis.id == name)
+        .unwrap_or_else(|| panic!("{} should declare axis {name}", model.id));
+
+    assert_eq!(axis.label, label);
+    assert_eq!(axis.role, role);
+    assert_eq!(axis.request_field, None);
+    match &axis.control {
+        ControlKind::Bool {
+            default: actual_default,
+        } => assert_eq!(*actual_default, default),
+        other => panic!("{} axis {name} should be bool, got {other:?}", model.id),
+    }
+}
+
+fn assert_task5_image_model_uses_canonical_axes(provider_id: &str, model: &MediaModelDescriptor) {
+    assert!(
+        model.max_outputs.is_some_and(|max| max <= 9),
+        "{provider_id}/{} should declare max_outputs at or below 9",
+        model.id
+    );
+    let axis_ids = model
+        .axes
+        .iter()
+        .map(|axis| axis.id.as_str())
+        .collect::<BTreeSet<_>>();
+    for raw_axis in RAW_IMAGE_AXIS_IDS {
+        assert!(
+            !axis_ids.contains(raw_axis),
+            "{provider_id}/{} must not expose raw image provider axis {raw_axis}",
+            model.id
+        );
+    }
+    for axis in &model.axes {
+        match axis.id.as_str() {
+            "mode" => {
+                assert_eq!(axis.label, "Mode");
+                assert_eq!(axis.role, AxisRole::Param);
+                assert_eq!(axis.request_field, None);
+            }
+            "ratio" => {
+                assert_eq!(axis.label, "Ratio");
+                assert_eq!(axis.role, AxisRole::Param);
+                assert_eq!(axis.request_field, None);
+                if let ControlKind::Enum { values, default } = &axis.control {
+                    assert!(
+                        values
+                            .iter()
+                            .all(|value| CANONICAL_MEDIA_RATIOS.contains(&value.as_str())),
+                        "{provider_id}/{} ratio values must be canonical",
+                        model.id
+                    );
+                    assert!(
+                        values.contains(default),
+                        "{provider_id}/{} ratio default must be declared",
+                        model.id
+                    );
+                } else {
+                    panic!("{provider_id}/{} ratio axis should be enum", model.id);
+                }
+            }
+            other => panic!(
+                "{provider_id}/{} should expose only canonical image axes, got {other}",
+                model.id
+            ),
+        }
+    }
+    assert!(
+        axis_ids.contains("ratio"),
+        "{provider_id}/{} should expose a canonical ratio axis",
+        model.id
+    );
+    assert!(
+        model.media_map.is_some(),
+        "{provider_id}/{} should map canonical axes through media_map",
+        model.id
+    );
+}
+
+fn assert_ratio_media_map_value(
+    model: &MediaModelDescriptor,
+    field: &str,
+    ratio: &str,
+    value: Option<&str>,
+) {
+    let ratio_map = model
+        .media_map
+        .as_ref()
+        .and_then(|media_map| media_map.ratio.as_ref())
+        .unwrap_or_else(|| panic!("{} should declare media_map.ratio", model.id));
+    assert_eq!(ratio_map.field, field);
+    assert_eq!(
+        ratio_map
+            .values
+            .get(ratio)
+            .and_then(|value| value.as_deref()),
+        value,
+        "{} should map ratio {ratio}",
+        model.id
+    );
+}
+
+fn single_variant_base_params(model: &MediaModelDescriptor) -> &BTreeMap<String, String> {
+    match &model.variants {
+        Variants::Single(variant) => &variant.base_params,
+        _ => panic!("{} should use a single variant", model.id),
+    }
 }
 
 #[test]
@@ -281,6 +482,10 @@ fn bundled_image_executions_declare_explicit_batch_mode() {
             "vercel-ai-gateway",
             include_str!("../../../resources/providers/vercel-ai-gateway.yaml"),
         ),
+        (
+            "worldrouter",
+            include_str!("../../../resources/providers/worldrouter.yaml"),
+        ),
     ] {
         assert_raw_image_executions_declare_batch_mode(provider_id, yaml);
     }
@@ -311,6 +516,56 @@ fn bundled_image_provider_descriptors_validate_and_do_not_duplicate_model_ids() 
             unique_ids.len(),
             "{provider_id} image model ids must be unique"
         );
+    }
+}
+
+#[test]
+fn task5_image_providers_expose_only_canonical_product_axes() {
+    for &(provider_id, yaml) in IMAGE_PROVIDER_YAMLS {
+        if !TASK5_CANONICAL_IMAGE_PROVIDER_IDS.contains(&provider_id) {
+            continue;
+        }
+        let descriptor = provider_descriptor(provider_id, yaml);
+        descriptor
+            .validate_media_descriptors()
+            .unwrap_or_else(|err| panic!("{provider_id} media descriptor validates: {err}"));
+        let image = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.image.as_ref())
+            .unwrap_or_else(|| panic!("{provider_id} should declare image media"));
+        for model in &image.models {
+            assert_task5_image_model_uses_canonical_axes(provider_id, model);
+        }
+    }
+}
+
+#[test]
+fn task5_video_providers_use_canonical_setting_labels() {
+    for provider_id in ["byteplus", "relaydance", "worldrouter"] {
+        let yaml = ALL_PROVIDER_YAMLS
+            .iter()
+            .find_map(|(id, yaml)| (*id == provider_id).then_some(*yaml))
+            .unwrap_or_else(|| panic!("{provider_id} should be listed"));
+        let descriptor = provider_descriptor(provider_id, yaml);
+        descriptor
+            .validate_media_descriptors()
+            .unwrap_or_else(|err| panic!("{provider_id} media descriptor validates: {err}"));
+        let video = descriptor
+            .media
+            .as_ref()
+            .and_then(|media| media.video.as_ref())
+            .unwrap_or_else(|| panic!("{provider_id} should declare video media"));
+        for model in &video.models {
+            for axis in &model.axes {
+                match axis.id.as_str() {
+                    "resolution" | "mode" => assert_eq!(axis.label, "Mode"),
+                    "ratio" | "aspect_ratio" => assert_eq!(axis.label, "Ratio"),
+                    "duration" | "duration_seconds" => assert_eq!(axis.label, "Duration"),
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -348,107 +603,101 @@ fn relaydance_declares_executable_video_descriptor() {
     assert_eq!(
         models_by_id.keys().copied().collect::<BTreeSet<_>>(),
         BTreeSet::from([
-            "doubao-seedance-2-0-720p",
-            "doubao-seedance-2-0-1080p",
-            "doubao-seedance-2-0-fast-260128",
+            "doubao-seedance-2-0",
+            "doubao-seedance-2-0-fast",
             "grok-imagine-video",
             "grok-imagine-video-1.5-preview",
             "happyhorse-1.0-t2v",
-            "seedance-1-5-pro-no-audio",
-            "seedance-1-5-pro-with-audio",
+            "seedance-1-5-pro",
             "seedance-fast-nsfw",
             "seedance-nsfw",
-            "seedance-nsfw-720p",
-            "seedance-nsfw-1080p",
         ])
     );
 
     let expected = [
         (
-            "doubao-seedance-2-0-720p",
-            "Seedance 2.0 720p",
+            "doubao-seedance-2-0",
+            "Seedance 2.0",
             SEEDANCE_VIDEO_DURATIONS,
-            &["720p"][..],
+            &["720p", "1080p"][..],
+            AxisRole::Selector,
+            None,
         ),
         (
-            "doubao-seedance-2-0-1080p",
-            "Seedance 2.0 1080p",
-            SEEDANCE_VIDEO_DURATIONS,
-            &["1080p"][..],
-        ),
-        (
-            "doubao-seedance-2-0-fast-260128",
+            "doubao-seedance-2-0-fast",
             "Seedance 2.0 Fast",
             SEEDANCE_VIDEO_DURATIONS,
             SEEDANCE_FAST_VIDEO_RESOLUTIONS,
+            AxisRole::Param,
+            Some("metadata.resolution"),
         ),
         (
-            "seedance-1-5-pro-no-audio",
-            "Seedance 1.5 Pro No Audio",
+            "seedance-1-5-pro",
+            "Seedance 1.5 Pro",
             SEEDANCE_15_VIDEO_DURATIONS,
             SEEDANCE_VIDEO_RESOLUTIONS,
-        ),
-        (
-            "seedance-1-5-pro-with-audio",
-            "Seedance 1.5 Pro With Audio",
-            SEEDANCE_15_VIDEO_DURATIONS,
-            SEEDANCE_VIDEO_RESOLUTIONS,
+            AxisRole::Param,
+            Some("metadata.resolution"),
         ),
         (
             "seedance-nsfw",
             "Seedance NSFW",
             SEEDANCE_VIDEO_DURATIONS,
-            &["720p"][..],
-        ),
-        (
-            "seedance-nsfw-720p",
-            "Seedance NSFW 720p",
-            SEEDANCE_VIDEO_DURATIONS,
-            &["720p"][..],
-        ),
-        (
-            "seedance-nsfw-1080p",
-            "Seedance NSFW 1080p",
-            SEEDANCE_VIDEO_DURATIONS,
-            &["1080p"][..],
+            &["720p", "1080p"][..],
+            AxisRole::Selector,
+            None,
         ),
         (
             "seedance-fast-nsfw",
             "Seedance Fast NSFW",
             SEEDANCE_VIDEO_DURATIONS,
             SEEDANCE_FAST_VIDEO_RESOLUTIONS,
+            AxisRole::Param,
+            Some("metadata.resolution"),
         ),
     ];
-    for (model_id, display_name, durations, resolutions) in expected {
+    for (model_id, display_name, durations, resolutions, resolution_role, resolution_field) in
+        expected
+    {
         let model = models_by_id
             .get(model_id)
             .unwrap_or_else(|| panic!("relaydance should include {model_id}"));
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
-        assert_select_parameter(
+        assert_range_parameter(
             model,
-            "duration_seconds",
+            "duration",
             "Duration",
-            durations,
-            "5",
+            durations.first().unwrap().parse::<f64>().unwrap(),
+            durations.last().unwrap().parse::<f64>().unwrap(),
+            1.0,
+            5.0,
             "seconds",
         );
-        assert_select_parameter(
+        assert_enum_axis(
             model,
             "resolution",
-            "Resolution",
+            "Mode",
             resolutions,
             resolutions.last().expect("resolution default"),
-            "metadata.resolution",
+            resolution_role,
+            resolution_field,
+            WireType::String,
         );
-        assert_select_parameter(
+        assert_enum_axis(
             model,
-            "aspect_ratio",
-            "Aspect ratio",
+            "ratio",
+            "Ratio",
             SEEDANCE_VIDEO_RATIOS,
             "16:9",
-            "metadata.ratio",
+            AxisRole::Param,
+            None,
+            WireType::String,
         );
+        assert_ratio_media_map_value(model, "metadata.ratio", "Auto", Some("adaptive"));
+        if model_id == "seedance-1-5-pro" {
+            assert_bool_axis(model, "audio", "Native audio", true, AxisRole::Selector);
+        }
     }
 
     let prompt_only_expected = [
@@ -466,7 +715,7 @@ fn relaydance_declares_executable_video_descriptor() {
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
         assert!(
-            model.parameters.is_empty(),
+            model.axes.is_empty(),
             "{model_id} should stay prompt-only until RelayDance exposes parameter metadata"
         );
     }
@@ -505,20 +754,17 @@ fn byteplus_declares_executable_video_descriptor() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         models_by_id.keys().copied().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "dreamina-seedance-2-0-260128",
-            "dreamina-seedance-2-0-fast-260128",
-        ])
+        BTreeSet::from(["dreamina-seedance-2-0", "dreamina-seedance-2-0-fast",])
     );
 
     let expected = [
         (
-            "dreamina-seedance-2-0-260128",
+            "dreamina-seedance-2-0",
             "Dreamina Seedance 2.0",
             SEEDANCE_VIDEO_RESOLUTIONS,
         ),
         (
-            "dreamina-seedance-2-0-fast-260128",
+            "dreamina-seedance-2-0-fast",
             "Dreamina Seedance 2.0 Fast",
             SEEDANCE_FAST_VIDEO_RESOLUTIONS,
         ),
@@ -529,27 +775,24 @@ fn byteplus_declares_executable_video_descriptor() {
             .unwrap_or_else(|| panic!("byteplus should include {model_id}"));
         assert_eq!(model.display_name.as_deref(), Some(display_name));
         assert_eq!(model.operations, vec![MediaOperation::Generate]);
-        assert_select_parameter_with_wire_type(
-            model,
-            "duration_seconds",
-            "Duration",
-            SEEDANCE_VIDEO_DURATIONS,
-            "5",
-            "duration",
-            MediaParameterWireType::Number,
+        assert_range_parameter(
+            model, "duration", "Duration", 4.0, 15.0, 1.0, 5.0, "duration",
         );
-        assert_select_parameter(
+        assert_enum_axis(
             model,
-            "aspect_ratio",
-            "Aspect ratio",
-            SEEDANCE_VIDEO_RATIOS,
-            "adaptive",
             "ratio",
+            "Ratio",
+            SEEDANCE_VIDEO_RATIOS,
+            "Auto",
+            AxisRole::Param,
+            None,
+            WireType::String,
         );
+        assert_ratio_media_map_value(model, "ratio", "Auto", Some("adaptive"));
         assert_select_parameter(
             model,
             "resolution",
-            "Resolution",
+            "Mode",
             resolutions,
             "720p",
             "resolution",
@@ -558,8 +801,35 @@ fn byteplus_declares_executable_video_descriptor() {
 }
 
 #[test]
+fn worldrouter_declares_executable_video_descriptor() {
+    let descriptor = provider_descriptor(
+        "worldrouter",
+        include_str!("../../../resources/providers/worldrouter.yaml"),
+    );
+    descriptor
+        .validate_media_descriptors()
+        .expect("worldrouter media descriptor validates");
+    let video = descriptor
+        .media
+        .as_ref()
+        .and_then(|media| media.video.as_ref())
+        .expect("worldrouter video media descriptor");
+    let execution = video
+        .execution
+        .as_ref()
+        .expect("worldrouter video execution descriptor");
+
+    assert_eq!(
+        video.discovery.as_ref().map(|discovery| discovery.adapter),
+        Some(MediaDiscoveryKind::Static)
+    );
+    assert_eq!(execution.adapter, MediaExecutionKind::WorldRouterVideo);
+    assert_eq!(execution.path, "/api/v3/contents/generations/tasks");
+}
+
+#[test]
 fn only_executable_video_providers_declare_video_media() {
-    let expected = BTreeSet::from(["byteplus", "relaydance"]);
+    let expected = BTreeSet::from(["byteplus", "relaydance", "worldrouter"]);
     for (provider_id, yaml) in ALL_PROVIDER_YAMLS {
         let descriptor = provider_descriptor(provider_id, yaml);
         let has_video = descriptor
@@ -740,53 +1010,168 @@ fn openai_catalog_declares_current_image_api_models() {
             model.operations.contains(&MediaOperation::Generate),
             "{model_id} should support image generation"
         );
-        assert_select_parameter(
-            model,
-            "quality",
-            "Quality",
-            &["auto", "low", "medium", "high"],
-            "auto",
-            "quality",
+        assert_task5_image_model_uses_canonical_axes("openai", model);
+        assert_eq!(
+            model.max_outputs,
+            Some(9),
+            "{model_id} should expose the global image output cap"
         );
-        assert_select_parameter(
-            model,
-            "output_format",
-            "Output format",
-            &["png", "jpeg", "webp"],
-            "png",
-            "output_format",
+        assert!(
+            model
+                .media_map
+                .as_ref()
+                .and_then(|media_map| media_map.size.as_ref())
+                .is_some(),
+            "{model_id} should map Mode + Ratio to the Images API size field"
         );
-
         if model_id == "gpt-image-2" {
-            assert_select_parameter(
+            assert_enum_axis(
                 model,
-                "size",
-                "Size",
-                &[
-                    "auto",
-                    "1024x1024",
-                    "1024x1536",
-                    "1536x1024",
-                    "2048x2048",
-                    "2048x1152",
-                    "2560x1440",
-                    "3840x2160",
-                    "2160x3840",
-                ],
-                "auto",
-                "size",
+                "mode",
+                "Mode",
+                &["1K SD", "2K HD"],
+                "1K SD",
+                AxisRole::Param,
+                None,
+                WireType::String,
             );
         } else {
-            assert_select_parameter(
+            assert_enum_axis(
                 model,
-                "size",
-                "Size",
-                &["auto", "1024x1024", "1024x1536", "1536x1024"],
-                "auto",
-                "size",
+                "mode",
+                "Mode",
+                &["1K SD"],
+                "1K SD",
+                AxisRole::Param,
+                None,
+                WireType::String,
             );
         }
     }
+}
+
+#[test]
+fn worldrouter_catalog_declares_all_documented_image_models() {
+    let descriptor = provider_descriptor(
+        "worldrouter",
+        include_str!("../../../resources/providers/worldrouter.yaml"),
+    );
+    let image = descriptor
+        .media
+        .as_ref()
+        .and_then(|media| media.image.as_ref())
+        .expect("worldrouter image media descriptor");
+
+    assert_eq!(
+        image.execution.as_ref().map(|execution| execution.adapter),
+        Some(MediaExecutionKind::ImagesJson)
+    );
+    assert_eq!(
+        image
+            .execution
+            .as_ref()
+            .map(|execution| execution.path.as_str()),
+        Some("/images/generations")
+    );
+
+    let expected = BTreeMap::from([
+        ("gemini-2.5-flash-image", "Gemini 2.5 Flash Image"),
+        ("gemini-3-pro-image-preview", "Gemini 3 Pro Image Preview"),
+        (
+            "gemini-3.1-flash-image-preview",
+            "Gemini 3.1 Flash Image Preview",
+        ),
+        ("gpt-image-2", "GPT Image 2"),
+    ]);
+    let models_by_id = image
+        .models
+        .iter()
+        .map(|model| (model.id.as_str(), model))
+        .collect::<BTreeMap<_, _>>();
+    let expected_model_ids = expected.keys().copied().collect::<BTreeSet<_>>();
+    let actual_model_ids = models_by_id.keys().copied().collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        actual_model_ids, expected_model_ids,
+        "WorldRouter image catalog should mirror documented generation model ids"
+    );
+
+    for (model_id, display_name) in &expected {
+        let model_id = *model_id;
+        let model = models_by_id
+            .get(model_id)
+            .unwrap_or_else(|| panic!("WorldRouter should include {model_id}"));
+        assert_eq!(model.display_name.as_deref(), Some(*display_name));
+        assert!(
+            model.operations.contains(&MediaOperation::Generate),
+            "{model_id} should support image generation"
+        );
+        assert_eq!(
+            model.max_outputs,
+            Some(9),
+            "{model_id} should expose the global image output cap"
+        );
+        if model_id == "gpt-image-2" {
+            assert_eq!(model.execution, None);
+            assert_enum_axis(
+                model,
+                "ratio",
+                "Ratio",
+                &["1:1", "3:2", "2:3"],
+                "1:1",
+                AxisRole::Param,
+                None,
+                WireType::String,
+            );
+        } else {
+            let execution = model
+                .execution
+                .as_ref()
+                .unwrap_or_else(|| panic!("{model_id} should override execution"));
+            assert_eq!(
+                execution.adapter,
+                MediaExecutionKind::GeminiGenerateContent,
+                "{model_id} should use Gemini generateContent"
+            );
+            assert_eq!(
+                execution.base_url.as_deref(),
+                Some("https://inference-api.worldrouter.ai"),
+                "{model_id} should override the OpenAI /v1 base URL"
+            );
+            assert_eq!(
+                execution.path, "/v1beta/models/{model}:generateContent",
+                "{model_id} should use the native Gemini route"
+            );
+        }
+    }
+
+    assert_enum_axis(
+        models_by_id["gemini-2.5-flash-image"],
+        "ratio",
+        "Ratio",
+        &["1:1"],
+        "1:1",
+        AxisRole::Param,
+        Some("aspectRatio"),
+        WireType::String,
+    );
+    assert!(
+        models_by_id["gemini-2.5-flash-image"]
+            .axes
+            .iter()
+            .all(|axis| axis.request_field.as_deref() != Some("imageSize")),
+        "gemini-2.5-flash-image must not send imageSize"
+    );
+    assert_enum_axis(
+        models_by_id["gemini-3.1-flash-image-preview"],
+        "mode",
+        "Mode",
+        &["0.5K", "1K", "2K", "4K"],
+        "2K",
+        AxisRole::Param,
+        Some("imageSize"),
+        WireType::String,
+    );
 }
 
 #[test]
@@ -842,52 +1227,36 @@ fn byteplus_catalog_declares_only_current_native_seedream_models() {
             model.operations.contains(&MediaOperation::Generate),
             "{model_id} should support image generation"
         );
-        let parameter_names = model
-            .parameters
-            .iter()
-            .map(|parameter| parameter.name.as_str())
-            .collect::<BTreeSet<_>>();
-        assert_select_parameter(model, "size", "Size", &["2K"], "2K", "size");
-        assert_select_parameter(
-            model,
-            "response_format",
-            "Response format",
-            &["b64_json", "url"],
-            "b64_json",
-            "response_format",
+        assert_task5_image_model_uses_canonical_axes("byteplus", model);
+        assert_eq!(
+            model.max_outputs,
+            Some(9),
+            "{model_id} should expose the global image output cap"
         );
-        assert_select_parameter(
+        assert_enum_axis(
             model,
-            "sequential_image_generation",
-            "Sequential image generation",
-            &["disabled", "auto"],
-            "disabled",
-            "sequential_image_generation",
+            "mode",
+            "Mode",
+            &["2K HD"],
+            "2K HD",
+            AxisRole::Param,
+            None,
+            WireType::String,
         );
         if model_id == "seedream-5-0-260128" {
             assert_eq!(
-                parameter_names,
-                BTreeSet::from([
-                    "size",
-                    "output_format",
-                    "response_format",
-                    "sequential_image_generation",
-                ]),
-                "{model_id} should declare exactly the adapter-supported BytePlus parameters"
-            );
-            assert_select_parameter(
-                model,
-                "output_format",
-                "Output format",
-                &["png", "jpeg"],
-                "jpeg",
-                "output_format",
+                single_variant_base_params(model)
+                    .get("output_format")
+                    .map(String::as_str),
+                Some("jpeg"),
+                "{model_id} should keep output_format hidden in base_params"
             );
         } else {
-            assert_eq!(
-                parameter_names,
-                BTreeSet::from(["size", "response_format", "sequential_image_generation"]),
-                "{model_id} should omit unsupported output_format but keep API-level parameters"
+            assert!(
+                single_variant_base_params(model)
+                    .get("output_format")
+                    .is_none(),
+                "{model_id} should not synthesize unsupported output_format"
             );
         }
     }

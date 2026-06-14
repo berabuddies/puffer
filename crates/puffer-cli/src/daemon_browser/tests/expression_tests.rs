@@ -1,14 +1,15 @@
-use super::super::agent::{key_text, scroll_delta};
+use super::super::agent::{key_text, parse_key_combo, scroll_delta};
 use super::super::cursor::parse_cursor_response;
 use super::super::dom_inspect::dom_inspect_expression;
 use super::super::params::{parse_input_event, required_string_array};
 use super::super::ref_resolution::{
-    checkable_state_expression, fill_expression, focus_expression, scroll_into_view_expression,
-    select_expression, target_point_expression,
+    checkable_state_expression, fill_expression, focus_expression,
+    hosted_fill_focus_check_expression, scroll_into_view_expression, select_expression,
+    target_point_expression,
 };
 use super::super::screenshot::{
-    parse_agent_screenshot_options, parse_capture_screenshot_response, BrowserElementRef,
-    BrowserScreenshotFormat,
+    parse_agent_screenshot_options, parse_capture_screenshot_response, snapshot_expression,
+    BrowserElementRef, BrowserScreenshotFormat,
 };
 use super::super::selection::parse_copy_selection_response;
 use super::super::upload::parse_upload_handle_response;
@@ -339,4 +340,93 @@ fn evaluation_errors_prefer_exception_description() {
     let message = format!("{error:#}");
     assert!(message.contains("line 5, column 13"));
     assert!(message.contains("Target is not editable"));
+}
+
+fn card_container_ref() -> BrowserElementRef {
+    BrowserElementRef {
+        ref_id: "@e20".to_string(),
+        role: "iframe".to_string(),
+        name: "Field container for: Card number".to_string(),
+        tag: "iframe".to_string(),
+        href: None,
+        x: 348.0,
+        y: 671.0,
+    }
+}
+
+#[test]
+fn fill_expression_hands_hosted_iframe_fields_to_runtime() {
+    let expression = fill_expression(&card_container_ref(), "4242424242424242").unwrap();
+    assert!(expression.contains("hostedFrameFill: true"));
+    assert!(expression.contains("window.__puffer_hosted_fill__"));
+    assert!(expression.contains("targetEl.querySelector('iframe')"));
+    // The old behavior threw on IFRAME shells; the probe must return a
+    // handoff marker instead of throwing.
+    assert!(!expression.contains("cannot be filled from the top document"));
+}
+
+#[test]
+fn hosted_fill_focus_check_requires_pending_frame_focus() {
+    let expression = hosted_fill_focus_check_expression();
+    assert!(expression.contains("window.__puffer_hosted_fill__"));
+    assert!(expression.contains("document.activeElement === pending.frame"));
+    assert!(expression.contains("no pending hosted fill frame"));
+}
+
+#[test]
+fn ref_actions_prefer_stored_snapshot_handles_over_stale_coordinates() {
+    let expression = target_point_expression(&card_container_ref()).unwrap();
+    assert!(expression.contains("window.__puffer_agent_refs__"));
+    assert!(expression.contains("stored.isConnected"));
+    // The signature fallback must still exist for post-navigation refs.
+    assert!(expression.contains("document.elementFromPoint(target.x, target.y)"));
+}
+
+#[test]
+fn snapshot_lists_named_iframes_and_stashes_exact_handles() {
+    let expression = snapshot_expression();
+    assert!(expression.contains("iframe,[role]"));
+    assert!(expression.contains("el.tagName !== 'IFRAME' || nameFor(el) !== ''"));
+    assert!(expression.contains("window.__puffer_agent_refs__ = { byRef }"));
+}
+
+#[test]
+fn parses_modifier_key_combos() {
+    let combo = parse_key_combo("Meta+A");
+    assert_eq!(combo.key, "A");
+    assert_eq!(combo.modifiers, 4);
+    assert_eq!(combo.commands, vec!["selectAll".to_string()]);
+
+    let combo = parse_key_combo("Ctrl+a");
+    assert_eq!(combo.key, "a");
+    assert_eq!(combo.modifiers, 2);
+    assert_eq!(combo.commands, vec!["selectAll".to_string()]);
+
+    let combo = parse_key_combo("Ctrl+Shift+Z");
+    assert_eq!(combo.key, "Z");
+    assert_eq!(combo.modifiers, 2 | 8);
+    assert!(combo.commands.is_empty());
+}
+
+#[test]
+fn plain_keys_and_edge_combos_stay_unmodified() {
+    let combo = parse_key_combo("Enter");
+    assert_eq!(combo.key, "Enter");
+    assert_eq!(combo.modifiers, 0);
+    assert!(combo.commands.is_empty());
+
+    // The bare plus key is not a combo.
+    let combo = parse_key_combo("+");
+    assert_eq!(combo.key, "+");
+    assert_eq!(combo.modifiers, 0);
+
+    // `Meta++` means Meta plus the `+` key.
+    let combo = parse_key_combo("Meta++");
+    assert_eq!(combo.key, "+");
+    assert_eq!(combo.modifiers, 4);
+
+    // Unknown prefixes are not modifiers; pass the raw key through.
+    let combo = parse_key_combo("Foo+A");
+    assert_eq!(combo.key, "Foo+A");
+    assert_eq!(combo.modifiers, 0);
 }

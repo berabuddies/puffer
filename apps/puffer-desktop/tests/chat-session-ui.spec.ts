@@ -19,10 +19,8 @@ const onePixelJpegBytes = Array.from(Buffer.from(ONE_PIXEL_JPEG_BASE64, "base64"
 const configuredImageMedia: MediaSettings = {
   image: {
     providerId: "openai",
-    modelId: "gpt-image-1",
-    operation: "generate",
-    adapter: "images_json",
-    parameters: {
+    logicalModelId: "gpt-image-1",
+    selections: {
       size: "1024x1024",
       quality: "auto",
       output_format: "png"
@@ -31,23 +29,49 @@ const configuredImageMedia: MediaSettings = {
   video: null
 };
 
-type FakeMediaCapabilityParameter = FakeMediaCapability["parameters"][number];
+type FakeMediaCapabilityAxis = FakeMediaCapability["axes"][number];
 
-function mediaParameter(input: {
-  name: string;
+function mediaEnumAxis(input: {
+  id: string;
   label: string;
   values: string[];
   defaultValue: string;
   requestField?: string | null;
   wireType?: "string" | "number";
-}): FakeMediaCapabilityParameter {
+}): FakeMediaCapabilityAxis {
   return {
-    name: input.name,
+    id: input.id,
     label: input.label,
-    values: input.values,
-    default: input.defaultValue,
-    requestField: input.requestField === undefined ? input.name : input.requestField,
+    role: "param",
+    control: { enum: { values: input.values, default: input.defaultValue } },
+    requestField: input.requestField === undefined ? input.id : input.requestField,
     wireType: input.wireType ?? "string"
+  };
+}
+
+function mediaRangeAxis(input: {
+  id: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  defaultValue: number;
+  requestField?: string | null;
+}): FakeMediaCapabilityAxis {
+  return {
+    id: input.id,
+    label: input.label,
+    role: "param",
+    control: {
+      range: {
+        min: input.min,
+        max: input.max,
+        step: input.step,
+        default: input.defaultValue
+      }
+    },
+    requestField: input.requestField === undefined ? input.id : input.requestField,
+    wireType: "number"
   };
 }
 
@@ -56,7 +80,7 @@ function imageCapability(input: {
   providerDisplayName: string;
   modelId: string;
   modelDisplayName: string;
-  parameters: FakeMediaCapabilityParameter[];
+  axes: FakeMediaCapabilityAxis[];
 }): FakeMediaCapability {
   return {
     providerId: input.providerId,
@@ -66,10 +90,7 @@ function imageCapability(input: {
     kind: "image",
     operation: "generate",
     adapter: "images_json",
-    parameters: input.parameters,
-    defaults: Object.fromEntries(
-      input.parameters.map((parameter) => [parameter.name, parameter.default])
-    ),
+    axes: input.axes,
     status: "available",
     source: "fake-daemon",
     reason: null,
@@ -83,7 +104,7 @@ function videoCapability(input: {
   modelId: string;
   modelDisplayName: string;
   adapter: string;
-  parameters: FakeMediaCapabilityParameter[];
+  axes: FakeMediaCapabilityAxis[];
 }): FakeMediaCapability {
   return {
     providerId: input.providerId,
@@ -93,10 +114,7 @@ function videoCapability(input: {
     kind: "video",
     operation: "generate",
     adapter: input.adapter,
-    parameters: input.parameters,
-    defaults: Object.fromEntries(
-      input.parameters.map((parameter) => [parameter.name, parameter.default])
-    ),
+    axes: input.axes,
     status: "available",
     source: "fake-daemon",
     reason: null,
@@ -110,17 +128,17 @@ function singleOptionImageCapability(): FakeMediaCapability {
     providerDisplayName: "OpenAI",
     modelId: "gpt-image-1",
     modelDisplayName: "GPT Image 1",
-    parameters: [
-      mediaParameter({
-        name: "size",
+    axes: [
+      mediaEnumAxis({
+        id: "size",
         label: "Size",
         values: ["1024x1024"],
         defaultValue: "1024x1024"
       }),
-      mediaParameter({
-        name: "quality",
+      mediaEnumAxis({
+        id: "quality",
         label: "Quality",
-        values: [],
+        values: ["auto"],
         defaultValue: "auto"
       })
     ]
@@ -128,16 +146,16 @@ function singleOptionImageCapability(): FakeMediaCapability {
 }
 
 function singleOptionVideoCapability(): FakeMediaCapability {
-  const parameters = [
-    mediaParameter({
-      name: "aspect_ratio",
+  const axes = [
+    mediaEnumAxis({
+      id: "aspect_ratio",
       label: "Aspect ratio",
       values: ["16:9"],
       defaultValue: "16:9",
       requestField: "metadata.ratio"
     }),
-    mediaParameter({
-      name: "duration_seconds",
+    mediaEnumAxis({
+      id: "duration_seconds",
       label: "Duration",
       values: ["8"],
       defaultValue: "8",
@@ -150,56 +168,58 @@ function singleOptionVideoCapability(): FakeMediaCapability {
     modelId: "gen-4",
     modelDisplayName: "Gen-4",
     adapter: "replicate_video",
-    parameters
+    axes
   });
 }
 
 function configurableVideoCapability(): FakeMediaCapability {
-  const parameters = [
-    mediaParameter({
-      name: "aspect_ratio",
-      label: "Aspect ratio",
-      values: ["16:9", "9:16"],
-      defaultValue: "16:9",
-      requestField: "metadata.ratio"
-    }),
-    mediaParameter({
-      name: "duration_seconds",
-      label: "Duration",
-      values: ["5", "8", "12"],
-      defaultValue: "8",
-      requestField: "seconds"
-    })
-  ];
   return videoCapability({
     providerId: "runway",
     providerDisplayName: "Runway",
     modelId: "gen-4",
     modelDisplayName: "Gen-4",
     adapter: "replicate_video",
-    parameters
+    axes: [
+      mediaEnumAxis({
+        id: "aspect_ratio",
+        label: "Aspect ratio",
+        values: ["16:9", "9:16"],
+        defaultValue: "16:9",
+        requestField: "metadata.ratio"
+      }),
+      mediaRangeAxis({
+        id: "duration_seconds",
+        label: "Duration",
+        min: 5,
+        max: 12,
+        step: 1,
+        defaultValue: 8,
+        requestField: "seconds"
+      })
+    ]
   });
 }
 
 function configurableVideoCapabilityWithProviderOptions(): FakeMediaCapability {
-  const parameters = [
-    mediaParameter({
-      name: "aspect_ratio",
+  const axes = [
+    mediaEnumAxis({
+      id: "aspect_ratio",
       label: "Aspect ratio",
       values: ["16:9", "9:16", "1:1"],
       defaultValue: "16:9",
       requestField: "ratio"
     }),
-    mediaParameter({
-      name: "duration_seconds",
+    mediaRangeAxis({
+      id: "duration_seconds",
       label: "Duration",
-      values: ["5", "8", "12"],
-      defaultValue: "5",
-      requestField: "duration",
-      wireType: "number"
+      min: 5,
+      max: 12,
+      step: 1,
+      defaultValue: 5,
+      requestField: "duration"
     }),
-    mediaParameter({
-      name: "resolution",
+    mediaEnumAxis({
+      id: "resolution",
       label: "Resolution",
       values: ["480p", "720p", "1080p"],
       defaultValue: "720p",
@@ -212,7 +232,7 @@ function configurableVideoCapabilityWithProviderOptions(): FakeMediaCapability {
     modelId: "dreamina-seedance-2-0-260128",
     modelDisplayName: "Dreamina Seedance 2.0",
     adapter: "byteplus_video",
-    parameters
+    axes
   });
 }
 
@@ -221,23 +241,23 @@ function relaydanceVideoCapability(input: {
   modelDisplayName: string;
   resolution: string;
 }): FakeMediaCapability {
-  const parameters = [
-    mediaParameter({
-      name: "duration_seconds",
+  const axes = [
+    mediaEnumAxis({
+      id: "duration_seconds",
       label: "Duration",
       values: ["5", "8"],
       defaultValue: "5",
       requestField: "seconds"
     }),
-    mediaParameter({
-      name: "resolution",
+    mediaEnumAxis({
+      id: "resolution",
       label: "Resolution",
       values: [input.resolution],
       defaultValue: input.resolution,
       requestField: "metadata.resolution"
     }),
-    mediaParameter({
-      name: "aspect_ratio",
+    mediaEnumAxis({
+      id: "aspect_ratio",
       label: "Aspect ratio",
       values: ["16:9", "9:16"],
       defaultValue: "16:9",
@@ -250,7 +270,7 @@ function relaydanceVideoCapability(input: {
     modelId: input.modelId,
     modelDisplayName: input.modelDisplayName,
     adapter: "relaydance_video",
-    parameters
+    axes
   });
 }
 
@@ -561,21 +581,21 @@ test("composer image generation settings modal saves media config from daemon ca
       providerDisplayName: "OpenAI",
       modelId: "gpt-image-2",
       modelDisplayName: "GPT Image 2",
-      parameters: [
-        mediaParameter({
-          name: "size",
+      axes: [
+        mediaEnumAxis({
+          id: "size",
           label: "Size",
           values: ["1024x1024", "1024x1536", "1536x1024"],
           defaultValue: "1024x1024"
         }),
-        mediaParameter({
-          name: "quality",
+        mediaEnumAxis({
+          id: "quality",
           label: "Quality",
           values: ["auto", "high"],
           defaultValue: "auto"
         }),
-        mediaParameter({
-          name: "output_format",
+        mediaEnumAxis({
+          id: "output_format",
           label: "Output format",
           values: ["png", "webp"],
           defaultValue: "png"
@@ -587,21 +607,21 @@ test("composer image generation settings modal saves media config from daemon ca
       providerDisplayName: "BytePlus",
       modelId: "seedream-3",
       modelDisplayName: "Seedream 3",
-      parameters: [
-        mediaParameter({
-          name: "size",
+      axes: [
+        mediaEnumAxis({
+          id: "size",
           label: "Size",
           values: ["1024x1024", "1280x720", "720x1280"],
           defaultValue: "1024x1024"
         }),
-        mediaParameter({
-          name: "quality",
+        mediaEnumAxis({
+          id: "quality",
           label: "Quality",
           values: ["standard", "high"],
           defaultValue: "standard"
         }),
-        mediaParameter({
-          name: "output_format",
+        mediaEnumAxis({
+          id: "output_format",
           label: "Output format",
           values: ["png", "webp"],
           defaultValue: "png"
@@ -613,21 +633,21 @@ test("composer image generation settings modal saves media config from daemon ca
       providerDisplayName: "BytePlus",
       modelId: "seedream-4",
       modelDisplayName: "Seedream 4",
-      parameters: [
-        mediaParameter({
-          name: "size",
+      axes: [
+        mediaEnumAxis({
+          id: "size",
           label: "Size",
           values: ["1024x1024", "1280x720", "720x1280"],
           defaultValue: "1024x1024"
         }),
-        mediaParameter({
-          name: "quality",
+        mediaEnumAxis({
+          id: "quality",
           label: "Quality",
           values: ["standard", "high"],
           defaultValue: "standard"
         }),
-        mediaParameter({
-          name: "output_format",
+        mediaEnumAxis({
+          id: "output_format",
           label: "Output format",
           values: ["png", "webp"],
           defaultValue: "png"
@@ -651,7 +671,7 @@ test("composer image generation settings modal saves media config from daemon ca
           {
             kind: "assistant_message",
             id: "image-settings-seed",
-            text: "Tune image defaults here.",
+            text: "Tune image settings here.",
             createdAtMs: baseTime - 30_000
           }
         ]
@@ -680,7 +700,7 @@ test("composer image generation settings modal saves media config from daemon ca
   );
   await expect(dialog.getByLabel("Provider")).toHaveValue("openai");
   await expect(dialog.getByLabel("Model")).toHaveValue(
-    ["openai", "gpt-image-1", "images_json"].join("\u0000")
+    ["openai", "gpt-image-1"].join("\u0000")
   );
   await expect(dialog.getByRole("combobox", { name: "Provider" })).toBeVisible();
   await expect(dialog.getByRole("combobox", { name: "Model" })).toBeVisible();
@@ -703,7 +723,7 @@ test("composer image generation settings modal saves media config from daemon ca
   await dialog.getByLabel("Provider").selectOption("byteplus");
   await dialog
     .getByLabel("Model")
-    .selectOption(["byteplus", "seedream-3", "images_json"].join("\u0000"));
+    .selectOption(["byteplus", "seedream-3"].join("\u0000"));
   await dialog.getByLabel("Size").selectOption("1280x720");
   await dialog.getByRole("button", { name: "Save" }).click();
 
@@ -712,10 +732,8 @@ test("composer image generation settings modal saves media config from daemon ca
     media: {
       image: {
         providerId: "byteplus",
-        modelId: "seedream-3",
-        operation: "generate",
-        adapter: "images_json",
-        parameters: {
+        logicalModelId: "seedream-3",
+        selections: {
           size: "1280x720",
           quality: "standard",
           output_format: "png"
@@ -737,7 +755,7 @@ test("composer image generation settings modal saves media config from daemon ca
   );
   await expect(reopenedDialog.getByLabel("Provider")).toHaveValue("byteplus");
   await expect(reopenedDialog.getByLabel("Model")).toHaveValue(
-    ["byteplus", "seedream-3", "images_json"].join("\u0000")
+    ["byteplus", "seedream-3"].join("\u0000")
   );
   await expect(reopenedDialog.getByLabel("Size")).toHaveValue("1280x720");
   await expect(reopenedDialog.getByLabel("Quality")).toHaveValue("standard");
@@ -844,13 +862,13 @@ test("composer image generation settings renders single choices as read-only val
   await expectReadOnlyField(dialog, "Quality", "auto");
 });
 
-test("composer image generation settings clamps unsupported saved parameters", async ({ page }) => {
+test("composer image generation settings clamps unsupported saved selections", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
       {
         sessionId: "session-image-settings-unsupported-params",
-        displayName: "Unsupported image parameters",
-        title: "Unsupported image parameters",
+        displayName: "Unsupported image selections",
+        title: "Unsupported image selections",
         cwd: "/tmp/puffer",
         folderPath: "/tmp/puffer",
         updatedAtMs: baseTime,
@@ -860,7 +878,7 @@ test("composer image generation settings clamps unsupported saved parameters", a
           {
             kind: "assistant_message",
             id: "image-settings-unsupported-params-seed",
-            text: "Tune unsupported image defaults here.",
+            text: "Tune unsupported image settings here.",
             createdAtMs: baseTime - 30_000
           }
         ]
@@ -871,10 +889,8 @@ test("composer image generation settings clamps unsupported saved parameters", a
     media: {
       image: {
         providerId: "openai",
-        modelId: "gpt-image-1",
-        operation: "generate",
-        adapter: "images_json",
-        parameters: {
+        logicalModelId: "gpt-image-1",
+        selections: {
           size: "2048x2048",
           quality: "ultra",
           output_format: "gif"
@@ -885,7 +901,7 @@ test("composer image generation settings clamps unsupported saved parameters", a
   });
   await daemon.install(page);
   await daemon.open(page);
-  await openSession(page, /Unsupported image parameters/);
+  await openSession(page, /Unsupported image selections/);
 
   await page.getByRole("button", { name: "Add content" }).click();
   await page.getByRole("menuitem", { name: "Image generation settings" }).click();
@@ -906,10 +922,8 @@ test("composer image generation settings clamps unsupported saved parameters", a
     media: {
       image: {
         providerId: "openai",
-        modelId: "gpt-image-1",
-        operation: "generate",
-        adapter: "images_json",
-        parameters: {
+        logicalModelId: "gpt-image-1",
+        selections: {
           size: "1024x1024",
           quality: "auto",
           output_format: "png"
@@ -936,7 +950,7 @@ test("composer video generation settings modal remains reachable without capabil
           {
             kind: "assistant_message",
             id: "video-settings-seed",
-            text: "Tune video defaults here.",
+            text: "Tune video settings here.",
             createdAtMs: baseTime - 30_000
           }
         ]
@@ -1052,10 +1066,8 @@ test("composer video generation settings renders saved single choices as read-on
       image: null,
       video: {
         providerId: "runway",
-        modelId: "gen-4",
-        operation: "generate",
-        adapter: "replicate_video",
-        parameters: {
+        logicalModelId: "gen-4",
+        selections: {
           aspect_ratio: "16:9",
           duration_seconds: "8"
         }
@@ -1080,7 +1092,7 @@ test("composer video generation settings renders saved single choices as read-on
   await expectReadOnlyField(dialog, "Provider", "Runway");
   await expectReadOnlyField(dialog, "Model", "Gen-4");
   await expectReadOnlyField(dialog, "Aspect ratio", "16:9");
-  await expectReadOnlyField(dialog, "Duration", "8s");
+  await expectReadOnlyField(dialog, "Duration", "8");
 
   await dialog.getByRole("button", { name: "Save" }).click();
   const update = await daemon.waitForRequest(
@@ -1092,10 +1104,8 @@ test("composer video generation settings renders saved single choices as read-on
       image: null,
       video: {
         providerId: "runway",
-        modelId: "gen-4",
-        operation: "generate",
-        adapter: "replicate_video",
-        parameters: {
+        logicalModelId: "gen-4",
+        selections: {
           aspect_ratio: "16:9",
           duration_seconds: "8"
         }
@@ -1172,10 +1182,8 @@ test("composer video generation settings shows multiple models for one provider"
       image: null,
       video: {
         providerId: "relaydance",
-        modelId: "doubao-seedance-2-0-1080p",
-        operation: "generate",
-        adapter: "relaydance_video",
-        parameters: {
+        logicalModelId: "doubao-seedance-2-0-1080p",
+        selections: {
           duration_seconds: "5",
           resolution: "1080p",
           aspect_ratio: "16:9"
@@ -1185,7 +1193,7 @@ test("composer video generation settings shows multiple models for one provider"
   });
 });
 
-test("composer video generation settings saves configurable video defaults", async ({ page }) => {
+test("composer video generation settings saves configurable video selections", async ({ page }) => {
   const daemon = new FakeDaemon({
     mediaCapabilities: [configurableVideoCapability()],
     sessions: [
@@ -1222,7 +1230,7 @@ test("composer video generation settings saves configurable video defaults", asy
     "list_media_capabilities",
     (request) => request.params.kind === "video"
   );
-  await expect(dialog.getByRole("combobox")).toHaveCount(2);
+  await expect(dialog.getByRole("combobox")).toHaveCount(1);
   const videoFolder = dialog.getByLabel("Video folder");
   await expect(videoFolder).toHaveValue("/tmp/puffer/.puffer/media/videos");
   await expect(videoFolder).toHaveJSProperty("readOnly", true);
@@ -1235,7 +1243,7 @@ test("composer video generation settings saves configurable video defaults", asy
   expect(openFolderButtonBox).not.toBeNull();
   expect(openFolderButtonBox!.height).toBe(videoFolderBox!.height);
   await dialog.getByLabel("Aspect ratio").selectOption("9:16");
-  await dialog.getByLabel("Duration").selectOption("12");
+  await dialog.getByLabel("Duration").fill("12");
 
   await dialog.getByRole("button", { name: "Save" }).click();
   const update = await daemon.waitForRequest(
@@ -1247,10 +1255,8 @@ test("composer video generation settings saves configurable video defaults", asy
       image: null,
       video: {
         providerId: "runway",
-        modelId: "gen-4",
-        operation: "generate",
-        adapter: "replicate_video",
-        parameters: {
+        logicalModelId: "gen-4",
+        selections: {
           aspect_ratio: "9:16",
           duration_seconds: "12"
         }
@@ -1299,7 +1305,7 @@ test("composer video generation settings saves additional provider options", asy
   await expect(dialog.getByLabel("Resolution")).toHaveValue("720p");
 
   await dialog.getByLabel("Aspect ratio").selectOption("1:1");
-  await dialog.getByLabel("Duration").selectOption("12");
+  await dialog.getByLabel("Duration").fill("12");
   await dialog.getByLabel("Resolution").selectOption("1080p");
 
   await dialog.getByRole("button", { name: "Save" }).click();
@@ -1312,10 +1318,8 @@ test("composer video generation settings saves additional provider options", asy
       image: null,
       video: {
         providerId: "byteplus",
-        modelId: "dreamina-seedance-2-0-260128",
-        operation: "generate",
-        adapter: "byteplus_video",
-        parameters: {
+        logicalModelId: "dreamina-seedance-2-0-260128",
+        selections: {
           aspect_ratio: "1:1",
           duration_seconds: "12",
           resolution: "1080p"
@@ -1354,10 +1358,8 @@ test("composer video generation settings normalizes stale provider options", asy
       image: null,
       video: {
         providerId: "byteplus",
-        modelId: "dreamina-seedance-2-0-260128",
-        operation: "generate",
-        adapter: "byteplus_video",
-        parameters: {
+        logicalModelId: "dreamina-seedance-2-0-260128",
+        selections: {
           aspect_ratio: "2:1",
           duration_seconds: "30",
           resolution: "4k",
@@ -1393,10 +1395,8 @@ test("composer video generation settings normalizes stale provider options", asy
       image: null,
       video: {
         providerId: "byteplus",
-        modelId: "dreamina-seedance-2-0-260128",
-        operation: "generate",
-        adapter: "byteplus_video",
-        parameters: {
+        logicalModelId: "dreamina-seedance-2-0-260128",
+        selections: {
           aspect_ratio: "16:9",
           duration_seconds: "5",
           resolution: "720p"
@@ -1422,7 +1422,7 @@ test("composer media generation settings marks stale saved image model invalid",
           {
             kind: "assistant_message",
             id: "stale-media-settings-seed",
-            text: "Check stale media defaults here.",
+            text: "Check stale media settings here.",
             createdAtMs: baseTime - 30_000
           }
         ]
@@ -1433,10 +1433,8 @@ test("composer media generation settings marks stale saved image model invalid",
     media: {
       image: {
         providerId: "openai",
-        modelId: "old-image-model",
-        operation: "generate",
-        adapter: "images_json",
-        parameters: {
+        logicalModelId: "old-image-model",
+        selections: {
           size: "1024x1024",
           quality: "auto",
           output_format: "png"
@@ -1458,7 +1456,7 @@ test("composer media generation settings marks stale saved image model invalid",
     dialog.locator(".pf-media-field").filter({ hasText: "Model" }).locator("select")
   ).toHaveCount(1);
   await expect(dialog.getByLabel("Model")).toHaveValue(
-    ["openai", "old-image-model", "images_json"].join("\u0000")
+    ["openai", "old-image-model"].join("\u0000")
   );
   await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
 });
@@ -2298,10 +2296,8 @@ test("video slash success appends a generated video attachment", async ({ page }
       image: null,
       video: {
         providerId: "runway",
-        modelId: "gen-4",
-        operation: "generate",
-        adapter: "replicate_video",
-        parameters: { duration_seconds: "8", aspect_ratio: "16:9" }
+        logicalModelId: "gen-4",
+        selections: { duration_seconds: "8", aspect_ratio: "16:9" }
       }
     }
   });

@@ -20,48 +20,46 @@ media:
       adapter: byteplus_video
       path: /contents/generations/tasks
     models:
-      - id: dreamina-seedance-2-0-260128
+      - id: dreamina-seedance-2-0
         display_name: Dreamina Seedance 2.0
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: duration
-            wire_type: number
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "adaptive"
-            request_field: ratio
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p", "1080p"]
-            default: "720p"
-            request_field: resolution
-      - id: dreamina-seedance-2-0-fast-260128
+        axes:
+          - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p", "1080p"], default: "720p" }, request_field: resolution }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "Auto" } }
+        media_map:
+          ratio:
+            field: ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants: { model_id: dreamina-seedance-2-0-260128 }
+      - id: dreamina-seedance-2-0-fast
         display_name: Dreamina Seedance 2.0 Fast
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: duration
-            wire_type: number
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "adaptive"
-            request_field: ratio
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p"]
-            default: "720p"
-            request_field: resolution
+        axes:
+          - { id: resolution, label: Mode, role: param, control: !enum { values: ["480p", "720p"], default: "720p" }, request_field: resolution }
+          - { id: duration, label: Duration, role: param, control: !range { min: 4.0, max: 15.0, step: 1.0, default: 5.0 }, request_field: duration, wire_type: number }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], default: "Auto" } }
+        media_map:
+          ratio:
+            field: ratio
+            values:
+              Auto: adaptive
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "1:1": "1:1"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants: { model_id: dreamina-seedance-2-0-fast-260128 }
   image:
     discovery:
       adapter: static
@@ -75,64 +73,44 @@ media:
         display_name: Seedream 5.0 Lite
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [2K]
-            default: 2K
-            request_field: size
-          - name: output_format
-            label: Output format
-            values: [png, jpeg]
-            default: jpeg
-            request_field: output_format
-          - name: response_format
-            label: Response format
-            values: [b64_json, url]
-            default: b64_json
-            request_field: response_format
-          - name: sequential_image_generation
-            label: Sequential image generation
-            values: [disabled, auto]
-            default: disabled
-            request_field: sequential_image_generation
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["2K HD"], default: "2K HD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "2K HD":
+                Auto: "2K"
+        variants: { model_id: seedream-5-0-260128, base_params: { output_format: jpeg, response_format: url, sequential_image_generation: disabled } }
       - id: seedream-4-5-251128
         display_name: Seedream 4.5
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [2K]
-            default: 2K
-            request_field: size
-          - name: response_format
-            label: Response format
-            values: [b64_json, url]
-            default: b64_json
-            request_field: response_format
-          - name: sequential_image_generation
-            label: Sequential image generation
-            values: [disabled, auto]
-            default: disabled
-            request_field: sequential_image_generation
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["2K HD"], default: "2K HD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "2K HD":
+                Auto: "2K"
+        variants: { model_id: seedream-4-5-251128, base_params: { response_format: url, sequential_image_generation: disabled } }
       - id: seedream-4-0-250828
         display_name: Seedream 4.0
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [2K]
-            default: 2K
-            request_field: size
-          - name: response_format
-            label: Response format
-            values: [b64_json, url]
-            default: b64_json
-            request_field: response_format
-          - name: sequential_image_generation
-            label: Sequential image generation
-            values: [disabled, auto]
-            default: disabled
-            request_field: sequential_image_generation
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["2K HD"], default: "2K HD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "2K HD":
+                Auto: "2K"
+        variants: { model_id: seedream-4-0-250828, base_params: { response_format: url, sequential_image_generation: disabled } }

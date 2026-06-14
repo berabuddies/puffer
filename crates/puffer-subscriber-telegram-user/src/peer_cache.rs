@@ -374,7 +374,15 @@ pub async fn hydrate_recent_dialog_peer_cache(
             .as_ref()
             .map(|message| message.date().timestamp_millis());
         cache.observe_chat_with_last_message_at_ms(chat, "recent_dialog", last_message_at_ms);
-        if matches!(chat, Chat::User(user) if !user.raw.bot) && last_message_at_ms.is_some() {
+        if matches!(
+            chat,
+            Chat::User(user)
+                if is_recent_dialog_target_user(
+                    user.id(),
+                    user.raw.bot,
+                    last_message_at_ms.is_some()
+                )
+        ) {
             direct_users_seen += 1;
         }
     }
@@ -675,6 +683,10 @@ fn username_looks_like_bot(username: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+fn is_recent_dialog_target_user(user_id: i64, is_bot: bool, has_last_message: bool) -> bool {
+    has_last_message && !is_bot && user_id != 777000
+}
+
 fn now_unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -685,8 +697,9 @@ fn now_unix_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        joined_name, merge_optional_name, phone_key, saved_contact_usernames,
-        telegram_username_from_contact_id, TelegramPeerCache, TelegramPeerRecord, CACHE_VERSION,
+        is_recent_dialog_target_user, joined_name, merge_optional_name, phone_key,
+        saved_contact_usernames, telegram_username_from_contact_id, TelegramPeerCache,
+        TelegramPeerRecord, CACHE_VERSION,
     };
     use crate::state::SkillEnv;
 
@@ -756,6 +769,14 @@ mod tests {
         assert_eq!(telegram_username_from_contact_id("telegram@12345"), None);
         assert_eq!(telegram_username_from_contact_id("telegram@bad-name"), None);
         assert_eq!(telegram_username_from_contact_id("google@alice"), None);
+    }
+
+    #[test]
+    fn recent_dialog_target_user_excludes_telegram_service_account() {
+        assert!(is_recent_dialog_target_user(123, false, true));
+        assert!(!is_recent_dialog_target_user(777000, false, true));
+        assert!(!is_recent_dialog_target_user(123, true, true));
+        assert!(!is_recent_dialog_target_user(123, false, false));
     }
 
     #[test]

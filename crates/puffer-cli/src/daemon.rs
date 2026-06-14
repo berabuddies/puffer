@@ -38,17 +38,20 @@ use puffer_config::{
     MediaGenerationConfig, ProxyConfig, ProxyEndpoint, ProxyScheme, PufferConfig,
 };
 use puffer_core::{
-    command_surface, default_effort_level, discover_exact_media_capabilities, dispatch_command,
-    enter_plan_mode, execute_connect_flow,
-    execute_user_turn_streaming_with_prompt_tools_and_cancel, generate_exact_media_with_cache,
+    command_surface, default_effort_level, dispatch_command, enter_plan_mode, execute_connect_flow,
+    execute_user_turn_streaming_with_prompt_tools_and_cancel, provider_preference_family,
+    supported_effort_levels, with_user_question_prompt_handler, AppState,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
+    BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
+    PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
+    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
+};
+use puffer_media::{
+    discover_exact_media_capabilities, generate_exact_media_with_cache,
     generated_video_access_metadata_by_artifact, list_exact_media_capabilities_with_cache,
-    provider_preference_family, read_generated_media_preview_by_artifact, supported_effort_levels,
-    with_user_question_prompt_handler, AppState, BrowserPermissionPromptActionSet,
-    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
-    ExactMediaDiscoveryCache, ExactMediaGenerationRequest, GeneratedVideoAccessMetadataResult,
-    MediaCapabilityView, MessageRole, ModelPreferenceFamily, PermissionPromptAction,
-    PermissionPromptRequest, ToolCallRequest, ToolInvocation, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    read_generated_media_preview_by_artifact, ExactMediaDiscoveryCache,
+    ExactMediaGenerationRequest, GeneratedVideoAccessMetadata, GeneratedVideoAccessMetadataResult,
+    MediaCapabilityView,
 };
 use puffer_provider_openai::{
     build_realtime_client_secret_request,
@@ -110,8 +113,8 @@ use crate::daemon_ui_state::{
 };
 use crate::desktop_api;
 use crate::desktop_api_types::{
-    ExternalCredentialDto, FolderGroupDto, McpServerDto, MediaCapabilityInfoDto,
-    MediaCapabilityParameterDto, ModelDescriptorDto, ProxyEndpointInputDto, ProxyTestResultDto,
+    ExternalCredentialDto, FolderGroupDto, McpServerDto, MediaCapabilityAxisDto,
+    MediaCapabilityInfoDto, ModelDescriptorDto, ProxyEndpointInputDto, ProxyTestResultDto,
     RepoActionResultDto, RepoStatusDto, SaveProxySettingsParams, SessionDetailDto,
     SettingsSnapshotDto, ThinkingOptionDto,
 };
@@ -134,12 +137,8 @@ pub(crate) struct Handshake {
 struct GenerateMediaParams {
     kind: String,
     prompt: String,
-    #[serde(default = "default_generate_media_count")]
-    count: u8,
-}
-
-fn default_generate_media_count() -> u8 {
-    1
+    #[serde(default)]
+    count: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -519,7 +518,7 @@ impl DaemonState {
 
     fn insert_generated_video_ticket(
         &self,
-        metadata: puffer_core::GeneratedVideoAccessMetadata,
+        metadata: GeneratedVideoAccessMetadata,
     ) -> (String, GeneratedVideoTicket) {
         let now_ms = daemon_now_ms();
         self.prune_expired_generated_video_tickets(now_ms);
@@ -2561,18 +2560,16 @@ fn media_capability_info_dto(capability: MediaCapabilityView) -> MediaCapability
         kind: capability.kind,
         operation: capability.operation,
         adapter: capability.adapter,
-        parameters: capability
-            .parameters
+        axes: capability
+            .axes
             .into_iter()
-            .map(|parameter| MediaCapabilityParameterDto {
-                name: parameter.name,
-                label: parameter.label,
-                values: parameter.values,
-                default: parameter.default,
-                request_field: parameter.request_field,
+            .map(|axis| MediaCapabilityAxisDto {
+                id: axis.id,
+                label: axis.label,
+                role: axis.role.as_str().to_string(),
+                control: serde_json::to_value(axis.control).unwrap_or(Value::Null),
             })
             .collect(),
-        defaults: capability.defaults,
         status: capability.status,
         source: capability.source,
         reason: capability.reason,
@@ -2595,7 +2592,12 @@ fn handle_generate_media(state: &DaemonState, params: &Value) -> Result<Value> {
     generate_media_job(state, &kind, prompt, count)
 }
 
-fn generate_media_job(state: &DaemonState, kind: &str, prompt: String, count: u8) -> Result<Value> {
+fn generate_media_job(
+    state: &DaemonState,
+    kind: &str,
+    prompt: String,
+    count: Option<u8>,
+) -> Result<Value> {
     let config = state.config_snapshot();
     let selection = media_selection_for_kind(config.media, kind)?;
     let inputs = state.build_runtime_inputs_without_discovery()?;
@@ -2638,28 +2640,29 @@ fn media_selection_for_kind(media: MediaConfig, kind: &str) -> Result<MediaGener
         "video" => media.video,
         _ => anyhow::bail!("unsupported media kind `{kind}`"),
     }
-    .ok_or_else(|| anyhow::anyhow!("{kind} media provider/model/adapter is not configured"))
+    .ok_or_else(|| anyhow::anyhow!("{kind} media provider/model is not configured"))
 }
 
 fn exact_media_generation_request(
     kind: &str,
     prompt: String,
-    count: u8,
+    count: Option<u8>,
     selection: MediaGenerationConfig,
 ) -> Result<ExactMediaGenerationRequest> {
-    let missing_context = format!("{kind} media provider/model/adapter is not configured");
+    let missing_context = format!("{kind} media provider/model is not configured");
+    // `model_id` carries the logical model; `parameters` carries the axis
+    // selections. The runtime resolves these into a concrete upstream model id,
+    // adapter, and request parameters.
     Ok(ExactMediaGenerationRequest {
         kind: kind.to_string(),
         provider_id: non_empty_media_field(&selection.provider_id, "provider_id")
             .context(missing_context.clone())?,
-        model_id: non_empty_media_field(&selection.model_id, "model_id")
-            .context(missing_context.clone())?,
-        operation: non_empty_media_field(&selection.operation, "operation")
-            .context(missing_context.clone())?,
-        adapter: non_empty_media_field(&selection.adapter, "adapter").context(missing_context)?,
+        model_id: non_empty_media_field(&selection.logical_model_id, "logical_model_id")
+            .context(missing_context)?,
+        operation: "generate".to_string(),
         prompt,
         image_references: Vec::new(),
-        parameters: selection.parameters,
+        parameters: selection.selections,
         count,
     })
 }
@@ -2686,7 +2689,7 @@ fn handle_read_generated_media_preview(state: &DaemonState, params: &Value) -> R
 /// `create_file_media_access` (both mint tickets for the same range handler).
 fn generated_video_ticket_response(
     state: &DaemonState,
-    metadata: puffer_core::GeneratedVideoAccessMetadata,
+    metadata: GeneratedVideoAccessMetadata,
 ) -> Value {
     let (token, ticket) = state.insert_generated_video_ticket(metadata);
     json!({
@@ -2735,7 +2738,7 @@ fn handle_create_file_media_access(state: &DaemonState, params: &Value) -> Resul
     };
     Ok(generated_video_ticket_response(
         state,
-        puffer_core::GeneratedVideoAccessMetadata {
+        GeneratedVideoAccessMetadata {
             path: canonical,
             mime_type: mime_type.to_string(),
             byte_count: metadata.len(),
@@ -5665,6 +5668,45 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
             payload: json!({"type": "turn-start", "turnId": turn_id_thread.clone()}),
         });
 
+        if crate::daemon_wechat_browser_setup::connect_args_are_wechat(&connect_args) {
+            let outcome = crate::daemon_wechat_browser_setup::execute_wechat_setup(
+                setup_state.clone(),
+                channel_thread.clone(),
+                turn_id_thread.clone(),
+                connect_args.clone(),
+                next_req_id.clone(),
+                pending_questions.clone(),
+                cancel_thread.clone(),
+            );
+            match outcome {
+                Ok(assistant_text) => {
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread.clone(),
+                            "assistantText": assistant_text,
+                        }),
+                    });
+                }
+                Err(error) => {
+                    if !(cancel_thread.is_cancelled()
+                        && cancel_reported_thread.load(Ordering::SeqCst))
+                    {
+                        publish_sessionless_turn_error_event(
+                            &setup_state,
+                            &channel_thread,
+                            &turn_id_thread,
+                            format!("{error:#}"),
+                            None,
+                        );
+                    }
+                }
+            }
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
+
         if crate::daemon_gcal_browser_setup::connect_args_are_gcal_browser(&connect_args) {
             let outcome = crate::daemon_gcal_browser_setup::execute_gcal_browser_setup(
                 setup_state.clone(),
@@ -5960,6 +6002,9 @@ fn publish_sessionless_turn_error_event(
 ///     cryptic transport-level message.
 ///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
 ///     fired. Mirrors the bail string `"cancelled"`.
+///   * `model_gateway_unavailable` — the OpenAI-compatible model endpoint
+///     was unreachable or reset the TCP connection before returning a
+///     response. The raw transport chain remains in `errorRaw`.
 ///   * `provider_stream_closed` — provider SSE closed before the OpenAI
 ///     Responses stream emitted `response.completed`.
 ///   * `other` — anything we haven't classified.
@@ -5967,6 +6012,21 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     // anyhow walks the chain via Display when you `format!("{:#}", err)`
     let chain = format!("{err:#}");
     let lower = chain.to_ascii_lowercase();
+    if lower.contains("failed to parse sse response")
+        || lower.contains("stream closed before response.completed")
+        || lower.contains("idle timeout waiting for sse")
+    {
+        return (chain, "provider_stream_closed");
+    }
+    if is_model_gateway_transport_error(&lower) {
+        return (
+            "the model gateway is temporarily unavailable or reset the connection before \
+             responding. retry in a few seconds; if it keeps failing, check the model gateway \
+             status or switch models."
+                .to_string(),
+            "model_gateway_unavailable",
+        );
+    }
     if lower.contains("tcp connect error")
         || lower.contains("connection refused")
         || lower.contains("connect: connection refused")
@@ -5982,13 +6042,22 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     if lower == "cancelled" || lower.contains(": cancelled") {
         return (chain, "cancelled");
     }
-    if lower.contains("failed to parse sse response")
-        || lower.contains("stream closed before response.completed")
-        || lower.contains("idle timeout waiting for sse")
-    {
-        return (chain, "provider_stream_closed");
-    }
     (chain, "other")
+}
+
+fn is_model_gateway_transport_error(lower: &str) -> bool {
+    let is_model_endpoint = lower.contains("/v1/responses") || lower.contains("/chat/completions");
+    if !is_model_endpoint {
+        return false;
+    }
+    lower.contains("error sending request")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("connect")
+        || lower.contains("dns")
+        || lower.contains("tls")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -6668,17 +6737,10 @@ media:
         display_name: Video Model
         operations:
           - generate
-        parameters:
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "9:16"]
-            default: "16:9"
-            request_field: aspect_ratio
-          - name: duration_seconds
-            label: Duration
-            values: ["5", "8"]
-            default: "5"
-            request_field: duration
+        axes:
+          - { id: aspect_ratio, label: Aspect ratio, role: param, control: !enum { values: ["16:9", "9:16"], default: "16:9" }, request_field: aspect_ratio }
+          - { id: duration_seconds, label: Duration, role: param, control: !enum { values: ["5", "8"], default: "5" }, request_field: duration }
+        variants: { model_id: owner/model-version }
 models: []
 "#,
         )
@@ -6708,22 +6770,11 @@ media:
         display_name: Seedance 2.0
         operations:
           - generate
-        parameters:
-          - name: duration_seconds
-            label: Duration
-            values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
-            default: "5"
-            request_field: seconds
-          - name: resolution
-            label: Resolution
-            values: ["480p", "720p", "1080p"]
-            default: "720p"
-            request_field: metadata.resolution
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
-            default: "16:9"
-            request_field: metadata.ratio
+        axes:
+          - { id: duration_seconds, label: Duration, role: param, control: !enum { values: ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"], default: "5" }, request_field: seconds }
+          - { id: resolution, label: Resolution, role: param, control: !enum { values: ["480p", "720p", "1080p"], default: "720p" }, request_field: metadata.resolution }
+          - { id: aspect_ratio, label: Aspect ratio, role: param, control: !enum { values: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"], default: "16:9" }, request_field: metadata.ratio }
+        variants: { model_id: doubao-seedance-2-0-720p }
 models: []
 "#,
         )
@@ -7135,16 +7186,30 @@ models: []
                 && capability["adapter"] == "images_json"
                 && capability["status"] == "available"
         }));
-        assert!(capabilities.iter().any(|capability| {
-            capability["parameters"]
-                .as_array()
-                .is_some_and(|parameters| {
-                    parameters.iter().any(|parameter| {
-                        parameter["name"] == "size"
-                            && parameter["requestField"] == "size"
-                            && parameter["default"] == "auto"
-                    })
-                })
+        let gpt_image = capabilities
+            .iter()
+            .find(|capability| capability["modelId"] == "gpt-image-1")
+            .expect("gpt-image-1 capability");
+        let axes = gpt_image["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "mode"
+                && axis["label"] == "Mode"
+                && axis["role"] == "param"
+                && axis["control"]["enum"]["default"] == "1K SD"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "ratio"
+                && axis["label"] == "Ratio"
+                && axis["control"]["enum"]["default"] == "Auto"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "output"
+                && axis["label"] == "Output"
+                && axis["control"]["range"]["min"] == 1.0
+                && axis["control"]["range"]["max"] == 9.0
         }));
     }
 
@@ -7202,7 +7267,7 @@ models: []
     }
 
     #[test]
-    fn media_capabilities_handler_does_not_expose_worldrouter_auto_as_image() {
+    fn media_capabilities_handler_exposes_worldrouter_image_models() {
         let _home_guard = PufferHomeEnvGuard::set();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -7224,8 +7289,28 @@ models: []
         let response =
             handle_list_media_capabilities(&state, &json!({"kind": "image"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
+        let models_by_id = capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability["modelId"].as_str().expect("model id"),
+                    capability["adapter"].as_str().expect("adapter"),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
 
-        assert!(capabilities.is_empty());
+        assert_eq!(
+            models_by_id,
+            std::collections::BTreeMap::from([
+                ("gemini-2.5-flash-image", "gemini_generate_content"),
+                ("gemini-3-pro-image-preview", "gemini_generate_content"),
+                ("gemini-3.1-flash-image-preview", "gemini_generate_content"),
+                ("gpt-image-2", "images_json"),
+            ])
+        );
+        assert!(capabilities
+            .iter()
+            .all(|capability| capability["status"] == "available"));
     }
 
     #[test]
@@ -7268,10 +7353,10 @@ models: []
         assert!(provider_ids.contains("zhipu"));
         assert!(provider_ids.contains("xai"));
         assert!(provider_ids.contains("vercel-ai-gateway"));
-        assert!(!provider_ids.contains("worldrouter"));
-        assert!(capabilities.iter().all(|capability| {
-            capability["adapter"] == "images_json" && capability["status"] == "available"
-        }));
+        assert!(provider_ids.contains("worldrouter"));
+        assert!(capabilities
+            .iter()
+            .all(|capability| capability["status"] == "available"));
     }
 
     #[test]
@@ -7282,10 +7367,30 @@ models: []
             handle_list_media_capabilities(&state, &json!({"kind": "video"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
 
-        assert!(capabilities.iter().any(|capability| {
-            capability["providerId"] == "replicate"
-                && capability["adapter"] == "replicate_video"
-                && capability["status"] == "available"
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability["providerId"] == "replicate")
+            .expect("replicate video capability");
+
+        assert_eq!(capability["adapter"], "replicate_video");
+        assert_eq!(capability["status"], "available");
+        assert!(capability.get("parameters").is_none());
+        assert!(capability.get("defaults").is_none());
+
+        let axes = capability["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "aspect_ratio"
+                && axis["label"] == "Ratio"
+                && axis["role"] == "param"
+                && axis["control"]["enum"]["default"] == "16:9"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "duration_seconds"
+                && axis["label"] == "Duration"
+                && axis["control"]["enum"]["default"] == "5"
         }));
     }
 
@@ -7297,24 +7402,37 @@ models: []
             handle_list_media_capabilities(&state, &json!({"kind": "video"})).expect("response");
         let capabilities = response["capabilities"].as_array().expect("capabilities");
 
-        assert!(capabilities.iter().any(|capability| {
-            capability["providerId"] == "relaydance"
-                && capability["adapter"] == "relaydance_video"
-                && capability["status"] == "available"
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability["providerId"] == "relaydance")
+            .expect("relaydance video capability");
+        assert!(capability.get("parameters").is_none());
+        assert!(capability.get("defaults").is_none());
+        let axes = capability["axes"].as_array().expect("axes");
+        assert!(axes
+            .iter()
+            .all(|axis| axis.get("requestField").is_none() && axis.get("wireType").is_none()));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "resolution"
+                && axis["label"] == "Mode"
+                && axis["control"]["enum"]["default"] == "720p"
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["id"] == "aspect_ratio"
+                && axis["label"] == "Ratio"
+                && axis["control"]["enum"]["default"] == "16:9"
         }));
     }
 
     #[test]
-    fn daemon_generate_media_requires_video_adapter_setting() {
+    fn daemon_generate_media_requires_available_video_model_setting() {
         let (_home_guard, _temp, state) = daemon_state_with_replicate_video_capability();
         {
             let mut config = state.config.lock().unwrap();
             config.media.video = Some(MediaGenerationConfig {
                 provider_id: "replicate".to_string(),
-                model_id: "owner/model-version".to_string(),
-                operation: "generate".to_string(),
-                adapter: "images_json".to_string(),
-                parameters: BTreeMap::from([
+                logical_model_id: "owner/unknown-model".to_string(),
+                selections: BTreeMap::from([
                     ("aspect_ratio".to_string(), "16:9".to_string()),
                     ("duration_seconds".to_string(), "5".to_string()),
                 ]),
@@ -7325,7 +7443,7 @@ models: []
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("selected video model unavailable"));
+        assert!(error.contains("unknown media model"), "{error}");
     }
 
     #[test]
@@ -7352,10 +7470,8 @@ models: []
             config.openai_base_url = Some("http://127.0.0.1:9".to_string());
             config.media.image = Some(MediaGenerationConfig {
                 provider_id: "openai".to_string(),
-                model_id: "stale-image".to_string(),
-                operation: "generate".to_string(),
-                adapter: "images_json".to_string(),
-                parameters: BTreeMap::new(),
+                logical_model_id: "stale-image".to_string(),
+                selections: BTreeMap::new(),
             });
         }
 
@@ -7363,10 +7479,7 @@ models: []
             handle_generate_media(&state, &json!({"kind": "image", "prompt": "draw an icon"}))
                 .expect_err("stale config should fail");
 
-        assert_eq!(
-            error.to_string(),
-            "selected image model unavailable: openai/stale-image via images_json"
-        );
+        assert!(error.to_string().contains("stale-image"), "{error}");
     }
 
     #[test]
@@ -7401,13 +7514,11 @@ models: []
             config.openai_base_url = Some(base_url);
             config.media.image = Some(MediaGenerationConfig {
                 provider_id: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
-                operation: "generate".to_string(),
-                adapter: "images_json".to_string(),
-                parameters: BTreeMap::from([
-                    ("size".to_string(), "1024x1024".to_string()),
-                    ("quality".to_string(), "auto".to_string()),
-                    ("output_format".to_string(), "png".to_string()),
+                logical_model_id: "gpt-image-1".to_string(),
+                selections: BTreeMap::from([
+                    ("mode".to_string(), "1K SD".to_string()),
+                    ("ratio".to_string(), "1:1".to_string()),
+                    ("output".to_string(), "1".to_string()),
                 ]),
             });
         }
@@ -7927,10 +8038,8 @@ models: []
             let mut config = state.config.lock().unwrap();
             config.media.image = Some(MediaGenerationConfig {
                 provider_id: "openrouter".to_string(),
-                model_id: "openrouter/image-chat".to_string(),
-                operation: "generate".to_string(),
-                adapter: "chat_image_output".to_string(),
-                parameters: BTreeMap::new(),
+                logical_model_id: "openrouter/image-chat".to_string(),
+                selections: BTreeMap::new(),
             });
         }
         let listed =
@@ -7987,13 +8096,11 @@ models: []
                 "media": {
                     "image": {
                         "providerId": "openai",
-                        "modelId": "gpt-image-1",
-                        "operation": "generate",
-                        "adapter": "images_json",
-                        "parameters": {
-                            "size": "1536x1024",
-                            "quality": "high",
-                            "output_format": "webp"
+                        "logicalModelId": "gpt-image-1",
+                        "selections": {
+                            "mode": "1K SD",
+                            "ratio": "3:2",
+                            "output": "2"
                         }
                     },
                     "video": null
@@ -8007,13 +8114,11 @@ models: []
             json!({
                 "image": {
                     "providerId": "openai",
-                    "modelId": "gpt-image-1",
-                    "operation": "generate",
-                    "adapter": "images_json",
-                    "parameters": {
-                        "size": "1536x1024",
-                        "quality": "high",
-                        "output_format": "webp"
+                    "logicalModelId": "gpt-image-1",
+                    "selections": {
+                        "mode": "1K SD",
+                        "ratio": "3:2",
+                        "output": "2"
                     }
                 },
                 "video": null
@@ -9605,6 +9710,44 @@ models: []
         let (msg, cat) = classify_turn_error(&err);
         assert_eq!(cat, "other");
         assert!(msg.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn classify_turn_error_distinguishes_model_gateway_transport_reset() {
+        use super::classify_turn_error;
+
+        let err = anyhow::anyhow!(
+            "error sending request for url \
+             (https://infer-api-test-46cc90.worldrouter.ai/v1/responses): \
+             client error (Connect): Connection reset by peer (os error 54)"
+        )
+        .context("request to https://infer-api-test-46cc90.worldrouter.ai/v1/responses failed");
+
+        let (msg, cat) = classify_turn_error(&err);
+
+        assert_eq!(cat, "model_gateway_unavailable", "{msg}");
+        assert!(msg.contains("model gateway"), "{msg}");
+        assert!(msg.contains("retry"), "{msg}");
+        assert!(!msg.contains("infer-api-test-46cc90"), "{msg}");
+        assert!(!msg.contains("os error 54"), "{msg}");
+
+        let err = anyhow::anyhow!("tcp connect error: Connection refused")
+            .context("request to https://infer-api-test-46cc90.worldrouter.ai/v1/responses failed");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "model_gateway_unavailable", "{msg}");
+    }
+
+    #[test]
+    fn classify_turn_error_keeps_sse_idle_timeout_as_stream_closed() {
+        use super::classify_turn_error;
+
+        let err = anyhow::anyhow!("idle timeout waiting for sse")
+            .context("failed to parse SSE response from https://example.test/v1/responses");
+
+        let (msg, cat) = classify_turn_error(&err);
+
+        assert_eq!(cat, "provider_stream_closed", "{msg}");
+        assert!(msg.contains("idle timeout waiting for sse"), "{msg}");
     }
 
     #[test]

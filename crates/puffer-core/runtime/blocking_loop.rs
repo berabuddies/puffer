@@ -14,6 +14,7 @@ use super::openai::conversation::{
     ToolOutputPayload,
 };
 use super::reflection::{ReflectionTraceEvent, ReflectionTracker};
+use super::skill_obligation::{NoToolDecision, SkillActionObligation};
 use super::tool_batch::execute_tool_batch;
 use super::{run_turn_hooks, ToolInvocation, TurnExecution};
 
@@ -30,6 +31,7 @@ pub(crate) fn run_blocking_loop(
     session.pre_loop_inject(&mut items);
 
     let mut invocations: Vec<ToolInvocation> = Vec::new();
+    let mut obligation = SkillActionObligation::default();
     let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
     // Carries the most recent assistant text across iterations so the
     // `max_turns` break path can return whatever reasoning the model
@@ -147,13 +149,14 @@ pub(crate) fn run_blocking_loop(
         if let Some(max_turns) = inputs.max_turns {
             if turn_index >= max_turns {
                 agent_span.set_str("puffer.subagent.max_turns_reached", "true");
+                let assistant_text = obligation.fail_if_pending().unwrap_or(last_assistant_text);
                 agent_span.set_content(
                     puffer_observability::LANGFUSE_TRACE_OUTPUT,
                     puffer_observability::ContentKind::Output,
-                    &last_assistant_text,
+                    &assistant_text,
                 );
                 return Ok(TurnExecution {
-                    assistant_text: last_assistant_text,
+                    assistant_text,
                     tool_invocations: invocations,
                     reflection_traces,
                 });
@@ -241,19 +244,23 @@ pub(crate) fn run_blocking_loop(
         }
 
         if turn.tool_calls.is_empty() {
-            run_turn_hooks(
-                inputs.resources,
-                &cwd,
-                &turn.assistant_text,
-                invocations.len(),
-            );
+            let assistant_text = match obligation.no_tool_decision() {
+                NoToolDecision::Complete => turn.assistant_text,
+                NoToolDecision::ContinueWithReminder(reminder) => {
+                    items.extend(turn.pre_tool_items);
+                    items.push(ConversationItem::user_message(reminder));
+                    continue;
+                }
+                NoToolDecision::FailNotStarted(message) => message,
+            };
+            run_turn_hooks(inputs.resources, &cwd, &assistant_text, invocations.len());
             agent_span.set_content(
                 puffer_observability::LANGFUSE_TRACE_OUTPUT,
                 puffer_observability::ContentKind::Output,
-                &turn.assistant_text,
+                &assistant_text,
             );
             return Ok(TurnExecution {
-                assistant_text: turn.assistant_text,
+                assistant_text,
                 tool_invocations: invocations,
                 reflection_traces,
             });
@@ -275,6 +282,7 @@ pub(crate) fn run_blocking_loop(
                 return Err(error);
             }
         };
+        obligation.observe_invocations(inputs.resources, &new_invocations);
 
         for inv in &new_invocations {
             items.push(ConversationItem::FunctionCallOutput {
@@ -368,5 +376,289 @@ pub(crate) fn run_blocking_loop(
             post_compaction_span.set_str("puffer.compaction.skipped", "true");
         }
         post_compaction_span.end();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::agent_loop::AssistantTurn;
+    use crate::runtime::openai::conversation::ConversationItem;
+    use crate::runtime::tool_executor::ToolExecutionBackend;
+    use crate::runtime::{ToolCallRequest, TurnStreamEvent};
+    use crate::AppState;
+    use puffer_config::PufferConfig;
+    use puffer_provider_openai::{OpenAIAuth, OpenAIRequestConfig};
+    use puffer_provider_registry::{AuthMode, AuthStore, ProviderDescriptor, ProviderRegistry};
+    use puffer_resources::{
+        LoadedItem, LoadedResources, SkillSpec, SourceInfo, SourceKind, ToolSpec,
+    };
+    use puffer_session_store::SessionMetadata;
+    use puffer_tools::ToolRegistry;
+    use serde_json::json;
+    use std::collections::{HashSet, VecDeque};
+    use uuid::Uuid;
+
+    struct FakeBlockingSession {
+        turns: VecDeque<AssistantTurn>,
+        request_config: OpenAIRequestConfig,
+    }
+
+    impl TurnSession for FakeBlockingSession {
+        fn one_turn_streaming(
+            &mut self,
+            _state: &mut AppState,
+            _auth_store: &mut AuthStore,
+            _items: &mut Vec<ConversationItem>,
+            _on_event: &mut dyn FnMut(TurnStreamEvent),
+        ) -> Result<AssistantTurn> {
+            unreachable!("blocking test should call one_turn_blocking")
+        }
+
+        fn one_turn_blocking(
+            &mut self,
+            _state: &mut AppState,
+            _auth_store: &mut AuthStore,
+            _items: &mut Vec<ConversationItem>,
+        ) -> Result<AssistantTurn> {
+            Ok(self.turns.pop_front().expect("scripted blocking turn"))
+        }
+
+        fn generate_summary(&self, _old_context: &str, _model_id: &str) -> Option<String> {
+            None
+        }
+
+        fn tool_execution_backend(&self) -> ToolExecutionBackend<'_> {
+            ToolExecutionBackend::OpenAi {
+                request_config: &self.request_config,
+                structured_output: None,
+            }
+        }
+    }
+
+    fn assistant_turn(assistant_text: &str) -> AssistantTurn {
+        AssistantTurn {
+            pre_tool_items: vec![ConversationItem::assistant_message(assistant_text)],
+            tool_calls: Vec::new(),
+            assistant_text: assistant_text.to_string(),
+            input_tokens_hint: None,
+            emitted_tool_call_ids: HashSet::new(),
+            usage_report: None,
+        }
+    }
+
+    fn tool_turn(tool_id: &str, call_id: &str, input: String) -> AssistantTurn {
+        AssistantTurn {
+            pre_tool_items: vec![ConversationItem::FunctionCall {
+                call_id: call_id.to_string(),
+                name: tool_id.to_string(),
+                arguments: input.clone(),
+            }],
+            tool_calls: vec![ToolCallRequest {
+                call_id: call_id.to_string(),
+                tool_id: tool_id.to_string(),
+                input,
+            }],
+            assistant_text: String::new(),
+            input_tokens_hint: None,
+            emitted_tool_call_ids: HashSet::new(),
+            usage_report: None,
+        }
+    }
+
+    fn loaded_tool(id: &str, description: &str, handler: &str) -> LoadedItem<ToolSpec> {
+        LoadedItem {
+            value: ToolSpec {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: description.to_string(),
+                handler: handler.to_string(),
+                ..ToolSpec::default()
+            },
+            source_info: SourceInfo {
+                path: format!("{id}.yaml").into(),
+                kind: SourceKind::Builtin,
+            },
+        }
+    }
+
+    fn loaded_skill(name: &str, requires_action: bool) -> LoadedItem<SkillSpec> {
+        LoadedItem {
+            value: SkillSpec {
+                name: name.to_string(),
+                description: format!("{name} description"),
+                content: format!("{name} body"),
+                requires_action,
+                ..SkillSpec::default()
+            },
+            source_info: SourceInfo {
+                path: format!("skills/{name}/SKILL.md").into(),
+                kind: SourceKind::Builtin,
+            },
+        }
+    }
+
+    fn provider() -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: "openai".to_string(),
+            display_name: "OpenAI".to_string(),
+            base_url: "http://127.0.0.1".to_string(),
+            default_api: "openai-responses".to_string(),
+            auth_modes: vec![AuthMode::ApiKey],
+            headers: Default::default(),
+            query_params: Default::default(),
+            discovery: None,
+            media: None,
+            models: vec![puffer_provider_registry::ModelDescriptor {
+                id: "gpt-5".to_string(),
+                display_name: "GPT-5".to_string(),
+                provider: "openai".to_string(),
+                api: "openai-responses".to_string(),
+                context_window: 272_000,
+                max_output_tokens: 16_384,
+                supports_reasoning: true,
+                compat: None,
+                input: vec![puffer_provider_registry::Modality::Text],
+                cost: None,
+            }],
+            chat_completions_path: None,
+        }
+    }
+
+    fn request_config() -> OpenAIRequestConfig {
+        OpenAIRequestConfig {
+            base_url: "http://127.0.0.1".to_string(),
+            version: "test".to_string(),
+            auth: OpenAIAuth::None,
+            originator: "puffer-test".to_string(),
+            session_id: None,
+            account_id: None,
+            custom_headers: Vec::new(),
+            query_params: Vec::new(),
+            chat_completions_path: None,
+            responses_path: None,
+        }
+    }
+
+    fn run_scripted_blocking_loop(
+        cwd: &std::path::Path,
+        resources: &LoadedResources,
+        turns: Vec<AssistantTurn>,
+        max_turns: Option<u32>,
+    ) -> TurnExecution {
+        let registry = ToolRegistry::from_resources(resources);
+        let provider = provider();
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider.clone());
+        let mut auth_store = AuthStore::default();
+        let mut state = AppState::new(PufferConfig::default(), cwd.to_path_buf(), session_for(cwd));
+        state.current_provider = Some("openai".to_string());
+        state.current_model = Some("openai/gpt-5".to_string());
+        state.grant_all_tools_for_session();
+        let mut session = FakeBlockingSession {
+            turns: VecDeque::from(turns),
+            request_config: request_config(),
+        };
+        let mut inputs = LoopInputs {
+            state: &mut state,
+            resources,
+            providers: &providers,
+            provider: &provider,
+            model_id: "gpt-5",
+            auth_store: &mut auth_store,
+            input: "make a short drama",
+            reflection_config: None,
+            tool_filter: None,
+            registry: &registry,
+            cancel: None,
+            max_turns,
+            observability: None,
+        };
+
+        run_blocking_loop(&mut inputs, &mut session).unwrap()
+    }
+
+    fn session_for(cwd: &std::path::Path) -> SessionMetadata {
+        SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: cwd.to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn blocking_loop_skill_action_obligation_reminds_then_accepts_tool() {
+        let temp = tempfile::tempdir().unwrap();
+        let write_path = temp.path().join("started.txt");
+        let resources = LoadedResources {
+            tools: vec![
+                loaded_tool("Skill", "Load a skill", "runtime:skill"),
+                loaded_tool("Write", "Write file", "runtime:claude_write"),
+            ],
+            skills: vec![loaded_skill("short-drama-generation", true)],
+            ..LoadedResources::default()
+        };
+
+        let write_input =
+            json!({"file_path": write_path.display().to_string(), "content": "started"})
+                .to_string();
+        let turn = run_scripted_blocking_loop(
+            temp.path(),
+            &resources,
+            vec![
+                tool_turn(
+                    "Skill",
+                    "call_skill",
+                    r#"{"skill":"short-drama-generation"}"#.to_string(),
+                ),
+                assistant_turn("I'll start..."),
+                tool_turn("Write", "call_write", write_input),
+                assistant_turn("done"),
+            ],
+            Some(6),
+        );
+
+        assert_eq!(turn.assistant_text, "done");
+        assert!(turn
+            .tool_invocations
+            .iter()
+            .any(|invocation| invocation.tool_id == "Write" && invocation.success));
+        assert_eq!(
+            std::fs::read_to_string(write_path).unwrap(),
+            "started",
+            "Write should satisfy the action obligation by starting tool work"
+        );
+    }
+
+    #[test]
+    fn blocking_loop_skill_action_obligation_fails_when_turn_budget_expires() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = LoadedResources {
+            tools: vec![loaded_tool("Skill", "Load a skill", "runtime:skill")],
+            skills: vec![loaded_skill("short-drama-generation", true)],
+            ..LoadedResources::default()
+        };
+
+        let turn = run_scripted_blocking_loop(
+            temp.path(),
+            &resources,
+            vec![tool_turn(
+                "Skill",
+                "call_skill",
+                r#"{"skill":"short-drama-generation"}"#.to_string(),
+            )],
+            Some(1),
+        );
+
+        assert!(turn.assistant_text.contains("No work was started"));
+        assert_eq!(turn.tool_invocations.len(), 1);
+        assert_eq!(turn.tool_invocations[0].tool_id, "Skill");
     }
 }

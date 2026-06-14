@@ -19,11 +19,6 @@
 //! OpenAI Responses + Chat Completions paths.
 
 use super::*;
-use std::io::{ErrorKind, Read, Write};
-use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
 
 /// RAII helper that restores an env var on drop. Use under
 /// `refresh_env_lock()` so concurrent tests don't race the value.
@@ -63,51 +58,6 @@ fn session_for(cwd: &std::path::Path) -> SessionMetadata {
         note: None,
     }
 }
-/// Scripted HTTP server: serves `expected_requests` mock responses,
-/// recording each raw request body so tests can assert on wire shape.
-fn spawn_server<F>(
-    content_type: &'static str,
-    expected_requests: usize,
-    response_body: F,
-) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>)
-where
-    F: Fn(usize) -> String + Send + 'static,
-{
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let request_log = Arc::clone(&requests);
-    let server = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut handled = 0_usize;
-        while handled < expected_requests && Instant::now() < deadline {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream.set_nonblocking(false).unwrap();
-                    let mut buffer = vec![0_u8; 65_536];
-                    let bytes = stream.read(&mut buffer).unwrap();
-                    let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
-                    request_log.lock().unwrap().push(request);
-                    let body = response_body(handled);
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    stream.write_all(response.as_bytes()).unwrap();
-                    handled += 1;
-                }
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => panic!("listener accept failed: {error}"),
-            }
-        }
-    });
-    (format!("http://{address}"), requests, server)
-}
-
 fn extract_request_body(raw: &str) -> &str {
     raw.split_once("\r\n\r\n")
         .map(|(_, body)| body)

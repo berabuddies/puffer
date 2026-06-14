@@ -19,17 +19,22 @@ media:
         display_name: Image 01
         operations:
           - generate
-        parameters:
-          - name: aspect_ratio
-            label: Aspect ratio
-            values: ["1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"]
-            default: "1:1"
-            request_field: aspect_ratio
-          - name: response_format
-            label: Response format
-            values: [url, base64]
-            default: base64
-            request_field: response_format
+        max_outputs: 9
+        axes:
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"], default: "1:1" } }
+        media_map:
+          ratio:
+            field: aspect_ratio
+            values:
+              "1:1": "1:1"
+              "16:9": "16:9"
+              "4:3": "4:3"
+              "3:2": "3:2"
+              "2:3": "2:3"
+              "3:4": "3:4"
+              "9:16": "9:16"
+              "21:9": "21:9"
+        variants: { model_id: image-01, base_params: { response_format: base64 } }
 models:
   - id: MiniMax-M2.7
     display_name: MiniMax-M2.7

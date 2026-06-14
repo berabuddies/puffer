@@ -116,7 +116,7 @@ pub(crate) fn execute_tool(
             let internal_media_discovery_cache = state
                 .exact_media_discovery_cache
                 .clone()
-                .unwrap_or_else(crate::ExactMediaDiscoveryCache::empty);
+                .unwrap_or_else(puffer_media::ExactMediaDiscoveryCache::empty);
             let session_id = state.session.id;
             let process_store = state.process_store.clone();
             let mut internal_permission_handler = |request| match request {
@@ -310,7 +310,7 @@ pub(crate) fn execute_tool(
             let workflow_media_discovery_cache = state
                 .exact_media_discovery_cache
                 .clone()
-                .unwrap_or_else(crate::ExactMediaDiscoveryCache::empty);
+                .unwrap_or_else(puffer_media::ExactMediaDiscoveryCache::empty);
             let stdout = execute_workflow_tool_with_media_context(
                 state,
                 resources,

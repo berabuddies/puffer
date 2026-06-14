@@ -13,6 +13,7 @@ anyhow.workspace = true
 tracing.workspace = true
 clap.workspace = true
 indexmap.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -24,6 +25,7 @@ url = "2.5.7"
 puffer-config = { path = "../puffer-config" }
 puffer-core = { path = "../puffer-core" }
 puffer-logging = { path = "../puffer-logging" }
+puffer-media = { path = "../puffer-media" }
 puffer-mcp-oauth = { path = "../puffer-mcp-oauth" }
 puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }

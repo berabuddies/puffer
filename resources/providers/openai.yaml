@@ -26,102 +26,93 @@ media:
         display_name: GPT Image 2
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [auto, 1024x1024, 1024x1536, 1536x1024, 2048x2048, 2048x1152, 2560x1440, 3840x2160, 2160x3840]
-            default: auto
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [auto, low, medium, high]
-            default: auto
-            request_field: quality
-          - name: output_format
-            label: Output format
-            values: [png, jpeg, webp]
-            default: png
-            request_field: output_format
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD", "2K HD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "1:1"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                Auto: auto
+                "1:1": "1024x1024"
+              "2K HD":
+                Auto: auto
+                "1:1": "2048x2048"
+        variants: { model_id: gpt-image-2, base_params: { quality: auto, output_format: png } }
       - id: gpt-image-1.5
         display_name: GPT Image 1.5
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [auto, 1024x1024, 1024x1536, 1536x1024]
-            default: auto
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [auto, low, medium, high]
-            default: auto
-            request_field: quality
-          - name: output_format
-            label: Output format
-            values: [png, jpeg, webp]
-            default: png
-            request_field: output_format
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "1:1", "2:3", "3:2"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                Auto: auto
+                "1:1": "1024x1024"
+                "2:3": "1024x1536"
+                "3:2": "1536x1024"
+        variants: { model_id: gpt-image-1.5, base_params: { quality: auto, output_format: png } }
       - id: chatgpt-image-latest
         display_name: ChatGPT Image Latest
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [auto, 1024x1024, 1024x1536, 1536x1024]
-            default: auto
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [auto, low, medium, high]
-            default: auto
-            request_field: quality
-          - name: output_format
-            label: Output format
-            values: [png, jpeg, webp]
-            default: png
-            request_field: output_format
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "1:1", "2:3", "3:2"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                Auto: auto
+                "1:1": "1024x1024"
+                "2:3": "1024x1536"
+                "3:2": "1536x1024"
+        variants: { model_id: chatgpt-image-latest, base_params: { quality: auto, output_format: png } }
       - id: gpt-image-1
         display_name: GPT Image 1
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [auto, 1024x1024, 1024x1536, 1536x1024]
-            default: auto
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [auto, low, medium, high]
-            default: auto
-            request_field: quality
-          - name: output_format
-            label: Output format
-            values: [png, jpeg, webp]
-            default: png
-            request_field: output_format
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "1:1", "2:3", "3:2"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                Auto: auto
+                "1:1": "1024x1024"
+                "2:3": "1024x1536"
+                "3:2": "1536x1024"
+        variants: { model_id: gpt-image-1, base_params: { quality: auto, output_format: png } }
       - id: gpt-image-1-mini
         display_name: GPT Image 1 Mini
         operations:
           - generate
-        parameters:
-          - name: size
-            label: Size
-            values: [auto, 1024x1024, 1024x1536, 1536x1024]
-            default: auto
-            request_field: size
-          - name: quality
-            label: Quality
-            values: [auto, low, medium, high]
-            default: auto
-            request_field: quality
-          - name: output_format
-            label: Output format
-            values: [png, jpeg, webp]
-            default: png
-            request_field: output_format
+        max_outputs: 9
+        axes:
+          - { id: mode, label: Mode, role: param, control: !enum { values: ["1K SD"], default: "1K SD" } }
+          - { id: ratio, label: Ratio, role: param, control: !enum { values: ["Auto", "1:1", "2:3", "3:2"], default: "Auto" } }
+        media_map:
+          size:
+            field: size
+            values:
+              "1K SD":
+                Auto: auto
+                "1:1": "1024x1024"
+                "2:3": "1024x1536"
+                "3:2": "1536x1024"
+        variants: { model_id: gpt-image-1-mini, base_params: { quality: auto, output_format: png } }
 models:
   - id: gpt-5.5
     display_name: GPT-5.5

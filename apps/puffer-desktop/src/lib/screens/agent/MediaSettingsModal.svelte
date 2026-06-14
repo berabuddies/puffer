@@ -8,9 +8,16 @@
     availableMediaCapabilities,
     mediaCapabilityConnectStateMessage
   } from "./mediaCapabilityState";
+  import {
+    axisControlKind,
+    axisDefaultValue,
+    axisOptions,
+    capabilityAxesError,
+    normalizeAxisSelections,
+    selectionIsValid
+  } from "./mediaAxisControls";
   import type {
     MediaCapabilityInfo,
-    MediaCapabilityParameterInfo,
     MediaGenerationSettings,
     MediaKind,
     MediaSettings,
@@ -29,19 +36,12 @@
   let { kind, sessionCwd, settings, settingsReady = true, onSaved, onClose }: Props = $props();
   const IMAGE_OUTPUT_DIR_RELATIVE = ".puffer/media/images";
   const VIDEO_OUTPUT_DIR_RELATIVE = ".puffer/media/videos";
-  const VIDEO_ASPECT_RATIO_PARAMETER_NAME = "aspect_ratio";
-  const VIDEO_DURATION_PARAMETER_NAME = "duration_seconds";
-  const VIDEO_PRIMARY_PARAMETER_NAMES = new Set([
-    VIDEO_ASPECT_RATIO_PARAMETER_NAME,
-    VIDEO_DURATION_PARAMETER_NAME
-  ]);
   const initialSaved = untrack(() => mediaSettingsForKind(kind, settings));
-  const initialParameters = untrack(() => initialSaved?.parameters ?? {});
+  const initialSelections = untrack(() => initialSaved?.selections ?? {});
 
   const title = $derived(mediaSettingsTitle(kind));
   const saveLabel = "Save";
   const closeLabel = $derived(`Close ${title.toLowerCase()}`);
-  const saved = $derived(mediaSettingsForKind(kind, settings));
   const imageDir = $derived(imageDirForSessionCwd(sessionCwd));
   const videoDir = $derived(videoDirForSessionCwd(sessionCwd));
 
@@ -51,11 +51,8 @@
   let error = $state<string | null>(null);
   let openError = $state<string | null>(null);
   let providerId = $state(initialSaved?.providerId ?? "");
-  let modelId = $state(initialSaved?.modelId ?? "");
-  let adapter = $state(initialSaved?.adapter ?? "");
-  let parameters = $state<Record<string, string>>({ ...initialParameters });
-  let aspectRatio = $state(videoAspectRatioFromParameters(initialParameters));
-  let durationSeconds = $state(videoDurationFromParameters(initialParameters));
+  let logicalModelId = $state(initialSaved?.logicalModelId ?? "");
+  let selections = $state<Record<string, string>>({ ...initialSelections });
   let appliedSettingsKey = $state(untrack(() => mediaSettingsKey(kind, settings)));
 
   let availableCapabilities = $derived(availableMediaCapabilities(capabilities, kind));
@@ -77,21 +74,9 @@
     availableCapabilities.filter((capability) => capability.providerId === providerId)
   );
   let selectedCapability = $derived(currentMatchingCapability());
-  let aspectRatioParameter = $derived(
-    findCapabilityParameter(selectedCapability, VIDEO_ASPECT_RATIO_PARAMETER_NAME)
+  let selectedCapabilityError = $derived(
+    selectedCapability ? capabilityAxesError(selectedCapability.axes) : null
   );
-  let durationParameter = $derived(
-    findCapabilityParameter(selectedCapability, VIDEO_DURATION_PARAMETER_NAME)
-  );
-  let aspectRatioOptions = $derived(videoStringOptions(aspectRatioParameter, aspectRatio));
-  let durationOptions = $derived(videoDurationOptions(durationParameter, durationSeconds));
-  let extraVideoParameters = $derived(
-    kind === "video" && selectedCapability
-      ? selectedCapability.parameters.filter((parameter) => !isPrimaryVideoParameter(parameter))
-      : []
-  );
-  let aspectRatioLabel = $derived(aspectRatioParameter?.label ?? "Aspect ratio");
-  let durationFieldLabel = $derived(durationParameter?.label ?? "Duration");
   let mediaContentReady = $derived(settingsReady && !loading);
   let hasAvailableCapabilities = $derived(availableCapabilities.length > 0);
   let savedSelectionMissing = $derived(
@@ -99,7 +84,9 @@
       savedSelectionIsConfigured(kind, settings) &&
       !savedSelectionIsAvailable(kind, settings, availableCapabilities)
   );
-  let canSave = $derived(Boolean(settingsReady && selectedCapability && !loading && !saving));
+  let canSave = $derived(
+    Boolean(settingsReady && selectedCapability && !selectedCapabilityError && !loading && !saving)
+  );
 
   function mediaSettingsTitle(mediaKind: MediaKind): string {
     return mediaKind === "image" ? "Image generation settings" : "Video generation settings";
@@ -115,31 +102,26 @@
     return [
       mediaKind,
       image?.providerId ?? "",
-      image?.modelId ?? "",
-      image?.adapter ?? "",
-      serializeParameters(image?.parameters ?? {}),
+      image?.logicalModelId ?? "",
+      serializeSelections(image?.selections ?? {}),
       video?.providerId ?? "",
-      video?.modelId ?? "",
-      video?.adapter ?? "",
-      serializeParameters(video?.parameters ?? {})
+      video?.logicalModelId ?? "",
+      serializeSelections(video?.selections ?? {})
     ].join("\u0000");
   }
 
   function applySettings(mediaSettings: MediaSettings) {
     const current = mediaSettingsForKind(kind, mediaSettings);
     providerId = current?.providerId ?? "";
-    modelId = current?.modelId ?? "";
-    adapter = current?.adapter ?? "";
-    parameters = { ...(current?.parameters ?? {}) };
-    aspectRatio = videoAspectRatioFromParameters(current?.parameters ?? {});
-    durationSeconds = videoDurationFromParameters(current?.parameters ?? {});
+    logicalModelId = current?.logicalModelId ?? "";
+    selections = { ...(current?.selections ?? {}) };
   }
 
   function chooseDefaultCapability() {
     if (availableCapabilities.length === 0) return;
     const savedCapability = currentMatchingCapability();
     if (savedCapability) {
-      applyVideoParameterState(savedCapability, parameters);
+      selections = normalizeAxisSelections(savedCapability.axes, selections);
       return;
     }
     if (savedSelectionIsConfigured(kind, settings)) return;
@@ -153,9 +135,8 @@
       selectCapability(first);
     } else {
       providerId = value;
-      modelId = "";
-      adapter = "";
-      parameters = {};
+      logicalModelId = "";
+      selections = {};
     }
   }
 
@@ -166,33 +147,22 @@
 
   function selectCapability(capability: MediaCapabilityInfo) {
     providerId = capability.providerId;
-    modelId = capability.modelId;
-    adapter = capability.adapter;
-    if (capability.kind === "image") {
-      parameters = { ...capability.defaults };
-    } else {
-      parameters = normalizeAuxiliaryVideoParameters(capability, capability.defaults);
-      aspectRatio = videoAspectRatioForCapability(capability, capability.defaults, aspectRatio);
-      durationSeconds = videoDurationForCapability(
-        capability,
-        capability.defaults,
-        durationSeconds
-      );
-    }
+    logicalModelId = capability.modelId;
+    selections = normalizeAxisSelections(capability.axes, selections);
   }
 
   function capabilityKey(capability: MediaCapabilityInfo): string {
-    return [capability.providerId, capability.modelId, capability.adapter].join("\u0000");
+    return [capability.providerId, capability.modelId].join("\u0000");
   }
 
   function currentCapabilityKey(): string {
-    return modelId ? [providerId, modelId, adapter].join("\u0000") : "";
+    return logicalModelId ? [providerId, logicalModelId].join("\u0000") : "";
   }
 
   function currentMatchingCapability(): MediaCapabilityInfo | null {
     return (
       availableCapabilities.find((capability) =>
-        capabilityMatchesIdentity(capability, kind, providerId, modelId, adapter)
+        capabilityMatchesIdentity(capability, kind, providerId, logicalModelId)
       ) ?? null
     );
   }
@@ -201,14 +171,14 @@
     capability: MediaCapabilityInfo,
     mediaKind: MediaKind,
     selectedProviderId: string | null | undefined,
-    selectedModelId: string | null | undefined,
-    selectedAdapter: string | null | undefined
+    selectedLogicalModelId: string | null | undefined
   ): boolean {
-    if (!selectedProviderId || !selectedModelId) return false;
-    if (capability.providerId !== selectedProviderId || capability.modelId !== selectedModelId) {
-      return false;
-    }
-    return capability.adapter === selectedAdapter;
+    if (!selectedProviderId || !selectedLogicalModelId) return false;
+    return (
+      capability.kind === mediaKind &&
+      capability.providerId === selectedProviderId &&
+      capability.modelId === selectedLogicalModelId
+    );
   }
 
   function providerSelectionIsUnavailable(): boolean {
@@ -217,9 +187,9 @@
 
   function modelSelectionIsUnavailable(): boolean {
     return Boolean(
-      modelId &&
+      logicalModelId &&
         !modelOptions.some((capability) =>
-          capabilityMatchesIdentity(capability, kind, providerId, modelId, adapter)
+          capabilityMatchesIdentity(capability, kind, providerId, logicalModelId)
         )
     );
   }
@@ -242,23 +212,7 @@
 
   function readOnlyModelLabel(): string {
     const capability = selectedCapability ?? modelOptions[0] ?? null;
-    return capability ? modelLabel(capability) : modelId;
-  }
-
-  function shouldRenderParameterSelect(parameter: MediaCapabilityParameterInfo): boolean {
-    return parameter.values.length > 1;
-  }
-
-  function shouldRenderAspectRatioSelect(): boolean {
-    return aspectRatioOptions.length !== 1;
-  }
-
-  function shouldRenderDurationSelect(): boolean {
-    return durationOptions.length !== 1;
-  }
-
-  function formatDurationLabel(value: number): string {
-    return `${value}s`;
+    return capability ? modelLabel(capability) : logicalModelId;
   }
 
   function mediaCapabilitiesLoadingPrimary(mediaKind: MediaKind): string {
@@ -272,169 +226,35 @@
   }
 
   function modelLabel(capability: MediaCapabilityInfo): string {
-    const label = capability.modelDisplayName || capability.modelId;
-    return modelOptions.filter((candidate) => candidate.modelId === capability.modelId).length > 1
-      ? `${label} (${capability.adapter})`
-      : label;
+    return capability.modelDisplayName || capability.modelId;
   }
 
-  function parameterValue(parameter: MediaCapabilityParameterInfo): string {
-    return parameterValueFromParameter(parameters, parameter) ?? parameter.default;
+  function axisValue(axisId: string): string {
+    return selections[axisId] ?? "";
   }
 
-  function setParameterValue(name: string, value: string) {
-    parameters = { ...parameters, [name]: value };
+  function setAxisValue(axisId: string, value: string) {
+    selections = { ...selections, [axisId]: value };
   }
 
-  function findCapabilityParameter(
-    capability: MediaCapabilityInfo | null,
-    name: string
-  ): MediaCapabilityParameterInfo | null {
-    if (!capability || capability.kind !== "video") return null;
-    return capability.parameters.find((parameter) => parameter.name === name) ?? null;
+  function axisReadOnlyValue(axisId: string): string {
+    return selections[axisId] ?? "";
   }
 
-  function isPrimaryVideoParameter(parameter: MediaCapabilityParameterInfo): boolean {
-    return VIDEO_PRIMARY_PARAMETER_NAMES.has(parameter.name);
-  }
-
-  function parameterValueFromParameter(
-    value: Record<string, string>,
-    parameter: MediaCapabilityParameterInfo
-  ): string | null {
-    const direct = value[parameter.name];
-    if (direct !== undefined) return direct;
+  function rangeControl(axis: MediaCapabilityInfo["axes"][number]) {
+    if ("range" in axis.control) return axis.control.range;
     return null;
   }
 
-  function videoStringOptions(
-    parameter: MediaCapabilityParameterInfo | null,
-    currentValue: string
-  ): string[] {
-    const values =
-      parameter?.values.filter((value) => value.trim().length > 0) ??
-      [];
-    if (values.length > 0) return uniqueStrings(values);
-    if (parameter?.default) return [parameter.default];
-    return currentValue ? [currentValue] : [];
+  function boolChecked(axisId: string): boolean {
+    return selections[axisId] === "true";
   }
 
-  function videoDurationOptions(
-    parameter: MediaCapabilityParameterInfo | null,
-    currentValue: number
-  ): number[] {
-    const rawValues =
-      parameter && parameter.values.length > 0
-        ? parameter.values
-        : parameter?.default
-          ? [parameter.default]
-          : [];
-    const values = rawValues
-      .map(parseDurationSeconds)
-      .filter((value): value is number => value !== null);
-    if (values.length > 0) return uniqueNumbers(values);
-    return Number.isFinite(currentValue) ? [currentValue] : [];
+  function boolLabel(axisId: string): string {
+    return boolChecked(axisId) ? "Enabled" : "Disabled";
   }
 
-  function uniqueStrings(values: string[]): string[] {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const value of values) {
-      if (seen.has(value)) continue;
-      seen.add(value);
-      out.push(value);
-    }
-    return out;
-  }
-
-  function uniqueNumbers(values: number[]): number[] {
-    const seen = new Set<number>();
-    const out: number[] = [];
-    for (const value of values) {
-      if (seen.has(value)) continue;
-      seen.add(value);
-      out.push(value);
-    }
-    return out;
-  }
-
-  function parseDurationSeconds(value: string): number | null {
-    const numeric = Number(value.trim().replace(/s$/i, ""));
-    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
-  }
-
-  function videoAspectRatioForCapability(
-    capability: MediaCapabilityInfo,
-    current: Record<string, string>,
-    currentValue: string
-  ): string {
-    const parameter = findCapabilityParameter(capability, VIDEO_ASPECT_RATIO_PARAMETER_NAME);
-    const selectedValue = parameter
-      ? parameterValueFromParameter(current, parameter)
-      : (current[VIDEO_ASPECT_RATIO_PARAMETER_NAME] ?? null);
-    const options = videoStringOptions(parameter, currentValue);
-    if (selectedValue && options.includes(selectedValue)) return selectedValue;
-    const defaultValue = parameter?.default ?? "";
-    if (defaultValue && options.includes(defaultValue)) return defaultValue;
-    return options[0] ?? currentValue;
-  }
-
-  function videoDurationForCapability(
-    capability: MediaCapabilityInfo,
-    current: Record<string, string>,
-    currentValue: number
-  ): number {
-    const parameter = findCapabilityParameter(capability, VIDEO_DURATION_PARAMETER_NAME);
-    const selectedValue = parameter
-      ? parameterValueFromParameter(current, parameter)
-      : (current[VIDEO_DURATION_PARAMETER_NAME] ?? null);
-    const options = videoDurationOptions(parameter, currentValue);
-    const selectedDuration = selectedValue ? parseDurationSeconds(selectedValue) : null;
-    if (selectedDuration !== null && options.includes(selectedDuration)) return selectedDuration;
-    const defaultValue = parameter?.default ? parseDurationSeconds(parameter.default) : null;
-    if (defaultValue !== null && options.includes(defaultValue)) return defaultValue;
-    return options[0] ?? currentValue;
-  }
-
-  function normalizeVideoAspectRatio(value: string): string {
-    return aspectRatioOptions.includes(value) ? value : aspectRatioOptions[0] ?? value;
-  }
-
-  function normalizeVideoDurationSeconds(value: number): number {
-    return durationOptions.includes(value) ? value : durationOptions[0] ?? value;
-  }
-
-  function normalizeParameters(
-    capability: MediaCapabilityInfo,
-    current: Record<string, string>
-  ): Record<string, string> {
-    const next: Record<string, string> = {};
-    for (const parameter of capability.parameters) {
-      const currentValue = current[parameter.name];
-      next[parameter.name] = parameter.values.includes(currentValue)
-        ? currentValue
-        : parameter.default;
-    }
-    return next;
-  }
-
-  function normalizeAuxiliaryVideoParameters(
-    capability: MediaCapabilityInfo,
-    current: Record<string, string>
-  ): Record<string, string> {
-    const next: Record<string, string> = {};
-    for (const parameter of capability.parameters) {
-      if (isPrimaryVideoParameter(parameter)) continue;
-      const currentValue = parameterValueFromParameter(current, parameter);
-      next[parameter.name] =
-        currentValue !== null && parameter.values.includes(currentValue)
-          ? currentValue
-          : parameter.default;
-    }
-    return next;
-  }
-
-  function serializeParameters(value: Record<string, string>): string {
+  function serializeSelections(value: Record<string, string>): string {
     return Object.entries(value)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, val]) => `${key}=${val}`)
@@ -467,73 +287,27 @@
     mediaSettings: MediaSettings,
     available: MediaCapabilityInfo[]
   ): boolean {
-    if (mediaKind === "image") {
-      const image = mediaSettings.image;
-      if (!image) return false;
-      return available.some((capability) =>
-        capabilityMatchesIdentity(
-          capability,
-          mediaKind,
-          image.providerId,
-          image.modelId,
-          image.adapter
-        )
-      );
-    }
-    const video = mediaSettings.video;
-    if (!video) return false;
+    const current = mediaSettingsForKind(mediaKind, mediaSettings);
+    if (!current) return false;
     return available.some((capability) =>
       capabilityMatchesIdentity(
         capability,
         mediaKind,
-        video.providerId,
-        video.modelId,
-        video.adapter
+        current.providerId,
+        current.logicalModelId
       )
     );
   }
 
   function withCurrentSelection(): MediaGenerationSettings {
-    const currentParameters =
-      kind === "video" ? videoParametersFromCurrent() : { ...parameters };
-    const normalizedParameters = selectedCapability
-      ? normalizeParameters(selectedCapability, currentParameters)
-      : currentParameters;
+    const normalizedSelections = selectedCapability
+      ? normalizeAxisSelections(selectedCapability.axes, selections)
+      : selections;
     return {
       providerId,
-      modelId,
-      operation: "generate",
-      adapter,
-      parameters: normalizedParameters
+      logicalModelId,
+      selections: normalizedSelections
     };
-  }
-
-  function videoParametersFromCurrent(): Record<string, string> {
-    const next = { ...parameters };
-    const aspectName = aspectRatioParameter?.name ?? VIDEO_ASPECT_RATIO_PARAMETER_NAME;
-    const durationName = durationParameter?.name ?? VIDEO_DURATION_PARAMETER_NAME;
-    next[aspectName] = normalizeVideoAspectRatio(aspectRatio);
-    next[durationName] = String(normalizeVideoDurationSeconds(durationSeconds));
-    return next;
-  }
-
-  function videoAspectRatioFromParameters(value: Record<string, string>): string {
-    return value[VIDEO_ASPECT_RATIO_PARAMETER_NAME] ?? "16:9";
-  }
-
-  function videoDurationFromParameters(value: Record<string, string>): number {
-    const duration = value[VIDEO_DURATION_PARAMETER_NAME] ?? "5";
-    return parseDurationSeconds(duration) ?? 5;
-  }
-
-  function applyVideoParameterState(
-    capability: MediaCapabilityInfo,
-    current: Record<string, string>
-  ) {
-    if (kind !== "video" || capability.kind !== "video") return;
-    parameters = normalizeAuxiliaryVideoParameters(capability, current);
-    aspectRatio = videoAspectRatioForCapability(capability, current, aspectRatio);
-    durationSeconds = videoDurationForCapability(capability, current, durationSeconds);
   }
 
   async function save() {
@@ -612,26 +386,10 @@
   });
 
   $effect(() => {
-    if (kind !== "image" || !selectedCapability) return;
-    const next = normalizeParameters(selectedCapability, parameters);
-    if (serializeParameters(next) !== serializeParameters(parameters)) {
-      parameters = next;
-    }
-  });
-
-  $effect(() => {
-    if (kind !== "video" || !selectedCapability) return;
-    const nextAspectRatio = normalizeVideoAspectRatio(aspectRatio);
-    const nextDurationSeconds = normalizeVideoDurationSeconds(durationSeconds);
-    const nextParameters = normalizeAuxiliaryVideoParameters(selectedCapability, parameters);
-    if (nextAspectRatio !== aspectRatio) {
-      aspectRatio = nextAspectRatio;
-    }
-    if (nextDurationSeconds !== durationSeconds) {
-      durationSeconds = nextDurationSeconds;
-    }
-    if (serializeParameters(nextParameters) !== serializeParameters(parameters)) {
-      parameters = nextParameters;
+    if (!selectedCapability || selectedCapabilityError) return;
+    const next = normalizeAxisSelections(selectedCapability.axes, selections);
+    if (serializeSelections(next) !== serializeSelections(selections)) {
+      selections = next;
     }
   });
 </script>
@@ -732,7 +490,7 @@
                 onchange={(event) => handleCapabilityChange(event.currentTarget.value)}
               >
                 {#if modelSelectionIsUnavailable()}
-                  <option value={currentCapabilityKey()} disabled>{modelId} unavailable</option>
+                  <option value={currentCapabilityKey()} disabled>{logicalModelId} unavailable</option>
                 {/if}
                 {#each modelOptions as capability}
                   <option value={capabilityKey(capability)}>{modelLabel(capability)}</option>
@@ -743,27 +501,70 @@
             {@render readOnlyField("Model", readOnlyModelLabel())}
           {/if}
 
-          {#if kind === "image"}
-            {#if selectedCapability}
-              {#each selectedCapability.parameters as parameter (parameter.name)}
-                {#if shouldRenderParameterSelect(parameter)}
+          {#if selectedCapabilityError}
+            <p class="pf-media-state" data-warning="true" role="alert">{selectedCapabilityError}</p>
+          {:else if selectedCapability}
+            {#each selectedCapability.axes as axis (axis.id)}
+              {@const controlKind = axisControlKind(axis)}
+              {#if controlKind === "enum" && axisOptions(axis).length > 1}
+                <label class="pf-media-field">
+                  <span class="pf-field-label">{axis.label}</span>
+                  <select
+                    class="sc-input"
+                    value={axisValue(axis.id)}
+                    onchange={(event) => setAxisValue(axis.id, event.currentTarget.value)}
+                  >
+                    {#each axisOptions(axis) as option}
+                      <option value={option}>{option}</option>
+                    {/each}
+                  </select>
+                </label>
+              {:else if controlKind === "enum"}
+                {@render readOnlyField(axis.label, axisReadOnlyValue(axis.id) || axisDefaultValue(axis) || "")}
+              {:else if controlKind === "range"}
+                {@const range = rangeControl(axis)}
+                {#if range}
                   <label class="pf-media-field">
-                    <span class="pf-field-label">{parameter.label}</span>
-                    <select
+                    <span class="pf-field-label">{axis.label}</span>
+                    <input
                       class="sc-input"
-                      value={parameterValue(parameter)}
-                      onchange={(event) => setParameterValue(parameter.name, event.currentTarget.value)}
-                    >
-                      {#each parameter.values as option}
-                        <option value={option}>{option}</option>
-                      {/each}
-                    </select>
+                      type="number"
+                      min={range.min}
+                      max={range.max}
+                      step={range.step || "any"}
+                      value={axisValue(axis.id)}
+                      onchange={(event) => {
+                        const value = event.currentTarget.value;
+                        setAxisValue(axis.id, selectionIsValid(axis, value) ? value : axisDefaultValue(axis) || "");
+                      }}
+                    />
                   </label>
                 {:else}
-                  {@render readOnlyField(parameter.label, parameterValue(parameter))}
+                  <p class="pf-media-state" data-warning="true" role="alert">
+                    Capability axis {axis.id || "(missing id)"} is malformed.
+                  </p>
                 {/if}
-              {/each}
-            {/if}
+              {:else if controlKind === "bool"}
+                <label class="pf-media-field pf-media-checkbox-field">
+                  <span class="pf-field-label">{axis.label}</span>
+                  <label class="pf-media-checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={boolChecked(axis.id)}
+                      onchange={(event) => setAxisValue(axis.id, event.currentTarget.checked ? "true" : "false")}
+                    />
+                    <span>{boolLabel(axis.id)}</span>
+                  </label>
+                </label>
+              {:else}
+                <p class="pf-media-state" data-warning="true" role="alert">
+                  Capability axis {axis.id || "(missing id)"} is malformed.
+                </p>
+              {/if}
+            {/each}
+          {/if}
+
+          {#if kind === "image"}
             {#if imageDir}
               <div class="pf-media-field">
                 <span id="pf-image-folder-label" class="pf-field-label">Image folder</span>
@@ -790,59 +591,6 @@
               {/if}
             {/if}
           {:else}
-            {#if shouldRenderAspectRatioSelect()}
-              <label class="pf-media-field">
-                <span class="pf-field-label">{aspectRatioLabel}</span>
-                <select
-                  class="sc-input"
-                  value={aspectRatio}
-                  onchange={(event) => (aspectRatio = event.currentTarget.value)}
-                >
-                  {#each aspectRatioOptions as option}
-                    <option value={option}>{option}</option>
-                  {/each}
-                </select>
-              </label>
-            {:else}
-              {@render readOnlyField(aspectRatioLabel, aspectRatio)}
-            {/if}
-            {#if shouldRenderDurationSelect()}
-              <label class="pf-media-field">
-                <span class="pf-field-label">{durationFieldLabel}</span>
-                <select
-                  class="sc-input"
-                  value={String(durationSeconds)}
-                  onchange={(event) => {
-                    const next = parseDurationSeconds(event.currentTarget.value);
-                    if (next !== null) durationSeconds = next;
-                  }}
-                >
-                  {#each durationOptions as option}
-                    <option value={String(option)}>{formatDurationLabel(option)}</option>
-                  {/each}
-                </select>
-              </label>
-            {:else}
-              {@render readOnlyField(durationFieldLabel, formatDurationLabel(durationSeconds))}
-            {/if}
-            {#each extraVideoParameters as parameter (parameter.name)}
-              {#if shouldRenderParameterSelect(parameter)}
-                <label class="pf-media-field">
-                  <span class="pf-field-label">{parameter.label}</span>
-                  <select
-                    class="sc-input"
-                    value={parameterValue(parameter)}
-                    onchange={(event) => setParameterValue(parameter.name, event.currentTarget.value)}
-                  >
-                    {#each parameter.values as option}
-                      <option value={option}>{option}</option>
-                    {/each}
-                  </select>
-                </label>
-              {:else}
-                {@render readOnlyField(parameter.label, parameterValue(parameter))}
-              {/if}
-            {/each}
             {#if videoDir}
               <div class="pf-media-field">
                 <span id="pf-video-folder-label" class="pf-field-label">Video folder</span>
@@ -1045,6 +793,19 @@
     min-width: 0;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .pf-media-checkbox-field {
+    gap: 8px;
+  }
+
+  .pf-media-checkbox-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    font-size: 13px;
+    color: var(--foreground);
   }
 
   .pf-field-label {

@@ -12,7 +12,8 @@ use crate::daemon::{DaemonState, ServerEnvelope};
 use super::dom_inspect::dom_inspect_expression;
 use super::params::{optional_u32, required_string, required_string_array};
 use super::ref_resolution::{
-    fill_expression, focus_expression, scroll_into_view_expression, select_expression,
+    fill_expression, focus_expression, hosted_fill_focus_check_expression,
+    hosted_fill_point_expression, scroll_into_view_expression, select_expression,
     set_checkable_state_expression, target_point_expression, upload_input_handle_expression,
 };
 use super::screenshot::{parse_agent_screenshot_options, BrowserElementRef};
@@ -282,8 +283,7 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             let target = required_string(params, "ref")?;
             let text = required_string(params, "text")?;
-            state.browsers.agent_fill(&backend_id, &target, &text)?;
-            Ok(json!({ "ok": true }))
+            state.browsers.agent_fill(&backend_id, &target, &text)
         }
         "select" => {
             let (_, backend_id) =
@@ -494,16 +494,39 @@ impl BrowserRegistry {
     }
 
     /// Fills an input-like element ref from the last agent snapshot.
+    ///
+    /// Editable controls in the top document are filled directly. When the
+    /// ref resolves to a hosted payment field — a cross-origin iframe (e.g.
+    /// Shopify/Stripe PCI card fields) whose real `<input>` the top document
+    /// cannot reach — the fill switches to trusted input: focus the frame
+    /// with a real mouse click, select existing content with a triple
+    /// click, and commit the text through `Input.insertText`, which the
+    /// browser routes to the focused frame.
     pub(crate) fn agent_fill(
         &self,
         backend_session_id: &str,
         ref_id: &str,
         text: &str,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(fill_expression(&target, text)?)?;
-        Ok(())
+        let session = self.get(backend_session_id)?;
+        let outcome = session.evaluate(fill_expression(&target, text)?)?.value;
+        let hosted = outcome
+            .get("hostedFrameFill")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !hosted {
+            return Ok(json!({ "ok": true }));
+        }
+        let x = outcome
+            .get("x")
+            .and_then(Value::as_f64)
+            .context("hosted frame fill point missing x")?;
+        let y = outcome
+            .get("y")
+            .and_then(Value::as_f64)
+            .context("hosted frame fill point missing y")?;
+        hosted_frame_fill(&session, x, y, text)
     }
 
     /// Selects one option in a native `<select>` ref from the last agent snapshot.
@@ -556,25 +579,29 @@ impl BrowserRegistry {
 
     /// Holds one keyboard key down in the target browser tab.
     pub(crate) fn agent_key_down(&self, backend_session_id: &str, key: &str) -> Result<()> {
-        let code = key_code(key);
+        let combo = parse_key_combo(key);
+        let code = key_code(&combo.key);
         self.get(backend_session_id)?.input(BrowserInputEvent::Key {
             event_type: "rawKeyDown".to_string(),
-            key: key.to_string(),
+            key: combo.key.clone(),
             code,
-            text: key_text(key),
-            modifiers: 0,
+            text: key_text(&combo.key).filter(|_| combo.modifiers == 0),
+            modifiers: combo.modifiers,
+            commands: combo.commands,
         })
     }
 
     /// Releases one keyboard key in the target browser tab.
     pub(crate) fn agent_key_up(&self, backend_session_id: &str, key: &str) -> Result<()> {
-        let code = key_code(key);
+        let combo = parse_key_combo(key);
+        let code = key_code(&combo.key);
         self.get(backend_session_id)?.input(BrowserInputEvent::Key {
             event_type: "keyUp".to_string(),
-            key: key.to_string(),
+            key: combo.key,
             code,
             text: None,
-            modifiers: 0,
+            modifiers: combo.modifiers,
+            commands: Vec::new(),
         })
     }
 
@@ -637,6 +664,81 @@ impl BrowserRegistry {
         }
         Ok((x, y))
     }
+}
+
+/// Completes a fill that targets a hosted (cross-origin) field iframe.
+///
+/// The value cannot be read back from the top document, so this path is
+/// strict about the one thing it can verify: focus must actually land inside
+/// the target frame before any text is sent, otherwise the keystrokes would
+/// leak into whatever element holds focus (#580-class silent misfill).
+fn hosted_frame_fill(session: &BrowserSession, x: f64, y: f64, text: &str) -> Result<Value> {
+    // Right after the probe's scrollIntoView the browser-side hit test can
+    // lag the new layout by a frame, routing a correctly-placed click to the
+    // parent document instead of the iframe. Give the compositor a beat,
+    // then retry the whole click with refreshed coordinates if focus does
+    // not arrive.
+    let mut focused = false;
+    let mut point = (x, y);
+    for attempt in 0..4 {
+        if attempt > 0 {
+            let refreshed = session
+                .evaluate(hosted_fill_point_expression().to_string())?
+                .value;
+            if let (Some(x), Some(y)) = (
+                refreshed.get("x").and_then(Value::as_f64),
+                refreshed.get("y").and_then(Value::as_f64),
+            ) {
+                point = (x, y);
+            }
+        }
+        thread::sleep(Duration::from_millis(80));
+        dispatch_agent_mouse_click(session, point.0, point.1, 1)?;
+        for _ in 0..6 {
+            thread::sleep(Duration::from_millis(50));
+            let check = session
+                .evaluate(hosted_fill_focus_check_expression().to_string())?
+                .value;
+            if check
+                .get("focused")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                focused = true;
+                break;
+            }
+        }
+        if focused {
+            break;
+        }
+    }
+    if !focused {
+        let (x, y) = point;
+        bail!(
+            "fill failed: clicking the hosted field iframe at ({x:.0}, {y:.0}) did not move focus \
+             into the frame; the field may be covered by an overlay or still loading. \
+             No text was sent."
+        );
+    }
+    // Clear any prior content by selecting it with a triple click — the
+    // standard select-all gesture for single-line fields. Mouse events are
+    // routed by browser-side hit testing into the frame, and `insertText`
+    // then replaces the live selection in the focused frame. No synthetic
+    // keyboard events: key dispatch can stall the CT Chromium input pipeline
+    // (observed as a key-event storm wedging CDP), and platform select-all
+    // shortcuts never reach cross-origin frames anyway.
+    dispatch_agent_mouse_click(session, point.0, point.1, 2)?;
+    dispatch_agent_mouse_click(session, point.0, point.1, 3)?;
+    session.input(BrowserInputEvent::Text {
+        text: text.to_string(),
+    })?;
+    Ok(json!({
+        "ok": true,
+        "mode": "hostedFrame",
+        "note": "Typed into a hosted (cross-origin) field iframe after verifying focus. \
+                 The frame's value cannot be read back from the top document; confirm via \
+                 the page's own field validation (e.g. error labels) in the next snapshot."
+    }))
 }
 
 fn dispatch_agent_mouse_click(
@@ -837,6 +939,81 @@ fn network_idle_duration(params: &Value) -> Duration {
 /// Returns the text payload for one synthesized key event when applicable.
 pub(super) fn key_text(key: &str) -> Option<String> {
     (key.len() == 1).then(|| key.to_string())
+}
+
+/// A parsed `Modifier+Key` combo for press/keydown/keyup actions.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct KeyCombo {
+    pub(super) key: String,
+    pub(super) modifiers: u32,
+    pub(super) commands: Vec<String>,
+}
+
+/// Parses agent key strings like `Meta+A`, `Ctrl+Shift+Z`, or plain `Enter`
+/// into a CDP key plus modifier mask. Editing shortcuts that depend on
+/// platform-level translation (macOS `Cmd+A`) are mapped to explicit CDP
+/// editing `commands` so they work in any focused frame, including
+/// cross-origin payment iframes.
+pub(super) fn parse_key_combo(raw: &str) -> KeyCombo {
+    let mut modifiers = 0u32;
+    let mut key = raw.to_string();
+    if raw.len() > 1 && raw.contains('+') {
+        let parts: Vec<&str> = raw.split('+').collect();
+        let mut parsed_modifiers = 0u32;
+        let mut consumed = 0usize;
+        while consumed < parts.len() - 1 {
+            match modifier_mask(parts[consumed]) {
+                Some(mask) => {
+                    parsed_modifiers |= mask;
+                    consumed += 1;
+                }
+                None => break,
+            }
+        }
+        if consumed > 0 {
+            // The unconsumed tail is the key; `Meta++` leaves ["", ""],
+            // which joins back into the literal `+` key.
+            let tail = parts[consumed..].join("+");
+            modifiers = parsed_modifiers;
+            key = if tail.is_empty() {
+                "+".to_string()
+            } else {
+                tail
+            };
+        }
+    }
+    let commands = editing_commands(&key, modifiers);
+    KeyCombo {
+        key,
+        modifiers,
+        commands,
+    }
+}
+
+fn modifier_mask(name: &str) -> Option<u32> {
+    match name.to_ascii_lowercase().as_str() {
+        "alt" | "option" | "opt" => Some(1),
+        "control" | "ctrl" => Some(2),
+        "meta" | "cmd" | "command" | "super" | "win" => Some(4),
+        "shift" => Some(8),
+        _ => None,
+    }
+}
+
+/// Maps primary-modifier editing shortcuts to CDP editing commands. CDP key
+/// events are injected below the platform shortcut layer, so on macOS
+/// `Cmd+A` never reaches the renderer as select-all unless the command is
+/// attached explicitly.
+fn editing_commands(key: &str, modifiers: u32) -> Vec<String> {
+    let primary = modifiers & (2 | 4) != 0;
+    let extra = modifiers & !(2 | 4);
+    if !primary || extra != 0 {
+        return Vec::new();
+    }
+    match key.to_ascii_lowercase().as_str() {
+        "a" => vec!["selectAll".to_string()],
+        _ => Vec::new(),
+    }
 }
 
 /// Converts one named scroll direction into wheel deltas.

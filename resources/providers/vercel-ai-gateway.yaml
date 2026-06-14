@@ -33,6 +33,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-2-flex }
       - id: bfl/flux-2-klein-4b
         display_name: FLUX 2 Klein 4B
         execution:
@@ -42,6 +43,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-2-klein-4b }
       - id: bfl/flux-2-klein-9b
         display_name: FLUX 2 Klein 9B
         execution:
@@ -51,6 +53,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-2-klein-9b }
       - id: bfl/flux-2-max
         display_name: FLUX 2 Max
         execution:
@@ -60,6 +63,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-2-max }
       - id: bfl/flux-2-pro
         display_name: FLUX 2 Pro
         execution:
@@ -69,6 +73,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-2-pro }
       - id: bfl/flux-kontext-max
         display_name: FLUX Kontext Max
         execution:
@@ -78,6 +83,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-kontext-max }
       - id: bfl/flux-kontext-pro
         display_name: FLUX Kontext Pro
         execution:
@@ -87,6 +93,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-kontext-pro }
       - id: bfl/flux-pro-1.0-fill
         display_name: FLUX Fill Pro 1.0
         execution:
@@ -96,6 +103,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-pro-1.0-fill }
       - id: bfl/flux-pro-1.1
         display_name: FLUX Pro 1.1
         execution:
@@ -105,6 +113,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-pro-1.1 }
       - id: bfl/flux-pro-1.1-ultra
         display_name: FLUX Pro 1.1 Ultra
         execution:
@@ -114,6 +123,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bfl/flux-pro-1.1-ultra }
       - id: bytedance/seedream-4.0
         display_name: Seedream 4.0
         execution:
@@ -123,6 +133,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bytedance/seedream-4.0 }
       - id: bytedance/seedream-4.5
         display_name: Seedream 4.5
         execution:
@@ -132,6 +143,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bytedance/seedream-4.5 }
       - id: bytedance/seedream-5.0-lite
         display_name: Seedream 5.0 Lite
         execution:
@@ -141,6 +153,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: bytedance/seedream-5.0-lite }
       - id: google/imagen-4.0-fast-generate-001
         display_name: Google Imagen 4.0 Fast Generate
         execution:
@@ -150,6 +163,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: google/imagen-4.0-fast-generate-001 }
       - id: google/imagen-4.0-generate-001
         display_name: Google Imagen 4.0 Generate
         execution:
@@ -159,6 +173,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: google/imagen-4.0-generate-001 }
       - id: google/imagen-4.0-ultra-generate-001
         display_name: Google Imagen 4.0 Ultra Generate
         execution:
@@ -168,6 +183,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: google/imagen-4.0-ultra-generate-001 }
       - id: openai/gpt-image-2
         display_name: OpenAI GPT Image 2
         execution:
@@ -177,6 +193,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: openai/gpt-image-2 }
       - id: openai/gpt-image-1
         display_name: OpenAI GPT Image 1
         execution:
@@ -186,6 +203,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: openai/gpt-image-1 }
       - id: openai/gpt-image-1-mini
         display_name: OpenAI GPT Image 1 Mini
         execution:
@@ -195,6 +213,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: openai/gpt-image-1-mini }
       - id: openai/gpt-image-1.5
         display_name: OpenAI GPT Image 1.5
         execution:
@@ -204,6 +223,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: openai/gpt-image-1.5 }
       - id: prodia/flux-fast-schnell
         display_name: Prodia Flux Schnell
         execution:
@@ -213,6 +233,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: prodia/flux-fast-schnell }
       - id: recraft/recraft-v2
         display_name: Recraft V2
         execution:
@@ -222,6 +243,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v2 }
       - id: recraft/recraft-v3
         display_name: Recraft V3
         execution:
@@ -231,6 +253,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v3 }
       - id: recraft/recraft-v4
         display_name: Recraft V4
         execution:
@@ -240,6 +263,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v4 }
       - id: recraft/recraft-v4-pro
         display_name: Recraft V4 Pro
         execution:
@@ -249,6 +273,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v4-pro }
       - id: recraft/recraft-v4.1
         display_name: Recraft V4.1
         execution:
@@ -258,6 +283,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v4.1 }
       - id: recraft/recraft-v4.1-pro
         display_name: Recraft V4.1 Pro
         execution:
@@ -267,6 +293,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v4.1-pro }
       - id: recraft/recraft-v4.1-utility
         display_name: Recraft V4.1 Utility
         execution:
@@ -276,6 +303,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v4.1-utility }
       - id: recraft/recraft-v4.1-utility-pro
         display_name: Recraft V4.1 Utility Pro
         execution:
@@ -285,6 +313,7 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: recraft/recraft-v4.1-utility-pro }
       - id: xai/grok-imagine-image
         display_name: Grok Imagine Image
         execution:
@@ -294,7 +323,37 @@ media:
             mode: per_image
         operations:
           - generate
+        variants: { model_id: xai/grok-imagine-image }
 models:
+  # Anthropic
+  - id: anthropic/claude-fable-5
+    display_name: Claude Fable 5
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 128000
+    supports_reasoning: true
+  - id: anthropic/claude-opus-4.8
+    display_name: Claude Opus 4.8
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 128000
+    supports_reasoning: true
+  - id: anthropic/claude-opus-4.7
+    display_name: Claude Opus 4.7
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 128000
+    supports_reasoning: true
+  - id: anthropic/claude-opus-4.6
+    display_name: Claude Opus 4.6
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 128000
+    supports_reasoning: true
   - id: anthropic/claude-opus-4.5
     display_name: Claude Opus 4.5
     provider: vercel-ai-gateway
@@ -302,10 +361,89 @@ models:
     context_window: 200000
     max_output_tokens: 64000
     supports_reasoning: true
+  - id: anthropic/claude-sonnet-4.6
+    display_name: Claude Sonnet 4.6
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 128000
+    supports_reasoning: true
+  - id: anthropic/claude-sonnet-4.5
+    display_name: Claude Sonnet 4.5
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 64000
+    supports_reasoning: true
+  - id: anthropic/claude-haiku-4.5
+    display_name: Claude Haiku 4.5
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 64000
+    supports_reasoning: true
+  # Google
+  - id: google/gemini-2.5-pro
+    display_name: Gemini 2.5 Pro
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1048576
+    max_output_tokens: 65536
+    supports_reasoning: true
   - id: google/gemini-2.5-flash
     display_name: Gemini 2.5 Flash
     provider: vercel-ai-gateway
     api: openai-completions
     context_window: 1000000
     max_output_tokens: 65536
+    supports_reasoning: true
+  - id: google/gemini-3-flash
+    display_name: Gemini 3 Flash
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 65000
+    supports_reasoning: true
+  - id: google/gemini-3.1-flash-lite
+    display_name: Gemini 3.1 Flash Lite
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 65000
+    supports_reasoning: true
+  - id: google/gemini-3.5-flash
+    display_name: Gemini 3.5 Flash
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1000000
+    max_output_tokens: 64000
+    supports_reasoning: true
+  # OpenAI
+  - id: openai/gpt-4.1
+    display_name: GPT-4.1
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 1047576
+    max_output_tokens: 32768
+    supports_reasoning: false
+  - id: openai/gpt-5
+    display_name: GPT-5
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 400000
+    max_output_tokens: 128000
+    supports_reasoning: true
+  - id: openai/o3
+    display_name: OpenAI o3
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 100000
+    supports_reasoning: true
+  - id: openai/o4-mini
+    display_name: OpenAI o4 Mini
+    provider: vercel-ai-gateway
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 100000
     supports_reasoning: true
