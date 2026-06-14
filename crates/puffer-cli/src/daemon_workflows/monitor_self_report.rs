@@ -28,9 +28,8 @@ use serde_json::{json, Map, Value};
 
 use super::handle_monitor_task_complete;
 use super::monitor_completion_phrases;
+use super::monitor_task_complete::COMPLETED_VIA_SELF_REPORT;
 use super::monitor_task_ignore::monitor_tasks_path;
-
-const COMPLETED_VIA_SELF_REPORT: &str = "self_report";
 
 /// Built-in multilingual phrases that frequently signal a user just finished a
 /// task. These are only *hints* handed to the LLM, never a hard gate: the model
@@ -73,6 +72,11 @@ struct OpenTask {
     /// Owning monitor connection slug, used to look up per-monitor completion
     /// phrases. `None` for legacy tasks without connection metadata.
     connection: Option<String>,
+    /// Numeric Telegram message id of the message that originally spawned this
+    /// task (written daemon-side, #630). Lets a self-report that *replies to*
+    /// that exact message complete this task deterministically. `None` for
+    /// legacy tasks created before source-message capture.
+    source_message_id: Option<i64>,
 }
 
 /// Decides which (if any) open monitor task the user's outgoing message just
@@ -90,6 +94,7 @@ trait CompletionJudge {
         model: Option<&str>,
         tasks: &[OpenTask],
         message: &str,
+        quote: Option<&str>,
         hints: &[String],
     ) -> Option<String>;
 }
@@ -124,17 +129,41 @@ fn process_self_report(paths: &ConfigPaths, envelope: &EventEnvelope, judge: &dy
     if open_tasks.is_empty() {
         return;
     }
+    // If the user *replied to* a specific Telegram message, prefer a
+    // deterministic match: a reply whose target is a task's originating message
+    // completes that task directly, spending zero LLM tokens. Any highlighted
+    // quote text is otherwise handed to the judge as strong disambiguation
+    // context (the common case where 14 generic tasks share one chat).
+    let reply = extract_reply(&envelope.event.payload);
+    if let Some(reply_msg_id) = reply.as_ref().and_then(|reply| reply.message_id) {
+        if let Some(task) = open_tasks
+            .iter()
+            .find(|task| task.source_message_id == Some(reply_msg_id))
+        {
+            complete_task(paths, &task.task_id);
+            return;
+        }
+    }
+    let quote = reply.as_ref().and_then(|reply| reply.quote_text.as_deref());
+
     let hints = completion_hints(paths, &open_tasks);
     // Use whatever model the user configured for this monitor; falls back to the
     // runtime default when the monitor has no explicit model.
     let model = monitor_model_for_open_tasks(&open_tasks);
-    let Some(task_id) = judge.judge(model.as_deref(), &open_tasks, message, &hints) else {
+    let Some(task_id) = judge.judge(model.as_deref(), &open_tasks, message, quote, &hints) else {
         return;
     };
     if !open_tasks.iter().any(|task| task.task_id == task_id) {
         // The judge must only complete a task it was shown; ignore stray ids.
         return;
     }
+    complete_task(paths, &task_id);
+}
+
+/// Flips a monitor task to `completed` via the deterministic daemon writeback,
+/// recording that it was completed by self-report (which bypasses the
+/// human-approval gate the reply-writeback path enforces).
+fn complete_task(paths: &ConfigPaths, task_id: &str) {
     let _ = handle_monitor_task_complete(
         paths,
         &json!({
@@ -226,7 +255,24 @@ fn open_task_from_value(task: &Value) -> Option<OpenTask> {
         subject: task_string(task, &["subject"]).unwrap_or_default(),
         description: task_string(task, &["description"]).unwrap_or_default(),
         connection: task_connection(task),
+        source_message_id: task_source_message_id(task),
     })
+}
+
+/// The numeric Telegram message id of the message that originally spawned this
+/// task. The daemon writes it to `metadata.source_message_id` (and mirrors it on
+/// `source_context.message_id`) for reply threading (#630); we reuse it to match
+/// a self-report that replies to that exact message.
+fn task_source_message_id(task: &Value) -> Option<i64> {
+    let metadata = task.get("metadata").and_then(Value::as_object)?;
+    if let Some(id) = metadata.get("source_message_id").and_then(Value::as_i64) {
+        return Some(id);
+    }
+    metadata
+        .get("source_context")
+        .and_then(Value::as_object)
+        .and_then(|context| context.get("message_id"))
+        .and_then(Value::as_i64)
 }
 
 /// Pulls the owning monitor connection slug from a task's metadata, tolerating
@@ -311,6 +357,38 @@ fn extract_chat_id(payload: &Value) -> Option<String> {
     payload.get("chat_id").and_then(value_to_id_string)
 }
 
+/// What the user's self-message replied to, if anything. Telegram replies carry
+/// the replied-to `message_id` always, and a `quote_text` only when the user
+/// highlighted part of the message to quote.
+struct ReplyInfo {
+    /// The replied-to message's numeric id, for deterministic task matching.
+    message_id: Option<i64>,
+    /// The highlighted quote snippet, handed to the judge as disambiguation
+    /// context when no deterministic id match is found.
+    quote_text: Option<String>,
+}
+
+/// Pulls reply/quote context out of a self-message payload (populated by the
+/// telegram subscriber's `reply_to` field). Returns `None` when the message is
+/// not a reply to another message.
+fn extract_reply(payload: &Value) -> Option<ReplyInfo> {
+    let reply_to = payload.get("reply_to")?;
+    if reply_to.get("kind").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let message_id = reply_to.get("message_id").and_then(Value::as_i64);
+    let quote_text = reply_to
+        .get("quote_text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned);
+    (message_id.is_some() || quote_text.is_some()).then_some(ReplyInfo {
+        message_id,
+        quote_text,
+    })
+}
+
 /// The live judge: a single no-tools completion routed through the process
 /// workflow runner, which resolves `model` to the right provider exactly like
 /// the triage agent. This is what makes the judge use the *monitor's* model
@@ -325,6 +403,7 @@ impl CompletionJudge for RunnerCompletionJudge {
         model: Option<&str>,
         tasks: &[OpenTask],
         message: &str,
+        quote: Option<&str>,
         hints: &[String],
     ) -> Option<String> {
         let runner = installed_workflow_runner()?;
@@ -332,7 +411,7 @@ impl CompletionJudge for RunnerCompletionJudge {
             [] => None,
             [task] => {
                 let reply = runner
-                    .complete_text(model, &single_task_prompt(task, message, hints))
+                    .complete_text(model, &single_task_prompt(task, message, quote, hints))
                     .ok()?;
                 reply
                     .trim()
@@ -342,7 +421,7 @@ impl CompletionJudge for RunnerCompletionJudge {
             }
             tasks => {
                 let reply = runner
-                    .complete_text(model, &multi_task_prompt(tasks, message, hints))
+                    .complete_text(model, &multi_task_prompt(tasks, message, quote, hints))
                     .ok()?;
                 parse_task_index(&reply).and_then(|index| {
                     (index >= 1 && index <= tasks.len())
@@ -353,20 +432,21 @@ impl CompletionJudge for RunnerCompletionJudge {
     }
 }
 
-fn single_task_prompt(task: &OpenTask, message: &str, hints: &[String]) -> String {
+fn single_task_prompt(task: &OpenTask, message: &str, quote: Option<&str>, hints: &[String]) -> String {
     format!(
         "A monitor created this open task from an earlier message in this chat:\n\
          Task: {subject}\n{description}\n\n\
-         The user just sent this message in the same chat:\n{message}\n\n\
+         The user just sent this message in the same chat:\n{message}\n{quote_line}\n\
          Phrases that often mean the user finished the task (hints, not exhaustive): {hints}\n\n\
          Did the user just indicate they completed or did this task? Answer exactly 'yes' or 'no'.",
         subject = task.subject,
         description = task.description,
+        quote_line = quote_context(quote),
         hints = hints.join(", "),
     )
 }
 
-fn multi_task_prompt(tasks: &[OpenTask], message: &str, hints: &[String]) -> String {
+fn multi_task_prompt(tasks: &[OpenTask], message: &str, quote: Option<&str>, hints: &[String]) -> String {
     let mut list = String::new();
     for (index, task) in tasks.iter().enumerate() {
         list.push_str(&format!(
@@ -378,11 +458,24 @@ fn multi_task_prompt(tasks: &[OpenTask], message: &str, hints: &[String]) -> Str
     }
     format!(
         "A monitor has these open tasks in this chat:\n{list}\n\
-         The user just sent this message in the same chat:\n{message}\n\n\
+         The user just sent this message in the same chat:\n{message}\n{quote_line}\n\
          Phrases that often mean the user finished a task (hints, not exhaustive): {hints}\n\n\
          Which task did the user just complete? Reply with only its number, or '0' if none.",
+        quote_line = quote_context(quote),
         hints = hints.join(", "),
     )
+}
+
+/// Renders the quoted-reply context line for a judge prompt, or an empty string
+/// when the self-message did not quote anything. The quote strongly disambiguates
+/// which task the user is reporting on when several are open in one chat.
+fn quote_context(quote: Option<&str>) -> String {
+    match quote {
+        Some(text) => {
+            format!("The user's message is a reply quoting this earlier message: \"{text}\"\n")
+        }
+        None => String::new(),
+    }
 }
 
 fn parse_task_index(reply: &str) -> Option<usize> {

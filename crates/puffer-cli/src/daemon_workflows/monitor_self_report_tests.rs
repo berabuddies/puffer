@@ -33,6 +33,7 @@ impl CompletionJudge for StubJudge {
         _model: Option<&str>,
         _tasks: &[OpenTask],
         _message: &str,
+        _quote: Option<&str>,
         _hints: &[String],
     ) -> Option<String> {
         if self.panic_on_call {
@@ -91,11 +92,53 @@ fn monitor_task(task_id: &str, chat_id: i64, status: &str) -> Value {
     })
 }
 
-/// A judge that records the hints it was handed, so a test can assert that
-/// per-monitor configured phrases were merged in alongside the defaults.
+/// A monitor task that records the Telegram message id it was created from, so a
+/// reply targeting that message can be matched deterministically.
+fn monitor_task_with_source(
+    task_id: &str,
+    chat_id: i64,
+    status: &str,
+    source_message_id: i64,
+) -> Value {
+    let mut task = monitor_task(task_id, chat_id, status);
+    task["metadata"]["source_message_id"] = json!(source_message_id);
+    task
+}
+
+/// A self-message that is a Telegram reply to `reply_message_id`, optionally
+/// quoting a highlighted snippet of it.
+fn self_reply_envelope(
+    chat_id: i64,
+    text: &str,
+    reply_message_id: i64,
+    quote_text: Option<&str>,
+) -> EventEnvelope {
+    let mut envelope = self_envelope(chat_id, text);
+    envelope.event.payload["reply_to"] = json!({
+        "kind": "message",
+        "message_id": reply_message_id,
+        "quote_text": quote_text,
+    });
+    envelope
+}
+
+/// A judge that records the hints and quoted-reply text it was handed, so a test
+/// can assert that per-monitor configured phrases were merged in alongside the
+/// defaults, and that reply quote context reached the judge.
 struct CapturingJudge {
     hints: std::sync::Mutex<Vec<String>>,
+    quote: std::sync::Mutex<Option<String>>,
     result: Option<String>,
+}
+
+impl CapturingJudge {
+    fn new(result: Option<&str>) -> Self {
+        Self {
+            hints: std::sync::Mutex::new(Vec::new()),
+            quote: std::sync::Mutex::new(None),
+            result: result.map(ToOwned::to_owned),
+        }
+    }
 }
 
 impl CompletionJudge for CapturingJudge {
@@ -104,9 +147,11 @@ impl CompletionJudge for CapturingJudge {
         _model: Option<&str>,
         _tasks: &[OpenTask],
         _message: &str,
+        quote: Option<&str>,
         hints: &[String],
     ) -> Option<String> {
         *self.hints.lock().unwrap() = hints.to_vec();
+        *self.quote.lock().unwrap() = quote.map(ToOwned::to_owned);
         self.result.clone()
     }
 }
@@ -122,10 +167,7 @@ fn configured_phrases_merge_into_hints_alongside_defaults() {
     )
     .unwrap();
 
-    let judge = CapturingJudge {
-        hints: std::sync::Mutex::new(Vec::new()),
-        result: None,
-    };
+    let judge = CapturingJudge::new(None);
     process_self_report(&paths, &self_envelope(42, "快递拿了"), &judge);
 
     let hints = judge.hints.lock().unwrap();
@@ -221,6 +263,56 @@ fn multiple_open_tasks_only_the_selected_one_completes() {
 
     assert_eq!(task_status(&paths, "monitor-1").as_deref(), Some("pending"));
     assert_eq!(task_status(&paths, "monitor-2").as_deref(), Some("completed"));
+}
+
+#[test]
+fn reply_to_task_source_message_completes_without_judge() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    // Two open tasks share the chat; only monitor-2 came from message 2497.
+    write_tasks(
+        &paths,
+        json!([
+            monitor_task_with_source("monitor-1", 42, "pending", 1000),
+            monitor_task_with_source("monitor-2", 42, "pending", 2497),
+        ]),
+    );
+
+    // The reply targets message 2497, so the deterministic match completes
+    // monitor-2 directly — the judge must never be invoked (zero tokens).
+    process_self_report(
+        &paths,
+        &self_reply_envelope(42, "已经完成了", 2497, None),
+        &StubJudge::never(),
+    );
+
+    assert_eq!(task_status(&paths, "monitor-1").as_deref(), Some("pending"));
+    assert_eq!(task_status(&paths, "monitor-2").as_deref(), Some("completed"));
+    let raw = std::fs::read_to_string(monitor_tasks_path(&paths)).unwrap();
+    assert!(raw.contains("self_report"));
+}
+
+#[test]
+fn reply_without_matching_source_falls_back_to_judge_with_quote() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    // The open task has no source_message_id, so the reply id cannot match; the
+    // quoted text must instead be handed to the judge for disambiguation.
+    write_tasks(&paths, json!([monitor_task("monitor-1", 42, "pending")]));
+
+    let judge = CapturingJudge::new(Some("monitor-1"));
+    process_self_report(
+        &paths,
+        &self_reply_envelope(42, "已经完成了", 2497, Some("今晚七点开会 准备好文档")),
+        &judge,
+    );
+
+    assert_eq!(
+        judge.quote.lock().unwrap().as_deref(),
+        Some("今晚七点开会 准备好文档"),
+        "quoted reply text reaches the judge"
+    );
+    assert_eq!(task_status(&paths, "monitor-1").as_deref(), Some("completed"));
 }
 
 #[test]

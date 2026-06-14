@@ -9,6 +9,14 @@ use super::monitor_task_ignore::{monitor_tasks_path, task_id_matches};
 
 const DEFAULT_COMPLETED_VIA: &str = "reply";
 
+/// `completed_via` value the self-report lane uses. Self-report is itself a
+/// human action — the user's own outgoing message in the conversation ("拿了",
+/// "来了") both does the thing and tells the other party — so it bypasses the
+/// human-approval gate the reply-writeback path enforces. Without this bypass
+/// every Telegram-sourced monitor task (they all carry a delivery target) would
+/// be un-completable by self-report, defeating the feature.
+pub(crate) const COMPLETED_VIA_SELF_REPORT: &str = "self_report";
+
 #[derive(Debug, Deserialize)]
 struct MonitorTaskCompleteParams {
     #[serde(alias = "taskId")]
@@ -61,8 +69,11 @@ pub(crate) fn handle_monitor_task_complete(paths: &ConfigPaths, params: &Value) 
         .as_object_mut()
         .context("monitor task entry must be an object")?;
 
+    // Self-report completions are themselves a human action, so they bypass the
+    // human-approval gate that protects the reply-writeback path.
+    let bypass_human_gate = completed_via == COMPLETED_VIA_SELF_REPORT;
     if !is_terminal(task_object) {
-        if is_human_gated_reply_task(task_object) {
+        if !bypass_human_gate && is_human_gated_reply_task(task_object) {
             anyhow::bail!(
                 "human-gated monitor reply tasks require human approval and a send receipt"
             );

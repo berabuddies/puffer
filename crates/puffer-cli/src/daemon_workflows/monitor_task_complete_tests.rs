@@ -210,6 +210,55 @@ fn complete_rejects_numeric_source_context_human_gated_reply_task() {
 }
 
 #[test]
+fn complete_via_self_report_bypasses_human_gate() {
+    // A self-report completion is itself a human action (the user's own outgoing
+    // message), so it must complete a Telegram-sourced monitor task even though
+    // that task carries a delivery target that human-gates the reply path. This
+    // is the whole point of the self-report lane.
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-1",
+                "subject": "现在去车库",
+                "description": "reply please",
+                "status": "pending",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connector": "telegram-login",
+                    "monitor_connection": "telegram-user",
+                    "chat_id": 6156741935_i64,
+                    "completion_policy": {
+                        "mode": "draft_then_approve",
+                        "requires_human_approval": true
+                    },
+                    "source_context": {
+                        "connector_slug": "telegram-login",
+                        "connection_slug": "telegram-user",
+                        "delivery_target": {
+                            "type": "telegram_chat",
+                            "chat_id": "6156741935"
+                        }
+                    }
+                }
+            }]
+        }),
+    );
+
+    handle_monitor_task_complete(
+        &paths,
+        &json!({"task_id": "monitor-1", "completed_via": "self_report"}),
+    )
+    .expect("self-report completion must bypass the human gate");
+
+    let stored = read_store(&paths);
+    assert_eq!(stored["tasks"][0]["status"], "completed");
+    assert_eq!(stored["tasks"][0]["completed_via"], "self_report");
+}
+
+#[test]
 fn complete_is_idempotent_no_op_on_already_terminal() {
     // Backstop for agentenv/monorepo#561/#562 review (dev-4 Finding 2): a
     // duplicate or stray complete on an already-terminal task must be a harmless
