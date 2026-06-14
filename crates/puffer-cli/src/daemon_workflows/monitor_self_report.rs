@@ -129,31 +129,33 @@ fn process_self_report(paths: &ConfigPaths, envelope: &EventEnvelope, judge: &dy
     if open_tasks.is_empty() {
         return;
     }
-    // If the user *replied to* a specific Telegram message, prefer a
-    // deterministic match: a reply whose target is a task's originating message
-    // completes that task directly, spending zero LLM tokens. Any highlighted
-    // quote text is otherwise handed to the judge as strong disambiguation
-    // context (the common case where 14 generic tasks share one chat).
+    // A reply to a task's originating message reliably identifies *which* task
+    // the user means, but NOT whether they actually finished it — a reply could
+    // just as easily say "not done yet". So a reply only narrows the judge's
+    // candidate set to that one task; the judge still confirms completion intent
+    // before anything is completed. Any highlighted quote text is also handed to
+    // the judge as disambiguation context.
     let reply = extract_reply(&envelope.event.payload);
-    if let Some(reply_msg_id) = reply.as_ref().and_then(|reply| reply.message_id) {
-        if let Some(task) = open_tasks
-            .iter()
-            .find(|task| task.source_message_id == Some(reply_msg_id))
-        {
-            complete_task(paths, &task.task_id);
-            return;
-        }
-    }
     let quote = reply.as_ref().and_then(|reply| reply.quote_text.as_deref());
+    let candidates: &[OpenTask] = reply
+        .as_ref()
+        .and_then(|reply| reply.message_id)
+        .and_then(|reply_msg_id| {
+            open_tasks
+                .iter()
+                .find(|task| task.source_message_id == Some(reply_msg_id))
+        })
+        .map(std::slice::from_ref)
+        .unwrap_or(open_tasks.as_slice());
 
-    let hints = completion_hints(paths, &open_tasks);
+    let hints = completion_hints(paths, candidates);
     // Use whatever model the user configured for this monitor; falls back to the
     // runtime default when the monitor has no explicit model.
-    let model = monitor_model_for_open_tasks(&open_tasks);
-    let Some(task_id) = judge.judge(model.as_deref(), &open_tasks, message, quote, &hints) else {
+    let model = monitor_model_for_open_tasks(candidates);
+    let Some(task_id) = judge.judge(model.as_deref(), candidates, message, quote, &hints) else {
         return;
     };
-    if !open_tasks.iter().any(|task| task.task_id == task_id) {
+    if !candidates.iter().any(|task| task.task_id == task_id) {
         // The judge must only complete a task it was shown; ignore stray ids.
         return;
     }

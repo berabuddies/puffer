@@ -128,6 +128,7 @@ fn self_reply_envelope(
 struct CapturingJudge {
     hints: std::sync::Mutex<Vec<String>>,
     quote: std::sync::Mutex<Option<String>>,
+    shown_task_ids: std::sync::Mutex<Vec<String>>,
     result: Option<String>,
 }
 
@@ -136,6 +137,7 @@ impl CapturingJudge {
         Self {
             hints: std::sync::Mutex::new(Vec::new()),
             quote: std::sync::Mutex::new(None),
+            shown_task_ids: std::sync::Mutex::new(Vec::new()),
             result: result.map(ToOwned::to_owned),
         }
     }
@@ -145,13 +147,15 @@ impl CompletionJudge for CapturingJudge {
     fn judge(
         &self,
         _model: Option<&str>,
-        _tasks: &[OpenTask],
+        tasks: &[OpenTask],
         _message: &str,
         quote: Option<&str>,
         hints: &[String],
     ) -> Option<String> {
         *self.hints.lock().unwrap() = hints.to_vec();
         *self.quote.lock().unwrap() = quote.map(ToOwned::to_owned);
+        *self.shown_task_ids.lock().unwrap() =
+            tasks.iter().map(|task| task.task_id.clone()).collect();
         self.result.clone()
     }
 }
@@ -266,7 +270,7 @@ fn multiple_open_tasks_only_the_selected_one_completes() {
 }
 
 #[test]
-fn reply_to_task_source_message_completes_without_judge() {
+fn reply_narrows_judge_to_the_targeted_task_then_completes() {
     let tempdir = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
     // Two open tasks share the chat; only monitor-2 came from message 2497.
@@ -278,18 +282,51 @@ fn reply_to_task_source_message_completes_without_judge() {
         ]),
     );
 
-    // The reply targets message 2497, so the deterministic match completes
-    // monitor-2 directly — the judge must never be invoked (zero tokens).
+    // The reply targets message 2497, so the candidate set is narrowed to just
+    // monitor-2; the judge still confirms intent (here: yes) before completing.
+    let judge = CapturingJudge::new(Some("monitor-2"));
     process_self_report(
         &paths,
         &self_reply_envelope(42, "已经完成了", 2497, None),
-        &StubJudge::never(),
+        &judge,
     );
 
+    assert_eq!(
+        *judge.shown_task_ids.lock().unwrap(),
+        vec!["monitor-2".to_string()],
+        "reply narrows the judge to only the targeted task"
+    );
     assert_eq!(task_status(&paths, "monitor-1").as_deref(), Some("pending"));
     assert_eq!(task_status(&paths, "monitor-2").as_deref(), Some("completed"));
     let raw = std::fs::read_to_string(monitor_tasks_path(&paths)).unwrap();
     assert!(raw.contains("self_report"));
+}
+
+#[test]
+fn reply_to_task_message_saying_not_done_leaves_task_open() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_tasks(
+        &paths,
+        json!([monitor_task_with_source("monitor-1", 42, "pending", 2497)]),
+    );
+
+    // The user replied to the task's source message but said they are NOT done.
+    // The reply narrows to monitor-1, but the judge says no, so it stays open —
+    // a reply must never auto-complete a task on its own.
+    let judge = CapturingJudge::new(None);
+    process_self_report(
+        &paths,
+        &self_reply_envelope(42, "我还没做好", 2497, None),
+        &judge,
+    );
+
+    assert_eq!(
+        *judge.shown_task_ids.lock().unwrap(),
+        vec!["monitor-1".to_string()],
+        "reply still narrows the judge to the targeted task"
+    );
+    assert_eq!(task_status(&paths, "monitor-1").as_deref(), Some("pending"));
 }
 
 #[test]
