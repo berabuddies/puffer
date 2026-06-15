@@ -290,6 +290,385 @@ fn native_cef_pool_reclaims_idle_session_when_slots_exhausted() {
     );
 }
 
+/// Reproduces issue #649: a tab the user opens directly in the native browser is
+/// a CEF page target the daemon never claimed, so it lives outside the tab
+/// registry and the agent's `list`/`snapshot` cannot see it. After
+/// `sync_native_tabs` reconciles against the live DevTools target list, the
+/// user-opened page must appear as an adopted, connected tab the agent can read.
+#[test]
+fn native_cef_sync_surfaces_user_opened_tab() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // One prewarm slot for the agent, plus a user-opened checkout page.
+    let cef = FakeCefDevtools::spawn_with_user_pages(
+        1,
+        vec![("user-checkout", "https://www.ridge.com/checkouts/abc123")],
+    );
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+    let root = "sess-user";
+
+    // The agent opens its own tab, claiming the prewarm slot.
+    registry
+        .open(
+            events.clone(),
+            backend_session_id(root, "t1"),
+            None,
+            800,
+            600,
+            false,
+        )
+        .expect("agent open should claim the prewarmed slot");
+    registry.tabs.lock().unwrap().record_opened_backend(
+        root,
+        "t1",
+        backend_session_id(root, "t1"),
+        Some("__cef_prewarm_0__".to_string()),
+        registry
+            .live_session(&backend_session_id(root, "t1"))
+            .unwrap()
+            .state(),
+    );
+
+    // Before reconciling, the daemon only knows about its own tab.
+    let before = registry.list_tabs(root);
+    assert_eq!(before.tabs.len(), 1, "agent should start with only its own tab");
+
+    registry.sync_native_tabs(&events, root, 800, 600);
+
+    let after = registry.list_tabs(root);
+
+    std::thread::sleep(Duration::from_millis(20));
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert_eq!(
+        after.tabs.len(),
+        2,
+        "the user-opened tab must be adopted into the registry, got {:?}",
+        after.tabs.iter().map(|t| &t.url).collect::<Vec<_>>()
+    );
+    let adopted = after
+        .tabs
+        .iter()
+        .find(|tab| tab.url.contains("ridge.com/checkouts/abc123"))
+        .expect("adopted user tab with the checkout URL must be present");
+    assert!(adopted.connected, "adopted user tab should be connected");
+    assert!(
+        adopted.native_cef_session_id.is_none(),
+        "a user-opened tab is not a prewarm slot"
+    );
+
+    // Reconciling again must not duplicate the already-adopted tab.
+    registry.sync_native_tabs(&events, root, 800, 600);
+    assert_eq!(
+        registry.list_tabs(root).tabs.len(),
+        2,
+        "re-sync must be idempotent and not re-adopt the same target"
+    );
+}
+
+/// Real end-to-end check for issue #649 against an actual Chromium DevTools
+/// endpoint (Google Chrome stands in for the native CEF runtime — both speak the
+/// same CDP). Unlike the FakeCefDevtools tests, this exercises the live
+/// `/json/list` format, a real CDP page worker attaching to a user-opened
+/// target, and a real DOM snapshot. Ignored by default: needs Chrome installed.
+/// Run with: `cargo test -p puffer-cli --bins real_chrome_adopts -- --ignored --nocapture`
+#[test]
+#[ignore = "needs real Google Chrome; run with --ignored"]
+fn real_chrome_adopts_and_snapshots_user_opened_tab() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let _guard = cef_env_lock().lock().unwrap();
+    let chrome = std::env::var("CHROME_BIN").unwrap_or_else(|_| {
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string()
+    });
+    assert!(
+        std::path::Path::new(&chrome).exists(),
+        "Chrome not found at {chrome}; set CHROME_BIN"
+    );
+
+    // A real local page that is NOT about:blank — the shape of a tab the user
+    // opened directly in the browser.
+    let tmp = tempfile::tempdir().unwrap();
+    let page = tmp.path().join("checkout.html");
+    std::fs::write(
+        &page,
+        "<html><head><title>RIDGE-CHECKOUT-649</title></head><body><h1>Pay 42 dollars</h1></body></html>",
+    )
+    .unwrap();
+    let page_url = format!("file://{}", page.display());
+
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let user_data = tmp.path().join("chrome-profile");
+
+    let mut child = Command::new(&chrome)
+        .arg("--headless=new")
+        .arg(format!("--remote-debugging-port={port}"))
+        .arg(format!("--user-data-dir={}", user_data.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-gpu")
+        .arg("--allow-file-access-from-files")
+        .arg("about:blank")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("launch Chrome");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    // Wait for DevTools, then open the user's tab via the HTTP endpoint.
+    let start = std::time::Instant::now();
+    loop {
+        if client
+            .get(format!("http://127.0.0.1:{port}/json/version"))
+            .send()
+            .and_then(|r| r.error_for_status())
+            .is_ok()
+        {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "Chrome DevTools never came up");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    client
+        .put(format!("http://127.0.0.1:{port}/json/new?{page_url}"))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .expect("open user tab via /json/new");
+
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", user_data.display().to_string());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let registry = BrowserRegistry::new(
+            tmp.path().to_path_buf(),
+            true,
+            BrowserLaunchSettings::default(),
+        );
+        let (events, _rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+        let root = "sess-real";
+
+        // Agent claims a prewarmed (about:blank) slot for its own tab.
+        registry
+            .open(events.clone(), backend_session_id(root, "t1"), None, 1024, 768, false)
+            .expect("agent open should claim the about:blank slot");
+        registry.tabs.lock().unwrap().record_opened_backend(
+            root,
+            "t1",
+            backend_session_id(root, "t1"),
+            registry
+                .live_session(&backend_session_id(root, "t1"))
+                .unwrap()
+                .native_cef_session_id(),
+            registry.live_session(&backend_session_id(root, "t1")).unwrap().state(),
+        );
+
+        // Reconcile: the user's file:// tab must be discovered + adopted.
+        registry.sync_native_tabs(&events, root, 1024, 768);
+
+        let tabs = registry.list_tabs(root);
+        let adopted = tabs
+            .tabs
+            .iter()
+            .find(|tab| tab.url.contains("checkout.html"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "user-opened tab not surfaced; saw {:?}",
+                    tabs.tabs.iter().map(|t| &t.url).collect::<Vec<_>>()
+                )
+            })
+            .clone();
+        assert!(adopted.connected, "adopted user tab should be connected");
+
+        // The agent can actually read the live DOM of the user's page.
+        let snapshot = registry
+            .agent_snapshot(&adopted.backend_session_id)
+            .expect("snapshot of adopted user tab");
+        let snap_text = snapshot.to_string();
+        assert!(
+            snap_text.contains("RIDGE-CHECKOUT-649") || snap_text.contains("Pay 42 dollars"),
+            "snapshot should contain the user page content, got: {snap_text}"
+        );
+        eprintln!("[real-chrome] adopted url={} snapshot.title ok", adopted.url);
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+    let _ = std::io::stderr().flush();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Reproduces the real-app gap behind issue #649: when the user browses
+/// entirely by hand and the agent never opened a browser, the daemon has no
+/// global root yet. `sync_native_tabs` must still establish the native-CEF
+/// connection on demand and surface the user's tab — without a prior agent open.
+#[test]
+fn native_cef_sync_surfaces_user_tab_without_prior_open() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    let cef = FakeCefDevtools::spawn_with_user_pages(
+        2,
+        vec![("user-checkout", "https://www.ridge.com/checkouts/manual")],
+    );
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+    let root = "sess-manual";
+
+    // NO registry.open(...) — the agent never touched the browser this session.
+    registry.sync_native_tabs(&events, root, 1024, 768);
+    let tabs = registry.list_tabs(root);
+
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        tabs.tabs.iter().any(|t| t.url.contains("ridge.com/checkouts/manual")),
+        "sync must surface the user tab even with no prior agent open, got {:?}",
+        tabs.tabs.iter().map(|t| &t.url).collect::<Vec<_>>()
+    );
+}
+
+/// Guards the reclaim interaction for issue #649: an adopted user tab holds no
+/// prewarm-pool slot, so reclaiming it to satisfy an exhausted pool would be
+/// futile (it frees no slot) AND would needlessly kill the page the user is
+/// viewing. When the pool is exhausted, reclaim must spare adopted tabs and
+/// reclaim a real slot holder instead.
+#[test]
+fn native_cef_reclaim_spares_adopted_user_tab() {
+    let _guard = cef_env_lock().lock().unwrap();
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+
+    // Exactly one prewarm slot, plus one user-opened page.
+    let cef = FakeCefDevtools::spawn_with_user_pages(
+        1,
+        vec![("user-checkout", "https://www.ridge.com/checkouts/xyz")],
+    );
+    let profile = tempfile::tempdir().unwrap();
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cef.port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", profile.path());
+
+    let registry = BrowserRegistry::new(
+        profile.path().to_path_buf(),
+        true,
+        BrowserLaunchSettings::default(),
+    );
+    let (events, _events_rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+    let root = "sess-reclaim";
+    let slot_backend = backend_session_id(root, "t1");
+    let adopted_backend = backend_session_id(root, "t2");
+    let third_backend = backend_session_id(root, "t3");
+
+    // Agent claims the only prewarm slot, then we adopt the user's tab.
+    registry
+        .open(events.clone(), slot_backend.clone(), None, 800, 600, false)
+        .expect("agent open should claim the only prewarmed slot");
+    registry.tabs.lock().unwrap().record_opened_backend(
+        root,
+        "t1",
+        slot_backend.clone(),
+        Some("__cef_prewarm_0__".to_string()),
+        registry.live_session(&slot_backend).unwrap().state(),
+    );
+    registry.sync_native_tabs(&events, root, 800, 600);
+    assert!(
+        registry.live_session(&adopted_backend).is_some(),
+        "user tab should have been adopted as t2"
+    );
+
+    // Make the adopted user tab the MOST idle session, so a naive reclaim would
+    // pick it first. It holds no slot, so reclaiming it must be refused.
+    *registry
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&adopted_backend)
+        .unwrap()
+        .last_active
+        .lock()
+        .unwrap() = std::time::Instant::now() - Duration::from_secs(120);
+
+    // Pool is exhausted (the single slot is held by t1). Opening a third tab must
+    // self-heal by reclaiming the slot holder (t1), NOT the adopted user tab.
+    let third = registry.open(events.clone(), third_backend.clone(), None, 800, 600, false);
+
+    std::thread::sleep(Duration::from_millis(20));
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+
+    assert!(
+        third.is_ok(),
+        "third open should reclaim the slot holder, got {:?}",
+        third.err()
+    );
+    assert!(
+        registry.live_session(&adopted_backend).is_some(),
+        "adopted user tab must be spared by reclaim (it frees no pool slot)"
+    );
+    assert!(
+        registry.live_session(&slot_backend).is_none(),
+        "the real slot holder should have been reclaimed instead"
+    );
+}
+
 /// Reproduces the slot-leak half of issue #585: a wedged page that never answers
 /// the CDP reset must NOT permanently leak its native-CEF prewarm slot. Closing
 /// such a page has to return its slot to the shared pool (best-effort reset) so a

@@ -23,6 +23,36 @@ pub(super) struct ChromePageTarget {
     pub(super) page_ws: String,
     pub(super) close_on_release: bool,
     pub(super) native_cef_session_id: Option<String>,
+    /// True for a target the daemon *adopted* (a tab the user opened directly in
+    /// the native browser, issue #649) rather than allocated from the prewarm
+    /// pool. Adopted targets are detach-only on release: the user owns the page,
+    /// so the daemon must never reset, close, or return it to the pool.
+    pub(super) adopted: bool,
+}
+
+/// A live page target discovered on the DevTools endpoint, carrying the live URL
+/// and title so a newly adopted tab reflects what the user is actually viewing
+/// without waiting for the page worker's first state evaluation.
+#[derive(Clone, Debug)]
+pub(super) struct DiscoveredTarget {
+    pub(super) target_id: String,
+    pub(super) page_ws: String,
+    pub(super) url: String,
+    pub(super) title: String,
+    pub(super) native_cef_session_id: Option<String>,
+}
+
+impl ChromePageTarget {
+    /// Builds a target wrapper for a user-opened page the daemon is adopting.
+    pub(super) fn adopted(target_id: String, page_ws: String) -> Self {
+        Self {
+            target_id,
+            page_ws,
+            close_on_release: false,
+            native_cef_session_id: None,
+            adopted: true,
+        }
+    }
 }
 
 /// Waits for Chrome to publish its browser-level DevTools WebSocket URL.
@@ -350,6 +380,7 @@ fn parse_page_target(value: &Value, close_on_release: bool) -> Result<ChromePage
         page_ws: page_ws.to_string(),
         close_on_release,
         native_cef_session_id,
+        adopted: false,
     })
 }
 
@@ -365,7 +396,71 @@ fn parse_target_info(browser_ws: &str, value: &Value) -> Result<ChromePageTarget
         page_ws: page_ws_for_target(browser_ws, target_id)?,
         close_on_release: false,
         native_cef_session_id: native_cef_session_id_from_url(url),
+        adopted: false,
     })
+}
+
+/// Lists ALL live page targets from the DevTools HTTP `/json/list` endpoint,
+/// including pages the user opened directly in the native browser (which carry
+/// real URLs and no prewarm-slot marker). Unlike [`initial_page_targets`] this
+/// does NOT filter to reusable about:blank/slot targets — it is the discovery
+/// side of issue #649, letting the daemon adopt user-opened tabs.
+pub(super) fn discover_page_targets(browser_ws: &str) -> Result<Vec<DiscoveredTarget>> {
+    let endpoint = format!("{}/json/list", devtools_http_base(browser_ws)?);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build Chrome HTTP client")?;
+    let value: Value = client
+        .get(endpoint)
+        .send()
+        .context("list Chrome targets")?
+        .error_for_status()
+        .context("Chrome target listing failed")?
+        .json()
+        .context("parse Chrome target listing")?;
+    let Some(targets) = value.as_array() else {
+        bail!("Chrome target listing response was not an array");
+    };
+    let mut discovered = Vec::new();
+    for target in targets {
+        if target.get("type").and_then(Value::as_str) != Some("page") {
+            continue;
+        }
+        let Some(target_id) = target
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(page_ws) = target
+            .get("webSocketDebuggerUrl")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let url = target
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let title = target
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let native_cef_session_id = native_cef_session_id_from_url(&url);
+        discovered.push(DiscoveredTarget {
+            target_id: target_id.to_string(),
+            page_ws: page_ws.to_string(),
+            url,
+            title,
+            native_cef_session_id,
+        });
+    }
+    Ok(discovered)
 }
 
 fn is_reusable_page_target(value: &Value) -> bool {
@@ -646,6 +741,7 @@ mod tests {
             page_ws,
             close_on_release: false,
             native_cef_session_id: Some("__cef_prewarm_2__".to_string()),
+            adopted: false,
         };
 
         reset_reusable_page_target(&target).unwrap();

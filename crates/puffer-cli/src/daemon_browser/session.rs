@@ -60,6 +60,13 @@ use pending::PendingKind;
 const CEF_REMOTE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const CEF_TARGET_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The native-CEF remote debugging port, if the desktop configured one. Used to
+/// decide whether tab discovery may lazily attach to an existing CEF (#649)
+/// without risking a managed-Chrome launch.
+pub(super) fn native_cef_remote_port() -> Option<u16> {
+    cef_remote_debugging_port()
+}
+
 /// Whether something is accepting TCP connections on the loopback CEF DevTools
 /// port. A short connect timeout so a missing CEF runtime (e.g. `tauri dev`, which
 /// doesn't stage CEF) falls back to the Chrome screencast backend fast instead of
@@ -92,6 +99,9 @@ pub(super) struct BrowserSession {
     pub(super) alive: Arc<AtomicBool>,
     pub(super) root: Option<BrowserRootSession>,
     pub(super) native_cef_session_id: Option<String>,
+    /// The CDP target this worker drives. Used to reconcile the registry against
+    /// the live DevTools target list so a target isn't adopted twice (#649).
+    pub(super) target_id: Option<String>,
 }
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
@@ -153,6 +163,18 @@ impl BrowserRootSession {
             })),
         })
     }
+    /// Establishes a native-CEF remote root **without** the managed-Chrome
+    /// fallback. Returns `Ok(None)` when no CEF endpoint is configured. Used to
+    /// lazily attach to the desktop's CEF for tab discovery (#649) even when the
+    /// agent never opened a browser itself — so a plain `list` can never end up
+    /// launching a headless Chrome.
+    pub(super) fn try_spawn_cef_remote(
+        profile_dir: &PathBuf,
+        launch_settings: &BrowserLaunchSettings,
+    ) -> Result<Option<Self>> {
+        Self::spawn_cef_remote_root(profile_dir, launch_settings)
+    }
+
     fn spawn_cef_remote_root(
         profile_dir: &PathBuf,
         launch_settings: &BrowserLaunchSettings,
@@ -233,6 +255,12 @@ impl BrowserRootSession {
     }
 
     pub(super) fn close_target(&self, target: &ChromePageTarget) -> Result<()> {
+        // Adopted targets (#649) belong to the user, not the prewarm pool. On
+        // release we simply detach the CDP worker: never reset the page, close
+        // the target, or return it to the pool.
+        if target.adopted {
+            return Ok(());
+        }
         let (browser_ws, owns_targets) = {
             let mut inner = self.inner.lock().unwrap();
             inner.last_active = Instant::now();
@@ -288,6 +316,12 @@ impl BrowserRootSession {
         self.inner.lock().unwrap().last_active.elapsed()
     }
 
+    /// The shared browser-level DevTools WebSocket URL, used to enumerate live
+    /// targets when reconciling user-opened tabs into the registry (#649).
+    pub(super) fn browser_ws(&self) -> String {
+        self.inner.lock().unwrap().browser_ws.clone()
+    }
+
     /// Reports whether this root hands out a FIXED pool of prewarmed page targets
     /// (native CEF, `owns_targets == false`) that cannot be grown on demand. When
     /// true, an exhausted pool must be replenished by reclaiming an existing page
@@ -309,7 +343,7 @@ impl BrowserRootSession {
 }
 
 impl BrowserSession {
-    /// Spawns one page worker bound to a page target inside an existing Chrome root owner.
+    /// Spawns one page worker by allocating a fresh target from the root's pool.
     pub(super) fn spawn(
         events: broadcast::Sender<ServerEnvelope>,
         recordings: Arc<Mutex<BrowserRecordingRegistry>>,
@@ -321,15 +355,83 @@ impl BrowserSession {
         foreground: bool,
     ) -> Result<Self> {
         let target = root.allocate_target()?;
-        let native_cef_session_id = target.native_cef_session_id.clone();
-        let (tx, rx) = mpsc::channel();
-        let state = Arc::new(Mutex::new(BrowserState {
-            url: DEFAULT_URL.to_string(),
-            title: String::new(),
-            loading: false,
+        Ok(Self::from_target(
+            events,
+            recordings,
+            console_logs,
+            session_id,
+            root,
+            target,
             width,
             height,
-        }));
+            foreground,
+            BrowserState {
+                url: DEFAULT_URL.to_string(),
+                title: String::new(),
+                loading: false,
+                width,
+                height,
+            },
+        ))
+    }
+
+    /// Spawns a page worker that *adopts* an existing CDP target the user opened
+    /// directly in the native browser (issue #649). The target is not drawn from
+    /// the prewarm pool, so the worker must never reset or pool it on release.
+    /// The initial state is seeded from the live URL/title so `list`/`snapshot`
+    /// reflect what the user is viewing immediately.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn adopt(
+        events: broadcast::Sender<ServerEnvelope>,
+        recordings: Arc<Mutex<BrowserRecordingRegistry>>,
+        console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
+        session_id: String,
+        root: BrowserRootSession,
+        target: ChromePageTarget,
+        width: u32,
+        height: u32,
+        foreground: bool,
+        url: String,
+        title: String,
+    ) -> Self {
+        Self::from_target(
+            events,
+            recordings,
+            console_logs,
+            session_id,
+            root,
+            target,
+            width,
+            height,
+            foreground,
+            BrowserState {
+                url,
+                title,
+                loading: false,
+                width,
+                height,
+            },
+        )
+    }
+
+    /// Spawns the CDP worker thread bound to a resolved page target.
+    #[allow(clippy::too_many_arguments)]
+    fn from_target(
+        events: broadcast::Sender<ServerEnvelope>,
+        recordings: Arc<Mutex<BrowserRecordingRegistry>>,
+        console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
+        session_id: String,
+        root: BrowserRootSession,
+        target: ChromePageTarget,
+        width: u32,
+        height: u32,
+        foreground: bool,
+        initial: BrowserState,
+    ) -> Self {
+        let native_cef_session_id = target.native_cef_session_id.clone();
+        let target_id = Some(target.target_id.clone());
+        let (tx, rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(initial));
         let network = Arc::new(Mutex::new(BrowserNetworkState::default()));
         let last_active = Arc::new(Mutex::new(Instant::now()));
         let alive = Arc::new(AtomicBool::new(true));
@@ -354,7 +456,7 @@ impl BrowserSession {
                 foreground,
             );
         });
-        Ok(Self {
+        Self {
             tx,
             state,
             network,
@@ -362,12 +464,18 @@ impl BrowserSession {
             alive,
             root: Some(root),
             native_cef_session_id,
-        })
+            target_id,
+        }
     }
 
     /// Returns the native desktop CEF slot id that owns this CDP target, when known.
     pub(super) fn native_cef_session_id(&self) -> Option<String> {
         self.native_cef_session_id.clone()
+    }
+
+    /// Returns the CDP target id this worker drives, when known.
+    pub(super) fn target_id(&self) -> Option<String> {
+        self.target_id.clone()
     }
     pub(super) fn state(&self) -> BrowserState {
         self.touch();
@@ -563,7 +671,11 @@ fn run_cdp_worker(
     };
     set_read_timeout(&socket, Some(CDP_READ_TIMEOUT));
 
-    let use_screencast = target.native_cef_session_id.is_none();
+    // Adopted user tabs (#649) render through the desktop's own native NSView, so
+    // the daemon must NOT screencast them or override their viewport — that would
+    // disrupt the page the user is looking at. Only managed headless Chrome
+    // targets (no native slot, not adopted) need screencast to be visible.
+    let use_screencast = target.native_cef_session_id.is_none() && !target.adopted;
     let mut next_id = 1u64;
     let mut pending = HashMap::<u64, PendingKind>::new();
     let _ = send_cdp(&mut socket, &mut next_id, "Page.enable", json!({}));

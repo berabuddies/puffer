@@ -4,8 +4,8 @@ use anyhow::Result;
 use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{EnvEntry, EventEnvelope, Manifest, StateSpec, SubscriberCommand};
 use puffer_subscriptions::{
-    find_subscriber_manifest, ConnectionAuthChecker, ConnectorTemplate, SubscriberManifestRoots,
-    SubscriptionManager,
+    find_subscriber_manifest, ConnectionAuthChecker, ConnectionAuthStatus, ConnectorTemplate,
+    SubscriberManifestRoots, SubscriptionManager,
 };
 use std::thread;
 use std::time::Duration;
@@ -24,7 +24,7 @@ impl ConnectionAuthChecker for TelegramConnectionAuthChecker {
         manager: &SubscriptionManager,
         template: &ConnectorTemplate,
         connection_slug: &str,
-    ) -> Result<Option<bool>> {
+    ) -> Result<Option<ConnectionAuthStatus>> {
         if !is_telegram_connector(&template.slug) {
             return Ok(None);
         }
@@ -51,6 +51,16 @@ impl ConnectionAuthChecker for TelegramConnectionAuthChecker {
                     return Ok(None);
                 }
             };
+            if envelope.event.kind == "auth_ok"
+                && envelope
+                    .event
+                    .payload
+                    .get("offline")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            {
+                return Ok(Some(ConnectionAuthStatus::Unknown));
+            }
             let auth_ok = envelope.event.kind == "auth_ok"
                 && envelope
                     .event
@@ -58,12 +68,15 @@ impl ConnectionAuthChecker for TelegramConnectionAuthChecker {
                     .get("ok")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-            if auth_ok || attempt == TELEGRAM_AUTH_RETRIES {
-                return Ok(Some(auth_ok));
+            if auth_ok {
+                return Ok(Some(ConnectionAuthStatus::Healthy));
+            }
+            if attempt == TELEGRAM_AUTH_RETRIES {
+                return Ok(Some(ConnectionAuthStatus::Broken));
             }
             thread::sleep(TELEGRAM_AUTH_RETRY_DELAY);
         }
-        Ok(Some(false))
+        Ok(Some(ConnectionAuthStatus::Broken))
     }
 }
 

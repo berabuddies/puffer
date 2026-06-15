@@ -147,6 +147,49 @@ mod tests {
     }
 
     #[test]
+    fn action_prompt_renders_recent_telegram_context_messages() {
+        let mut metadata = Map::new();
+        metadata.insert(
+            "source_context".to_string(),
+            json!({
+                "kind": "telegram_direct_message",
+                "text": "聊下？",
+                "delivery_target": {
+                    "type": "telegram_chat",
+                    "chat_id": "42"
+                },
+                "context_messages": [
+                    {
+                        "from": "them",
+                        "text": "上次说的报价发你了"
+                    },
+                    {
+                        "from": "me",
+                        "text": "我晚点看，周一聊细节"
+                    }
+                ]
+            }),
+        );
+
+        let prompt = action_prompt(
+            "monitor-1",
+            "Telegram: 聊下？",
+            "对方发来私聊：聊下？",
+            &MonitorTaskAction {
+                name: "Draft reply".to_string(),
+                prompt: "Prepare a concise response.".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(prompt.contains("Current source text: 聊下？"));
+        assert!(prompt.contains("Bounded Telegram server-history context before current message"));
+        assert!(prompt.contains("them: 上次说的报价发你了"));
+        assert!(prompt.contains("me: 我晚点看，周一聊细节"));
+        assert!(prompt.contains("do not answer or create work from prior messages alone"));
+    }
+
+    #[test]
     fn scoped_monitor_reply_prompt_instructs_source_language() {
         let prompt = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -159,6 +202,44 @@ mod tests {
         assert!(prompt.contains("Preserve explicit product names"));
         assert!(prompt.contains("prefer 2-4 short paragraphs"));
         assert!(prompt.contains("Put a blank line between paragraphs"));
+        assert!(prompt.contains("bounded Telegram server-history context"));
+        assert!(prompt.contains("subscriber_diagnostics"));
+        assert!(prompt.contains("do not answer"));
+    }
+
+    #[test]
+    fn scoped_monitor_reply_prompt_marks_diagnostics_context_as_observed() {
+        let mut metadata = Map::new();
+        metadata.insert(
+            "source_context".to_string(),
+            json!({
+                "text": "聊下？",
+                "conversation_context": {
+                    "source": "subscriber_diagnostics",
+                    "messages": [
+                        {
+                            "from": "them",
+                            "text": "刚才说的那件事"
+                        }
+                    ]
+                }
+            }),
+        );
+
+        let prompt = action_prompt(
+            "monitor-1",
+            "Telegram: 聊下？",
+            "对方发来私聊：聊下？",
+            &MonitorTaskAction {
+                name: "Draft reply".to_string(),
+                prompt: "Prepare a concise response.".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(prompt.contains("Observed Telegram context before current message"));
+        assert!(prompt.contains("may have gaps"));
+        assert!(prompt.contains("do not assume it is complete or immediately adjacent"));
     }
 }
 
@@ -315,6 +396,9 @@ fn source_context_section(metadata: &Map<String, Value>) -> String {
     if let Some(summary) = string_field_from_map(context, &["summary"]) {
         lines.push(format!("- {summary}"));
     }
+    if let Some(text) = string_field_from_map(context, &["text"]) {
+        lines.push(format!("- Current source text: {}", compact_line(&text)));
+    }
     let connection_slug = string_field_from_map(context, &["connection_slug", "connectionSlug"]);
     let connector_slug = string_field_from_map(context, &["connector_slug", "connectorSlug"]);
     if connection_slug.is_some() || connector_slug.is_some() {
@@ -341,11 +425,80 @@ fn source_context_section(metadata: &Map<String, Value>) -> String {
                 .unwrap_or_default()
         ));
     }
+    let conversation_context = context
+        .get("conversation_context")
+        .or_else(|| context.get("conversationContext"));
+    let conversation_context_source = conversation_context
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str);
+    let context_messages = context
+        .get("context_messages")
+        .or_else(|| context.get("contextMessages"))
+        .and_then(Value::as_array)
+        .or_else(|| {
+            conversation_context
+                .and_then(|value| value.get("messages"))
+                .and_then(Value::as_array)
+        });
+    if let Some(context_messages) = context_messages {
+        let rendered = context_messages
+            .iter()
+            .filter_map(render_context_message)
+            .take(8)
+            .collect::<Vec<_>>();
+        if !rendered.is_empty() {
+            if conversation_context_source == Some("subscriber_diagnostics") {
+                lines.push(
+                    "- Observed Telegram context before current message (may have gaps):"
+                        .to_string(),
+                );
+            } else {
+                lines.push(
+                    "- Bounded Telegram server-history context before current message:".to_string(),
+                );
+            }
+            lines.extend(rendered.into_iter().map(|message| format!("  - {message}")));
+            if conversation_context_source == Some("subscriber_diagnostics") {
+                lines.push(
+                    "- Use observed same-chat context only to disambiguate the current source text; do not assume it is complete or immediately adjacent, and do not answer or create work from prior messages alone."
+                        .to_string(),
+                );
+            } else {
+                lines.push(
+                    "- Use bounded same-chat history only to disambiguate the current source text; do not answer or create work from prior messages alone."
+                        .to_string(),
+                );
+            }
+        }
+    }
     lines.push(
         "- Use this source context as the only authorized reply target for this monitor task."
             .to_string(),
     );
     lines.join("\n")
+}
+
+fn render_context_message(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    let text = string_field_from_map(object, &["text"])?;
+    let from = string_field_from_map(object, &["from"])
+        .or_else(|| {
+            string_field_from_map(object, &["direction"]).map(|direction| {
+                if direction == "outgoing" {
+                    "me".to_string()
+                } else if direction == "incoming" {
+                    "them".to_string()
+                } else {
+                    direction
+                }
+            })
+        })
+        .unwrap_or_else(|| "context".to_string());
+    Some(format!("{}: {}", compact_line(&from), compact_line(&text)))
+}
+
+fn compact_line(value: &str) -> String {
+    value.replace('\n', " ").replace('\r', " ")
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {

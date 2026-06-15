@@ -49,9 +49,19 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
         ),
     );
     match action.as_str() {
-        "list" => Ok(serde_json::to_value(
-            state.browsers.list_tabs(&root_session_id),
-        )?),
+        "list" => {
+            // Pull in any tab the user opened directly in the native browser so
+            // the agent sees what the user is actually looking at (#649).
+            state.browsers.sync_native_tabs(
+                &state.event_sender(),
+                &root_session_id,
+                width,
+                height,
+            );
+            Ok(serde_json::to_value(
+                state.browsers.list_tabs(&root_session_id),
+            )?)
+        }
         "open" => {
             let tab_id =
                 resolve_open_target_tab_id(&state.browsers, &root_session_id, params, true);

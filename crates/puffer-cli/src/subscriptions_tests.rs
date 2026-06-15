@@ -1,7 +1,7 @@
 use super::*;
 use puffer_subscriptions::{
-    ActionSpec, ConnectorSubscriberTemplate, ConnectorTemplate, WorkflowBindingSpec,
-    WorkflowBindingStatus,
+    ActionSpec, ConnectionAuthStatus, ConnectorSubscriberTemplate, ConnectorTemplate,
+    WorkflowBindingSpec, WorkflowBindingStatus,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -228,7 +228,7 @@ done
     )
     .unwrap();
 
-    assert_eq!(result, Some(true));
+    assert_eq!(result, Some(ConnectionAuthStatus::Healthy));
     runtime.shutdown();
 }
 
@@ -352,7 +352,7 @@ fn builtin_auth_checker_reports_gmail_browser_auth_required_state() {
             "work"
         )
         .unwrap(),
-        Some(true)
+        Some(ConnectionAuthStatus::Healthy)
     );
 
     let dir = crate::gmail_browser::state_dir(&paths, "work");
@@ -379,7 +379,7 @@ fn builtin_auth_checker_reports_gmail_browser_auth_required_state() {
             "work"
         )
         .unwrap(),
-        Some(false)
+        Some(ConnectionAuthStatus::Broken)
     );
 
     runtime.shutdown();

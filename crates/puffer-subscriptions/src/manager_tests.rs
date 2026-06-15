@@ -1,13 +1,14 @@
 use super::*;
 use crate::action::ActionResult;
 use crate::catalog::ConnectorTemplate;
-use crate::connection::ConnectionRecord;
+use crate::connection::{ConnectionHealth, ConnectionHealthStatus, ConnectionRecord};
 use crate::spec::{ActionSpec, WorkflowBindingSpec, WorkflowBindingStatus};
 use puffer_subscriber_runtime::{Event, EventEnvelope, SubscriberCommand};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 #[test]
@@ -172,6 +173,176 @@ fn auth_refresh_does_not_degrade_connections_without_checker() {
 
     assert!(notices.is_empty());
     assert_eq!(connection.state, ConnectionState::Active);
+    assert!(!connection.auth_failure_notified);
+
+    manager.shutdown();
+}
+
+struct UnknownAuthChecker;
+
+impl ConnectionAuthChecker for UnknownAuthChecker {
+    fn check(
+        &self,
+        _manager: &SubscriptionManager,
+        _template: &ConnectorTemplate,
+        _connection_slug: &str,
+    ) -> Result<Option<ConnectionAuthStatus>> {
+        Ok(Some(ConnectionAuthStatus::Unknown))
+    }
+}
+
+#[test]
+fn control_health_event_marks_connection_degraded_and_ready_restores_active() {
+    let temp = tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+        .build(runtime.handle().clone())
+        .unwrap();
+    manager
+        .connection_store()
+        .create(ConnectionRecord::authenticated(
+            "telegram-user",
+            "telegram-login",
+            "Personal Telegram",
+        ))
+        .unwrap();
+    manager
+        .store()
+        .create(test_binding(
+            "telegram-monitor",
+            "telegram-user",
+            Vec::new(),
+        ))
+        .unwrap();
+    manager.refresh_connection_consumers().unwrap();
+    assert_eq!(
+        manager
+            .connection_store()
+            .get("telegram-user")
+            .unwrap()
+            .state,
+        ConnectionState::Active
+    );
+
+    manager.bus().publish(EventEnvelope {
+        envelope_id: "offline".into(),
+        subscriber_id: "telegram-user".into(),
+        received_at_ms: 1_700_000_000_000,
+        event: Event {
+            topic: "telegram-user".into(),
+            kind: "connection_health".into(),
+            control: true,
+            dedup_key: None,
+            text: String::new(),
+            payload: json!({
+                "status": "retrying",
+                "reason": "connect_failed",
+                "detail": "read 0 bytes",
+                "next_retry_at_ms": 1_700_000_010_000_i64,
+            }),
+        },
+    });
+    runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(50)).await });
+
+    let degraded = manager.connection_store().get("telegram-user").unwrap();
+    assert_eq!(degraded.state, ConnectionState::Degraded);
+    assert_eq!(
+        degraded.health,
+        Some(ConnectionHealth {
+            status: ConnectionHealthStatus::Retrying,
+            reason: Some("connect_failed".into()),
+            detail: Some("read 0 bytes".into()),
+            updated_at_ms: 1_700_000_000_000,
+            next_retry_at_ms: Some(1_700_000_010_000),
+        })
+    );
+
+    manager.bus().publish(EventEnvelope {
+        envelope_id: "ready".into(),
+        subscriber_id: "telegram-user".into(),
+        received_at_ms: 1_700_000_020_000,
+        event: Event {
+            topic: "telegram-user".into(),
+            kind: "ready".into(),
+            control: true,
+            dedup_key: None,
+            text: String::new(),
+            payload: json!({ "resumed": true, "recovered": true }),
+        },
+    });
+    runtime.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(50)).await });
+
+    let recovered = manager.connection_store().get("telegram-user").unwrap();
+    assert_eq!(recovered.state, ConnectionState::Active);
+    assert_eq!(
+        recovered.health.as_ref().map(|health| health.status),
+        Some(ConnectionHealthStatus::Ok)
+    );
+
+    manager.shutdown();
+}
+
+#[test]
+fn auth_unknown_does_not_clear_degraded_health() {
+    let temp = tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+        .with_connection_auth_checker(Arc::new(UnknownAuthChecker))
+        .build(runtime.handle().clone())
+        .unwrap();
+    manager
+        .connector_store()
+        .upsert(ConnectorTemplate {
+            slug: "telegram-login".into(),
+            description: "Telegram".into(),
+            skill: "telegram".into(),
+            binary: "puffer".into(),
+            command: Vec::new(),
+            requires_auth: true,
+            can_subscribe: true,
+            can_proxy_agent: false,
+            subscriber: None,
+            output_schema: Value::Null,
+            actions: BTreeMap::new(),
+        })
+        .unwrap();
+    manager
+        .connection_store()
+        .create(ConnectionRecord {
+            state: ConnectionState::Degraded,
+            has_consumer: true,
+            health: Some(ConnectionHealth {
+                status: ConnectionHealthStatus::Retrying,
+                reason: Some("connect_failed".into()),
+                detail: Some("read 0 bytes".into()),
+                updated_at_ms: 1_700_000_000_000,
+                next_retry_at_ms: Some(1_700_000_010_000),
+            }),
+            ..ConnectionRecord::authenticated(
+                "telegram-user",
+                "telegram-login",
+                "Personal Telegram",
+            )
+        })
+        .unwrap();
+
+    let notices = manager.refresh_connection_auth().unwrap();
+    let connection = manager.connection_store().get("telegram-user").unwrap();
+
+    assert!(notices.is_empty());
+    assert_eq!(connection.state, ConnectionState::Degraded);
+    assert_eq!(
+        connection.health.as_ref().map(|health| health.status),
+        Some(ConnectionHealthStatus::Retrying)
+    );
     assert!(!connection.auth_failure_notified);
 
     manager.shutdown();

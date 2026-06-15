@@ -24,6 +24,7 @@ mod delivery;
 mod diagnostics;
 mod events;
 mod health;
+mod history_cache;
 mod import;
 mod logging;
 mod login;
@@ -41,6 +42,7 @@ mod updates;
 
 pub use crate::client::run;
 
+pub use crate::history_cache::{TelegramHistoryCache, TelegramHistoryContextMessage};
 /// Narrow re-exports for external callers that drive the login flow
 /// directly (see `puffer-cli`'s `connect` subcommand). The internal
 /// `login` and `state` modules stay private so unrelated helpers

@@ -45,7 +45,8 @@ use app_helpers::{
 };
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -501,6 +502,11 @@ fn handle_key(
     tui: &mut TuiState,
     no_alt_screen: bool,
 ) -> Result<bool> {
+    // Windows Terminal and some other backends emit both Press and Release
+    // events for character keys. Only act on Press to avoid doubled input.
+    if key.kind != KeyEventKind::Press {
+        return Ok(false);
+    }
     // Reset the recap idle timer on any keystroke. Auto-recap fires only
     // after `config.recap.idle_secs` have elapsed since the last keystroke.
     tui.last_user_input_at = std::time::Instant::now();

@@ -83,6 +83,15 @@ fn browser_debug(event: &str, details: impl AsRef<str>) {
     eprintln!("[puffer-browser-daemon] {event} {}", details.as_ref());
 }
 
+/// Whether a discovered DevTools target URL represents a real page the user is
+/// viewing (and thus worth adopting, #649), as opposed to an unclaimed prewarm
+/// slot (`about:blank#…`), a blank tab, or an internal `devtools://`/
+/// `chrome-extension://` surface.
+fn is_user_visible_url(url: &str) -> bool {
+    let url = url.trim();
+    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("file://")
+}
+
 fn tab_state_summary(state: &BrowserTabsState) -> String {
     state
         .tabs
@@ -345,6 +354,153 @@ impl BrowserRegistry {
             tab.loading = false;
         }
         BrowserCurrentTabContext::from_tab(&tab)
+    }
+
+    /// Surfaces native-CEF tabs the user opened directly in the desktop browser
+    /// (issue #649). Those CEF page targets are created without going through the
+    /// daemon, so they never land in the tab registry and the agent's
+    /// `list`/`snapshot` cannot see them. This reconciles the registry against the
+    /// live DevTools target list: every user-visible page target that isn't
+    /// already tracked is *adopted* — a CDP page worker is attached and a tab
+    /// recorded — so the agent can read and drive it. Best-effort: any failure
+    /// leaves the registry untouched.
+    pub(crate) fn sync_native_tabs(
+        &self,
+        events: &broadcast::Sender<ServerEnvelope>,
+        root_session_id: &str,
+        width: u32,
+        height: u32,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        // Adoption only applies to the native-CEF fixed-pool backend. Establish
+        // the CEF connection on demand if the agent never opened a browser this
+        // session (the user may have browsed entirely by hand, #649) — but never
+        // launch a managed Chrome just to sync.
+        let Some(root) = self.ensure_native_cef_root() else {
+            return;
+        };
+        let browser_ws = root.browser_ws();
+        let discovered = match chrome::discover_page_targets(&browser_ws) {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                browser_debug("tabs.sync.discover-failed", format!("error={error}"));
+                return;
+            }
+        };
+        let width = width.max(1);
+        let height = height.max(1);
+        // Target ids the daemon already drives (its own claimed slots and any
+        // previously adopted user tabs). `insert` below also dedupes within this
+        // pass so a target advertised twice is adopted once.
+        let mut tracked: std::collections::HashSet<String> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|session| session.target_id())
+            .collect();
+        for target in discovered {
+            // Unclaimed prewarm slots (about:blank#puffer-cef-slot=…) are not
+            // user-visible pages; skip them.
+            if target.native_cef_session_id.is_some() {
+                continue;
+            }
+            if !is_user_visible_url(&target.url) {
+                continue;
+            }
+            if !tracked.insert(target.target_id.clone()) {
+                continue;
+            }
+            let tab_id = self.tabs.lock().unwrap().next_tab_id(root_session_id);
+            let backend_id = backend_session_id(root_session_id, &tab_id);
+            let page_target =
+                chrome::ChromePageTarget::adopted(target.target_id.clone(), target.page_ws.clone());
+            let session = BrowserSession::adopt(
+                events.clone(),
+                Arc::clone(&self.recordings),
+                Arc::clone(&self.console_logs),
+                backend_id.clone(),
+                root.clone(),
+                page_target,
+                width,
+                height,
+                false,
+                target.url.clone(),
+                target.title.clone(),
+            );
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(backend_id.clone(), session);
+            self.tabs.lock().unwrap().record_opened_backend(
+                root_session_id,
+                &tab_id,
+                backend_id,
+                None,
+                BrowserState {
+                    url: target.url,
+                    title: target.title,
+                    loading: false,
+                    width,
+                    height,
+                },
+            );
+            browser_debug(
+                "tabs.sync.adopted",
+                format!(
+                    "root_session_id={root_session_id} tab_id={tab_id} target_id={}",
+                    target.target_id
+                ),
+            );
+        }
+    }
+
+    /// Returns the live native-CEF global root, attaching to the desktop's CEF
+    /// on demand if none exists yet (#649: the user may have opened pages by hand
+    /// before the agent ever touched the browser). Returns `None` — never a
+    /// managed Chrome — when no CEF endpoint is configured, so a plain `list`
+    /// cannot spawn a browser. Established once per daemon lifetime; later opens
+    /// reuse the same global root.
+    fn ensure_native_cef_root(&self) -> Option<BrowserRootSession> {
+        if let Some(root) = self
+            .roots
+            .lock()
+            .unwrap()
+            .get(GLOBAL_BROWSER_ROOT_ID)
+            .cloned()
+            .filter(|root| root.is_alive() && root.reuses_fixed_target_pool())
+        {
+            return Some(root);
+        }
+        // Only attach when the desktop actually configured a CEF endpoint;
+        // otherwise discovery is a no-op (managed-Chrome deployments have no
+        // user-driven tabs).
+        session::native_cef_remote_port()?;
+        let launch_settings = self.launch_settings.lock().unwrap().clone();
+        let spawned = match BrowserRootSession::try_spawn_cef_remote(
+            &self.profile_root.join(GLOBAL_BROWSER_ROOT_ID),
+            &launch_settings,
+        ) {
+            Ok(Some(root)) => root,
+            Ok(None) => return None,
+            Err(error) => {
+                browser_debug("tabs.sync.cef-root-failed", format!("error={error}"));
+                return None;
+            }
+        };
+        let mut roots = self.roots.lock().unwrap();
+        // Lost a race with a concurrent open()/sync — reuse the winner.
+        if let Some(existing) = roots
+            .get(GLOBAL_BROWSER_ROOT_ID)
+            .cloned()
+            .filter(|root| root.is_alive())
+        {
+            return Some(existing);
+        }
+        roots.insert(GLOBAL_BROWSER_ROOT_ID.to_string(), spawned.clone());
+        Some(spawned)
     }
 
     /// Opens or reuses a tab inside the agent session browser set.
@@ -614,7 +770,14 @@ impl BrowserRegistry {
             let sessions = self.sessions.lock().unwrap();
             sessions
                 .iter()
-                .filter(|(id, session)| id.as_str() != exclude_session_id && session.is_alive())
+                // Only sessions that actually hold a prewarm slot can free one.
+                // Adopted user tabs (#649) carry no native slot id, so reclaiming
+                // them frees nothing and would just kill the user's page.
+                .filter(|(id, session)| {
+                    id.as_str() != exclude_session_id
+                        && session.is_alive()
+                        && session.native_cef_session_id().is_some()
+                })
                 .max_by_key(|(_, session)| session.idle_for())
                 .map(|(id, _)| id.clone())
         };

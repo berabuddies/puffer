@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use puffer_config::{ConfigPaths, PufferConfig};
+use puffer_config::{load_config, ConfigPaths, PufferConfig};
 use puffer_core::{
     execute_tool_action_once, execute_user_turn_streaming,
     execute_user_turn_streaming_without_tools, AppState, TurnStreamEvent,
@@ -7,6 +7,7 @@ use puffer_core::{
 use puffer_provider_registry::{canonical_provider_id, AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, BACKGROUND_SESSION_TAG};
+use puffer_subscriber_telegram_user::TelegramHistoryCache;
 use puffer_subscriptions::{
     install_workflow_runner, ActionUsage, WorkflowActionOutput, WorkflowActionRunner,
 };
@@ -14,8 +15,10 @@ use puffer_workflow::{
     AgentExecution, AgentExecutor, CronDeduper, CronExpression, DagRunner, ExecutionContext,
     TriggerSpec, WorkflowStore,
 };
-use serde_json::json;
-use std::path::PathBuf;
+use serde_json::{json, Value};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -23,6 +26,7 @@ use time::{OffsetDateTime, UtcOffset};
 
 const OPENAI_TASK_AGENT_MODEL: &str = "gpt-5.4-mini";
 const ANTHROPIC_TASK_AGENT_MODEL: &str = "claude-haiku-4-5-20251001";
+const TELEGRAM_CONVERSATION_CONTEXT_LIMIT: usize = 8;
 
 /// Owns native workflow trigger hooks for the current process.
 pub(crate) struct WorkflowRuntime {
@@ -83,6 +87,12 @@ struct ProcessWorkflowRunner {
     lock: Mutex<()>,
 }
 
+struct WorkflowRuntimeSnapshot {
+    config: PufferConfig,
+    providers: ProviderRegistry,
+    auth_store: AuthStore,
+}
+
 impl WorkflowActionRunner for ProcessWorkflowRunner {
     fn run_workflow(&self, slug: &str, trigger: serde_json::Value) -> Result<WorkflowActionOutput> {
         let _guard = self.lock.lock().unwrap();
@@ -93,14 +103,15 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         if !definition.enabled {
             anyhow::bail!("workflow `{slug}` is disabled");
         }
+        let snapshot = self.runtime_snapshot();
         let run = DagRunner::new(
             &store,
             PufferAgentExecutor {
                 paths: self.paths.clone(),
-                config: self.config.clone(),
+                config: snapshot.config,
                 resources: self.resources.clone(),
-                providers: self.providers.clone(),
-                auth_store: self.auth_store.clone(),
+                providers: snapshot.providers,
+                auth_store: snapshot.auth_store,
             },
         )
         .run(&definition, trigger, None)?;
@@ -118,12 +129,13 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
     ) -> Result<WorkflowActionOutput> {
         let _guard = self.lock.lock().unwrap();
         let cwd = self.paths.workspace_root.clone();
-        let mut state = self.new_app_state(cwd.clone(), None)?;
+        let snapshot = self.runtime_snapshot();
+        let mut state = self.new_app_state_with_snapshot(cwd.clone(), None, &snapshot)?;
         let result = execute_tool_action_once(
             &mut state,
             &self.resources,
-            &self.providers,
-            &self.auth_store,
+            &snapshot.providers,
+            &snapshot.auth_store,
             &cwd,
             tool_id,
             input,
@@ -158,6 +170,7 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         let mut usage = None;
         let mut turn_window: Option<(i128, i128)> = None;
         for trigger in triggers {
+            let trigger = enrich_monitor_trigger_context(&self.paths, trigger)?;
             let triggers = vec![trigger];
             let prompt = render_triage_batch_prompt(prompt, &triggers)?;
             let session_key = triage_session_key(model, &triggers);
@@ -203,25 +216,70 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
 }
 
 impl ProcessWorkflowRunner {
-    fn new_app_state(&self, cwd: PathBuf, model: Option<&str>) -> Result<AppState> {
+    fn new_app_state_with_snapshot(
+        &self,
+        cwd: PathBuf,
+        model: Option<&str>,
+        snapshot: &WorkflowRuntimeSnapshot,
+    ) -> Result<AppState> {
         let session_store = SessionStore::from_paths(&self.paths)?;
         let session = session_store
             .create_session_with_tags(cwd.clone(), vec![BACKGROUND_SESSION_TAG.to_string()])?;
-        let mut state = AppState::new(self.config.clone(), cwd, session);
+        let mut state = AppState::new(snapshot.config.clone(), cwd, session);
         if let Some(model) = model.and_then(non_empty_trimmed) {
             apply_explicit_model(&mut state, model);
         } else {
-            apply_authenticated_provider_fallback(&mut state, &self.providers, &self.auth_store);
+            apply_authenticated_provider_fallback(
+                &mut state,
+                &snapshot.providers,
+                &snapshot.auth_store,
+            );
         }
         Ok(state)
     }
 
-    fn new_task_app_state(&self, cwd: PathBuf, model: Option<&str>) -> Result<AppState> {
-        let mut state = self.new_app_state(cwd, model)?;
+    fn new_task_app_state_with_snapshot(
+        &self,
+        cwd: PathBuf,
+        model: Option<&str>,
+        snapshot: &WorkflowRuntimeSnapshot,
+    ) -> Result<AppState> {
+        let mut state = self.new_app_state_with_snapshot(cwd, model, snapshot)?;
         if model.and_then(non_empty_trimmed).is_none() {
-            apply_task_agent_model_default(&mut state, &self.providers);
+            apply_task_agent_model_default(&mut state, &snapshot.providers);
         }
         Ok(state)
+    }
+
+    fn runtime_snapshot(&self) -> WorkflowRuntimeSnapshot {
+        let config = match load_config(&self.paths) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to refresh workflow config; using startup snapshot"
+                );
+                self.config.clone()
+            }
+        };
+        let auth_path = self.paths.user_config_dir.join("auth.json");
+        let auth_store = match AuthStore::load(&auth_path) {
+            Ok(auth_store) => auth_store,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to refresh workflow auth store; using startup snapshot"
+                );
+                self.auth_store.clone()
+            }
+        };
+        let mut providers = self.providers.clone();
+        apply_config_provider_overrides(&mut providers, &config);
+        WorkflowRuntimeSnapshot {
+            config,
+            providers,
+            auth_store,
+        }
     }
 
     fn run_task_agent_prompt_for_session(
@@ -239,9 +297,10 @@ impl ProcessWorkflowRunner {
         // session memory (the triage protocol requires TaskList, which reads
         // the store from disk), and the stable per-connection cache key keeps
         // prompt-prefix caching effective across fresh sessions.
-        let mut state = self.new_task_app_state(cwd, model)?;
+        let snapshot = self.runtime_snapshot();
+        let mut state = self.new_task_app_state_with_snapshot(cwd, model, &snapshot)?;
         state.prompt_cache_key_override = Some(session_key.to_string());
-        let mut auth_store = self.auth_store.clone();
+        let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         // Post-lock stamp: history's run window starts at router dispatch, so
         // this is what separates queue/lock wait from actual turn time.
@@ -249,7 +308,7 @@ impl ProcessWorkflowRunner {
         let output = execute_user_turn_streaming(
             &mut state,
             &self.resources,
-            &self.providers,
+            &snapshot.providers,
             &mut auth_store,
             &prompt,
             |event| {
@@ -278,13 +337,14 @@ impl ProcessWorkflowRunner {
         model: Option<&str>,
     ) -> Result<WorkflowActionOutput> {
         let cwd = self.paths.workspace_root.clone();
-        let mut state = self.new_task_app_state(cwd, model)?;
-        let mut auth_store = self.auth_store.clone();
+        let snapshot = self.runtime_snapshot();
+        let mut state = self.new_task_app_state_with_snapshot(cwd, model, &snapshot)?;
+        let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         let output = execute_user_turn_streaming_without_tools(
             &mut state,
             &self.resources,
-            &self.providers,
+            &snapshot.providers,
             &mut auth_store,
             &prompt,
             |event| {
@@ -338,6 +398,297 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
     ))
 }
 
+fn enrich_monitor_trigger_context(paths: &ConfigPaths, mut trigger: Value) -> Result<Value> {
+    let Some(connection_id) = trigger
+        .get("connection_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(trigger);
+    };
+    if !connection_id.contains("telegram") || !safe_path_component(connection_id) {
+        return Ok(trigger);
+    }
+    let payload = match trigger.get("payload").and_then(Value::as_object) {
+        Some(payload) => payload,
+        None => return Ok(trigger),
+    };
+    let Some(chat_id) = payload.get("chat_id").and_then(Value::as_i64) else {
+        return Ok(trigger);
+    };
+    if payload
+        .get("chat_kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "user")
+    {
+        return Ok(trigger);
+    }
+    let current_message_id = payload.get("message_id").and_then(Value::as_i64);
+    let current_date_ms = payload.get("date_ms").and_then(Value::as_i64);
+    let history_path = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join(connection_id)
+        .join("telegram-history-cache.json");
+    let messages = match read_prior_telegram_history_cache_messages(
+        &history_path,
+        chat_id,
+        current_message_id,
+        current_date_ms,
+        TELEGRAM_CONVERSATION_CONTEXT_LIMIT,
+    ) {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                connection_id,
+                chat_id,
+                "failed to read Telegram history cache for monitor context; continuing without cached context"
+            );
+            Vec::new()
+        }
+    };
+    if !messages.is_empty() {
+        let context = json!({
+            "kind": "telegram_prior_messages",
+            "source": "telegram_server_history_cache",
+            "continuity": "bounded_server_history",
+            "scope": "same_chat_before_current_message",
+            "limit": TELEGRAM_CONVERSATION_CONTEXT_LIMIT,
+            "note": "bounded recent Telegram server history in this same chat before the current trigger, maintained by the Telegram subscriber. Use it to disambiguate the current source message; the current trigger text remains authoritative for creating/updating the task.",
+            "messages": messages,
+        });
+        if let Some(payload) = trigger.get_mut("payload").and_then(Value::as_object_mut) {
+            payload.insert("conversation_context".to_string(), context);
+        }
+        return Ok(trigger);
+    }
+    let diagnostics_path = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join(connection_id)
+        .join("message-diagnostics.ndjson");
+    let messages = match read_prior_telegram_context_messages(
+        &diagnostics_path,
+        chat_id,
+        current_message_id,
+        current_date_ms,
+        TELEGRAM_CONVERSATION_CONTEXT_LIMIT,
+    ) {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                connection_id,
+                chat_id,
+                "failed to read Telegram diagnostics for monitor context; continuing without diagnostics context"
+            );
+            Vec::new()
+        }
+    };
+    if messages.is_empty() {
+        return Ok(trigger);
+    }
+    let context = json!({
+        "kind": "telegram_prior_messages",
+        "source": "subscriber_diagnostics",
+        "continuity": "unknown",
+        "scope": "same_chat_before_current_message",
+        "limit": TELEGRAM_CONVERSATION_CONTEXT_LIMIT,
+        "note": "Recent Telegram messages in this same chat before the current trigger, as observed by the subscriber. This may be partial if the subscriber was offline; use it only to disambiguate context, while the current trigger text remains authoritative for creating/updating the task.",
+        "messages": messages,
+    });
+    if let Some(payload) = trigger.get_mut("payload").and_then(Value::as_object_mut) {
+        payload.insert("conversation_context".to_string(), context);
+    }
+    Ok(trigger)
+}
+
+fn safe_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn read_prior_telegram_history_cache_messages(
+    path: &Path,
+    chat_id: i64,
+    current_message_id: Option<i64>,
+    current_date_ms: Option<i64>,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    if limit == 0 || !path.exists() {
+        return Ok(Vec::new());
+    }
+    let cache = TelegramHistoryCache::load_path(path)?;
+    cache
+        .prior_context_messages(chat_id, current_message_id, current_date_ms, limit)
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("serialize Telegram history context messages")
+}
+
+fn read_prior_telegram_context_messages(
+    path: &Path,
+    chat_id: i64,
+    current_message_id: Option<i64>,
+    current_date_ms: Option<i64>,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    for path in telegram_context_diagnostic_paths(path) {
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+        };
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if !telegram_context_stage_is_relevant(&payload) {
+                continue;
+            }
+            if payload.get("chat_id").and_then(Value::as_i64) != Some(chat_id) {
+                continue;
+            }
+            if payload.get("chat_kind").and_then(Value::as_str) != Some("user") {
+                continue;
+            }
+            let message_id = payload.get("message_id").and_then(Value::as_i64);
+            if message_id.is_some() && message_id == current_message_id {
+                continue;
+            }
+            let date_ms = payload.get("date_ms").and_then(Value::as_i64).unwrap_or(0);
+            if !telegram_context_message_precedes_current(
+                date_ms,
+                message_id,
+                current_date_ms,
+                current_message_id,
+            ) {
+                continue;
+            }
+            let Some(text) = payload
+                .get("text_prefix")
+                .or_else(|| payload.get("text"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let is_outgoing = payload
+                .get("is_outgoing")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| {
+                    payload.get("stage").and_then(Value::as_str) == Some("suppressed_outgoing")
+                });
+            let direction = if is_outgoing { "outgoing" } else { "incoming" };
+            let from = if is_outgoing { "me" } else { "them" };
+            let sender_label = telegram_context_sender_label(&payload, is_outgoing);
+            let chat_title = payload
+                .get("chat_title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let sender_username = payload
+                .get("sender_username")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            candidates.push((
+                date_ms,
+                message_id.unwrap_or_default(),
+                json!({
+                    "from": from,
+                    "direction": direction,
+                    "sender": {
+                        "label": sender_label,
+                        "username": sender_username,
+                        "is_user": is_outgoing,
+                    },
+                    "chat": {
+                        "id": chat_id,
+                        "title": chat_title,
+                    },
+                    "message_id": message_id,
+                    "date_ms": date_ms,
+                    "ts": date_ms,
+                    "text": text,
+                }),
+            ));
+        }
+    }
+    candidates.sort_by_key(|(date_ms, message_id, _)| (*date_ms, *message_id));
+    let start = candidates.len().saturating_sub(limit);
+    Ok(candidates
+        .into_iter()
+        .skip(start)
+        .map(|(_, _, value)| value)
+        .collect())
+}
+
+fn telegram_context_diagnostic_paths(path: &Path) -> [PathBuf; 2] {
+    [
+        PathBuf::from(format!("{}.1", path.display())),
+        path.to_path_buf(),
+    ]
+}
+
+fn telegram_context_stage_is_relevant(payload: &Value) -> bool {
+    matches!(
+        payload.get("stage").and_then(Value::as_str),
+        Some("emitted" | "suppressed_outgoing")
+    )
+}
+
+fn telegram_context_message_precedes_current(
+    date_ms: i64,
+    message_id: Option<i64>,
+    current_date_ms: Option<i64>,
+    current_message_id: Option<i64>,
+) -> bool {
+    if let Some(current_date_ms) = current_date_ms {
+        return date_ms < current_date_ms
+            || (date_ms == current_date_ms
+                && message_id
+                    .zip(current_message_id)
+                    .is_some_and(|(left, right)| left < right));
+    }
+    match message_id.zip(current_message_id) {
+        Some((left, right)) => left < right,
+        None => true,
+    }
+}
+
+fn telegram_context_sender_label(payload: &Value, is_outgoing: bool) -> String {
+    payload
+        .get("sender_name")
+        .or_else(|| payload.get("chat_title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            if is_outgoing {
+                "me".to_string()
+            } else {
+                "sender".to_string()
+            }
+        })
+}
+
 /// Current Unix time in milliseconds (i128, matching workflow history).
 fn now_unix_ms() -> i128 {
     std::time::SystemTime::now()
@@ -359,12 +710,13 @@ fn triage_session_key(model: Option<&str>, triggers: &[serde_json::Value]) -> St
 
 /// Stamps the trigger's verbatim source grounding onto monitor tasks created
 /// for that envelope: the exact event text (`metadata.source_text`, plus
-/// `source_context.text`) and the source message id
-/// (`metadata.source_message_id`, plus `source_context.message_id`, used to
-/// send approved replies as a Telegram reply to the triggering message —
-/// agentenv/monorepo#630). Server-owned — the agent never writes these, so
-/// paraphrase errors can always be checked against the original wording and
-/// replies thread to the right message.
+/// `source_context.text`), the source message id (`metadata.source_message_id`,
+/// plus `source_context.message_id`, used to send approved replies as a Telegram
+/// reply to the triggering message — agentenv/monorepo#630), and any
+/// server-built recent Telegram conversation context for reply-draft quality.
+/// Server-owned — the agent never writes these, so paraphrase errors can always
+/// be checked against the original wording and replies thread to the right
+/// message.
 fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) -> Result<()> {
     let Some(envelope_id) = trigger
         .get("envelope_id")
@@ -385,6 +737,10 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
         .get("payload")
         .and_then(|payload| payload.get("message_id"))
         .and_then(serde_json::Value::as_i64);
+    let conversation_context = trigger
+        .get("payload")
+        .and_then(|payload| payload.get("conversation_context"))
+        .cloned();
     let path = paths
         .workspace_config_dir
         .join("runtime")
@@ -462,7 +818,9 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
                 changed = true;
             }
             if let Some(message_id) = message_id {
-                if context.get("message_id").and_then(serde_json::Value::as_i64)
+                if context
+                    .get("message_id")
+                    .and_then(serde_json::Value::as_i64)
                     != Some(message_id)
                 {
                     context.insert(
@@ -470,6 +828,31 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
                         serde_json::Value::from(message_id),
                     );
                     changed = true;
+                }
+            }
+            match conversation_context.as_ref() {
+                Some(conversation_context) => {
+                    if context.get("conversation_context") != Some(conversation_context) {
+                        context.insert(
+                            "conversation_context".to_string(),
+                            conversation_context.clone(),
+                        );
+                        changed = true;
+                    }
+                    if let Some(messages) = conversation_context.get("messages") {
+                        if context.get("context_messages") != Some(messages) {
+                            context.insert("context_messages".to_string(), messages.clone());
+                            changed = true;
+                        }
+                    }
+                }
+                None => {
+                    if context.remove("conversation_context").is_some() {
+                        changed = true;
+                    }
+                    if context.remove("context_messages").is_some() {
+                        changed = true;
+                    }
                 }
             }
         }
@@ -575,14 +958,15 @@ fn poll_cron(runner: &ProcessWorkflowRunner, deduper: &mut CronDeduper) -> Resul
                 "scheduled_minute_epoch": minute_epoch,
             });
             let _guard = runner.lock.lock().unwrap();
+            let snapshot = runner.runtime_snapshot();
             let run = DagRunner::new(
                 &store,
                 PufferAgentExecutor {
                     paths: runner.paths.clone(),
-                    config: runner.config.clone(),
+                    config: snapshot.config,
                     resources: runner.resources.clone(),
-                    providers: runner.providers.clone(),
-                    auth_store: runner.auth_store.clone(),
+                    providers: snapshot.providers,
+                    auth_store: snapshot.auth_store,
                 },
             )
             .run(&definition, trigger, Some(trigger_key))?;
@@ -639,6 +1023,28 @@ fn apply_task_agent_model_default(state: &mut AppState, providers: &ProviderRegi
     let selector = format!("{provider_id}/{model_id}");
     if providers.resolve_model(&selector).is_some() {
         apply_explicit_model(state, &selector);
+    }
+}
+
+fn apply_config_provider_overrides(providers: &mut ProviderRegistry, config: &PufferConfig) {
+    providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+    if !config.openai_headers.is_empty() {
+        providers.set_openai_headers(
+            config
+                .openai_headers
+                .clone()
+                .into_iter()
+                .collect::<indexmap::IndexMap<_, _>>(),
+        );
+    }
+    if !config.openai_query_params.is_empty() {
+        providers.set_openai_query_params(
+            config
+                .openai_query_params
+                .clone()
+                .into_iter()
+                .collect::<indexmap::IndexMap<_, _>>(),
+        );
     }
 }
 
@@ -733,9 +1139,11 @@ mod tests {
     };
     use puffer_config::PufferConfig;
     use puffer_provider_registry::{AuthMode, Modality, ModelDescriptor, ProviderDescriptor};
+    use puffer_resources::LoadedResources;
     use puffer_session_store::SessionMetadata;
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use uuid::Uuid;
 
     fn provider(id: &str, model_id: &str) -> ProviderDescriptor {
@@ -803,6 +1211,57 @@ mod tests {
     }
 
     #[test]
+    fn task_agent_state_refreshes_disk_config_and_auth_after_runner_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        puffer_config::ensure_workspace_dirs(&paths).unwrap();
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider_with_models(
+            "anthropic",
+            &["claude-sonnet-4-5", "claude-haiku-4-5-20251001"],
+        ));
+        providers.register(provider_with_models("openai", &["gpt-5.5", "gpt-5.4-mini"]));
+
+        let mut startup_config = PufferConfig::default();
+        startup_config.default_provider = Some("anthropic".to_string());
+        startup_config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        let runner = super::ProcessWorkflowRunner {
+            paths: paths.clone(),
+            config: startup_config,
+            resources: LoadedResources::default(),
+            providers,
+            auth_store: AuthStore::default(),
+            lock: Mutex::new(()),
+        };
+
+        let mut latest_config = PufferConfig::default();
+        latest_config.default_provider = Some("anthropic".to_string());
+        latest_config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        latest_config.openai_base_url = Some("https://worldrouter.test/v1".to_string());
+        puffer_config::save_user_config(&paths, &latest_config).unwrap();
+        let mut latest_auth = AuthStore::default();
+        latest_auth.set_api_key("openai", "test-key");
+        latest_auth
+            .save(&paths.user_config_dir.join("auth.json"))
+            .unwrap();
+
+        let snapshot = runner.runtime_snapshot();
+        let state = runner
+            .new_task_app_state_with_snapshot(paths.workspace_root.clone(), None, &snapshot)
+            .unwrap();
+
+        assert!(snapshot.auth_store.get("openai").is_some());
+        assert_eq!(
+            state.config.openai_base_url.as_deref(),
+            Some("https://worldrouter.test/v1")
+        );
+        assert_eq!(state.current_provider.as_deref(), Some("openai"));
+        assert_eq!(state.current_model.as_deref(), Some("openai/gpt-5.4-mini"));
+    }
+
+    #[test]
     fn triage_session_key_uses_connection_and_model() {
         let triggers = vec![json!({
             "connection_id": "telegram-user",
@@ -835,6 +1294,326 @@ mod tests {
 
         assert!(prompt.contains("Workflow trigger:"));
         assert!(prompt.contains("\"first\""));
+    }
+
+    #[test]
+    fn enrich_monitor_trigger_context_adds_prior_telegram_chat_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let account_dir = paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join("telegram-user");
+        std::fs::create_dir_all(&account_dir).unwrap();
+        std::fs::write(
+            account_dir.join("message-diagnostics.ndjson.1"),
+            json!({
+                "stage": "emitted",
+                "chat_id": 42,
+                "chat_kind": "user",
+                "chat_title": "Chaofan 10-23",
+                "sender_name": "Chaofan",
+                "message_id": 9,
+                "date_ms": 500,
+                "text_prefix": "报价那件事今天定",
+                "is_outgoing": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            account_dir.join("message-diagnostics.ndjson"),
+            [
+                json!({
+                    "stage": "emitted",
+                    "chat_id": 42,
+                    "chat_kind": "user",
+                    "chat_title": "Chaofan 10-23",
+                    "sender_name": "Chaofan",
+                    "message_id": 10,
+                    "date_ms": 1_000,
+                    "text_prefix": "上次说的报价发你了",
+                    "is_outgoing": false
+                })
+                .to_string(),
+                json!({
+                    "stage": "suppressed_outgoing",
+                    "chat_id": 42,
+                    "chat_kind": "user",
+                    "chat_title": "Chaofan 10-23",
+                    "sender_name": "Me",
+                    "message_id": 11,
+                    "date_ms": 2_000,
+                    "text_prefix": "我晚点看，周一聊细节",
+                    "is_outgoing": true
+                })
+                .to_string(),
+                json!({
+                    "stage": "emitted",
+                    "chat_id": 42,
+                    "chat_kind": "user",
+                    "chat_title": "Chaofan 10-23",
+                    "sender_name": "Chaofan",
+                    "message_id": 12,
+                    "date_ms": 3_000,
+                    "text_prefix": "聊下？",
+                    "is_outgoing": false
+                })
+                .to_string(),
+                json!({
+                    "stage": "emitted",
+                    "chat_id": 99,
+                    "chat_kind": "user",
+                    "chat_title": "Other",
+                    "sender_name": "Other",
+                    "message_id": 4,
+                    "date_ms": 2_500,
+                    "text_prefix": "别的聊天",
+                    "is_outgoing": false
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let trigger = json!({
+            "connection_id": "telegram-user",
+            "text": "聊下？",
+            "payload": {
+                "chat_id": 42,
+                "chat_kind": "user",
+                "chat_title": "Chaofan 10-23",
+                "message_id": 12,
+                "date_ms": 3_000
+            }
+        });
+
+        let enriched = super::enrich_monitor_trigger_context(&paths, trigger).unwrap();
+        let context = enriched
+            .pointer("/payload/conversation_context")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        let messages = context
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+
+        assert_eq!(context["source"], "subscriber_diagnostics");
+        assert_eq!(context["continuity"], "unknown");
+        assert!(context["note"].as_str().unwrap().contains("may be partial"));
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["text"], "报价那件事今天定");
+        assert_eq!(messages[0]["from"], "them");
+        assert_eq!(messages[0]["direction"], "incoming");
+        assert_eq!(messages[1]["text"], "上次说的报价发你了");
+        assert_eq!(messages[1]["from"], "them");
+        assert_eq!(messages[1]["direction"], "incoming");
+        assert_eq!(messages[2]["text"], "我晚点看，周一聊细节");
+        assert_eq!(messages[2]["from"], "me");
+        assert_eq!(messages[2]["direction"], "outgoing");
+        assert!(!serde_json::to_string(messages).unwrap().contains("聊下？"));
+        assert!(!serde_json::to_string(messages)
+            .unwrap()
+            .contains("别的聊天"));
+    }
+
+    #[test]
+    fn enrich_monitor_trigger_context_reads_bounded_telegram_history_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let account_dir = paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join("telegram-user");
+        std::fs::create_dir_all(&account_dir).unwrap();
+        std::fs::write(
+            account_dir.join("telegram-history-cache.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "source": "telegram_server_history",
+                "limit_per_chat": 64,
+                "chats": [
+                    {
+                        "chat_id": 42,
+                        "chat_kind": "user",
+                        "chat_title": "Chaofan 10-23",
+                        "messages": [
+                            {
+                                "message_id": 9,
+                                "date_ms": 500,
+                                "is_outgoing": false,
+                                "sender_name": "Chaofan",
+                                "text": "报价那件事今天定"
+                            },
+                            {
+                                "message_id": 10,
+                                "date_ms": 1_000,
+                                "is_outgoing": true,
+                                "sender_name": "Me",
+                                "text": "我晚点看，周一聊细节"
+                            },
+                            {
+                                "message_id": 11,
+                                "date_ms": 3_000,
+                                "is_outgoing": false,
+                                "sender_name": "Chaofan",
+                                "text": "聊下？"
+                            }
+                        ]
+                    },
+                    {
+                        "chat_id": 99,
+                        "chat_kind": "user",
+                        "chat_title": "Other",
+                        "messages": [
+                            {
+                                "message_id": 3,
+                                "date_ms": 1_500,
+                                "is_outgoing": false,
+                                "sender_name": "Other",
+                                "text": "别的聊天"
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let trigger = json!({
+            "connection_id": "telegram-user",
+            "text": "聊下？",
+            "payload": {
+                "chat_id": 42,
+                "chat_kind": "user",
+                "chat_title": "Chaofan 10-23",
+                "message_id": 11,
+                "date_ms": 3_000
+            }
+        });
+
+        let enriched = super::enrich_monitor_trigger_context(&paths, trigger).unwrap();
+        let context = enriched
+            .pointer("/payload/conversation_context")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        let messages = context
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+
+        assert_eq!(context["source"], "telegram_server_history_cache");
+        assert_eq!(context["continuity"], "bounded_server_history");
+        assert!(context["note"]
+            .as_str()
+            .unwrap()
+            .contains("bounded recent Telegram server history"));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["text"], "报价那件事今天定");
+        assert_eq!(messages[0]["from"], "them");
+        assert_eq!(messages[1]["text"], "我晚点看，周一聊细节");
+        assert_eq!(messages[1]["from"], "me");
+        assert!(!serde_json::to_string(messages).unwrap().contains("聊下？"));
+        assert!(!serde_json::to_string(messages)
+            .unwrap()
+            .contains("别的聊天"));
+    }
+
+    #[test]
+    fn enrich_monitor_trigger_context_falls_back_when_history_cache_is_corrupt() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let account_dir = paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join("telegram-user");
+        std::fs::create_dir_all(&account_dir).unwrap();
+        std::fs::write(account_dir.join("telegram-history-cache.json"), "{bad json").unwrap();
+        std::fs::write(
+            account_dir.join("message-diagnostics.ndjson"),
+            json!({
+                "stage": "emitted",
+                "chat_id": 42,
+                "chat_kind": "user",
+                "chat_title": "Chaofan 10-23",
+                "sender_name": "Chaofan",
+                "message_id": 10,
+                "date_ms": 1_000,
+                "text_prefix": "诊断兜底上下文",
+                "is_outgoing": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let trigger = json!({
+            "connection_id": "telegram-user",
+            "text": "聊下？",
+            "payload": {
+                "chat_id": 42,
+                "chat_kind": "user",
+                "message_id": 11,
+                "date_ms": 2_000
+            }
+        });
+
+        let enriched = super::enrich_monitor_trigger_context(&paths, trigger).unwrap();
+        let context = enriched
+            .pointer("/payload/conversation_context")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        let messages = context
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+
+        assert_eq!(context["source"], "subscriber_diagnostics");
+        assert_eq!(messages[0]["text"], "诊断兜底上下文");
+    }
+
+    #[test]
+    fn enrich_monitor_trigger_context_skips_group_chats() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let account_dir = paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join("telegram-user");
+        std::fs::create_dir_all(&account_dir).unwrap();
+        std::fs::write(
+            account_dir.join("message-diagnostics.ndjson"),
+            json!({
+                "stage": "emitted",
+                "chat_id": -10042,
+                "chat_kind": "group",
+                "chat_title": "Project Group",
+                "sender_name": "Alice",
+                "message_id": 10,
+                "date_ms": 1_000,
+                "text_prefix": "群里前文",
+                "is_outgoing": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let trigger = json!({
+            "connection_id": "telegram-user",
+            "text": "@zooey 聊下？",
+            "payload": {
+                "chat_id": -10042,
+                "chat_kind": "group",
+                "message_id": 11,
+                "date_ms": 2_000
+            }
+        });
+
+        let enriched = super::enrich_monitor_trigger_context(&paths, trigger).unwrap();
+
+        assert!(enriched.pointer("/payload/conversation_context").is_none());
     }
 
     #[test]
@@ -968,7 +1747,27 @@ mod tests {
         let trigger = json!({
             "envelope_id": "env-1",
             "text": "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。",
-            "payload": { "message_id": 6836 }
+            "payload": {
+                "message_id": 6836,
+                "conversation_context": {
+                    "kind": "telegram_prior_messages",
+                    "scope": "same_chat_before_current_message",
+                    "messages": [
+                        {
+                            "from": "them",
+                            "direction": "incoming",
+                            "text": "刚刚的异常还在继续",
+                            "date_ms": 1_000
+                        },
+                        {
+                            "from": "me",
+                            "direction": "outgoing",
+                            "text": "我看一下，16:00 前回复",
+                            "date_ms": 2_000
+                        }
+                    ]
+                }
+            }
         });
 
         super::record_monitor_source_text(&paths, &trigger).unwrap();
@@ -988,6 +1787,15 @@ mod tests {
         // The source message id rides along for reply threading (#630).
         assert_eq!(tasks[0]["metadata"]["source_message_id"], 6836);
         assert_eq!(tasks[0]["metadata"]["source_context"]["message_id"], 6836);
+        // Prior same-chat context rides along for reply-draft quality.
+        assert_eq!(
+            tasks[0]["metadata"]["source_context"]["conversation_context"]["scope"],
+            "same_chat_before_current_message"
+        );
+        assert_eq!(
+            tasks[0]["metadata"]["source_context"]["context_messages"][0]["text"],
+            "刚刚的异常还在继续"
+        );
         // …while a different envelope's task is untouched.
         assert!(tasks[1]["metadata"].get("source_text").is_none());
 

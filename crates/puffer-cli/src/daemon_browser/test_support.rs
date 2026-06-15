@@ -34,6 +34,7 @@ impl BrowserSession {
             alive: Arc::new(AtomicBool::new(true)),
             root: None,
             native_cef_session_id: None,
+            target_id: None,
         }
     }
 }
@@ -56,17 +57,29 @@ pub(crate) struct FakeCefDevtools {
 impl FakeCefDevtools {
     /// Spawns a fake DevTools endpoint with `slot_count` reusable targets.
     pub(crate) fn spawn(slot_count: usize) -> Self {
-        Self::spawn_inner(slot_count, Vec::new())
+        Self::spawn_inner(slot_count, Vec::new(), Vec::new())
+    }
+
+    /// Like [`FakeCefDevtools::spawn`], but also advertises `user_pages`
+    /// (`(target_id, url)` pairs) as additional `page` targets with real URLs —
+    /// the CDP shape of a tab the user opened directly in the native browser,
+    /// outside the daemon's prewarm pool (issue #649).
+    pub(crate) fn spawn_with_user_pages(slot_count: usize, user_pages: Vec<(&str, &str)>) -> Self {
+        let user_pages = user_pages
+            .into_iter()
+            .map(|(id, url)| (id.to_string(), url.to_string()))
+            .collect();
+        Self::spawn_inner(slot_count, Vec::new(), user_pages)
     }
 
     /// Like [`FakeCefDevtools::spawn`], but the slots whose indices are in
     /// `hung` accept the CDP websocket yet never answer any request, simulating
     /// a wedged page that cannot be reset.
     pub(crate) fn spawn_with_hung_slots(slot_count: usize, hung: Vec<usize>) -> Self {
-        Self::spawn_inner(slot_count, hung)
+        Self::spawn_inner(slot_count, hung, Vec::new())
     }
 
-    fn spawn_inner(slot_count: usize, hung: Vec<usize>) -> Self {
+    fn spawn_inner(slot_count: usize, hung: Vec<usize>, user_pages: Vec<(String, String)>) -> Self {
         let hung: HashSet<usize> = hung.into_iter().collect();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -74,15 +87,19 @@ impl FakeCefDevtools {
         let finished = Arc::new(AtomicBool::new(false));
         let server_finished = Arc::clone(&finished);
         std::thread::spawn(move || {
-            let targets = (0..slot_count)
+            let mut entries = (0..slot_count)
                 .map(|index| {
                     format!(
                         r#"{{"id":"target-{index}","type":"page","url":"about:blank#puffer-cef-slot=__cef_prewarm_{index}__","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/target-{index}"}}"#
                     )
                 })
-                .collect::<Vec<_>>()
-                .join(",");
-            let list_body = format!("[{targets}]");
+                .collect::<Vec<_>>();
+            entries.extend(user_pages.iter().map(|(id, url)| {
+                format!(
+                    r#"{{"id":"{id}","type":"page","url":"{url}","title":"User Tab","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/{id}"}}"#
+                )
+            }));
+            let list_body = format!("[{}]", entries.join(","));
             while !server_finished.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {

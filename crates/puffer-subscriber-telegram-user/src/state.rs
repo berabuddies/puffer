@@ -75,6 +75,11 @@ impl SkillEnv {
     pub fn delivery_cursor_path(&self) -> PathBuf {
         self.state_dir.join("delivery-cursor.json")
     }
+
+    /// Returns the path used to persist bounded recent Telegram server history.
+    pub fn history_cache_path(&self) -> PathBuf {
+        self.state_dir.join("telegram-history-cache.json")
+    }
 }
 
 /// Persisted Telegram API credentials + last-used phone, written after a

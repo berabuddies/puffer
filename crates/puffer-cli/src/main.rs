@@ -32,6 +32,7 @@ mod daemon_title;
 mod daemon_turn_recovery;
 mod daemon_turn_routing;
 mod daemon_ui_state;
+#[cfg(unix)]
 mod daemon_wechat_browser_setup;
 mod daemon_workflows;
 mod desktop_activity;
@@ -51,6 +52,7 @@ mod runner_selection;
 mod subscriber_tool_args;
 mod subscriber_tools;
 mod subscriptions;
+#[cfg(unix)]
 mod wechat_connector;
 mod workflow_runtime;
 mod workflows;
@@ -1388,6 +1390,7 @@ fn run_connector_bridge(id: &str, args: &[String]) -> Result<()> {
         match id {
             "lark-user" => lark_connector::run("user", args).await,
             "lark-bot" => lark_connector::run("bot", args).await,
+            #[cfg(unix)]
             "wechat-user" => wechat_connector::run("user", args).await,
             other => Err(anyhow::anyhow!(
                 "unknown connector id `{other}`; this puffer build does not bundle a bridge for it"
