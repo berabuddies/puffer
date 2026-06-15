@@ -4788,6 +4788,7 @@ dependencies = [
  "anyhow",
  "base64",
  "cbc",
+ "chacha20poly1305",
  "des",
  "dirs",
  "hmac 0.12.1",

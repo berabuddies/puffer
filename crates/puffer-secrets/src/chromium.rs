@@ -96,6 +96,63 @@ pub(crate) fn load_saved_credentials(variant: Chromium) -> Result<Vec<ImportedCr
     }
 }
 
+/// Chrome elevation-service hardcoded final-unwrap keys for App-Bound Encryption
+/// (public constants from the runassu/xaitax research). After both DPAPI layers
+/// are peeled, the 32-byte ABE key is still AEAD-encrypted under one of these,
+/// selected by a flag byte. FLAG 0x01 = AES-256-GCM, 0x02 = ChaCha20-Poly1305.
+/// (0x03 derives a per-machine key via CNG and is not handled here.) These are
+/// Chrome-specific; Edge uses a COM-only route with a different key.
+const ABE_AES_KEY_FLAG1: [u8; 32] = [
+    0xB3, 0x1C, 0x6E, 0x24, 0x1A, 0xC8, 0x46, 0x72, 0x8D, 0xA9, 0xC1, 0xFA, 0xC4, 0x93, 0x66, 0x51,
+    0xCF, 0xFB, 0x94, 0x4D, 0x14, 0x3A, 0xB8, 0x16, 0x27, 0x6B, 0xCC, 0x6D, 0xA0, 0x28, 0x47, 0x87,
+];
+const ABE_CHACHA_KEY_FLAG2: [u8; 32] = [
+    0xE9, 0x8F, 0x37, 0xD7, 0xF4, 0xE1, 0xFA, 0x43, 0x3D, 0x19, 0x30, 0x4D, 0xC2, 0x25, 0x80, 0x42,
+    0x09, 0x0E, 0x2D, 0x1D, 0x7E, 0xEA, 0x76, 0x70, 0xD4, 0x1F, 0x73, 0x8D, 0x08, 0x72, 0x96, 0x60,
+];
+
+/// Recovers the 32-byte App-Bound Encryption (`v20`) master key from the blob
+/// left after both DPAPI layers (SYSTEM outer + interactive-user inner) have
+/// been peeled off the `app_bound_encrypted_key`.
+///
+/// Post-DPAPI layout: `[u32 hdr_len][hdr][u32 content_len][flag(1)][iv(12)][ct(32)][tag(16)]`.
+/// The key is AEAD-decrypted from `ct||tag` under the flag's hardcoded key with
+/// `iv` as the nonce. This is pure crypto (no OS calls), so it is unit-tested
+/// with synthetic fixtures; the DPAPI peeling that produces `post_dpapi` is the
+/// OS-specific, privilege-gated step handled by the caller.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn unwrap_abe_key_material(post_dpapi: &[u8]) -> anyhow::Result<[u8; 32]> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use anyhow::{anyhow, bail, Context};
+
+    fn take_u32(data: &[u8]) -> anyhow::Result<(usize, &[u8])> {
+        let bytes = data.get(..4).context("ABE: truncated length")?;
+        Ok((u32::from_le_bytes(bytes.try_into().unwrap()) as usize, &data[4..]))
+    }
+    let (hdr_len, rest) = take_u32(post_dpapi)?;
+    let rest = rest.get(hdr_len..).context("ABE: truncated header")?;
+    let (content_len, content) = take_u32(rest)?;
+    let content = content.get(..content_len).context("ABE: truncated content")?;
+    let flag = *content.first().context("ABE: missing flag")?;
+    let iv = content.get(1..13).context("ABE: missing iv")?;
+    let ct_tag = content.get(13..).context("ABE: missing ciphertext")?;
+    let key = match flag {
+        0x01 => aes_gcm::Aes256Gcm::new_from_slice(&ABE_AES_KEY_FLAG1)
+            .unwrap()
+            .decrypt(aes_gcm::Nonce::from_slice(iv), ct_tag)
+            .map_err(|_| anyhow!("ABE flag1 AES-GCM unwrap failed"))?,
+        0x02 => chacha20poly1305::ChaCha20Poly1305::new_from_slice(&ABE_CHACHA_KEY_FLAG2)
+            .unwrap()
+            .decrypt(chacha20poly1305::Nonce::from_slice(iv), ct_tag)
+            .map_err(|_| anyhow!("ABE flag2 ChaCha20 unwrap failed"))?,
+        0x03 => bail!("ABE flag 0x03 (per-machine CNG key) is not supported"),
+        other => bail!("ABE: unknown flag 0x{other:02x}"),
+    };
+    key.as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("ABE key is not 32 bytes"))
+}
+
 /// Reports whether this browser has at least one profile with a login database.
 pub(crate) fn is_available(variant: Chromium) -> bool {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -386,14 +443,14 @@ mod windows {
         let stripped = blob
             .strip_prefix(b"APPB")
             .context("app_bound key missing APPB prefix")?;
-        let after_system = dpapi_unprotect(stripped).context("SYSTEM-context DPAPI (run as SYSTEM)")?;
-        let after_user = dpapi_unprotect(&after_system).context("user-context DPAPI")?;
-        if after_user.len() < 32 {
-            bail!("app_bound key payload too short");
-        }
-        let key = &after_user[after_user.len() - 32..];
-        key.try_into()
-            .map_err(|_| anyhow!("app_bound key has unexpected length"))
+        // Outer layer needs SYSTEM; inner layer needs the interactive user's
+        // context (caller must run as SYSTEM impersonating that user).
+        let after_system =
+            dpapi_unprotect(stripped).context("SYSTEM-DPAPI outer unwrap (run as SYSTEM)")?;
+        let after_user =
+            dpapi_unprotect(&after_system).context("user-DPAPI inner unwrap (impersonate user)")?;
+        // Then the flag-based final unwrap with the hardcoded key.
+        super::unwrap_abe_key_material(&after_user)
     }
 
     /// Calls `CryptUnprotectData` and returns the decrypted bytes.
@@ -574,5 +631,65 @@ mod linux {
         } else {
             String::from_utf8(encrypted.to_vec()).context("decode legacy Chromium password value")
         }
+    }
+}
+
+#[cfg(test)]
+mod abe_tests {
+    use super::*;
+    use aes_gcm::aead::{Aead, KeyInit};
+
+    /// Builds a synthetic post-DPAPI ABE blob: encrypts `key32` under the flag's
+    /// hardcoded key, exactly as Chrome's elevation service stores it.
+    fn build_post_dpapi(flag: u8, key32: &[u8; 32]) -> Vec<u8> {
+        let iv = [0x11u8; 12];
+        let ct_tag = match flag {
+            0x01 => aes_gcm::Aes256Gcm::new_from_slice(&ABE_AES_KEY_FLAG1)
+                .unwrap()
+                .encrypt(aes_gcm::Nonce::from_slice(&iv), key32.as_slice())
+                .unwrap(),
+            0x02 => chacha20poly1305::ChaCha20Poly1305::new_from_slice(&ABE_CHACHA_KEY_FLAG2)
+                .unwrap()
+                .encrypt(chacha20poly1305::Nonce::from_slice(&iv), key32.as_slice())
+                .unwrap(),
+            _ => unreachable!(),
+        };
+        let mut content = vec![flag];
+        content.extend_from_slice(&iv);
+        content.extend_from_slice(&ct_tag);
+        let header = br"C:\Program Files\Google\Chrome\Application\chrome.exe";
+        let mut out = (header.len() as u32).to_le_bytes().to_vec();
+        out.extend_from_slice(header);
+        out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        out.extend_from_slice(&content);
+        out
+    }
+
+    #[test]
+    fn recovers_abe_key_flag1_aes_gcm() {
+        let key = [0x42u8; 32];
+        assert_eq!(
+            unwrap_abe_key_material(&build_post_dpapi(0x01, &key)).unwrap(),
+            key
+        );
+    }
+
+    #[test]
+    fn recovers_abe_key_flag2_chacha20() {
+        let key = [0x37u8; 32];
+        assert_eq!(
+            unwrap_abe_key_material(&build_post_dpapi(0x02, &key)).unwrap(),
+            key
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_flag() {
+        let key = [0x01u8; 32];
+        let mut blob = build_post_dpapi(0x01, &key);
+        // flag byte sits right after the 4-byte hdr_len + header.
+        let flag_pos = 4 + br"C:\Program Files\Google\Chrome\Application\chrome.exe".len() + 4;
+        blob[flag_pos] = 0x09;
+        assert!(unwrap_abe_key_material(&blob).is_err());
     }
 }
