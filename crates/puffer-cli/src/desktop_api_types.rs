@@ -262,6 +262,8 @@ pub(crate) struct SessionDetailDto {
     pub(crate) created_at_ms: u64,
     pub(crate) event_count: usize,
     pub(crate) activity_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) active_turn_id: Option<Option<String>>,
     pub(crate) slug: Option<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) note: Option<String>,

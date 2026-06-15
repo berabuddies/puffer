@@ -320,6 +320,7 @@ pub(crate) fn load_session_detail(
         created_at_ms: record.metadata.created_at_ms,
         event_count: record.events.len(),
         activity_status: session_activity_status(&record.events).to_string(),
+        active_turn_id: None,
         slug: record.metadata.slug.clone(),
         tags: record.metadata.tags.clone(),
         note: record.metadata.note.clone(),
