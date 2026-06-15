@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use puffer_config::{ConfigPaths, PufferConfig};
+use puffer_config::{load_config, ConfigPaths, PufferConfig};
 use puffer_core::{
     execute_tool_action_once, execute_user_turn_streaming,
     execute_user_turn_streaming_without_tools, AppState, TurnStreamEvent,
@@ -87,6 +87,12 @@ struct ProcessWorkflowRunner {
     lock: Mutex<()>,
 }
 
+struct WorkflowRuntimeSnapshot {
+    config: PufferConfig,
+    providers: ProviderRegistry,
+    auth_store: AuthStore,
+}
+
 impl WorkflowActionRunner for ProcessWorkflowRunner {
     fn run_workflow(&self, slug: &str, trigger: serde_json::Value) -> Result<WorkflowActionOutput> {
         let _guard = self.lock.lock().unwrap();
@@ -97,14 +103,15 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         if !definition.enabled {
             anyhow::bail!("workflow `{slug}` is disabled");
         }
+        let snapshot = self.runtime_snapshot();
         let run = DagRunner::new(
             &store,
             PufferAgentExecutor {
                 paths: self.paths.clone(),
-                config: self.config.clone(),
+                config: snapshot.config,
                 resources: self.resources.clone(),
-                providers: self.providers.clone(),
-                auth_store: self.auth_store.clone(),
+                providers: snapshot.providers,
+                auth_store: snapshot.auth_store,
             },
         )
         .run(&definition, trigger, None)?;
@@ -122,12 +129,13 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
     ) -> Result<WorkflowActionOutput> {
         let _guard = self.lock.lock().unwrap();
         let cwd = self.paths.workspace_root.clone();
-        let mut state = self.new_app_state(cwd.clone(), None)?;
+        let snapshot = self.runtime_snapshot();
+        let mut state = self.new_app_state_with_snapshot(cwd.clone(), None, &snapshot)?;
         let result = execute_tool_action_once(
             &mut state,
             &self.resources,
-            &self.providers,
-            &self.auth_store,
+            &snapshot.providers,
+            &snapshot.auth_store,
             &cwd,
             tool_id,
             input,
@@ -208,25 +216,70 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
 }
 
 impl ProcessWorkflowRunner {
-    fn new_app_state(&self, cwd: PathBuf, model: Option<&str>) -> Result<AppState> {
+    fn new_app_state_with_snapshot(
+        &self,
+        cwd: PathBuf,
+        model: Option<&str>,
+        snapshot: &WorkflowRuntimeSnapshot,
+    ) -> Result<AppState> {
         let session_store = SessionStore::from_paths(&self.paths)?;
         let session = session_store
             .create_session_with_tags(cwd.clone(), vec![BACKGROUND_SESSION_TAG.to_string()])?;
-        let mut state = AppState::new(self.config.clone(), cwd, session);
+        let mut state = AppState::new(snapshot.config.clone(), cwd, session);
         if let Some(model) = model.and_then(non_empty_trimmed) {
             apply_explicit_model(&mut state, model);
         } else {
-            apply_authenticated_provider_fallback(&mut state, &self.providers, &self.auth_store);
+            apply_authenticated_provider_fallback(
+                &mut state,
+                &snapshot.providers,
+                &snapshot.auth_store,
+            );
         }
         Ok(state)
     }
 
-    fn new_task_app_state(&self, cwd: PathBuf, model: Option<&str>) -> Result<AppState> {
-        let mut state = self.new_app_state(cwd, model)?;
+    fn new_task_app_state_with_snapshot(
+        &self,
+        cwd: PathBuf,
+        model: Option<&str>,
+        snapshot: &WorkflowRuntimeSnapshot,
+    ) -> Result<AppState> {
+        let mut state = self.new_app_state_with_snapshot(cwd, model, snapshot)?;
         if model.and_then(non_empty_trimmed).is_none() {
-            apply_task_agent_model_default(&mut state, &self.providers);
+            apply_task_agent_model_default(&mut state, &snapshot.providers);
         }
         Ok(state)
+    }
+
+    fn runtime_snapshot(&self) -> WorkflowRuntimeSnapshot {
+        let config = match load_config(&self.paths) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to refresh workflow config; using startup snapshot"
+                );
+                self.config.clone()
+            }
+        };
+        let auth_path = self.paths.user_config_dir.join("auth.json");
+        let auth_store = match AuthStore::load(&auth_path) {
+            Ok(auth_store) => auth_store,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to refresh workflow auth store; using startup snapshot"
+                );
+                self.auth_store.clone()
+            }
+        };
+        let mut providers = self.providers.clone();
+        apply_config_provider_overrides(&mut providers, &config);
+        WorkflowRuntimeSnapshot {
+            config,
+            providers,
+            auth_store,
+        }
     }
 
     fn run_task_agent_prompt_for_session(
@@ -244,9 +297,10 @@ impl ProcessWorkflowRunner {
         // session memory (the triage protocol requires TaskList, which reads
         // the store from disk), and the stable per-connection cache key keeps
         // prompt-prefix caching effective across fresh sessions.
-        let mut state = self.new_task_app_state(cwd, model)?;
+        let snapshot = self.runtime_snapshot();
+        let mut state = self.new_task_app_state_with_snapshot(cwd, model, &snapshot)?;
         state.prompt_cache_key_override = Some(session_key.to_string());
-        let mut auth_store = self.auth_store.clone();
+        let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         // Post-lock stamp: history's run window starts at router dispatch, so
         // this is what separates queue/lock wait from actual turn time.
@@ -254,7 +308,7 @@ impl ProcessWorkflowRunner {
         let output = execute_user_turn_streaming(
             &mut state,
             &self.resources,
-            &self.providers,
+            &snapshot.providers,
             &mut auth_store,
             &prompt,
             |event| {
@@ -283,13 +337,14 @@ impl ProcessWorkflowRunner {
         model: Option<&str>,
     ) -> Result<WorkflowActionOutput> {
         let cwd = self.paths.workspace_root.clone();
-        let mut state = self.new_task_app_state(cwd, model)?;
-        let mut auth_store = self.auth_store.clone();
+        let snapshot = self.runtime_snapshot();
+        let mut state = self.new_task_app_state_with_snapshot(cwd, model, &snapshot)?;
+        let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         let output = execute_user_turn_streaming_without_tools(
             &mut state,
             &self.resources,
-            &self.providers,
+            &snapshot.providers,
             &mut auth_store,
             &prompt,
             |event| {
@@ -903,14 +958,15 @@ fn poll_cron(runner: &ProcessWorkflowRunner, deduper: &mut CronDeduper) -> Resul
                 "scheduled_minute_epoch": minute_epoch,
             });
             let _guard = runner.lock.lock().unwrap();
+            let snapshot = runner.runtime_snapshot();
             let run = DagRunner::new(
                 &store,
                 PufferAgentExecutor {
                     paths: runner.paths.clone(),
-                    config: runner.config.clone(),
+                    config: snapshot.config,
                     resources: runner.resources.clone(),
-                    providers: runner.providers.clone(),
-                    auth_store: runner.auth_store.clone(),
+                    providers: snapshot.providers,
+                    auth_store: snapshot.auth_store,
                 },
             )
             .run(&definition, trigger, Some(trigger_key))?;
@@ -967,6 +1023,28 @@ fn apply_task_agent_model_default(state: &mut AppState, providers: &ProviderRegi
     let selector = format!("{provider_id}/{model_id}");
     if providers.resolve_model(&selector).is_some() {
         apply_explicit_model(state, &selector);
+    }
+}
+
+fn apply_config_provider_overrides(providers: &mut ProviderRegistry, config: &PufferConfig) {
+    providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+    if !config.openai_headers.is_empty() {
+        providers.set_openai_headers(
+            config
+                .openai_headers
+                .clone()
+                .into_iter()
+                .collect::<indexmap::IndexMap<_, _>>(),
+        );
+    }
+    if !config.openai_query_params.is_empty() {
+        providers.set_openai_query_params(
+            config
+                .openai_query_params
+                .clone()
+                .into_iter()
+                .collect::<indexmap::IndexMap<_, _>>(),
+        );
     }
 }
 
@@ -1061,9 +1139,11 @@ mod tests {
     };
     use puffer_config::PufferConfig;
     use puffer_provider_registry::{AuthMode, Modality, ModelDescriptor, ProviderDescriptor};
+    use puffer_resources::LoadedResources;
     use puffer_session_store::SessionMetadata;
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use uuid::Uuid;
 
     fn provider(id: &str, model_id: &str) -> ProviderDescriptor {
@@ -1128,6 +1208,57 @@ mod tests {
                 note: None,
             },
         )
+    }
+
+    #[test]
+    fn task_agent_state_refreshes_disk_config_and_auth_after_runner_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        puffer_config::ensure_workspace_dirs(&paths).unwrap();
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider_with_models(
+            "anthropic",
+            &["claude-sonnet-4-5", "claude-haiku-4-5-20251001"],
+        ));
+        providers.register(provider_with_models("openai", &["gpt-5.5", "gpt-5.4-mini"]));
+
+        let mut startup_config = PufferConfig::default();
+        startup_config.default_provider = Some("anthropic".to_string());
+        startup_config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        let runner = super::ProcessWorkflowRunner {
+            paths: paths.clone(),
+            config: startup_config,
+            resources: LoadedResources::default(),
+            providers,
+            auth_store: AuthStore::default(),
+            lock: Mutex::new(()),
+        };
+
+        let mut latest_config = PufferConfig::default();
+        latest_config.default_provider = Some("anthropic".to_string());
+        latest_config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        latest_config.openai_base_url = Some("https://worldrouter.test/v1".to_string());
+        puffer_config::save_user_config(&paths, &latest_config).unwrap();
+        let mut latest_auth = AuthStore::default();
+        latest_auth.set_api_key("openai", "test-key");
+        latest_auth
+            .save(&paths.user_config_dir.join("auth.json"))
+            .unwrap();
+
+        let snapshot = runner.runtime_snapshot();
+        let state = runner
+            .new_task_app_state_with_snapshot(paths.workspace_root.clone(), None, &snapshot)
+            .unwrap();
+
+        assert!(snapshot.auth_store.get("openai").is_some());
+        assert_eq!(
+            state.config.openai_base_url.as_deref(),
+            Some("https://worldrouter.test/v1")
+        );
+        assert_eq!(state.current_provider.as_deref(), Some("openai"));
+        assert_eq!(state.current_model.as_deref(), Some("openai/gpt-5.4-mini"));
     }
 
     #[test]
