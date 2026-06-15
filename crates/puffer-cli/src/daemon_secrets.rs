@@ -55,10 +55,13 @@ pub(crate) fn import_chrome_secrets(paths: &ConfigPaths) -> Result<ImportReport>
     vault(paths)?.import_chrome_saved_credentials()
 }
 
-/// Imports saved credentials from one named browser source into the vault.
+/// Imports saved credentials from one named source (browser or 1Password).
 pub(crate) fn import_browser_secrets(paths: &ConfigPaths, source_id: &str) -> Result<ImportReport> {
+    if source_id == "1password" {
+        return vault(paths)?.sync_onepassword_references();
+    }
     let source = BrowserSource::from_id(source_id)
-        .with_context(|| format!("unknown browser source `{source_id}`"))?;
+        .with_context(|| format!("unknown import source `{source_id}`"))?;
     vault(paths)?.sync_browser_source(source)
 }
 

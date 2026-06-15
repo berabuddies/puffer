@@ -2544,7 +2544,8 @@ export class FakeDaemon {
       { id: "chrome", label: "Chrome", available: true },
       { id: "edge", label: "Edge", available: false },
       { id: "brave", label: "Brave", available: false },
-      { id: "firefox", label: "Firefox", available: false }
+      { id: "firefox", label: "Firefox", available: false },
+      { id: "1password", label: "1Password", available: false }
     ];
   }
 

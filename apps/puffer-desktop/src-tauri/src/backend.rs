@@ -218,9 +218,13 @@ impl BackendState {
                     .get("source")
                     .and_then(|value| value.as_str())
                     .ok_or_else(|| anyhow!("import_browser_secrets requires a `source`"))?;
-                let source = puffer_secrets::BrowserSource::from_id(source_id)
-                    .ok_or_else(|| anyhow!("unknown browser source `{source_id}`"))?;
-                let report = self.secret_vault()?.sync_browser_source(source)?;
+                let report = if source_id == "1password" {
+                    self.secret_vault()?.sync_onepassword_references()?
+                } else {
+                    let source = puffer_secrets::BrowserSource::from_id(source_id)
+                        .ok_or_else(|| anyhow!("unknown import source `{source_id}`"))?;
+                    self.secret_vault()?.sync_browser_source(source)?
+                };
                 serde_value(json!({
                     "settings": self.load_settings_snapshot()?,
                     "report": report,

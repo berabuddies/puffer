@@ -16,6 +16,9 @@ mod chromium;
 mod der;
 mod firefox;
 mod keychain;
+pub mod onepassword;
+
+pub use onepassword::{is_op_reference, op_cli_available, resolve_op_reference};
 
 const STORE_VERSION: u32 = 1;
 const KEY_BYTES: usize = 32;
@@ -180,16 +183,24 @@ pub struct SourceAvailability {
     pub available: bool,
 }
 
-/// Lists every browser source and whether it can currently be imported.
+/// Lists every import source (browsers + 1Password) and its availability.
 pub fn available_browser_sources() -> Vec<SourceAvailability> {
-    BrowserSource::all()
+    let mut sources: Vec<SourceAvailability> = BrowserSource::all()
         .into_iter()
         .map(|source| SourceAvailability {
             id: source.id().to_string(),
             label: source.label().to_string(),
             available: source.is_available(),
         })
-        .collect()
+        .collect();
+    // 1Password is not a browser source: it stores op:// references resolved on
+    // demand, and is available whenever the `op` CLI is installed.
+    sources.push(SourceAvailability {
+        id: "1password".to_string(),
+        label: "1Password".to_string(),
+        available: onepassword::op_cli_available(),
+    });
+    sources
 }
 
 /// Encrypted JSON-backed secret vault.
@@ -429,6 +440,38 @@ impl SecretVault {
                 username: non_empty_option(Some(credential.username)),
                 origin: Some(credential.origin_url),
                 source: source.id().to_string(),
+            }) {
+                Ok(_) => imported += 1,
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        Ok(ImportReport {
+            imported,
+            skipped,
+            errors,
+        })
+    }
+
+    /// Imports 1Password logins as `op://` references (resolved on demand, never
+    /// stored as plaintext) into the encrypted vault.
+    pub fn sync_onepassword_references(&self) -> Result<ImportReport> {
+        let logins = onepassword::import_login_references()?;
+        let mut imported = 0usize;
+        let mut skipped = 0usize;
+        let mut errors = Vec::new();
+        for login in logins {
+            if login.reference.trim().is_empty() {
+                skipped += 1;
+                continue;
+            }
+            match self.put(SecretUpsert {
+                id: None,
+                label: login.label,
+                description: Some("1Password reference".to_string()),
+                value: login.reference,
+                username: None,
+                origin: login.origin,
+                source: "1password".to_string(),
             }) {
                 Ok(_) => imported += 1,
                 Err(error) => errors.push(error.to_string()),
