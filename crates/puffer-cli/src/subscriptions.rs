@@ -378,17 +378,24 @@ impl puffer_subscriptions::ConnectionAuthChecker for BuiltinConnectionAuthChecke
         manager: &SubscriptionManager,
         template: &puffer_subscriptions::ConnectorTemplate,
         connection_slug: &str,
-    ) -> Result<Option<bool>> {
+    ) -> Result<Option<puffer_subscriptions::ConnectionAuthStatus>> {
         if template.slug == crate::gmail_browser::CONNECTOR_SLUG {
-            return Ok(Some(crate::gmail_browser::connection_auth_ok(
-                &self.paths,
-                connection_slug,
-            )?));
+            return Ok(Some(
+                if crate::gmail_browser::connection_auth_ok(&self.paths, connection_slug)? {
+                    puffer_subscriptions::ConnectionAuthStatus::Healthy
+                } else {
+                    puffer_subscriptions::ConnectionAuthStatus::Broken
+                },
+            ));
         }
         if template.slug == crate::gcal_browser::CONNECTOR_SLUG {
             let configured = crate::gcal_browser::load_config(&self.paths, connection_slug)?
                 .is_some_and(|config| config.is_configured());
-            return Ok(Some(configured));
+            return Ok(Some(if configured {
+                puffer_subscriptions::ConnectionAuthStatus::Healthy
+            } else {
+                puffer_subscriptions::ConnectionAuthStatus::Broken
+            }));
         }
         let slack = SlackConnectionAuthChecker {
             paths: self.paths.clone(),

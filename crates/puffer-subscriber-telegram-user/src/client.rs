@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use grammers_client::{session::Session, Client, Config};
 use puffer_subscriber_runtime::SubscriberCommand;
 use serde_json::json;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
 use crate::actions::handle_telegram_act;
@@ -26,6 +26,8 @@ use crate::state::{default_init_params, LoginState, SkillEnv};
 use crate::updates::{handle_live_update, spawn_live_update_task, LiveUpdateEvent};
 
 const LIVE_UPDATE_RECOVERY_DELAY: Duration = Duration::from_secs(1);
+const OFFLINE_RESUME_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(5);
+const OFFLINE_RESUME_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
 enum UpdateLoopExit {
     StdinClosed,
@@ -36,6 +38,52 @@ enum RuntimeCommandOutcome {
     Continue,
     ReauthStarted,
     ClientReplaced,
+}
+
+enum OfflineResumeAttempt {
+    Resumed {
+        client: Client,
+        offline_since_ms: i64,
+    },
+    AuthRequired,
+    StillOffline(OfflineResumeState),
+}
+
+#[derive(Debug, Clone)]
+struct OfflineResumeState {
+    detail: String,
+    offline_since_ms: i64,
+    retry_delay: Duration,
+    next_retry_at: tokio::time::Instant,
+    next_retry_at_ms: i64,
+}
+
+impl OfflineResumeState {
+    fn new(detail: String) -> Self {
+        Self::scheduled(
+            detail,
+            monitoring_live_since_ms(),
+            OFFLINE_RESUME_RETRY_INITIAL_DELAY,
+        )
+    }
+
+    fn retry_failed(&self, detail: String) -> Self {
+        Self::scheduled(
+            detail,
+            self.offline_since_ms,
+            next_offline_retry_delay(self.retry_delay),
+        )
+    }
+
+    fn scheduled(detail: String, offline_since_ms: i64, retry_delay: Duration) -> Self {
+        Self {
+            detail,
+            offline_since_ms,
+            retry_delay,
+            next_retry_at: tokio::time::Instant::now() + retry_delay,
+            next_retry_at_ms: unix_now_ms() + retry_delay.as_millis() as i64,
+        }
+    }
 }
 
 /// Result state handed back by the spawned startup hydration task.
@@ -83,13 +131,13 @@ pub async fn run() -> anyhow::Result<()> {
     // holds a valid auth key we can go straight to the update loop without
     // prompting the agent for login credentials.
     //
-    // `offline_reason` parks the subscriber as "temporarily offline" when the
+    // `offline_state` parks the subscriber as "temporarily offline" when the
     // resume failed for infrastructure reasons (network/DC unreachable) with
-    // the auth material intact. In that state a business command acts as the
-    // user's explicit retry: it re-attempts the resume on demand instead of
-    // answering "not authenticated" (agentenv/monorepo#626). No background
-    // retry loop — recovery is always user-driven.
-    let mut offline_reason: Option<String> = None;
+    // the auth material intact. The same login-phase state machine owns both
+    // stdin commands and the automatic retry timer so the Telegram client and
+    // command stream still have a single owner.
+    let mut offline_state: Option<OfflineResumeState> = None;
+    let mut recovered_offline_since_ms: Option<i64> = None;
     let mut client = match try_resume_session(&env).await? {
         SessionResume::Resumed(c) => {
             emit_control(&env.topic, "ready", json!({ "resumed": true }))?;
@@ -100,12 +148,9 @@ pub async fn run() -> anyhow::Result<()> {
             None
         }
         SessionResume::Transient(detail) => {
-            emit_control(
-                &env.topic,
-                "resume_offline",
-                json!({ "error": detail, "retryable": true }),
-            )?;
-            offline_reason = Some(detail);
+            let state = OfflineResumeState::new(detail);
+            emit_resume_offline(&env, &state)?;
+            offline_state = Some(state);
             None
         }
     };
@@ -113,26 +158,49 @@ pub async fn run() -> anyhow::Result<()> {
     // Login phase: if we don't have an authorized client yet, keep reading
     // stdin commands until login completes or stdin closes.
     while client.as_ref().map(|_| false).unwrap_or(true) {
-        let cmd = tokio::select! {
-            maybe = commands.next() => maybe?,
+        let cmd = if let Some(retry_at) = offline_state.as_ref().map(|state| state.next_retry_at) {
+            tokio::select! {
+                maybe = commands.next() => maybe?,
+                _ = tokio::time::sleep_until(retry_at) => {
+                    let state = offline_state
+                        .take()
+                        .expect("offline state exists for retry timer");
+                    match attempt_offline_resume(&env, state).await? {
+                        OfflineResumeAttempt::Resumed {
+                            client: recovered,
+                            offline_since_ms,
+                        } => {
+                            recovered_offline_since_ms = Some(offline_since_ms);
+                            client = Some(recovered);
+                        }
+                        OfflineResumeAttempt::AuthRequired => {}
+                        OfflineResumeAttempt::StillOffline(next_state) => {
+                            offline_state = Some(next_state);
+                        }
+                    }
+                    continue;
+                }
+            }
+        } else {
+            commands.next().await?
         };
         let Some(cmd) = cmd else {
             info!("stdin closed before login completed");
             return Ok(());
         };
-        // Resume-on-demand: when parked offline, a business command is the
-        // user's explicit Retry — attempt the resume once before answering.
-        if offline_reason.is_some() && is_resume_retry_command(&cmd) {
-            match try_resume_session(&env).await? {
-                SessionResume::Resumed(mut resumed) => {
-                    offline_reason = None;
-                    emit_control(
-                        &env.topic,
-                        "ready",
-                        json!({ "resumed": true, "recovered": true }),
-                    )?;
-                    // Serve the command that triggered the recovery, then fall
-                    // through into the normal authorized flow.
+        // Business commands still trigger an immediate retry instead of
+        // waiting for the next timer tick, then answer on their own channel if
+        // Telegram remains offline.
+        if offline_state.is_some() && is_resume_retry_command(&cmd) {
+            let state = offline_state
+                .take()
+                .expect("offline state exists for retry command");
+            match attempt_offline_resume(&env, state).await? {
+                OfflineResumeAttempt::Resumed {
+                    client: mut resumed,
+                    offline_since_ms,
+                } => {
+                    recovered_offline_since_ms = Some(offline_since_ms);
                     let _ = handle_runtime_command(
                         &env,
                         &mut resumed,
@@ -144,16 +212,10 @@ pub async fn run() -> anyhow::Result<()> {
                     client = Some(resumed);
                     continue;
                 }
-                SessionResume::AuthRequired => {
-                    // The retry revealed genuine auth loss — switch to the
-                    // login-required mode and let the arms below answer with
-                    // the real auth error.
-                    offline_reason = None;
-                    emit_control(&env.topic, "login_required", json!({}))?;
-                }
-                SessionResume::Transient(detail) => {
-                    emit_offline_command_error(&env, &cmd, &detail)?;
-                    offline_reason = Some(detail);
+                OfflineResumeAttempt::AuthRequired => {}
+                OfflineResumeAttempt::StillOffline(next_state) => {
+                    emit_offline_command_error(&env, &cmd, &next_state.detail)?;
+                    offline_state = Some(next_state);
                     continue;
                 }
             }
@@ -222,9 +284,9 @@ pub async fn run() -> anyhow::Result<()> {
                 // While parked offline the on-disk session is signed in and
                 // only the network was unreachable — answering ok:false would
                 // degrade the connection as if the login were lost. Probes
-                // deliberately do NOT trigger a resume retry (recovery stays
-                // user-driven, not poll-driven).
-                let offline = offline_reason.is_some();
+                // deliberately do NOT trigger a resume retry; the retry timer
+                // is owned by this state machine.
+                let offline = offline_state.is_some();
                 emit_control(
                     &env.topic,
                     "auth_ok",
@@ -310,6 +372,7 @@ pub async fn run() -> anyhow::Result<()> {
                 &mut qr_state,
                 &mut delivery_cursor,
                 &mut notification_mutes,
+                recovered_offline_since_ms.take(),
             )
             .await?
             {
@@ -466,12 +529,14 @@ async fn run_update_loop(
     qr_state: &mut Option<qr_login::QrLoginState>,
     delivery_cursor: &mut DeliveryCursor,
     notification_mutes: &mut NotificationMuteCache,
+    recovered_offline_since_ms: Option<i64>,
 ) -> anyhow::Result<UpdateLoopExit> {
     emit_control(&env.topic, "ready", json!({}))?;
     // Monitoring is promised from this moment on: messages dated after this
     // boundary must reach the triage pipeline even when they arrive while
     // startup hydration is still running (see hydrate_dialog_state).
-    let live_since_ms = monitoring_live_since_ms();
+    let live_since_ms =
+        startup_monitoring_boundary(monitoring_live_since_ms(), recovered_offline_since_ms);
     reset_delivery_cursor_for_current_account(client, delivery_cursor).await?;
     if let Some(exit) = hydrate_startup_state_before_updates(
         env,
@@ -717,17 +782,115 @@ fn spawn_startup_hydration(
     })
 }
 
+async fn attempt_offline_resume(
+    env: &SkillEnv,
+    state: OfflineResumeState,
+) -> anyhow::Result<OfflineResumeAttempt> {
+    match try_resume_session(env).await? {
+        SessionResume::Resumed(client) => {
+            emit_connection_health_ok(env)?;
+            emit_control(
+                &env.topic,
+                "ready",
+                json!({ "resumed": true, "recovered": true }),
+            )?;
+            Ok(OfflineResumeAttempt::Resumed {
+                client,
+                offline_since_ms: state.offline_since_ms,
+            })
+        }
+        SessionResume::AuthRequired => {
+            emit_connection_health_auth_required(env)?;
+            emit_control(&env.topic, "login_required", json!({}))?;
+            Ok(OfflineResumeAttempt::AuthRequired)
+        }
+        SessionResume::Transient(detail) => {
+            let next_state = state.retry_failed(detail);
+            emit_connection_health_retrying(env, &next_state)?;
+            Ok(OfflineResumeAttempt::StillOffline(next_state))
+        }
+    }
+}
+
+fn emit_resume_offline(env: &SkillEnv, state: &OfflineResumeState) -> anyhow::Result<()> {
+    emit_control(
+        &env.topic,
+        "resume_offline",
+        json!({
+            "error": state.detail,
+            "retryable": true,
+            "offline_since_ms": state.offline_since_ms,
+            "next_retry_at_ms": state.next_retry_at_ms,
+        }),
+    )
+}
+
+fn emit_connection_health_retrying(
+    env: &SkillEnv,
+    state: &OfflineResumeState,
+) -> anyhow::Result<()> {
+    emit_control(
+        &env.topic,
+        "connection_health",
+        json!({
+            "status": "retrying",
+            "reason": "connect_failed",
+            "detail": state.detail,
+            "offline_since_ms": state.offline_since_ms,
+            "next_retry_at_ms": state.next_retry_at_ms,
+        }),
+    )
+}
+
+fn emit_connection_health_ok(env: &SkillEnv) -> anyhow::Result<()> {
+    emit_control(
+        &env.topic,
+        "connection_health",
+        json!({
+            "status": "ok",
+        }),
+    )
+}
+
+fn emit_connection_health_auth_required(env: &SkillEnv) -> anyhow::Result<()> {
+    emit_control(
+        &env.topic,
+        "connection_health",
+        json!({
+            "status": "auth_required",
+            "reason": "login_required",
+        }),
+    )
+}
+
 /// Unix-millis boundary from which this session promises message delivery.
 /// Message dates are Telegram server time; a small grace window absorbs local
 /// clock skew so a message sent moments after startup is never misread as
 /// pre-session history.
 fn monitoring_live_since_ms() -> i64 {
     const CLOCK_SKEW_GRACE_MS: i64 = 30_000;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    unix_now_ms() - CLOCK_SKEW_GRACE_MS
+}
+
+fn unix_now_ms() -> i64 {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    now_ms - CLOCK_SKEW_GRACE_MS
+    now_ms
+}
+
+fn startup_monitoring_boundary(
+    default_live_since_ms: i64,
+    recovered_offline_since_ms: Option<i64>,
+) -> i64 {
+    recovered_offline_since_ms.unwrap_or(default_live_since_ms)
+}
+
+fn next_offline_retry_delay(current: Duration) -> Duration {
+    current
+        .saturating_mul(2)
+        .min(OFFLINE_RESUME_RETRY_MAX_DELAY)
 }
 
 /// Stops an in-flight hydration task and waits for it to wind down so a
@@ -1002,8 +1165,8 @@ fn handle_login_custom(env: &SkillEnv, op: String, args: serde_json::Value) -> a
 }
 
 /// Business commands that retry a parked-offline resume on demand. Login
-/// commands run their own flow, and auth probes must stay passive — recovery
-/// is user-driven, never poll-driven (agentenv/monorepo#626).
+/// commands run their own flow, and auth probes must stay passive because the
+/// state machine owns automatic recovery.
 fn is_resume_retry_command(cmd: &SubscriberCommand) -> bool {
     match cmd {
         SubscriberCommand::TelegramListPeers { .. }
@@ -1182,4 +1345,41 @@ fn import_payload(outcome: &TdataImportOutcome) -> serde_json::Value {
         "dc_id": outcome.dc_id,
         "session_path": outcome.session_path.display().to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        next_offline_retry_delay, startup_monitoring_boundary, OFFLINE_RESUME_RETRY_INITIAL_DELAY,
+        OFFLINE_RESUME_RETRY_MAX_DELAY,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn startup_monitoring_boundary_uses_offline_start_after_recovery() {
+        assert_eq!(
+            startup_monitoring_boundary(1_700_000_100_000, Some(1_700_000_000_000)),
+            1_700_000_000_000
+        );
+    }
+
+    #[test]
+    fn startup_monitoring_boundary_uses_fresh_boundary_without_recovery() {
+        assert_eq!(
+            startup_monitoring_boundary(1_700_000_100_000, None),
+            1_700_000_100_000
+        );
+    }
+
+    #[test]
+    fn offline_retry_delay_backs_off_until_cap() {
+        assert_eq!(
+            next_offline_retry_delay(OFFLINE_RESUME_RETRY_INITIAL_DELAY),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            next_offline_retry_delay(OFFLINE_RESUME_RETRY_MAX_DELAY),
+            OFFLINE_RESUME_RETRY_MAX_DELAY
+        );
+    }
 }

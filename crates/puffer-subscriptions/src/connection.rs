@@ -25,6 +25,38 @@ pub enum ConnectionState {
     Disabled,
 }
 
+/// User-visible health detail for an authenticated connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionHealth {
+    /// Current connector delivery/auth health.
+    pub status: ConnectionHealthStatus,
+    /// Stable machine-readable reason, for example `connect_failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Short diagnostic detail safe to surface in local UI/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Host-received event timestamp in Unix milliseconds.
+    pub updated_at_ms: i128,
+    /// Next planned retry timestamp in Unix milliseconds, when retrying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at_ms: Option<i64>,
+}
+
+/// Health categories for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionHealthStatus {
+    /// Connection is healthy and receiving events.
+    Ok,
+    /// Connection is temporarily unavailable.
+    Offline,
+    /// Connection is temporarily unavailable and retrying automatically.
+    Retrying,
+    /// Saved auth is no longer usable; user action is required.
+    AuthRequired,
+}
+
 /// One authorized connector instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionRecord {
@@ -46,6 +78,9 @@ pub struct ConnectionRecord {
     /// Whether Puffer has already surfaced the one-time broken-auth notice.
     #[serde(default)]
     pub auth_failure_notified: bool,
+    /// Current delivery/auth health, when the connector reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<ConnectionHealth>,
 }
 
 impl ConnectionRecord {
@@ -63,6 +98,7 @@ impl ConnectionRecord {
             has_consumer: false,
             cursor: None,
             auth_failure_notified: false,
+            health: None,
         }
     }
 

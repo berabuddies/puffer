@@ -51,7 +51,8 @@ pub use catalog::{
 pub use catalog_store::{ConnectorCatalogStore, ConnectorCatalogStoreError};
 pub use classify::{Classifier, ClassifyDecision, NullClassifier, RemoteClassifier};
 pub use connection::{
-    ConnectionRecord, ConnectionSlug, ConnectionState, ConnectionStore, ConnectionStoreError,
+    ConnectionHealth, ConnectionHealthStatus, ConnectionRecord, ConnectionSlug, ConnectionState,
+    ConnectionStore, ConnectionStoreError,
 };
 pub use contacts::{
     connector_contacts_for_connector, connector_slug_accepts_contact_id,
@@ -65,7 +66,9 @@ pub use history::{
     now_ms, WorkflowActionLog, WorkflowBindingRun, WorkflowBindingRunStatus, WorkflowHistoryStore,
     WorkflowHistoryStoreError,
 };
-pub use manager::{ConnectionAuthChecker, SubscriptionManager, SubscriptionManagerBuilder};
+pub use manager::{
+    ConnectionAuthChecker, ConnectionAuthStatus, SubscriptionManager, SubscriptionManagerBuilder,
+};
 pub use protocol::{
     ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,
     ConnectorSubscribeFrame,

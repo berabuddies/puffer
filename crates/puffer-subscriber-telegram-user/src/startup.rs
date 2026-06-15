@@ -13,9 +13,7 @@ use tracing::{info, warn};
 
 use crate::delivery::{emit_message_if_new, DeliveryCursor};
 use crate::notifications::NotificationMuteCache;
-use crate::peer_cache::{
-    hydrate_contact_book, hydrate_saved_contact_usernames, TelegramPeerCache,
-};
+use crate::peer_cache::{hydrate_contact_book, hydrate_saved_contact_usernames, TelegramPeerCache};
 use crate::state::SkillEnv;
 
 const MAX_STARTUP_DIALOGS: usize = 2_000;
@@ -217,8 +215,14 @@ async fn collect_resume_messages(
     cursor: &DeliveryCursor,
     since_ms: Option<i64>,
 ) -> anyhow::Result<Vec<Message>> {
-    collect_limited_resume_messages(client, dialog, cursor, MAX_RESUME_MESSAGES_PER_CHAT, since_ms)
-        .await
+    collect_limited_resume_messages(
+        client,
+        dialog,
+        cursor,
+        MAX_RESUME_MESSAGES_PER_CHAT,
+        since_ms,
+    )
+    .await
 }
 
 async fn collect_limited_resume_messages(
@@ -299,6 +303,17 @@ mod tests {
         assert_eq!(
             startup_dialog_disposition(false, true, LIVE_SINCE_MS - 5_000, true, LIVE_SINCE_MS),
             StartupDialogDisposition::MarkSeen,
+        );
+    }
+
+    #[test]
+    fn untracked_chat_during_offline_window_is_backfilled_from_offline_boundary() {
+        let offline_since_ms = LIVE_SINCE_MS - 70 * 60 * 1_000;
+        assert_eq!(
+            startup_dialog_disposition(false, true, LIVE_SINCE_MS - 5_000, true, offline_since_ms),
+            StartupDialogDisposition::Backfill {
+                since_ms: Some(offline_since_ms)
+            },
         );
     }
 

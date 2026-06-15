@@ -7,8 +7,8 @@ use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{Event, EventEnvelope};
 use puffer_subscriptions::{
     connector_runtime_hints, connector_workflow_trigger_supported, suggested_connection_slug,
-    ActionDispatcher, ActionSpec, BuiltinActionDispatcher, ConnectionRecord, ConnectionState,
-    ConnectorActionRequest, ConnectorTemplate, SubscriberManifestRoots,
+    ActionDispatcher, ActionSpec, BuiltinActionDispatcher, ConnectionAuthStatus, ConnectionRecord,
+    ConnectionState, ConnectorActionRequest, ConnectorTemplate, SubscriberManifestRoots,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -348,15 +348,15 @@ pub fn execute_connection_create(
         .connector_store()
         .get(&parsed.connector_slug)
         .ok_or_else(|| anyhow::anyhow!("connector `{}` not found", parsed.connector_slug))?;
-    let auth_ok = if template.requires_auth {
+    let auth_status = if template.requires_auth {
         match manager.check_connection_auth(&template, &parsed.slug)? {
-            Some(ok) => Some(ok),
-            None => parsed.auth_ok,
+            Some(status) => Some(status),
+            None => parsed.auth_ok.map(connection_auth_status_from_bool),
         }
     } else {
-        Some(true)
+        Some(ConnectionAuthStatus::Healthy)
     };
-    if template.requires_auth && auth_ok == Some(false) {
+    if template.requires_auth && auth_status == Some(ConnectionAuthStatus::Broken) {
         anyhow::bail!(
             "connector `{}` reported auth is not ready; run `/connect {} {}` first",
             parsed.connector_slug,
@@ -371,6 +371,14 @@ pub fn execute_connection_create(
     manager.refresh_connection_consumers()?;
     manager.refresh_connection_auth()?;
     Ok(serde_json::to_string_pretty(&record)?)
+}
+
+fn connection_auth_status_from_bool(ok: bool) -> ConnectionAuthStatus {
+    if ok {
+        ConnectionAuthStatus::Healthy
+    } else {
+        ConnectionAuthStatus::Broken
+    }
 }
 
 /// Executes `ConnectionDelete`.

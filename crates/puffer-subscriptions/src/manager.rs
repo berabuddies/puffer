@@ -6,7 +6,9 @@ use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::catalog_store::ConnectorCatalogStore;
 use crate::classify::{Classifier, NullClassifier};
 use crate::command_match::command_matches_terminal_event;
-use crate::connection::{ConnectionState, ConnectionStore};
+use crate::connection::{
+    ConnectionHealth, ConnectionHealthStatus, ConnectionState, ConnectionStore,
+};
 use crate::connector_process;
 use crate::connector_stream::{ConnectorEventProcessor, ConnectorStreamHandle};
 use crate::contacts::contact_ids_for_connector;
@@ -30,6 +32,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// WeChat's `act` path drives the LIVE client with deliberate human-like pacing
@@ -53,15 +56,23 @@ enum ConnectionContactScope {
 /// Host-provided auth checker for built-in connectors whose credentials are
 /// owned by the embedding process instead of a connector subprocess.
 pub trait ConnectionAuthChecker: Send + Sync {
-    /// Returns `Some(true)` when auth is healthy, `Some(false)` when auth is
-    /// known broken, and `None` when this checker does not handle the
-    /// connector.
+    /// Returns `Some(Healthy)` when auth is healthy, `Some(Broken)` when auth is
+    /// known broken, `Some(Unknown)` when auth cannot be probed without changing
+    /// connection state, and `None` when this checker does not handle the connector.
     fn check(
         &self,
         manager: &SubscriptionManager,
         template: &crate::catalog::ConnectorTemplate,
         connection_slug: &str,
-    ) -> Result<Option<bool>>;
+    ) -> Result<Option<ConnectionAuthStatus>>;
+}
+
+/// Result of a connector auth health probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionAuthStatus {
+    Healthy,
+    Broken,
+    Unknown,
 }
 
 /// Builder for [`SubscriptionManager`]. Lets callers swap in custom
@@ -185,6 +196,14 @@ impl SubscriptionManagerBuilder {
         let history_for_router = history_store.clone();
         let dispatcher_for_router = dispatcher.clone();
         let classifier_for_router = classifier.clone();
+        let health_bus = self.bus.clone();
+        let health_connection_store = connection_store.clone();
+        let health_watcher = {
+            let _runtime_guard = handle.enter();
+            handle.spawn(async move {
+                watch_connection_health_events(health_bus, health_connection_store).await;
+            })
+        };
         let router = {
             let _runtime_guard = handle.enter();
             SubscriptionRouter::spawn(
@@ -207,6 +226,7 @@ impl SubscriptionManagerBuilder {
             classifier,
             auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
+            health_watcher: Mutex::new(Some(health_watcher)),
             subscribers: Mutex::new(HashMap::new()),
             connector_streams: Mutex::new(HashMap::new()),
             command_wait_locks: Mutex::new(HashMap::new()),
@@ -230,6 +250,7 @@ pub struct SubscriptionManager {
     classifier: Arc<dyn Classifier>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
+    health_watcher: Mutex<Option<JoinHandle<()>>>,
     subscribers: Mutex<HashMap<String, SubscriberHandle>>,
     connector_streams: Mutex<HashMap<String, ConnectorStreamHandle>>,
     command_wait_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -507,8 +528,8 @@ impl SubscriptionManager {
             if !template.requires_auth {
                 continue;
             }
-            let auth_ok = match self.check_connection_auth(&template, &connection.slug) {
-                Ok(Some(auth_ok)) => auth_ok,
+            let auth_status = match self.check_connection_auth(&template, &connection.slug) {
+                Ok(Some(status)) => status,
                 Ok(None) if connection.has_consumer => {
                     tracing::warn!(
                         connection = %connection.slug,
@@ -525,12 +546,16 @@ impl SubscriptionManager {
                         %error,
                         "connector auth check failed"
                     );
-                    false
+                    ConnectionAuthStatus::Broken
                 }
             };
-            if auth_ok {
+            if auth_status == ConnectionAuthStatus::Unknown {
+                continue;
+            }
+            if auth_status == ConnectionAuthStatus::Healthy {
                 self.connection_store.update(&connection.slug, |record| {
                     record.auth_failure_notified = false;
+                    record.health = None;
                     if record.state == ConnectionState::Degraded {
                         record.state = ConnectionState::Authenticated;
                         record.set_has_consumer(record.has_consumer);
@@ -540,6 +565,13 @@ impl SubscriptionManager {
                 let was_notified = connection.auth_failure_notified;
                 let updated = self.connection_store.update(&connection.slug, |record| {
                     record.state = ConnectionState::Degraded;
+                    record.health = Some(ConnectionHealth {
+                        status: ConnectionHealthStatus::AuthRequired,
+                        reason: Some("auth_failed".into()),
+                        detail: None,
+                        updated_at_ms: crate::now_ms(),
+                        next_retry_at_ms: None,
+                    });
                     record.auth_failure_notified = true;
                 })?;
                 if !was_notified {
@@ -555,7 +587,7 @@ impl SubscriptionManager {
         &self,
         template: &crate::catalog::ConnectorTemplate,
         connection_slug: &str,
-    ) -> Result<Option<bool>> {
+    ) -> Result<Option<ConnectionAuthStatus>> {
         let template = template.clone();
         let connection_slug = connection_slug.to_string();
         let process_template = template.clone();
@@ -568,8 +600,12 @@ impl SubscriptionManager {
             )
             .await
         })?;
-        if checked.is_some() {
-            return Ok(checked);
+        if let Some(checked) = checked {
+            return Ok(Some(if checked {
+                ConnectionAuthStatus::Healthy
+            } else {
+                ConnectionAuthStatus::Broken
+            }));
         }
         if let Some(checker) = &self.auth_checker {
             return checker.check(self, &template, &connection_slug);
@@ -738,6 +774,9 @@ impl SubscriptionManager {
 
     /// Shuts down router and every supervised subscriber. Best-effort.
     pub fn shutdown(&self) {
+        if let Some(handle) = self.health_watcher.lock().unwrap().take() {
+            handle.abort();
+        }
         if let Some(router) = self.router.lock().unwrap().take() {
             let _ =
                 block_on_manager_handle(&self.handle, async move { Ok(router.shutdown().await) });
@@ -765,6 +804,110 @@ impl SubscriptionManager {
                 block_on_manager_handle(&self.handle, async move { Ok(handle.shutdown().await) });
         }
     }
+}
+
+async fn watch_connection_health_events(bus: EventBus, connection_store: Arc<ConnectionStore>) {
+    let mut rx = bus.subscribe();
+    while let Some(envelope) = rx.recv().await {
+        apply_connection_health_event(&connection_store, &envelope);
+    }
+}
+
+fn apply_connection_health_event(connection_store: &ConnectionStore, envelope: &EventEnvelope) {
+    if !envelope.event.control {
+        return;
+    }
+    let connection_slug = if connection_store.get(&envelope.event.topic).is_some() {
+        envelope.event.topic.as_str()
+    } else if connection_store.get(&envelope.subscriber_id).is_some() {
+        envelope.subscriber_id.as_str()
+    } else {
+        return;
+    };
+    let Some(health) = health_from_control_event(envelope) else {
+        return;
+    };
+    let _ = connection_store.update(connection_slug, |record| match health.status {
+        ConnectionHealthStatus::Ok => {
+            record.health = Some(health);
+            if record.state == ConnectionState::Degraded {
+                record.state = ConnectionState::Authenticated;
+                record.set_has_consumer(record.has_consumer);
+            }
+            record.auth_failure_notified = false;
+        }
+        ConnectionHealthStatus::Offline | ConnectionHealthStatus::Retrying => {
+            if record.state != ConnectionState::Disabled {
+                record.state = ConnectionState::Degraded;
+            }
+            record.health = Some(health);
+        }
+        ConnectionHealthStatus::AuthRequired => {
+            if record.state != ConnectionState::Disabled {
+                record.state = ConnectionState::Degraded;
+            }
+            record.health = Some(health);
+            record.auth_failure_notified = true;
+        }
+    });
+}
+
+fn health_from_control_event(envelope: &EventEnvelope) -> Option<ConnectionHealth> {
+    let payload = &envelope.event.payload;
+    match envelope.event.kind.as_str() {
+        "connection_health" => {
+            let status = match payload.get("status").and_then(serde_json::Value::as_str)? {
+                "ok" => ConnectionHealthStatus::Ok,
+                "offline" => ConnectionHealthStatus::Offline,
+                "retrying" => ConnectionHealthStatus::Retrying,
+                "auth_required" => ConnectionHealthStatus::AuthRequired,
+                _ => return None,
+            };
+            Some(ConnectionHealth {
+                status,
+                reason: string_payload(payload, "reason"),
+                detail: string_payload(payload, "detail")
+                    .or_else(|| string_payload(payload, "error")),
+                updated_at_ms: envelope.received_at_ms,
+                next_retry_at_ms: payload
+                    .get("next_retry_at_ms")
+                    .and_then(serde_json::Value::as_i64),
+            })
+        }
+        "resume_offline" => Some(ConnectionHealth {
+            status: ConnectionHealthStatus::Retrying,
+            reason: Some("connect_failed".into()),
+            detail: string_payload(payload, "error"),
+            updated_at_ms: envelope.received_at_ms,
+            next_retry_at_ms: payload
+                .get("next_retry_at_ms")
+                .and_then(serde_json::Value::as_i64),
+        }),
+        "login_required" => Some(ConnectionHealth {
+            status: ConnectionHealthStatus::AuthRequired,
+            reason: Some("login_required".into()),
+            detail: None,
+            updated_at_ms: envelope.received_at_ms,
+            next_retry_at_ms: None,
+        }),
+        "ready" => Some(ConnectionHealth {
+            status: ConnectionHealthStatus::Ok,
+            reason: None,
+            detail: None,
+            updated_at_ms: envelope.received_at_ms,
+            next_retry_at_ms: None,
+        }),
+        _ => None,
+    }
+}
+
+fn string_payload(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn block_on_manager_handle<T, F>(handle: &Handle, future: F) -> Result<T>
