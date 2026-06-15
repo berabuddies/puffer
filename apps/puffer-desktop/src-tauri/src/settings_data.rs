@@ -1,7 +1,8 @@
 use crate::dtos::{
     AuthProviderStatusDto, BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserExtensionDto,
     BrowserSettingsDto, ProviderSummaryDto, ResourceCountsDto, SecretSummaryDto,
-    SecretsSettingsDto, SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
+    SecretSourceDto, SecretsSettingsDto, SettingsConfigDto, SettingsSessionSummaryDto,
+    SettingsSnapshotDto,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -169,6 +170,14 @@ fn secrets_settings(paths: &ConfigPaths) -> Result<SecretsSettingsDto> {
         store_file: store_file.display().to_string(),
         key_source: secret_key_source().to_string(),
         chrome_import_supported: cfg!(target_os = "macos"),
+        sources: puffer_secrets::available_browser_sources()
+            .into_iter()
+            .map(|source| SecretSourceDto {
+                id: source.id,
+                label: source.label,
+                available: source.available,
+            })
+            .collect(),
         items: SecretVault::list_metadata(&store_file)?
             .into_iter()
             .map(secret_summary)

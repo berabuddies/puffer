@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-mod chrome;
+mod chromium;
+mod der;
+mod firefox;
 mod keychain;
 
 const STORE_VERSION: u32 = 1;
@@ -77,16 +79,117 @@ pub struct ResolvedSecret {
     pub value: String,
 }
 
-/// Summary of a Chrome credential import pass.
+/// Summary of a browser credential import pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChromeImportReport {
+pub struct ImportReport {
     /// Number of credentials written to the encrypted Puffer store.
     pub imported: usize,
-    /// Number of Chrome rows skipped because they were unusable or duplicates.
+    /// Number of source rows skipped because they were unusable or duplicates.
     pub skipped: usize,
     /// Non-secret import diagnostics.
     pub errors: Vec<String>,
+}
+
+/// Back-compat alias for the original Chrome-only report type.
+pub type ChromeImportReport = ImportReport;
+
+/// One credential decrypted from an external browser store, ready for import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportedCredential {
+    pub(crate) origin_url: String,
+    pub(crate) username: String,
+    pub(crate) password: String,
+}
+
+/// A browser credential store Puffer can import saved logins from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserSource {
+    Chrome,
+    Edge,
+    Brave,
+    Firefox,
+}
+
+impl BrowserSource {
+    /// Stable source id stored on each secret and used by the RPC/UI.
+    pub fn id(self) -> &'static str {
+        match self {
+            BrowserSource::Chrome => "chrome",
+            BrowserSource::Edge => "edge",
+            BrowserSource::Brave => "brave",
+            BrowserSource::Firefox => "firefox",
+        }
+    }
+
+    /// User-facing source name.
+    pub fn label(self) -> &'static str {
+        match self {
+            BrowserSource::Chrome => "Chrome",
+            BrowserSource::Edge => "Edge",
+            BrowserSource::Brave => "Brave",
+            BrowserSource::Firefox => "Firefox",
+        }
+    }
+
+    /// All known sources, in display order.
+    pub fn all() -> [BrowserSource; 4] {
+        [
+            BrowserSource::Chrome,
+            BrowserSource::Edge,
+            BrowserSource::Brave,
+            BrowserSource::Firefox,
+        ]
+    }
+
+    /// Resolves a source from its stable id.
+    pub fn from_id(id: &str) -> Option<BrowserSource> {
+        BrowserSource::all()
+            .into_iter()
+            .find(|source| source.id() == id)
+    }
+
+    fn load_credentials(self) -> Result<Vec<ImportedCredential>> {
+        match self {
+            BrowserSource::Chrome => chromium::load_saved_credentials(chromium::Chromium::Chrome),
+            BrowserSource::Edge => chromium::load_saved_credentials(chromium::Chromium::Edge),
+            BrowserSource::Brave => chromium::load_saved_credentials(chromium::Chromium::Brave),
+            BrowserSource::Firefox => firefox::load_saved_credentials(),
+        }
+    }
+
+    fn is_available(self) -> bool {
+        match self {
+            BrowserSource::Chrome => chromium::is_available(chromium::Chromium::Chrome),
+            BrowserSource::Edge => chromium::is_available(chromium::Chromium::Edge),
+            BrowserSource::Brave => chromium::is_available(chromium::Chromium::Brave),
+            BrowserSource::Firefox => firefox::is_available(),
+        }
+    }
+}
+
+/// Availability of one browser source for display in settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAvailability {
+    /// Stable source id (e.g. `chrome`, `firefox`).
+    pub id: String,
+    /// User-facing source name.
+    pub label: String,
+    /// Whether at least one importable profile currently exists.
+    pub available: bool,
+}
+
+/// Lists every browser source and whether it can currently be imported.
+pub fn available_browser_sources() -> Vec<SourceAvailability> {
+    BrowserSource::all()
+        .into_iter()
+        .map(|source| SourceAvailability {
+            id: source.id().to_string(),
+            label: source.label().to_string(),
+            available: source.is_available(),
+        })
+        .collect()
 }
 
 /// Encrypted JSON-backed secret vault.
@@ -297,13 +400,18 @@ impl SecretVault {
     }
 
     /// Imports decryptable Chrome saved credentials into the encrypted vault.
-    pub fn import_chrome_saved_credentials(&self) -> Result<ChromeImportReport> {
-        self.sync_chrome_saved_credentials()
+    pub fn import_chrome_saved_credentials(&self) -> Result<ImportReport> {
+        self.sync_browser_source(BrowserSource::Chrome)
     }
 
-    /// Syncs decryptable Chrome saved credentials into the encrypted vault.
-    pub fn sync_chrome_saved_credentials(&self) -> Result<ChromeImportReport> {
-        let credentials = chrome::load_saved_credentials()?;
+    /// Back-compat alias for [`Self::import_chrome_saved_credentials`].
+    pub fn sync_chrome_saved_credentials(&self) -> Result<ImportReport> {
+        self.sync_browser_source(BrowserSource::Chrome)
+    }
+
+    /// Imports decryptable saved credentials from one browser source.
+    pub fn sync_browser_source(&self, source: BrowserSource) -> Result<ImportReport> {
+        let credentials = source.load_credentials()?;
         let mut imported = 0usize;
         let mut skipped = 0usize;
         let mut errors = Vec::new();
@@ -312,21 +420,21 @@ impl SecretVault {
                 skipped += 1;
                 continue;
             }
-            let label = chrome_secret_label(&credential);
+            let label = browser_secret_label(source, &credential);
             match self.put(SecretUpsert {
                 id: None,
                 label,
-                description: Some(chrome_site_description(&credential.origin_url)),
+                description: Some(site_description(&credential.origin_url)),
                 value: credential.password,
                 username: non_empty_option(Some(credential.username)),
                 origin: Some(credential.origin_url),
-                source: "chrome".to_string(),
+                source: source.id().to_string(),
             }) {
                 Ok(_) => imported += 1,
                 Err(error) => errors.push(error.to_string()),
             }
         }
-        Ok(ChromeImportReport {
+        Ok(ImportReport {
             imported,
             skipped,
             errors,
@@ -510,15 +618,15 @@ fn is_generic_secret_search_term(term: &str) -> bool {
     )
 }
 
-fn chrome_secret_label(credential: &chrome::ChromeCredential) -> String {
-    let host = chrome_site_description(&credential.origin_url);
+fn browser_secret_label(source: BrowserSource, credential: &ImportedCredential) -> String {
+    let host = site_description(&credential.origin_url);
     match credential.username.trim() {
-        "" => format!("Chrome {host}"),
-        username => format!("Chrome {username} @ {host}"),
+        "" => format!("{} {host}", source.label()),
+        username => format!("{} {username} @ {host}", source.label()),
     }
 }
 
-fn chrome_site_description(origin_url: &str) -> String {
+fn site_description(origin_url: &str) -> String {
     origin_url
         .split("://")
         .nth(1)

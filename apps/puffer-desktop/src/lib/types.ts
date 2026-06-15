@@ -500,10 +500,19 @@ export type SecretSummary = {
   updatedAtMs: number;
 };
 
+export type SecretSource = {
+  id: string;
+  label: string;
+  available: boolean;
+};
+
 export type SecretsSettings = {
   storeFile: string;
   keySource: string;
+  /** Back-compat: legacy macOS Chrome import flag. Prefer `sources`. */
   chromeImportSupported: boolean;
+  /** All browser import sources and whether each is currently available. */
+  sources: SecretSource[];
   items: SecretSummary[];
 };
 
@@ -588,6 +597,9 @@ export type ChromeSecretsImportResult = {
   settings: SettingsSnapshot;
   report: ChromeImportReport;
 };
+
+/** Result of importing saved credentials from any browser source. */
+export type BrowserSecretsImportResult = ChromeSecretsImportResult;
 
 export type OpenAIRealtimeClientSecretOptions = {
   providerId?: string;

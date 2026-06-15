@@ -1087,6 +1087,26 @@ export async function importChromeSecrets(): Promise<ChromeSecretsImportResult> 
   });
 }
 
+/** Imports saved credentials from one browser source (chrome|edge|brave|firefox). */
+export async function importBrowserSecrets(
+  source: string
+): Promise<ChromeSecretsImportResult> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendChromeSecretsImportResult>("import_browser_secrets", { source });
+  }
+  if (!canInvokeTauri()) {
+    return {
+      settings: mockSettingsSnapshot,
+      report: { imported: 0, skipped: 0, errors: [`${source} import requires the desktop backend.`] }
+    };
+  }
+  return invoke<BackendChromeSecretsImportResult>("backend_request", {
+    method: "import_browser_secrets",
+    params: { source }
+  });
+}
+
 export interface TelegramRelationshipReport {
   chatId: number;
   name: string;

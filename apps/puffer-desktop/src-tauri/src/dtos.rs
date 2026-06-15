@@ -380,8 +380,20 @@ pub(crate) struct BrowserCaptchaSolverDto {
 pub(crate) struct SecretsSettingsDto {
     pub store_file: String,
     pub key_source: String,
+    /// Back-compat: legacy macOS Chrome import flag. Prefer `sources`.
     pub chrome_import_supported: bool,
+    /// All browser import sources and whether each is currently available.
+    pub sources: Vec<SecretSourceDto>,
     pub items: Vec<SecretSummaryDto>,
+}
+
+/// Describes one browser import source and its availability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretSourceDto {
+    pub id: String,
+    pub label: String,
+    pub available: bool,
 }
 
 /// Describes non-secret metadata for one saved secret.

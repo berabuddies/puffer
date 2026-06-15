@@ -1737,7 +1737,7 @@ test("Secrets settings save and import without rendering raw secret values", asy
   await expect(pane.locator(".pf-mcp-card").filter({ hasText: "Build token" })).toBeVisible();
 
   await pane.getByRole("button", { name: "Sync from Chrome" }).click();
-  await daemon.waitForRequest("import_chrome_secrets");
+  await daemon.waitForRequest("import_browser_secrets");
   await expect(
     pane.locator(".pf-mcp-card").filter({ hasText: "Chrome developer@example.com" })
   ).toBeVisible();

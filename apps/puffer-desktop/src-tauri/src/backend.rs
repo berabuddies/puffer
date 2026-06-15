@@ -213,6 +213,22 @@ impl BackendState {
                     "report": report,
                 }))
             }
+            "import_browser_secrets" => {
+                let source_id = params
+                    .get("source")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| anyhow!("import_browser_secrets requires a `source`"))?;
+                let source = puffer_secrets::BrowserSource::from_id(source_id)
+                    .ok_or_else(|| anyhow!("unknown browser source `{source_id}`"))?;
+                let report = self.secret_vault()?.sync_browser_source(source)?;
+                serde_value(json!({
+                    "settings": self.load_settings_snapshot()?,
+                    "report": report,
+                }))
+            }
+            "list_secret_sources" => serde_value(json!({
+                "sources": puffer_secrets::available_browser_sources(),
+            })),
             "run_remote_bash" => self.run_remote_bash(params),
             "read_remote_file" => self.read_remote_file(params),
             "write_remote_file" => self.write_remote_file(params),

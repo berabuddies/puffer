@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
-use puffer_secrets::{ChromeImportReport, SecretUpsert, SecretVault};
+use puffer_secrets::{
+    BrowserSource, ImportReport, SecretUpsert, SecretVault, SourceAvailability,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -49,8 +51,20 @@ pub(crate) fn delete_secret(paths: &ConfigPaths, params: &Value) -> Result<bool>
 }
 
 /// Imports saved Chrome credentials into the encrypted Puffer secret vault.
-pub(crate) fn import_chrome_secrets(paths: &ConfigPaths) -> Result<ChromeImportReport> {
+pub(crate) fn import_chrome_secrets(paths: &ConfigPaths) -> Result<ImportReport> {
     vault(paths)?.import_chrome_saved_credentials()
+}
+
+/// Imports saved credentials from one named browser source into the vault.
+pub(crate) fn import_browser_secrets(paths: &ConfigPaths, source_id: &str) -> Result<ImportReport> {
+    let source = BrowserSource::from_id(source_id)
+        .with_context(|| format!("unknown browser source `{source_id}`"))?;
+    vault(paths)?.sync_browser_source(source)
+}
+
+/// Lists every browser import source and whether it is currently available.
+pub(crate) fn list_secret_sources() -> Vec<SourceAvailability> {
+    puffer_secrets::available_browser_sources()
 }
 
 fn vault(paths: &ConfigPaths) -> Result<SecretVault> {
