@@ -34,6 +34,7 @@ const MONITOR_RUNTIME_LANGUAGE_POLICY: &str = r#"Monitor source-language runtime
 - Preserve explicit product names, code identifiers, URLs, and quoted text exactly when appropriate.
 - Copy every number, percentage, amount, date, time, duration, and identifier into task fields exactly as written in the current source event text. Never round, convert, infer, or substitute values, and never reuse values from other messages or prior context.
 - When the source message contains critical values, quote the relevant sentence verbatim inside the task description instead of paraphrasing it.
+- If the trigger payload contains `conversation_context`, read it before deciding what the current source event means. `conversation_context.source=telegram_server_history_cache` means bounded recent Telegram server-history messages from the same direct chat before the current trigger; `conversation_context.source=subscriber_diagnostics` means best-effort observed subscriber diagnostics that may have gaps. Use context only to disambiguate ambiguous short messages and reply intent; do not create tasks from prior context alone, do not assume diagnostics context is complete or immediately adjacent, and do not replace the current source event's numbers, deadlines, or asks with prior-message details.
 - When updating an existing monitor task with TaskUpdate, never change its status; update content fields only. Task lifecycle is owned by the daemon and user actions."#;
 
 /// Aggregate counters surfaced by workflow and connection status views.

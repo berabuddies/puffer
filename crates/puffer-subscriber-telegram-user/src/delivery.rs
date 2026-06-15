@@ -12,9 +12,10 @@ use anyhow::Context as _;
 use grammers_client::types::{Chat, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::events::{build_message_event, emit};
+use crate::history_cache::TelegramHistoryCache;
 use crate::notifications::NotificationMuteCache;
 use crate::state::SkillEnv;
 
@@ -130,6 +131,14 @@ pub(crate) async fn emit_message_if_new(
         );
         return Ok(false);
     }
+    if let Err(error) = record_message_history(env, message) {
+        warn!(
+            chat = %message.chat().id(),
+            message_id = message.id(),
+            %error,
+            "failed to record Telegram message in bounded history cache"
+        );
+    }
     let notification_muted = notification_mutes.message_chat_muted(message);
     let notification_silent = message.silent();
     let is_outgoing = message.outgoing();
@@ -202,6 +211,16 @@ pub(crate) async fn emit_live_message_if_new(
         source_received_at_ms,
     )
     .await
+}
+
+fn record_message_history(env: &SkillEnv, message: &Message) -> anyhow::Result<()> {
+    // This read-modify-write path relies on the subscriber processing updates
+    // serially. Startup hydration performs a merged final save so resume
+    // backfill writes made through this path are not overwritten.
+    let original = TelegramHistoryCache::load(env).unwrap_or_default();
+    let mut cache = original.clone();
+    cache.observe_message(message);
+    cache.save_if_changed(env, &original)
 }
 
 fn message_notifications_suppressed(notification_muted: bool, notification_silent: bool) -> bool {
