@@ -367,10 +367,20 @@ mod windows {
     }
 
     /// Unwraps the `v20` ABE AES key: base64 → strip `APPB` → SYSTEM-DPAPI →
-    /// user-DPAPI → trailing 32 bytes. The SYSTEM-DPAPI step only succeeds when
-    /// running as SYSTEM. (Some Chrome builds add a further AES-GCM wrap around
-    /// the key; if VM testing shows `v20` still failing, that extra layer is the
-    /// next thing to add here.)
+    /// user-DPAPI → trailing 32 bytes.
+    ///
+    /// KNOWN INCOMPLETE — confirmed against Edge 145 (ARM Win11) on 2026-06-15:
+    /// the two layers use *different security contexts*. The outer wrap is
+    /// SYSTEM-DPAPI (only a SYSTEM process can unwrap it); the inner wrap is the
+    /// *interactive user's* DPAPI. A single process cannot satisfy both — a
+    /// SYSTEM process must `LogonUser` + `ImpersonateLoggedOnUser` for the inner
+    /// unwrap (or split the two unwraps across contexts). This naive two-call
+    /// version therefore fails on real ABE data. Additionally, current builds
+    /// may wrap the recovered key in a further AES-GCM layer (the Chrome
+    /// elevation-service `IElevator` path). Full `v20` support is a separate
+    /// workstream (impersonation + possibly the COM elevation interface);
+    /// until then `v20` rows are detected and reported as skipped, never
+    /// silently dropped.
     fn decode_app_bound_key(b64: &str) -> Result<[u8; 32]> {
         let blob = BASE64.decode(b64).context("decode app_bound key")?;
         let stripped = blob
