@@ -4,8 +4,8 @@ mod pending;
 
 use super::chrome::{
     close_page_target, create_page_target, ensure_chrome_executable, initial_page_target,
-    read_devtools_ws_url, read_remote_devtools_ws_url, wait_for_initial_page_targets,
-    ChromePageTarget,
+    read_devtools_ws_url, read_remote_devtools_ws_url, resolve_external_devtools_endpoint,
+    wait_for_initial_page_targets, ChromePageTarget, ExternalDevToolsEndpoint,
 };
 use super::command::BrowserCommand;
 use super::console::BrowserConsoleRegistry;
@@ -87,6 +87,7 @@ struct BrowserRootState {
     browser_ws: String,
     child: Option<Child>,
     owns_targets: bool,
+    external_page_target: Option<ChromePageTarget>,
     reusable_targets: Vec<ChromePageTarget>,
     last_active: Instant,
 }
@@ -111,6 +112,9 @@ impl BrowserRootSession {
         height: u32,
         launch_settings: BrowserLaunchSettings,
     ) -> Result<Self> {
+        if let Some(endpoint) = resolve_external_devtools_endpoint()? {
+            return Self::spawn_external_root(profile_dir, endpoint);
+        }
         if let Some(root) = Self::spawn_cef_remote_root(&profile_dir, &launch_settings)? {
             return Ok(root);
         }
@@ -158,11 +162,57 @@ impl BrowserRootSession {
                 browser_ws,
                 child: Some(child),
                 owns_targets: true,
+                external_page_target: None,
                 reusable_targets: reusable_target.into_iter().collect(),
                 last_active: Instant::now(),
             })),
         })
     }
+
+    fn spawn_external_root(
+        profile_dir: PathBuf,
+        endpoint: ExternalDevToolsEndpoint,
+    ) -> Result<Self> {
+        match endpoint {
+            ExternalDevToolsEndpoint::Browser { browser_ws } => {
+                log_browser_backend(format!("using external browser DevTools at {browser_ws}"));
+                let reusable_target = initial_page_target(&browser_ws)?;
+                Ok(Self {
+                    inner: Arc::new(Mutex::new(BrowserRootState {
+                        profile_dir,
+                        browser_ws,
+                        child: None,
+                        owns_targets: true,
+                        external_page_target: None,
+                        reusable_targets: reusable_target.into_iter().collect(),
+                        last_active: Instant::now(),
+                    })),
+                })
+            }
+            ExternalDevToolsEndpoint::Page { page_ws } => {
+                log_browser_backend("using external page DevTools endpoint");
+                let target = ChromePageTarget {
+                    target_id: "external".to_string(),
+                    page_ws: page_ws.clone(),
+                    close_on_release: false,
+                    native_cef_session_id: None,
+                    adopted: false,
+                };
+                Ok(Self {
+                    inner: Arc::new(Mutex::new(BrowserRootState {
+                        profile_dir,
+                        browser_ws: page_ws,
+                        child: None,
+                        owns_targets: false,
+                        external_page_target: Some(target),
+                        reusable_targets: Vec::new(),
+                        last_active: Instant::now(),
+                    })),
+                })
+            }
+        }
+    }
+
     /// Establishes a native-CEF remote root **without** the managed-Chrome
     /// fallback. Returns `Ok(None)` when no CEF endpoint is configured. Used to
     /// lazily attach to the desktop's CEF for tab discovery (#649) even when the
@@ -232,6 +282,7 @@ impl BrowserRootSession {
                 browser_ws,
                 child: None,
                 owns_targets: false,
+                external_page_target: None,
                 reusable_targets,
                 last_active: Instant::now(),
             })),
@@ -242,6 +293,9 @@ impl BrowserRootSession {
         let mut inner = self.inner.lock().unwrap();
         inner.last_active = Instant::now();
         ensure_root_alive(&mut inner)?;
+        if let Some(target) = &inner.external_page_target {
+            return Ok(target.clone());
+        }
         if let Some(target) = inner.reusable_targets.pop() {
             return Ok(target);
         }
@@ -261,12 +315,22 @@ impl BrowserRootSession {
         if target.adopted {
             return Ok(());
         }
-        let (browser_ws, owns_targets) = {
+        let (browser_ws, owns_targets, external_page_target_id) = {
             let mut inner = self.inner.lock().unwrap();
             inner.last_active = Instant::now();
             ensure_root_alive(&mut inner)?;
-            (inner.browser_ws.clone(), inner.owns_targets)
+            (
+                inner.browser_ws.clone(),
+                inner.owns_targets,
+                inner
+                    .external_page_target
+                    .as_ref()
+                    .map(|target| target.target_id.clone()),
+            )
         };
+        if external_page_target_id.as_deref() == Some(target.target_id.as_str()) {
+            return Ok(());
+        }
         if !owns_targets && !target.close_on_release {
             // Reset is best-effort: a wedged/unresponsive page (issue #585) may
             // never answer the CDP reset, but we MUST still return the slot to the
