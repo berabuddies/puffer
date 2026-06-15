@@ -167,16 +167,7 @@ impl ConnectionStore {
     /// Loads a connection store. Missing files are treated as empty.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, ConnectionStoreError> {
         let path = path.into();
-        let inner = if path.exists() {
-            let raw = std::fs::read_to_string(&path)?;
-            if raw.trim().is_empty() {
-                ConnectionStoreFile::default()
-            } else {
-                serde_json::from_str(&raw)?
-            }
-        } else {
-            ConnectionStoreFile::default()
-        };
+        let inner = read_store_file(&path)?;
         Ok(Self {
             path,
             inner: Mutex::new(inner),
@@ -185,16 +176,18 @@ impl ConnectionStore {
 
     /// Returns all connection records sorted by slug.
     pub fn list(&self) -> Vec<ConnectionRecord> {
-        let mut list = self.inner.lock().unwrap().connections.clone();
+        let mut guard = self.inner.lock().unwrap();
+        self.refresh_locked_best_effort(&mut guard);
+        let mut list = guard.connections.clone();
         list.sort_by(|a, b| a.slug.cmp(&b.slug));
         list
     }
 
     /// Returns one connection by slug.
     pub fn get(&self, slug: &str) -> Option<ConnectionRecord> {
-        self.inner
-            .lock()
-            .unwrap()
+        let mut guard = self.inner.lock().unwrap();
+        self.refresh_locked_best_effort(&mut guard);
+        guard
             .connections
             .iter()
             .find(|connection| connection.slug == slug)
@@ -205,6 +198,7 @@ impl ConnectionStore {
     pub fn create(&self, connection: ConnectionRecord) -> Result<(), ConnectionStoreError> {
         validate_connection(&connection)?;
         let mut guard = self.inner.lock().unwrap();
+        self.refresh_locked(&mut guard)?;
         if guard
             .connections
             .iter()
@@ -219,6 +213,7 @@ impl ConnectionStore {
     /// Deletes a connection by slug.
     pub fn delete(&self, slug: &str) -> Result<(), ConnectionStoreError> {
         let mut guard = self.inner.lock().unwrap();
+        self.refresh_locked(&mut guard)?;
         let before = guard.connections.len();
         guard
             .connections
@@ -235,6 +230,7 @@ impl ConnectionStore {
         F: FnOnce(&mut ConnectionRecord),
     {
         let mut guard = self.inner.lock().unwrap();
+        self.refresh_locked(&mut guard)?;
         let connection = guard
             .connections
             .iter_mut()
@@ -245,6 +241,33 @@ impl ConnectionStore {
         let updated = connection.clone();
         write_atomic(&self.path, &*guard)?;
         Ok(updated)
+    }
+
+    fn refresh_locked(&self, store: &mut ConnectionStoreFile) -> Result<(), ConnectionStoreError> {
+        *store = read_store_file(&self.path)?;
+        Ok(())
+    }
+
+    fn refresh_locked_best_effort(&self, store: &mut ConnectionStoreFile) {
+        if let Err(error) = self.refresh_locked(store) {
+            tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "failed to refresh connection store before read"
+            );
+        }
+    }
+}
+
+fn read_store_file(path: &Path) -> Result<ConnectionStoreFile, ConnectionStoreError> {
+    if !path.exists() {
+        return Ok(ConnectionStoreFile::default());
+    }
+    let raw = std::fs::read_to_string(path)?;
+    if raw.trim().is_empty() {
+        Ok(ConnectionStoreFile::default())
+    } else {
+        Ok(serde_json::from_str(&raw)?)
     }
 }
 
@@ -297,6 +320,31 @@ mod tests {
         let connection = reopened.get("my-telegram").unwrap();
         assert_eq!(connection.connector_slug, "telegram-login");
         assert_eq!(connection.state, ConnectionState::Authenticated);
+    }
+
+    #[test]
+    fn connection_store_reads_connections_written_by_another_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("connections.json");
+        let store = ConnectionStore::load(&path).unwrap();
+        assert!(store.list().is_empty());
+
+        let external = ConnectionStore::load(&path).unwrap();
+        external
+            .create(ConnectionRecord::authenticated(
+                "telegram-user",
+                "telegram-login",
+                "Personal Telegram",
+            ))
+            .unwrap();
+
+        let listed = store.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].slug, "telegram-user");
+        assert_eq!(
+            store.get("telegram-user").unwrap().connector_slug,
+            "telegram-login"
+        );
     }
 
     #[test]
