@@ -185,12 +185,20 @@ fn load_master_key(key4_db: &Path) -> Result<Option<Vec<u8>>> {
         bail!("Firefox key database has an unexpected NSS key id");
     }
     let decrypted = decrypt_key_blob(&key4.a11, &key4.global_salt, primary)?;
-    // The NSS key blob is stored unpadded (legacy 3DES) or PKCS#7-padded to the
-    // PBES2 block size (modern AES). Strip the pad to recover the raw master key,
-    // whose length selects the login-field cipher: 24 bytes ⇒ 3DES, 32 ⇒ AES-256.
-    let key = pkcs7_unpad(&decrypted);
-    if key.len() < 24 {
-        bail!("Firefox master key is too short");
+    // The key blob is PKCS#7-padded under PBES2/AES (32-byte key ⇒ 48 bytes) but
+    // stored UNPADDED under legacy 3DES (exactly 24 bytes). Only accept the
+    // stripped form when it is a valid key length — otherwise the "padding" was
+    // really the tail of an unpadded 24-byte 3DES key (which can legitimately end
+    // in pad-like bytes), so fall back to the raw plaintext. The recovered length
+    // selects the login-field cipher: 24 ⇒ 3DES, 32 ⇒ AES-256.
+    let stripped = pkcs7_unpad(&decrypted);
+    let key: &[u8] = if matches!(stripped.len(), 24 | 32) {
+        stripped
+    } else {
+        &decrypted
+    };
+    if !matches!(key.len(), 24 | 32) {
+        bail!("Firefox master key has an unexpected length ({} bytes)", key.len());
     }
     Ok(Some(key.to_vec()))
 }
@@ -297,6 +305,12 @@ fn decrypt_key_blob(blob: &[u8], global_salt: &[u8], primary: &[u8]) -> Result<V
         let mut kdf_params = kdf_params.reader();
         let entry_salt = kdf_params.expect(TAG_OCTET_STRING)?.contents;
         let iterations = kdf_params.expect(TAG_INTEGER)?.as_usize()? as u32;
+        // `key4.db` is attacker-influenceable (a synced/dropped-in profile), and
+        // the iteration count drives PBKDF2 directly — bound it so a crafted blob
+        // cannot turn import into an unbounded-CPU hang. Real profiles use ~10k–650k.
+        if !(1..=10_000_000).contains(&iterations) {
+            bail!("Firefox PBES2 iteration count {iterations} is out of range");
+        }
         // encryptionScheme: SEQUENCE { OID aes256-CBC, OCTET STRING iv }
         let mut scheme = scheme.reader();
         let _aes_oid = scheme.expect(TAG_OID)?;
@@ -602,6 +616,34 @@ mod tests {
         assert_eq!(creds[0].origin_url, "https://example.com");
         assert_eq!(creds[0].username, "alice@example.com");
         assert_eq!(creds[0].password, "hunter2");
+    }
+
+    #[test]
+    fn legacy_3des_master_key_ending_in_pad_byte_is_not_truncated() {
+        // Regression: the 24-byte legacy 3DES key is stored UNPADDED, so a key
+        // whose last byte looks like PKCS#7 padding (here 0x01) must NOT be
+        // pkcs7-stripped to 23 bytes (which would bail "too short" and silently
+        // drop the whole profile).
+        let dir = tempfile::tempdir().unwrap();
+        let global_salt = [0x11u8; 32];
+        let entry_salt_item2 = [0x22u8; 20];
+        let entry_salt_a11 = [0x33u8; 20];
+        let mut master_key = [0x12u8; 24];
+        master_key[23] = 0x01; // pad-like trailing byte
+
+        let item2 = legacy_blob(&global_salt, &entry_salt_item2, b"password-check\x02\x02");
+        let a11 = legacy_blob(&global_salt, &entry_salt_a11, &master_key);
+        write_key4(dir.path(), &global_salt, &item2, &a11);
+
+        let iv8 = [0x55u8; 8];
+        let user_b64 = login_blob(&master_key, &iv8, b"dave@example.com");
+        let pass_b64 = login_blob(&master_key, &iv8, b"tr0ub4dour");
+        write_logins(dir.path(), "https://legacy.example", &user_b64, &pass_b64);
+
+        let creds = load_profile(dir.path()).unwrap();
+        assert_eq!(creds.len(), 1, "pad-like-ending 3DES key must still decrypt");
+        assert_eq!(creds[0].username, "dave@example.com");
+        assert_eq!(creds[0].password, "tr0ub4dour");
     }
 
     #[test]
