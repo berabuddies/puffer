@@ -21,6 +21,8 @@ pub(crate) enum Chromium {
     Chrome,
     Edge,
     Brave,
+    /// The open-source Chromium browser (common on Linux).
+    Chromium,
 }
 
 impl Chromium {
@@ -31,6 +33,7 @@ impl Chromium {
             Chromium::Chrome => "Library/Application Support/Google/Chrome",
             Chromium::Edge => "Library/Application Support/Microsoft Edge",
             Chromium::Brave => "Library/Application Support/BraveSoftware/Brave-Browser",
+            Chromium::Chromium => "Library/Application Support/Chromium",
         }
     }
 
@@ -41,6 +44,7 @@ impl Chromium {
             Chromium::Chrome => "Chrome Safe Storage",
             Chromium::Edge => "Microsoft Edge Safe Storage",
             Chromium::Brave => "Brave Safe Storage",
+            Chromium::Chromium => "Chromium Safe Storage",
         }
     }
 
@@ -51,6 +55,7 @@ impl Chromium {
             Chromium::Chrome => "Chrome",
             Chromium::Edge => "Microsoft Edge",
             Chromium::Brave => "Brave",
+            Chromium::Chromium => "Chromium",
         }
     }
 
@@ -61,6 +66,7 @@ impl Chromium {
             Chromium::Chrome => "Google/Chrome/User Data",
             Chromium::Edge => "Microsoft/Edge/User Data",
             Chromium::Brave => "BraveSoftware/Brave-Browser/User Data",
+            Chromium::Chromium => "Chromium/User Data",
         }
     }
 
@@ -71,6 +77,7 @@ impl Chromium {
             Chromium::Chrome => "google-chrome",
             Chromium::Edge => "microsoft-edge",
             Chromium::Brave => "BraveSoftware/Brave-Browser",
+            Chromium::Chromium => "chromium",
         }
     }
 }

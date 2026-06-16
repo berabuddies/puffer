@@ -111,6 +111,7 @@ pub enum BrowserSource {
     Chrome,
     Edge,
     Brave,
+    Chromium,
     Firefox,
 }
 
@@ -121,6 +122,7 @@ impl BrowserSource {
             BrowserSource::Chrome => "chrome",
             BrowserSource::Edge => "edge",
             BrowserSource::Brave => "brave",
+            BrowserSource::Chromium => "chromium",
             BrowserSource::Firefox => "firefox",
         }
     }
@@ -131,16 +133,18 @@ impl BrowserSource {
             BrowserSource::Chrome => "Chrome",
             BrowserSource::Edge => "Edge",
             BrowserSource::Brave => "Brave",
+            BrowserSource::Chromium => "Chromium",
             BrowserSource::Firefox => "Firefox",
         }
     }
 
     /// All known sources, in display order.
-    pub fn all() -> [BrowserSource; 4] {
+    pub fn all() -> [BrowserSource; 5] {
         [
             BrowserSource::Chrome,
             BrowserSource::Edge,
             BrowserSource::Brave,
+            BrowserSource::Chromium,
             BrowserSource::Firefox,
         ]
     }
@@ -157,6 +161,9 @@ impl BrowserSource {
             BrowserSource::Chrome => chromium::load_saved_credentials(chromium::Chromium::Chrome),
             BrowserSource::Edge => chromium::load_saved_credentials(chromium::Chromium::Edge),
             BrowserSource::Brave => chromium::load_saved_credentials(chromium::Chromium::Brave),
+            BrowserSource::Chromium => {
+                chromium::load_saved_credentials(chromium::Chromium::Chromium)
+            }
             BrowserSource::Firefox => firefox::load_saved_credentials(),
         }
     }
@@ -166,6 +173,7 @@ impl BrowserSource {
             BrowserSource::Chrome => chromium::is_available(chromium::Chromium::Chrome),
             BrowserSource::Edge => chromium::is_available(chromium::Chromium::Edge),
             BrowserSource::Brave => chromium::is_available(chromium::Chromium::Brave),
+            BrowserSource::Chromium => chromium::is_available(chromium::Chromium::Chromium),
             BrowserSource::Firefox => firefox::is_available(),
         }
     }
