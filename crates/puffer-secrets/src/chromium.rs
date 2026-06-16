@@ -561,18 +561,19 @@ mod linux {
     //! Linux Chromium derives its AES-128 key (PBKDF2-SHA1, salt `saltysalt`,
     //! **1 iteration**) from a password held either in the Secret Service
     //! (gnome-keyring / kwallet) or, when the basic/text store is used, the
-    //! well-known constant `peanuts`. Secret Service access needs D-Bus and is
-    //! left as a follow-up; this implements the `peanuts` fallback that covers
-    //! basic-store and many headless setups. `v10` blobs are AES-128-CBC.
+    //! well-known constant `peanuts`. We query the Secret Service via the
+    //! `secret-tool` CLI and always also try `peanuts`, decrypting each blob
+    //! with whichever key works. `v10` blobs are AES-128-CBC.
     use super::{login_databases, Chromium, ImportedCredential};
     use aes::Aes128;
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result};
     use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
     use pbkdf2::pbkdf2_hmac;
     use rusqlite::Connection;
     use sha1::Sha1;
     use std::fs;
     use std::path::Path;
+    use std::process::Command;
 
     type Aes128CbcDec = cbc::Decryptor<Aes128>;
 
@@ -580,12 +581,41 @@ mod linux {
     const IV: [u8; 16] = [b' '; 16];
     const ITERATIONS: u32 = 1; // Linux uses 1 iteration (macOS uses 1003).
 
+    /// The `application` attribute this browser uses for its Secret Service key.
+    fn keyring_app(variant: Chromium) -> &'static str {
+        match variant {
+            Chromium::Chrome => "chrome",
+            Chromium::Chromium => "chromium",
+            Chromium::Edge => "microsoft-edge",
+            Chromium::Brave => "brave",
+        }
+    }
+
+    /// Reads the browser's "Safe Storage" key from the Secret Service via
+    /// `secret-tool`, if available and unlocked.
+    fn secret_service_password(app: &str) -> Option<Vec<u8>> {
+        let output = Command::new("secret-tool")
+            .args(["lookup", "application", app])
+            .output()
+            .ok()?;
+        if !output.status.success() || output.stdout.is_empty() {
+            return None;
+        }
+        Some(output.stdout)
+    }
+
     pub(super) fn load_saved_credentials(variant: Chromium) -> Result<Vec<ImportedCredential>> {
-        // TODO: query Secret Service (gnome-keyring/kwallet) before falling back.
-        let key = derive_key(b"peanuts");
+        // Candidate keys: the Secret Service key (if present) and the basic-store
+        // `peanuts` fallback. Each blob is tried against both.
+        let mut keys: Vec<[u8; 16]> = Vec::new();
+        if let Some(password) = secret_service_password(keyring_app(variant)) {
+            keys.push(derive_key(&password));
+        }
+        keys.push(derive_key(b"peanuts"));
+
         let mut out = Vec::new();
         for login_db in login_databases(variant) {
-            if let Ok(rows) = read_login_database(&login_db, &key) {
+            if let Ok(rows) = read_login_database(&login_db, &keys) {
                 out.extend(rows);
             }
         }
@@ -598,7 +628,7 @@ mod linux {
         key
     }
 
-    fn read_login_database(path: &Path, key: &[u8; 16]) -> Result<Vec<ImportedCredential>> {
+    fn read_login_database(path: &Path, keys: &[[u8; 16]]) -> Result<Vec<ImportedCredential>> {
         let temp_dir = tempfile::tempdir().context("create Chromium import temp dir")?;
         let copy_path = temp_dir.path().join("Login Data");
         fs::copy(path, &copy_path)
@@ -621,7 +651,7 @@ mod linux {
             if origin_url.trim().is_empty() || encrypted.is_empty() {
                 continue;
             }
-            let password = match decrypt_password(&encrypted, key) {
+            let password = match decrypt_password(&encrypted, keys) {
                 Ok(password) => password,
                 Err(_) => continue,
             };
@@ -637,12 +667,19 @@ mod linux {
         Ok(credentials)
     }
 
-    fn decrypt_password(encrypted: &[u8], key: &[u8; 16]) -> Result<String> {
+    fn decrypt_password(encrypted: &[u8], keys: &[[u8; 16]]) -> Result<String> {
         if encrypted.starts_with(b"v10") || encrypted.starts_with(b"v11") {
-            let decrypted = Aes128CbcDec::new(key.into(), &IV.into())
-                .decrypt_padded_vec_mut::<Pkcs7>(&encrypted[3..])
-                .map_err(|_| anyhow!("decrypt Chromium password value"))?;
-            String::from_utf8(decrypted).context("Chromium password value is not UTF-8")
+            // Try each candidate key (Secret Service, then peanuts).
+            for key in keys {
+                if let Ok(decrypted) = Aes128CbcDec::new(key.into(), &IV.into())
+                    .decrypt_padded_vec_mut::<Pkcs7>(&encrypted[3..])
+                {
+                    if let Ok(text) = String::from_utf8(decrypted) {
+                        return Ok(text);
+                    }
+                }
+            }
+            anyhow::bail!("no candidate key decrypted the Chromium password value")
         } else {
             String::from_utf8(encrypted.to_vec()).context("decode legacy Chromium password value")
         }
