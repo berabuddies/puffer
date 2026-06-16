@@ -1,19 +1,21 @@
 //! Firefox (and Gecko-family) saved-login extraction.
 //!
 //! Firefox keeps logins in two files inside each profile:
-//! - `key4.db` — a SQLite NSS database holding the *encrypted* 3DES master key,
+//! - `key4.db` — a SQLite NSS database holding the *encrypted* master key,
 //!   plus the salts and a `password-check` sentinel used to validate the
 //!   (optional) Primary Password.
 //! - `logins.json` — the per-site `encryptedUsername` / `encryptedPassword`
-//!   blobs, each a base64 DER structure encrypted with the master key (always
-//!   3DES-CBC).
+//!   blobs, each a base64 DER structure encrypted with the master key. The
+//!   per-field cipher is named by an OID: legacy profiles use 3DES-CBC (24-byte
+//!   key), modern profiles use AES-256-CBC (32-byte key) — we branch on it.
 //!
 //! The recovery chain is: derive a PBE key from `globalSalt` (+ Primary
-//! Password) → decrypt the master key in `nssPrivate.a11` → 3DES-decrypt every
-//! `logins.json` blob. The master-key wrapping in `key4.db` uses one of two PBE
-//! schemes (legacy `pbeWithSha1AndTripleDES-CBC`, or modern `PBES2` =
-//! AES-256-CBC + PBKDF2-HMAC-SHA256), selected by an OID. This is a direct port
-//! of lclevy's `firepwd.py`, the algorithm of record.
+//! Password) → decrypt the master key in `nssPrivate.a11` → decrypt every
+//! `logins.json` blob with the cipher its OID names. The master-key wrapping in
+//! `key4.db` likewise uses one of two PBE schemes (legacy
+//! `pbeWithSha1AndTripleDES-CBC`, or modern `PBES2` = AES-256-CBC +
+//! PBKDF2-HMAC-SHA256), selected by an OID. This is a direct port of lclevy's
+//! `firepwd.py`, the algorithm of record.
 //!
 //! Unlike the Chromium path this is entirely platform-independent (no Keychain /
 //! DPAPI / Secret Service), so it covers macOS, Windows, and Linux uniformly —
@@ -46,6 +48,10 @@ const OID_PBE_SHA1_3DES: &[u8] = &[
 ];
 /// `PBES2` — OID 1.2.840.113549.1.5.13.
 const OID_PBES2: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0d];
+/// `des-ede3-cbc` — OID 1.2.840.113549.3.7 (legacy `logins.json` field cipher).
+const OID_DES_EDE3_CBC: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x03, 0x07];
+/// `aes256-CBC` — OID 2.16.840.1.101.3.4.1.42 (modern `logins.json` field cipher).
+const OID_AES256_CBC: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2a];
 /// Fixed NSS key id tying a `logins.json` blob to the master key in `nssPrivate`.
 const CKA_ID: &[u8] = &[
     0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -165,7 +171,8 @@ fn load_profile(dir: &Path) -> Result<Vec<ImportedCredential>> {
     Ok(out)
 }
 
-/// Recovers the 24-byte 3DES master key, or `None` if a Primary Password is set.
+/// Recovers the NSS master key (24-byte 3DES or 32-byte AES-256), or `None` if a
+/// Primary Password is set.
 fn load_master_key(key4_db: &Path) -> Result<Option<Vec<u8>>> {
     let key4 = read_key4(key4_db)?;
     let primary = b""; // We only attempt the common empty-Primary-Password case.
@@ -178,10 +185,31 @@ fn load_master_key(key4_db: &Path) -> Result<Option<Vec<u8>>> {
         bail!("Firefox key database has an unexpected NSS key id");
     }
     let decrypted = decrypt_key_blob(&key4.a11, &key4.global_salt, primary)?;
-    if decrypted.len() < 24 {
+    // The NSS key blob is stored unpadded (legacy 3DES) or PKCS#7-padded to the
+    // PBES2 block size (modern AES). Strip the pad to recover the raw master key,
+    // whose length selects the login-field cipher: 24 bytes ⇒ 3DES, 32 ⇒ AES-256.
+    let key = pkcs7_unpad(&decrypted);
+    if key.len() < 24 {
         bail!("Firefox master key is too short");
     }
-    Ok(Some(decrypted[..24].to_vec()))
+    Ok(Some(key.to_vec()))
+}
+
+/// Strips PKCS#7 padding when the trailing bytes form a valid pad (1..=16),
+/// else returns the input unchanged (NSS stores legacy 3DES keys unpadded).
+fn pkcs7_unpad(data: &[u8]) -> &[u8] {
+    let Some(&last) = data.last() else {
+        return data;
+    };
+    let pad = last as usize;
+    if (1..=16).contains(&pad)
+        && pad <= data.len()
+        && data[data.len() - pad..].iter().all(|&b| b as usize == pad)
+    {
+        &data[..data.len() - pad]
+    } else {
+        data
+    }
 }
 
 /// Raw key material read from `key4.db`.
@@ -290,13 +318,29 @@ fn decode_login_field(b64: &str, master_key: &[u8]) -> Result<String> {
     let algorithm = outer.expect(TAG_SEQUENCE)?;
     let ciphertext = outer.expect(TAG_OCTET_STRING)?.contents;
     let mut algorithm = algorithm.reader();
-    let _oid = algorithm.expect(TAG_OID)?; // des-ede3-cbc
+    let oid = algorithm.expect(TAG_OID)?.contents;
     let iv = algorithm.expect(TAG_OCTET_STRING)?.contents;
-    let cipher = Tdes3CbcDec::new_from_slices(master_key, iv)
-        .map_err(|_| anyhow!("init Firefox login cipher"))?;
-    let plaintext = cipher
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
-        .map_err(|_| anyhow!("decrypt Firefox login field"))?;
+    let plaintext = if oid == OID_AES256_CBC {
+        // Modern Firefox: AES-256-CBC under the 32-byte master key, 16-byte IV.
+        let key = master_key
+            .get(..32)
+            .context("Firefox AES master key too short")?;
+        Aes256CbcDec::new_from_slices(key, iv)
+            .map_err(|_| anyhow!("init Firefox AES login cipher"))?
+            .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+            .map_err(|_| anyhow!("decrypt Firefox AES login field"))?
+    } else if oid == OID_DES_EDE3_CBC {
+        // Legacy Firefox: 3DES-CBC under the 24-byte master key, 8-byte IV.
+        let key = master_key
+            .get(..24)
+            .context("Firefox 3DES master key too short")?;
+        Tdes3CbcDec::new_from_slices(key, iv)
+            .map_err(|_| anyhow!("init Firefox 3DES login cipher"))?
+            .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+            .map_err(|_| anyhow!("decrypt Firefox 3DES login field"))?
+    } else {
+        bail!("Firefox login field uses an unsupported cipher OID");
+    };
     String::from_utf8(plaintext).context("Firefox login field is not UTF-8")
 }
 
@@ -493,6 +537,17 @@ mod tests {
         BASE64.encode(der)
     }
 
+    /// Modern AES-256-CBC `logins.json` field (32-byte key, 16-byte IV).
+    fn aes_login_blob(master_key: &[u8], iv16: &[u8], plaintext: &[u8]) -> String {
+        let ciphertext = enc_aes(master_key, iv16, plaintext);
+        let der = seq(&[
+            octet(CKA_ID),
+            seq(&[oid(OID_AES256_CBC), octet(iv16)]),
+            octet(&ciphertext),
+        ]);
+        BASE64.encode(der)
+    }
+
     fn write_key4(dir: &Path, global_salt: &[u8], item2: &[u8], a11: &[u8]) {
         let conn = Connection::open(dir.join("key4.db")).unwrap();
         conn.execute(
@@ -577,6 +632,38 @@ mod tests {
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0].username, "bob@example.org");
         assert_eq!(creds[0].password, "correct horse");
+    }
+
+    #[test]
+    fn decrypts_modern_aes256_logins_end_to_end() {
+        // Real modern Firefox: PBES2 key blobs AND AES-256-CBC login fields with
+        // a 32-byte master key (the case the live VM test exposed).
+        let dir = tempfile::tempdir().unwrap();
+        let global_salt = [0x9Au8; 32];
+        let entry_salt_item2 = [0x8Bu8; 32];
+        let entry_salt_a11 = [0x7Cu8; 32];
+        let iv14_item2 = [0x6Du8; 14];
+        let iv14_a11 = [0x5Eu8; 14];
+        let master_key = [0x4Fu8; 32];
+
+        let item2 = pbes2_blob(
+            &global_salt,
+            &entry_salt_item2,
+            &iv14_item2,
+            b"password-check\x02\x02",
+        );
+        let a11 = pbes2_blob(&global_salt, &entry_salt_a11, &iv14_a11, &master_key);
+        write_key4(dir.path(), &global_salt, &item2, &a11);
+
+        let iv16 = [0x3Au8; 16];
+        let user_b64 = aes_login_blob(&master_key, &iv16, b"carol@example.net");
+        let pass_b64 = aes_login_blob(&master_key, &iv16, b"battery staple");
+        write_logins(dir.path(), "https://aes.example.net", &user_b64, &pass_b64);
+
+        let creds = load_profile(dir.path()).unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "carol@example.net");
+        assert_eq!(creds[0].password, "battery staple");
     }
 
     #[test]
