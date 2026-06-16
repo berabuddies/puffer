@@ -12,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const RESEARCH_ACTION_PROMPT_GUIDANCE: &str = "\n\nResearch action prompt guidance:\n- For any Research action, actionPrompt must define the specific research question, include source chat/contact context, cap web research to at most 3 web searches and 8 total research/tool steps, avoid repeated equivalent queries, prefer official or primary sources, and tell the action agent to stop once it has enough evidence for a concise reply.";
+const TASK_UPDATE_SOURCE_ISOLATION_POLICY: &str = "\n\nTaskUpdate source isolation policy:\n- Same chat/contact is not enough to call something a duplicate. If the current source event asks a new question, changes topic, or creates a separate request, create a new monitor task even when another task from the same sender is still pending.\n- If TaskUpdate changes an existing monitor task's subject, description, or activeForm, metadata MUST include monitor_envelope_id copied from the current workflow trigger and MUST replace or clear actions. Never leave action prompts from the previous source message attached to updated task text.";
 
 #[derive(Debug, Deserialize)]
 struct MonitorCreateParams {
@@ -462,6 +463,7 @@ fn monitor_triage_prompt(
         memory_path.display(),
         contact_ids
     );
+    prompt.push_str(TASK_UPDATE_SOURCE_ISOLATION_POLICY);
     prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
     prompt
 }
@@ -563,6 +565,9 @@ mod tests {
         assert!(prompt.contains("Never infer source identity"));
         assert!(prompt.contains("Do not add any metadata field named"));
         assert!(prompt.contains("Research action prompt guidance"));
+        assert!(prompt.contains("TaskUpdate source isolation policy"));
+        assert!(prompt.contains("Same chat/contact is not enough"));
+        assert!(prompt.contains("replace or clear actions"));
         assert!(prompt.contains("avoid repeated equivalent queries"));
         assert!(prompt.contains("Use the same language as the source message's primary language"));
         assert!(prompt.contains("subject, description, actions[].actionPrompt"));
