@@ -133,6 +133,14 @@ fn unwrap_abe_key_material(post_dpapi: &[u8]) -> anyhow::Result<[u8; 32]> {
     let rest = rest.get(hdr_len..).context("ABE: truncated header")?;
     let (content_len, content) = take_u32(rest)?;
     let content = content.get(..content_len).context("ABE: truncated content")?;
+    // Edge stores the 32-byte key directly after the two DPAPI layers (no
+    // flag/AEAD wrap) — verified live decrypting a real Edge v20 blob. Chrome
+    // wraps it under a flag-selected hardcoded key.
+    if content_len == 32 {
+        return content
+            .try_into()
+            .map_err(|_| anyhow!("ABE: 32-byte content is not a valid key"));
+    }
     let flag = *content.first().context("ABE: missing flag")?;
     let iv = content.get(1..13).context("ABE: missing iv")?;
     let ct_tag = content.get(13..).context("ABE: missing ciphertext")?;
@@ -681,6 +689,19 @@ mod abe_tests {
             unwrap_abe_key_material(&build_post_dpapi(0x02, &key)).unwrap(),
             key
         );
+    }
+
+    #[test]
+    fn recovers_abe_key_edge_raw_content() {
+        // Edge: post-DPAPI content is the 32-byte key directly (no flag/AEAD).
+        // Verified live against a real Edge v20 blob on 2026-06-16.
+        let key = [0x5au8; 32];
+        let header = br"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe";
+        let mut blob = (header.len() as u32).to_le_bytes().to_vec();
+        blob.extend_from_slice(header);
+        blob.extend_from_slice(&32u32.to_le_bytes());
+        blob.extend_from_slice(&key);
+        assert_eq!(unwrap_abe_key_material(&blob).unwrap(), key);
     }
 
     #[test]
