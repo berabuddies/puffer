@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const KEY_BYTES: usize = 32;
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Puffer Code Secrets";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "puffer-code";
 const OVERRIDE_KEY_ENV: &str = "PUFFER_SECRET_STORE_KEY";
 
