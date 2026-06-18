@@ -229,7 +229,7 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
                 &spec,
                 envelope,
                 "monitor_digest_queued",
-                "Queued monitor event for hourly digest triage.",
+                "Queued monitor event for digest triage.",
             );
             continue;
         }
@@ -453,7 +453,7 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
                         &spec,
                         envelope,
                         "monitor_digest_queued",
-                        "Queued monitor event for hourly digest triage.",
+                        "Queued monitor event for digest triage.",
                     );
                 }
             } else {

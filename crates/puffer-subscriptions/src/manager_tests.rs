@@ -167,7 +167,7 @@ fn monitor_events_flush_as_delayed_digest_batch() {
 }
 
 #[test]
-fn monitor_digest_interval_can_be_shortened_for_local_testing() {
+fn monitor_digest_interval_can_be_overridden_for_local_testing() {
     let _guard = MONITOR_DIGEST_ENV_LOCK
         .get_or_init(|| StdMutex::new(()))
         .lock()
@@ -184,6 +184,25 @@ fn monitor_digest_interval_can_be_shortened_for_local_testing() {
         std::env::set_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV, previous);
     } else {
         std::env::remove_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV);
+    }
+}
+
+#[test]
+fn monitor_digest_interval_defaults_to_one_minute() {
+    let _guard = MONITOR_DIGEST_ENV_LOCK
+        .get_or_init(|| StdMutex::new(()))
+        .lock()
+        .unwrap();
+    let previous = std::env::var_os(MONITOR_DIGEST_INTERVAL_SECONDS_ENV);
+    std::env::remove_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV);
+
+    assert_eq!(
+        monitor_digest_interval_from_env(),
+        std::time::Duration::from_secs(60)
+    );
+
+    if let Some(previous) = previous {
+        std::env::set_var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV, previous);
     }
 }
 

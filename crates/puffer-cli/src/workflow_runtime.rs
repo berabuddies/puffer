@@ -424,7 +424,7 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
     let trigger_label = if triggers.len() == 1 {
         "Workflow trigger"
     } else {
-        "Hourly monitor digest triggers"
+        "Monitor digest triggers"
     };
     // Stamp each trigger with its direction (incoming/outgoing) so the triage
     // agent can apply the completion protocol to the right messages.
@@ -456,7 +456,7 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
     let digest_guidance = if triggers.len() == 1 {
         String::new()
     } else {
-        "\n\nHourly digest policy:\n- Treat the triggers below as one conversation/time-window, not as independent task requests.\n- First infer the conversation-level intent, then create only consolidated tasks that still require attention.\n- Treat greetings, acknowledgements, casual chatter, and informational messages as context/noise unless they change the next action.\n- Do not create a separate task for each short question or each individual message.\n- Task subjects must be imperative next actions, not topic summaries. Prefer \"Review PR #404 and decide the triage approach\" over \"PR #404 discussion\".\n- Task descriptions must explain why the action is needed, cite the source request/context, and state the concrete next step.\n- When creating a task, copy the most relevant trigger's `envelope_id` into `metadata.monitor_envelope_id` so source grounding can be attached."
+        "\n\nMonitor digest policy:\n- Treat the triggers below as one conversation/time-window, not as independent task requests.\n- First infer the conversation-level intent, then create only consolidated tasks that still require attention.\n- Treat greetings, acknowledgements, casual chatter, and informational messages as context/noise unless they change the next action.\n- Do not create a separate task for each short question or each individual message.\n- Task subjects must be imperative next actions, not topic summaries. Prefer \"Review PR #404 and decide the triage approach\" over \"PR #404 discussion\".\n- Task descriptions must explain why the action is needed, cite the source request/context, and state the concrete next step.\n- When creating a task, copy the most relevant trigger's `envelope_id` into `metadata.monitor_envelope_id` so source grounding can be attached."
             .to_string()
     };
     Ok(format!(
@@ -1400,7 +1400,7 @@ mod tests {
 
         let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
 
-        assert!(prompt.contains("Hourly monitor digest triggers:"));
+        assert!(prompt.contains("Monitor digest triggers:"));
         assert!(prompt.contains("Do not create a separate task for each short question"));
         assert!(prompt.contains("Task subjects must be imperative next actions"));
         assert!(prompt.contains("\"first\""));

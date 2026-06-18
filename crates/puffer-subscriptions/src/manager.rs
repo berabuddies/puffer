@@ -34,7 +34,7 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const MONITOR_DIGEST_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const MONITOR_DIGEST_INTERVAL: Duration = Duration::from_secs(60);
 const MONITOR_DIGEST_INTERVAL_SECONDS_ENV: &str = "PUFFER_MONITOR_DIGEST_INTERVAL_SECONDS";
 /// WeChat's `act` path drives the LIVE client with deliberate human-like pacing
 /// (think-time, a length-scaled compose pause, simulated mouse paths, navigate +
@@ -189,7 +189,7 @@ impl SubscriptionManagerBuilder {
         self
     }
 
-    /// Override the monitor digest interval. Production defaults to one hour.
+    /// Override the monitor digest interval. Production defaults to one minute.
     pub fn with_monitor_digest_interval(mut self, interval: Duration) -> Self {
         self.monitor_digest_interval = interval;
         self
