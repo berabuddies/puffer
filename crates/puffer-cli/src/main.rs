@@ -44,6 +44,8 @@ mod gmail_browser_log;
 mod heartbeat;
 mod internal_tools;
 mod lark_connector;
+#[path = "lark_browser.rs"]
+mod lark_browser;
 mod media_internal_tools;
 mod non_interactive;
 mod project_metadata;
@@ -1373,6 +1375,7 @@ fn run_subscriber(id: &str) -> Result<()> {
             "email" => puffer_subscriber_email::run().await,
             "gcal-browser" => crate::gcal_browser::run_subscriber().await,
             "gmail-browser" => crate::gmail_browser::run_subscriber().await,
+            "lark-browser" => crate::lark_browser::run_subscriber().await,
             other => Err(anyhow::anyhow!(
                 "unknown subscriber id `{other}`; this puffer build does not bundle a driver for it"
             )),
