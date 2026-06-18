@@ -1,5 +1,8 @@
 //! Lark/Feishu web connector backed by daemon-managed CEF sessions.
 
+#[path = "lark_browser_actions.rs"]
+mod lark_browser_actions;
+
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{Event, SubscriberCommand};
@@ -265,6 +268,9 @@ fn ensure_browser_daemon<'a>(
 }
 
 async fn wait_or_handle_command(
+    env: &SubscriberEnv,
+    config: Option<&LarkBrowserConfig>,
+    handshake: &mut Option<crate::daemon::Handshake>,
     commands: &mut CommandStream,
     delay: Duration,
 ) -> Result<()> {
@@ -275,20 +281,64 @@ async fn wait_or_handle_command(
                 tokio::time::sleep(delay).await;
                 return Ok(());
             };
-            handle_command(command)
+            handle_command(env, config, handshake, command)
         }
     }
 }
 
-fn handle_command(command: SubscriberCommand) -> Result<()> {
+fn handle_command(
+    env: &SubscriberEnv,
+    config: Option<&LarkBrowserConfig>,
+    handshake: &mut Option<crate::daemon::Handshake>,
+    command: SubscriberCommand,
+) -> Result<()> {
     match command {
+        SubscriberCommand::Custom { op, args } if op == "lark_browser_act" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let input = args.get("input").cloned().unwrap_or_else(|| json!({}));
+            let Some(config) = config else {
+                emit_control(
+                    &env.topic,
+                    "lark_browser_action_error",
+                    json!({
+                        "op": op,
+                        "action": action,
+                        "error": "lark-browser connector is not configured yet",
+                    }),
+                )?;
+                return Ok(());
+            };
+            match lark_browser_actions::handle_action(env, config, handshake, action, &input) {
+                Ok(payload) => {
+                    emit_control(&env.topic, "lark_browser_action_complete", payload)
+                }
+                Err(error) => emit_control(
+                    &env.topic,
+                    "lark_browser_action_error",
+                    json!({
+                        "op": op,
+                        "action": action,
+                        "error": format!("{error:#}"),
+                    }),
+                ),
+            }
+        }
         SubscriberCommand::Custom { op, .. } => {
-            eprintln!("lark-browser: ignored unknown custom op={op}");
-            Ok(())
+            emit_control(
+                &env.topic,
+                "command_ignored",
+                json!({ "op": op, "error": "unknown custom op" }),
+            )
         }
         _ => {
-            eprintln!("lark-browser: ignored unrecognized command");
-            Ok(())
+            emit_control(
+                &env.topic,
+                "command_ignored",
+                json!({ "error": "lark-browser subscriber only handles lark_browser_act custom commands" }),
+            )
         }
     }
 }
@@ -574,7 +624,8 @@ pub(crate) async fn run_subscriber() -> anyhow::Result<()> {
                 env.state_dir.display()
             );
             emit_control(&env.topic, "config_required", json!({}))?;
-            wait_or_handle_command(&mut commands, POLL_INTERVAL).await?;
+            wait_or_handle_command(&env, None, &mut handshake, &mut commands, POLL_INTERVAL)
+                .await?;
             continue;
         };
 
@@ -590,7 +641,14 @@ pub(crate) async fn run_subscriber() -> anyhow::Result<()> {
                 "config_required",
                 json!({ "reason": "unknown_brand", "brand": config.brand }),
             )?;
-            wait_or_handle_command(&mut commands, POLL_INTERVAL).await?;
+            wait_or_handle_command(
+                &env,
+                Some(&config),
+                &mut handshake,
+                &mut commands,
+                POLL_INTERVAL,
+            )
+            .await?;
             continue;
         };
 
@@ -598,7 +656,14 @@ pub(crate) async fn run_subscriber() -> anyhow::Result<()> {
         match result {
             Ok(()) => {
                 save_seen(&env.state_dir, &seen)?;
-                wait_or_handle_command(&mut commands, POLL_INTERVAL).await?;
+                wait_or_handle_command(
+                    &env,
+                    Some(&config),
+                    &mut handshake,
+                    &mut commands,
+                    POLL_INTERVAL,
+                )
+                .await?;
             }
             Err(error) => {
                 handshake = None;
@@ -608,7 +673,14 @@ pub(crate) async fn run_subscriber() -> anyhow::Result<()> {
                     "poll_error",
                     json!({ "error": format!("{error:#}") }),
                 )?;
-                wait_or_handle_command(&mut commands, ERROR_BACKOFF).await?;
+                wait_or_handle_command(
+                    &env,
+                    Some(&config),
+                    &mut handshake,
+                    &mut commands,
+                    ERROR_BACKOFF,
+                )
+                .await?;
             }
         }
     }
