@@ -48,6 +48,8 @@ mod internal_tools;
 mod lark_connector;
 #[path = "lark_browser.rs"]
 mod lark_browser;
+#[path = "lark_browser_script.rs"]
+mod lark_browser_script;
 mod media_internal_tools;
 mod non_interactive;
 mod project_metadata;
