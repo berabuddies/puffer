@@ -66,6 +66,110 @@ pub(crate) fn parse_feed_rows(result: &serde_json::Value) -> Vec<FeedRow> {
     }).unwrap_or_default()
 }
 
+// ── Task 8: Observer JS ──────────────────────────────────────────────────────
+
+/// Installs an idempotent MutationObserver on the open conversation. Records
+/// each new `.js-message-item` (stable `id`/`data-id`) with its direction
+/// (`message-self`=out / `message-not-self`=in) into `window.__cap`. Re-running
+/// is a no-op once installed.
+#[allow(dead_code)] // wired into the active poll in Task 10
+pub(crate) const LARK_OBSERVER_INSTALL_JS: &str = r#"(() => {
+  window.__cap = window.__cap || [];
+  if (window.__capObs) return JSON.stringify({status:'already'});
+  const seen = new Set();
+  const record = el => {
+    if (!el || !el.matches || !el.matches('.js-message-item')) return;
+    const id = el.id || el.getAttribute('data-id');
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const cls = (el.className || '').toString();
+    const dir = cls.includes('message-not-self') ? 'in' : (cls.includes('message-self') ? 'out' : '?');
+    const t = el.querySelector('.message-text');
+    window.__cap.push({id, dir, pos: el.getAttribute('data-position'), text: t ? (t.textContent||'').trim().slice(0,2000) : ''});
+  };
+  document.querySelectorAll('.js-message-item').forEach(record);
+  window.__capObs = new MutationObserver(muts => {
+    for (const m of muts) for (const n of m.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      record(n);
+      if (n.querySelectorAll) n.querySelectorAll('.js-message-item').forEach(record);
+    }
+  });
+  window.__capObs.observe(document.body, {childList:true, subtree:true});
+  return JSON.stringify({status:'installed', seeded: window.__cap.length});
+})()"#;
+
+/// Returns and CLEARS window.__cap (drain). The active chat id is read from the
+/// feed card marked `[data-feed-active="true"]`.
+#[allow(dead_code)] // wired into the active poll in Task 10
+pub(crate) const LARK_OBSERVER_DRAIN_JS: &str = r#"(() => {
+  const cap = window.__cap || [];
+  window.__cap = [];
+  const active = document.querySelector('[data-feed-active="true"]');
+  const chat_id = active ? (active.getAttribute('data-feed-id') || '') : '';
+  return JSON.stringify({ chat_id, items: cap });
+})()"#;
+
+// ── Task 9: Active-message parser + optimistic-id reconciliation ─────────────
+
+#[allow(dead_code)] // wired into the active poll in Task 10
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ActiveMsg {
+    pub id: String,
+    pub is_outgoing: bool,
+    pub text: String,
+}
+
+#[allow(dead_code)] // wired into the active poll in Task 10
+pub(crate) fn is_snowflake_id(id: &str) -> bool {
+    id.len() >= 15 && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+#[allow(dead_code)] // wired into the active poll in Task 10
+pub(crate) fn parse_active_drain(result: &serde_json::Value) -> (String, Vec<ActiveMsg>) {
+    let chat_id = result.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let msgs = result.get("items").and_then(|v| v.as_array()).map(|items| {
+        items.iter().filter_map(|m| {
+            let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if !is_snowflake_id(id) { return None; } // drop pending optimistic ids
+            Some(ActiveMsg {
+                id: id.to_string(),
+                is_outgoing: m.get("dir").and_then(|v| v.as_str()) == Some("out"),
+                text: m.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            })
+        }).collect()
+    }).unwrap_or_default();
+    (chat_id, msgs)
+}
+
+#[cfg(test)]
+mod active_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn snowflake_detection_filters_optimistic_ids() {
+        assert!(is_snowflake_id("7652607780750119026"));
+        assert!(!is_snowflake_id("gApEI0EY3S"));   // optimistic temp id
+        assert!(!is_snowflake_id("123"));
+    }
+
+    #[test]
+    fn parse_drain_drops_pending_optimistic_messages() {
+        let result = json!({"chat_id":"999","items":[
+            {"id":"gApEI0EY3S","dir":"out","text":"sending"},
+            {"id":"7652607780750119026","dir":"out","text":"sent"},
+            {"id":"7652607883305029745","dir":"in","text":"reply"}
+        ]});
+        let (chat, msgs) = parse_active_drain(&result);
+        assert_eq!(chat, "999");
+        assert_eq!(msgs.len(), 2);                  // optimistic id dropped
+        assert_eq!(msgs[0].id, "7652607780750119026");
+        assert!(msgs[0].is_outgoing);
+        assert!(!msgs[1].is_outgoing);
+    }
+}
+
 #[cfg(test)]
 mod feed_tests {
     use super::*;
