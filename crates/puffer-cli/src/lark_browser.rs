@@ -135,6 +135,45 @@ impl CommandStream {
     }
 }
 
+/// The state-directory root name used for lark/feishu browser subscriber instances.
+/// Mirrors how `gmail_browser::STATE_ROOT` and the subscriber manifests relate:
+/// the builtin manifest at `builtin_resources_dir/subscribers/<brand>/manifest.toml`
+/// declares `dir = "state"` (relative), so the supervisor sets
+/// `PUFFER_SKILL_STATE_DIR = builtin_resources_dir/subscribers/<brand>/state`.
+pub(crate) const SUBSCRIBERS_DIR: &str = "subscribers";
+const STATE_SUBDIR: &str = "state";
+
+/// Returns the per-connection state directory for a lark/feishu browser subscriber.
+///
+/// Matches the path the subscriber runtime computes from the manifest:
+/// `builtin_resources_dir/subscribers/<brand_slug>/state`.
+pub(crate) fn state_dir(paths: &puffer_config::ConfigPaths, brand: Brand) -> PathBuf {
+    paths
+        .builtin_resources_dir
+        .join(SUBSCRIBERS_DIR)
+        .join(brand.slug())
+        .join(STATE_SUBDIR)
+}
+
+/// Writes `LarkBrowserConfig` as `config.toml` into the per-connection state dir
+/// so the subscriber's `load_config_from_dir` can find it on next poll.
+pub(crate) fn save_config(
+    paths: &puffer_config::ConfigPaths,
+    brand: Brand,
+    connection_slug: &str,
+) -> Result<LarkBrowserConfig> {
+    let config = LarkBrowserConfig {
+        brand: brand.slug().to_string(),
+        connection: connection_slug.to_string(),
+    };
+    let dir = state_dir(paths, brand);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let raw = toml::to_string_pretty(&config).context("serialize Lark browser config")?;
+    let path = dir.join(CONFIG_FILE);
+    fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
+    Ok(config)
+}
+
 fn load_config_from_dir(state_dir: &Path) -> Result<Option<LarkBrowserConfig>> {
     let path = state_dir.join(CONFIG_FILE);
     if !path.exists() {
@@ -933,6 +972,65 @@ mod emit_tests {
         );
         assert_eq!(events.len(), 1, "only snowflake id should emit");
         assert_eq!(events[0].payload["source"], "active");
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use puffer_config::ConfigPaths;
+
+    fn test_paths(tmp: &std::path::Path) -> ConfigPaths {
+        ConfigPaths {
+            workspace_root: tmp.join("workspace"),
+            workspace_config_dir: tmp.join("workspace").join(".puffer"),
+            user_config_dir: tmp.join("home").join(".puffer"),
+            builtin_resources_dir: tmp.join("resources"),
+        }
+    }
+
+    #[test]
+    fn save_and_load_config_round_trip_lark() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = test_paths(tmp.path());
+        save_config(&paths, Brand::Lark, "lark-browser").unwrap();
+
+        let dir = state_dir(&paths, Brand::Lark);
+        let loaded = load_config_from_dir(&dir).unwrap().expect("config must exist");
+        assert_eq!(loaded.brand, "lark-browser");
+        assert_eq!(loaded.connection, "lark-browser");
+        assert_eq!(
+            brand_from_config_str(&loaded.brand),
+            Some(Brand::Lark),
+            "brand_from_config_str must parse back to Brand::Lark"
+        );
+    }
+
+    #[test]
+    fn save_and_load_config_round_trip_feishu() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = test_paths(tmp.path());
+        save_config(&paths, Brand::Feishu, "my-feishu").unwrap();
+
+        let dir = state_dir(&paths, Brand::Feishu);
+        let loaded = load_config_from_dir(&dir).unwrap().expect("config must exist");
+        assert_eq!(loaded.brand, "feishu-browser");
+        assert_eq!(loaded.connection, "my-feishu");
+        assert_eq!(
+            brand_from_config_str(&loaded.brand),
+            Some(Brand::Feishu),
+            "brand_from_config_str must parse back to Brand::Feishu"
+        );
+    }
+
+    #[test]
+    fn load_config_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = test_paths(tmp.path());
+        let dir = state_dir(&paths, Brand::Lark);
+        // dir may not even exist — should return None without error
+        let result = load_config_from_dir(&dir).unwrap();
+        assert!(result.is_none(), "missing config.toml must return None");
     }
 }
 

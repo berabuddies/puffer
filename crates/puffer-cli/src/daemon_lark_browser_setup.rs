@@ -77,6 +77,11 @@ impl SetupFlow {
         self.cancel.check()?;
         self.open_url(self.brand.web_url(), "Lark/Feishu")?;
         self.poll_until_logged_in()?;
+        crate::lark_browser::save_config(
+            self.state.config_paths(),
+            self.brand,
+            &self.connection_slug,
+        )?;
         let registered = upsert_connection(&self.connection_slug, self.brand)?;
         let action = if registered { "created" } else { "updated" };
         Ok(format!(
