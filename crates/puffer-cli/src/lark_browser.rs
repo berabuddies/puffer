@@ -39,6 +39,7 @@ impl Brand {
 }
 
 /// Persisted Lark/Feishu browser connector configuration.
+#[allow(dead_code)] // wired into run_subscriber in Task 7
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LarkBrowserConfig {
     #[serde(default)]
@@ -47,6 +48,7 @@ pub(crate) struct LarkBrowserConfig {
     pub(crate) connection: String,
 }
 
+#[allow(dead_code)] // wired into run_subscriber in Task 7
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 struct SeenState {
     #[serde(default)]
@@ -55,6 +57,7 @@ struct SeenState {
     seen: BTreeSet<String>,
 }
 
+#[allow(dead_code)] // wired into run_subscriber in Task 7
 fn feed_fingerprint(preview: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -62,10 +65,12 @@ fn feed_fingerprint(preview: &str) -> String {
     format!("{:x}", h.finish())
 }
 
+#[allow(dead_code)] // wired into run_subscriber in Task 7
 fn feed_dedup_key(conn: &str, row: &crate::lark_browser_script::FeedRow) -> String {
     format!("{}:{}:{}", conn, row.chat_id, feed_fingerprint(&row.preview))
 }
 
+#[allow(dead_code)] // wired into run_subscriber in Task 7
 fn should_emit_feed(seen: &SeenState, key: &str) -> bool {
     if seen.seen.contains(key) {
         return false;
@@ -73,6 +78,7 @@ fn should_emit_feed(seen: &SeenState, key: &str) -> bool {
     seen.initialized // pre-init: seeds only, emits nothing
 }
 
+#[allow(dead_code)] // wired into run_subscriber in Task 7
 fn build_message_event(
     platform: &str,
     brand: &str,
@@ -101,6 +107,7 @@ fn build_message_event(
     }
 }
 
+#[allow(dead_code)] // wired into run_subscriber in Task 7
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
