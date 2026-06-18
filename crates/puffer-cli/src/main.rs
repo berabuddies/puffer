@@ -21,6 +21,8 @@ mod daemon_files;
 mod daemon_fs_watch;
 mod daemon_gcal_browser_setup;
 mod daemon_gmail_browser_setup;
+#[path = "daemon_lark_browser_setup.rs"]
+mod daemon_lark_browser_setup;
 mod daemon_lambda_skills;
 mod daemon_local_model;
 mod daemon_lsp;
