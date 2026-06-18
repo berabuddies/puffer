@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 
-use crate::lark_browser_script::{parse_feed_rows, FeedRow, LARK_FEED_SCRIPT};
+use crate::lark_browser_script::{feed_loaded, parse_feed_rows, FeedRow, LARK_FEED_SCRIPT};
 
 pub(crate) const CONNECTOR_SLUG_LARK: &str = "lark-browser";
 pub(crate) const CONNECTOR_SLUG_FEISHU: &str = "feishu-browser";
@@ -75,11 +75,11 @@ pub(crate) struct LarkBrowserConfig {
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
-struct SeenState {
+pub(crate) struct SeenState {
     #[serde(default)]
-    initialized: bool,
+    pub(crate) initialized: bool,
     #[serde(default)]
-    seen: BTreeSet<String>,
+    pub(crate) seen: BTreeSet<String>,
 }
 
 struct SubscriberEnv {
@@ -290,6 +290,49 @@ fn handle_command(command: SubscriberCommand) -> Result<()> {
     }
 }
 
+/// Pure, testable core of a single feed poll. Computes which events to emit and
+/// mutates `seen` — but ONLY when the page reports `loaded: true`. When the
+/// messenger shell is absent (unloaded page or logged-out), returns an empty
+/// vec and leaves `seen` untouched so the next poll retries with a clean slate.
+pub(crate) fn process_feed_poll(
+    parsed: &Value,
+    conn: &str,
+    platform: &str,
+    brand_label: &str,
+    seen: &mut SeenState,
+) -> Vec<Event> {
+    if !feed_loaded(parsed) {
+        return Vec::new();
+    }
+
+    let rows = parse_feed_rows(parsed);
+    let mut newly_seen = BTreeSet::new();
+    let mut events = Vec::new();
+
+    for row in &rows {
+        let key = feed_dedup_key(conn, row);
+        newly_seen.insert(key.clone());
+        if should_emit_feed(seen, &key) {
+            events.push(build_message_event(
+                platform,
+                brand_label,
+                &row.chat_id,
+                &row.name,
+                &row.preview,
+                row.is_outgoing,
+                "feed",
+                &key,
+            ));
+        }
+    }
+
+    // Only after a loaded poll: seed seen and mark initialized.
+    seen.seen.extend(newly_seen);
+    seen.initialized = true;
+
+    events
+}
+
 fn poll_once_feed(
     env: &SubscriberEnv,
     config: &LarkBrowserConfig,
@@ -344,37 +387,20 @@ fn poll_once_feed(
         raw_value
     };
 
-    let rows = parse_feed_rows(&parsed);
+    let loaded = feed_loaded(&parsed);
     let seen_count_before = seen.seen.len();
     let initialized_before = seen.initialized;
-    let mut newly_seen = BTreeSet::new();
-    let mut emitted = 0usize;
 
-    for row in &rows {
-        let key = feed_dedup_key(&config.connection, row);
-        newly_seen.insert(key.clone());
-        if should_emit_feed(seen, &key) {
-            emitted += 1;
-            emit_event(build_message_event(
-                brand.platform(),
-                &config.brand,
-                &row.chat_id,
-                &row.name,
-                &row.preview,
-                row.is_outgoing,
-                "feed",
-                &key,
-            ))?;
-        }
+    let events = process_feed_poll(&parsed, &config.connection, brand.platform(), &config.brand, seen);
+    let emitted = events.len();
+    for event in events {
+        emit_event(event)?;
     }
 
-    seen.seen.extend(newly_seen);
-    seen.initialized = true;
-
     eprintln!(
-        "lark-browser: poll_complete topic={} observed_rows={} emitted_rows={emitted} initialized_before={initialized_before} initialized_after={} seen_count_before={seen_count_before} seen_count_after={}",
+        "lark-browser: poll_complete topic={} loaded={loaded} observed_rows={} emitted_rows={emitted} initialized_before={initialized_before} initialized_after={} seen_count_before={seen_count_before} seen_count_after={}",
         env.topic,
-        rows.len(),
+        if loaded { parse_feed_rows(&parsed).len() } else { 0 },
         seen.initialized,
         seen.seen.len()
     );
@@ -493,6 +519,67 @@ mod emit_tests {
         assert_eq!(ev.payload["brand"], "lark");
         assert_eq!(ev.kind, "message");
         assert_eq!(ev.dedup_key.as_deref(), Some("c1:123:abc"));
+    }
+
+    // --- process_feed_poll loaded-gate tests ---
+
+    #[test]
+    fn process_feed_poll_not_loaded_leaves_seen_uninitialized() {
+        // A poll result where `loaded` is false (page not yet ready).
+        let parsed = serde_json::json!({
+            "loaded": false,
+            "rows": [{"chat_id": "42", "name": "Alice", "preview": "hi", "unread": true, "outgoing": false}]
+        });
+        let mut seen = SeenState::default();
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        // No events emitted, and seen.initialized stays false.
+        assert!(events.is_empty(), "expected no events when not loaded");
+        assert!(!seen.initialized, "initialized must stay false when not loaded");
+        assert!(seen.seen.is_empty(), "seen set must stay empty when not loaded");
+    }
+
+    #[test]
+    fn process_feed_poll_no_loaded_key_leaves_seen_uninitialized() {
+        // Missing `loaded` key (e.g. old script version or parse failure).
+        let parsed = serde_json::json!({
+            "rows": [{"chat_id": "42", "name": "Alice", "preview": "hi", "unread": true, "outgoing": false}]
+        });
+        let mut seen = SeenState::default();
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        assert!(events.is_empty(), "expected no events when loaded key missing");
+        assert!(!seen.initialized, "initialized must stay false when loaded key missing");
+    }
+
+    #[test]
+    fn process_feed_poll_loaded_seeds_and_marks_initialized() {
+        // A loaded poll: rows present → should seed seen, mark initialized, but NOT emit
+        // (because initialized was false → should_emit_feed returns false for all).
+        let parsed = serde_json::json!({
+            "loaded": true,
+            "rows": [{"chat_id": "42", "name": "Alice", "preview": "hi", "unread": true, "outgoing": false}]
+        });
+        let mut seen = SeenState::default();
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        // First loaded poll: seeds but emits nothing (pre-init).
+        assert!(events.is_empty(), "first loaded poll should seed only, not emit");
+        assert!(seen.initialized, "initialized must be true after a loaded poll");
+        assert_eq!(seen.seen.len(), 1, "seen must contain the seeded key");
+    }
+
+    #[test]
+    fn process_feed_poll_loaded_emits_new_after_init() {
+        // Second loaded poll with a NEW row that wasn't in the baseline.
+        let parsed = serde_json::json!({
+            "loaded": true,
+            "rows": [{"chat_id": "99", "name": "Bob", "preview": "new msg", "unread": true, "outgoing": false}]
+        });
+        let mut seen = SeenState {
+            initialized: true,
+            seen: std::collections::BTreeSet::new(),
+        };
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        assert_eq!(events.len(), 1, "post-init poll with new row should emit one event");
+        assert_eq!(events[0].payload["chat_id"], "99");
     }
 }
 

@@ -13,7 +13,11 @@ pub(crate) const LARK_LOGIN_MARKER_JS: &str = r#"(() => {
 /// chat_id, display name, last-message preview, unread flag, and a best-effort
 /// outgoing flag (preview begins with the localized "You:" sender, detectable
 /// via the self-message marker in the card or a leading sender span).
+/// Also returns `loaded: bool` — true when the messenger shell is present in the
+/// DOM (same stable selectors as the login marker), so callers can distinguish
+/// "page not yet loaded / logged out" from "loaded but 0 conversations".
 pub(crate) const LARK_FEED_SCRIPT: &str = r#"(() => {
+  const loaded = !!document.querySelector('.lark_feedMainList, .a11y_feed_main_list, [class*="page-content-messenger"]');
   const cards = Array.from(document.querySelectorAll('[data-feed-id]'));
   const rows = cards.map(c => {
     const chat_id = c.getAttribute('data-feed-id') || '';
@@ -26,8 +30,16 @@ pub(crate) const LARK_FEED_SCRIPT: &str = r#"(() => {
     const outgoing = /^you[:：]/i.test(preview);
     return { chat_id, name, preview, unread, outgoing };
   }).filter(r => r.chat_id);
-  return JSON.stringify({ rows });
+  return JSON.stringify({ loaded, rows });
 })()"#;
+
+/// Returns `true` when the feed script result indicates the messenger shell was
+/// present in the DOM at the time of the poll. Used to gate first-poll
+/// initialization so an unloaded/logged-out page doesn't permanently seed an
+/// empty baseline.
+pub(crate) fn feed_loaded(result: &serde_json::Value) -> bool {
+    result.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FeedRow {
@@ -58,6 +70,30 @@ pub(crate) fn parse_feed_rows(result: &serde_json::Value) -> Vec<FeedRow> {
 mod feed_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn feed_loaded_true_when_loaded_key_is_true() {
+        let result = json!({"loaded": true, "rows": []});
+        assert!(feed_loaded(&result));
+    }
+
+    #[test]
+    fn feed_loaded_false_when_loaded_key_is_false() {
+        let result = json!({"loaded": false, "rows": []});
+        assert!(!feed_loaded(&result));
+    }
+
+    #[test]
+    fn feed_loaded_false_when_loaded_key_missing() {
+        // Simulates an unloaded page or old script version missing the key.
+        let result = json!({"rows": []});
+        assert!(!feed_loaded(&result));
+    }
+
+    #[test]
+    fn feed_loaded_false_on_null() {
+        assert!(!feed_loaded(&serde_json::Value::Null));
+    }
 
     #[test]
     fn parses_feed_rows_with_chat_id_and_direction() {
