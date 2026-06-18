@@ -455,8 +455,13 @@ fn poll_once_feed(
     };
 
     // ── Active pass (before feed so we know active_chat_id for suppression) ──
+    // This pass is BEST-EFFORT: transient evaluate errors (page still loading,
+    // tab not yet ready) must NOT abort the poll or block the feed pass below.
+    // On any error or unparseable result we log a warning, default active_chat_id
+    // to "" and active_events to [], and continue to the feed pass normally.
+
     // (1) Install observer (idempotent — re-installs after navigation).
-    let _ = crate::daemon_browser::send_daemon_request(
+    if let Err(e) = crate::daemon_browser::send_daemon_request(
         handshake_ref,
         "browser_agent",
         json!({
@@ -468,11 +473,12 @@ fn poll_once_feed(
             "background": true,
             "script": LARK_OBSERVER_INSTALL_JS,
         }),
-    )
-    .context("evaluate Lark observer install JS")?;
+    ) {
+        eprintln!("lark-browser: active_pass_install_warn topic={} error={e:#} (continuing to feed pass)", env.topic);
+    }
 
     // (2) Drain captured messages.
-    let drain_value = crate::daemon_browser::send_daemon_request(
+    let drain_result = crate::daemon_browser::send_daemon_request(
         handshake_ref,
         "browser_agent",
         json!({
@@ -484,23 +490,30 @@ fn poll_once_feed(
             "background": true,
             "script": LARK_OBSERVER_DRAIN_JS,
         }),
-    )
-    .context("evaluate Lark observer drain JS")?;
+    );
 
-    let drain_raw = drain_value.get("value").cloned().unwrap_or(Value::Null);
-    let drain_parsed: Value = if let Some(s) = drain_raw.as_str() {
-        serde_json::from_str(s).unwrap_or(Value::Null)
-    } else {
-        drain_raw
+    let (active_chat_id, active_events) = match drain_result {
+        Err(e) => {
+            eprintln!("lark-browser: active_pass_drain_warn topic={} error={e:#} (continuing to feed pass)", env.topic);
+            (String::new(), Vec::new())
+        }
+        Ok(drain_value) => {
+            let drain_raw = drain_value.get("value").cloned().unwrap_or(Value::Null);
+            let drain_parsed: Value = if let Some(s) = drain_raw.as_str() {
+                serde_json::from_str(s).unwrap_or(Value::Null)
+            } else {
+                drain_raw
+            };
+            process_active_drain(
+                &drain_parsed,
+                &config.connection,
+                brand.platform(),
+                &config.brand,
+                seen,
+            )
+        }
     };
 
-    let (active_chat_id, active_events) = process_active_drain(
-        &drain_parsed,
-        &config.connection,
-        brand.platform(),
-        &config.brand,
-        seen,
-    );
     let active_emitted = active_events.len();
     for event in active_events {
         emit_event(event)?;
