@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "lark-browser message event",
+  "type": "object",
+  "properties": {
+    "platform": { "type": "string", "enum": ["lark-browser", "feishu-browser"] },
+    "brand": { "type": "string", "enum": ["lark", "feishu"] },
+    "chat_id": { "type": "string" },
+    "message_id": { "type": "string" },
+    "sender": { "type": "string" },
+    "is_outgoing": { "type": "boolean" },
+    "source": { "type": "string", "enum": ["feed", "active"] },
+    "receivedAtMs": { "type": "number" }
+  },
+  "required": ["platform", "chat_id", "is_outgoing"]
+}

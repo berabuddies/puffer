@@ -1,0 +1,13 @@
+manifest_version = 1
+id = "lark-browser"
+kind = "subscriber"
+topic = "lark-browser"
+display_name = "Lark Browser"
+
+# Hidden subcommand baked into the puffer binary. Drives the Lark web client
+# through the daemon CEF browser and emits newly observed messages as ndjson.
+[run]
+cmd = ["puffer", "__subscriber", "lark-browser"]
+
+[state]
+dir = "state"
