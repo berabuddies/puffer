@@ -72,7 +72,6 @@ pub(crate) fn parse_feed_rows(result: &serde_json::Value) -> Vec<FeedRow> {
 /// each new `.js-message-item` (stable `id`/`data-id`) with its direction
 /// (`message-self`=out / `message-not-self`=in) into `window.__cap`. Re-running
 /// is a no-op once installed.
-#[allow(dead_code)] // wired into the active poll in Task 10
 pub(crate) const LARK_OBSERVER_INSTALL_JS: &str = r#"(() => {
   window.__cap = window.__cap || [];
   if (window.__capObs) return JSON.stringify({status:'already'});
@@ -101,7 +100,6 @@ pub(crate) const LARK_OBSERVER_INSTALL_JS: &str = r#"(() => {
 
 /// Returns and CLEARS window.__cap (drain). The active chat id is read from the
 /// feed card marked `[data-feed-active="true"]`.
-#[allow(dead_code)] // wired into the active poll in Task 10
 pub(crate) const LARK_OBSERVER_DRAIN_JS: &str = r#"(() => {
   const cap = window.__cap || [];
   window.__cap = [];
@@ -112,7 +110,6 @@ pub(crate) const LARK_OBSERVER_DRAIN_JS: &str = r#"(() => {
 
 // ── Task 9: Active-message parser + optimistic-id reconciliation ─────────────
 
-#[allow(dead_code)] // wired into the active poll in Task 10
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ActiveMsg {
     pub id: String,
@@ -120,12 +117,10 @@ pub(crate) struct ActiveMsg {
     pub text: String,
 }
 
-#[allow(dead_code)] // wired into the active poll in Task 10
 pub(crate) fn is_snowflake_id(id: &str) -> bool {
     id.len() >= 15 && id.bytes().all(|b| b.is_ascii_digit())
 }
 
-#[allow(dead_code)] // wired into the active poll in Task 10
 pub(crate) fn parse_active_drain(result: &serde_json::Value) -> (String, Vec<ActiveMsg>) {
     let chat_id = result.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let msgs = result.get("items").and_then(|v| v.as_array()).map(|items| {

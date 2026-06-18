@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 
-use crate::lark_browser_script::{feed_loaded, parse_feed_rows, FeedRow, LARK_FEED_SCRIPT};
+use crate::lark_browser_script::{
+    feed_loaded, parse_active_drain, parse_feed_rows, FeedRow, LARK_FEED_SCRIPT,
+    LARK_OBSERVER_DRAIN_JS, LARK_OBSERVER_INSTALL_JS,
+};
 
 pub(crate) const CONNECTOR_SLUG_LARK: &str = "lark-browser";
 pub(crate) const CONNECTOR_SLUG_FEISHU: &str = "feishu-browser";
@@ -294,12 +297,16 @@ fn handle_command(command: SubscriberCommand) -> Result<()> {
 /// mutates `seen` — but ONLY when the page reports `loaded: true`. When the
 /// messenger shell is absent (unloaded page or logged-out), returns an empty
 /// vec and leaves `seen` untouched so the next poll retries with a clean slate.
+///
+/// `active_chat_id`: if non-empty, feed rows for that chat_id are suppressed
+/// (the active pass covers the open chat with higher fidelity).
 pub(crate) fn process_feed_poll(
     parsed: &Value,
     conn: &str,
     platform: &str,
     brand_label: &str,
     seen: &mut SeenState,
+    active_chat_id: &str,
 ) -> Vec<Event> {
     if !feed_loaded(parsed) {
         return Vec::new();
@@ -312,6 +319,11 @@ pub(crate) fn process_feed_poll(
     for row in &rows {
         let key = feed_dedup_key(conn, row);
         newly_seen.insert(key.clone());
+        // Suppress feed rows for the open chat — the active layer covers it
+        // with higher fidelity (full text, snowflake id, outgoing direction).
+        if !active_chat_id.is_empty() && row.chat_id == active_chat_id {
+            continue;
+        }
         if should_emit_feed(seen, &key) {
             events.push(build_message_event(
                 platform,
@@ -331,6 +343,61 @@ pub(crate) fn process_feed_poll(
     seen.initialized = true;
 
     events
+}
+
+/// Pure, testable core of a single active-conversation drain poll.
+/// Evaluates `LARK_OBSERVER_DRAIN_JS` output (already parsed). For each
+/// `ActiveMsg` with a snowflake id not yet in `seen`, emits an event with
+/// `source:"active"`. Seeds (without emitting) on the very first loaded poll,
+/// matching the feed-poll behaviour.
+///
+/// `parsed`: the parsed JSON returned from `LARK_OBSERVER_DRAIN_JS`.
+/// Returns `(active_chat_id, events)` so the caller can pass `active_chat_id`
+/// to `process_feed_poll` for suppression.
+pub(crate) fn process_active_drain(
+    parsed: &Value,
+    conn: &str,
+    platform: &str,
+    brand_label: &str,
+    seen: &mut SeenState,
+) -> (String, Vec<Event>) {
+    let (active_chat_id, msgs) = parse_active_drain(parsed);
+
+    // Nothing open — return empty and don't mutate seen.
+    if active_chat_id.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let mut newly_seen = BTreeSet::new();
+    let mut events = Vec::new();
+
+    for msg in &msgs {
+        let key = format!("{}:{}:{}", conn, active_chat_id, msg.id);
+        newly_seen.insert(key.clone());
+        if should_emit_feed(seen, &key) {
+            events.push(build_message_event(
+                platform,
+                brand_label,
+                &active_chat_id,
+                "", // sender unknown at message level — text carries content
+                &msg.text,
+                msg.is_outgoing,
+                "active",
+                &key,
+            ));
+        }
+    }
+
+    // Seed seen regardless of init state (same gate as feed: only after a
+    // loaded/non-empty drain do we update).
+    if !newly_seen.is_empty() || seen.initialized {
+        seen.seen.extend(newly_seen);
+        // Mark initialized once we get a non-empty active drain on a loaded poll.
+        // (The feed pass also sets this flag; whichever runs first wins.)
+        seen.initialized = true;
+    }
+
+    (active_chat_id, events)
 }
 
 fn poll_once_feed(
@@ -387,18 +454,78 @@ fn poll_once_feed(
         raw_value
     };
 
+    // ── Active pass (before feed so we know active_chat_id for suppression) ──
+    // (1) Install observer (idempotent — re-installs after navigation).
+    let _ = crate::daemon_browser::send_daemon_request(
+        handshake_ref,
+        "browser_agent",
+        json!({
+            "action": "evaluate",
+            "sessionId": session_id,
+            "tabId": "messenger",
+            "width": BROWSER_WIDTH,
+            "height": BROWSER_HEIGHT,
+            "background": true,
+            "script": LARK_OBSERVER_INSTALL_JS,
+        }),
+    )
+    .context("evaluate Lark observer install JS")?;
+
+    // (2) Drain captured messages.
+    let drain_value = crate::daemon_browser::send_daemon_request(
+        handshake_ref,
+        "browser_agent",
+        json!({
+            "action": "evaluate",
+            "sessionId": session_id,
+            "tabId": "messenger",
+            "width": BROWSER_WIDTH,
+            "height": BROWSER_HEIGHT,
+            "background": true,
+            "script": LARK_OBSERVER_DRAIN_JS,
+        }),
+    )
+    .context("evaluate Lark observer drain JS")?;
+
+    let drain_raw = drain_value.get("value").cloned().unwrap_or(Value::Null);
+    let drain_parsed: Value = if let Some(s) = drain_raw.as_str() {
+        serde_json::from_str(s).unwrap_or(Value::Null)
+    } else {
+        drain_raw
+    };
+
+    let (active_chat_id, active_events) = process_active_drain(
+        &drain_parsed,
+        &config.connection,
+        brand.platform(),
+        &config.brand,
+        seen,
+    );
+    let active_emitted = active_events.len();
+    for event in active_events {
+        emit_event(event)?;
+    }
+
+    // ── Feed pass ────────────────────────────────────────────────────────────
     let loaded = feed_loaded(&parsed);
     let seen_count_before = seen.seen.len();
     let initialized_before = seen.initialized;
 
-    let events = process_feed_poll(&parsed, &config.connection, brand.platform(), &config.brand, seen);
+    let events = process_feed_poll(
+        &parsed,
+        &config.connection,
+        brand.platform(),
+        &config.brand,
+        seen,
+        &active_chat_id,
+    );
     let emitted = events.len();
     for event in events {
         emit_event(event)?;
     }
 
     eprintln!(
-        "lark-browser: poll_complete topic={} loaded={loaded} observed_rows={} emitted_rows={emitted} initialized_before={initialized_before} initialized_after={} seen_count_before={seen_count_before} seen_count_after={}",
+        "lark-browser: poll_complete topic={} loaded={loaded} active_chat_id={active_chat_id:?} observed_rows={} emitted_feed={emitted} emitted_active={active_emitted} initialized_before={initialized_before} initialized_after={} seen_count_before={seen_count_before} seen_count_after={}",
         env.topic,
         if loaded { parse_feed_rows(&parsed).len() } else { 0 },
         seen.initialized,
@@ -531,7 +658,7 @@ mod emit_tests {
             "rows": [{"chat_id": "42", "name": "Alice", "preview": "hi", "unread": true, "outgoing": false}]
         });
         let mut seen = SeenState::default();
-        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen, "");
         // No events emitted, and seen.initialized stays false.
         assert!(events.is_empty(), "expected no events when not loaded");
         assert!(!seen.initialized, "initialized must stay false when not loaded");
@@ -545,7 +672,7 @@ mod emit_tests {
             "rows": [{"chat_id": "42", "name": "Alice", "preview": "hi", "unread": true, "outgoing": false}]
         });
         let mut seen = SeenState::default();
-        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen, "");
         assert!(events.is_empty(), "expected no events when loaded key missing");
         assert!(!seen.initialized, "initialized must stay false when loaded key missing");
     }
@@ -559,7 +686,7 @@ mod emit_tests {
             "rows": [{"chat_id": "42", "name": "Alice", "preview": "hi", "unread": true, "outgoing": false}]
         });
         let mut seen = SeenState::default();
-        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen, "");
         // First loaded poll: seeds but emits nothing (pre-init).
         assert!(events.is_empty(), "first loaded poll should seed only, not emit");
         assert!(seen.initialized, "initialized must be true after a loaded poll");
@@ -577,9 +704,150 @@ mod emit_tests {
             initialized: true,
             seen: std::collections::BTreeSet::new(),
         };
-        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen);
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen, "");
         assert_eq!(events.len(), 1, "post-init poll with new row should emit one event");
         assert_eq!(events[0].payload["chat_id"], "99");
+    }
+
+    // --- feed suppression: active chat_id skips the matching feed row ---
+
+    #[test]
+    fn process_feed_poll_suppresses_active_chat_row() {
+        // Feed has two rows. One chat_id matches the active (open) chat.
+        // The active-chat row should NOT be emitted even post-init.
+        let parsed = serde_json::json!({
+            "loaded": true,
+            "rows": [
+                {"chat_id": "ACTIVE_CHAT", "name": "Alice", "preview": "active msg", "unread": true, "outgoing": false},
+                {"chat_id": "OTHER_CHAT",  "name": "Bob",   "preview": "other msg",  "unread": true, "outgoing": false}
+            ]
+        });
+        let mut seen = SeenState {
+            initialized: true,
+            seen: std::collections::BTreeSet::new(),
+        };
+        let events = process_feed_poll(
+            &parsed,
+            "conn1",
+            "lark-browser",
+            "lark",
+            &mut seen,
+            "ACTIVE_CHAT",
+        );
+        // Only the OTHER_CHAT row should be emitted; ACTIVE_CHAT is suppressed.
+        assert_eq!(events.len(), 1, "only non-active feed row should emit");
+        assert_eq!(events[0].payload["chat_id"], "OTHER_CHAT");
+    }
+
+    #[test]
+    fn process_feed_poll_no_suppression_when_active_chat_empty() {
+        // When active_chat_id is empty (no chat open), all feed rows emit normally.
+        let parsed = serde_json::json!({
+            "loaded": true,
+            "rows": [
+                {"chat_id": "CHAT_A", "name": "A", "preview": "msg a", "unread": true, "outgoing": false},
+                {"chat_id": "CHAT_B", "name": "B", "preview": "msg b", "unread": true, "outgoing": false}
+            ]
+        });
+        let mut seen = SeenState {
+            initialized: true,
+            seen: std::collections::BTreeSet::new(),
+        };
+        let events = process_feed_poll(&parsed, "conn1", "lark-browser", "lark", &mut seen, "");
+        assert_eq!(events.len(), 2, "all feed rows should emit when active_chat_id is empty");
+    }
+
+    // --- process_active_drain pure helper tests ---
+
+    #[test]
+    fn process_active_drain_empty_drain_no_events() {
+        // Empty items list → no events, no init flip.
+        let parsed = serde_json::json!({"chat_id": "CHAT1", "items": []});
+        let mut seen = SeenState::default();
+        let (chat_id, events) = process_active_drain(
+            &parsed, "conn1", "lark-browser", "lark", &mut seen,
+        );
+        assert_eq!(chat_id, "CHAT1");
+        assert!(events.is_empty(), "no events for empty drain");
+        // initialized stays false because no msgs to seed
+        assert!(!seen.initialized, "initialized should not flip on empty drain");
+    }
+
+    #[test]
+    fn process_active_drain_no_chat_open_no_events() {
+        // chat_id is empty → no active chat; nothing happens.
+        let parsed = serde_json::json!({"chat_id": "", "items": [
+            {"id": "7652607780750119026", "dir": "out", "text": "hi"}
+        ]});
+        let mut seen = SeenState::default();
+        let (chat_id, events) = process_active_drain(
+            &parsed, "conn1", "lark-browser", "lark", &mut seen,
+        );
+        assert!(chat_id.is_empty());
+        assert!(events.is_empty());
+        assert!(!seen.initialized);
+    }
+
+    #[test]
+    fn process_active_drain_seeds_on_first_poll_no_emit() {
+        // First poll with a snowflake id: seeds seen but emits nothing (pre-init).
+        let parsed = serde_json::json!({
+            "chat_id": "CHAT1",
+            "items": [{"id": "7652607780750119026", "dir": "in", "text": "hello"}]
+        });
+        let mut seen = SeenState::default();
+        let (chat_id, events) = process_active_drain(
+            &parsed, "conn1", "lark-browser", "lark", &mut seen,
+        );
+        assert_eq!(chat_id, "CHAT1");
+        assert!(events.is_empty(), "first poll must seed only, not emit");
+        assert!(seen.initialized, "initialized must flip after first drain with msgs");
+        assert!(
+            seen.seen.contains("conn1:CHAT1:7652607780750119026"),
+            "key must be seeded"
+        );
+    }
+
+    #[test]
+    fn process_active_drain_emits_on_second_poll() {
+        // Second poll: seen already initialized, new snowflake arrives → emits.
+        let parsed = serde_json::json!({
+            "chat_id": "CHAT1",
+            "items": [{"id": "7652607883305029745", "dir": "out", "text": "reply"}]
+        });
+        let mut seen = SeenState {
+            initialized: true,
+            seen: std::collections::BTreeSet::new(),
+        };
+        let (chat_id, events) = process_active_drain(
+            &parsed, "conn1", "lark-browser", "lark", &mut seen,
+        );
+        assert_eq!(chat_id, "CHAT1");
+        assert_eq!(events.len(), 1, "new snowflake post-init must emit");
+        assert_eq!(events[0].payload["chat_id"], "CHAT1");
+        assert_eq!(events[0].payload["is_outgoing"], true);
+        assert_eq!(events[0].payload["source"], "active");
+    }
+
+    #[test]
+    fn process_active_drain_drops_optimistic_temp_ids() {
+        // Optimistic ids (non-snowflake) are silently dropped.
+        let parsed = serde_json::json!({
+            "chat_id": "CHAT1",
+            "items": [
+                {"id": "gApEI0EY3S", "dir": "out", "text": "sending"},
+                {"id": "7652607780750119026", "dir": "out", "text": "sent"}
+            ]
+        });
+        let mut seen = SeenState {
+            initialized: true,
+            seen: std::collections::BTreeSet::new(),
+        };
+        let (_chat_id, events) = process_active_drain(
+            &parsed, "conn1", "lark-browser", "lark", &mut seen,
+        );
+        assert_eq!(events.len(), 1, "only snowflake id should emit");
+        assert_eq!(events[0].payload["source"], "active");
     }
 }
 
