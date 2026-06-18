@@ -4,7 +4,7 @@
 //! Replaces the two near-identical, silently-failing writers that previously
 //! lived in `delivery.rs` and `updates.rs`. Improvements:
 //!   - one implementation instead of two copies;
-//!   - **size-based rotation** (rotate at 16 MiB, keep one `.1` generation) so
+//!   - **size-based rotation** (rotate at 5 MiB, keep three generations) so
 //!     the files no longer grow unbounded;
 //!   - write failures surface via a throttled `tracing::warn!` instead of being
 //!     swallowed, so a read-only/full state dir is visible instead of silent.
@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
-/// Rotate a diagnostic file once it reaches this size; the previous generation
-/// is kept as `<file>.1` (one backup, overwritten on each rotation).
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Rotate a diagnostic file once it reaches this size.
+const MAX_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_GENERATIONS: usize = 3;
 
 /// Serializes diagnostic writes across both files. They are infrequent and the
 /// payloads are tiny, so a single lock is simpler than per-file locks and avoids
@@ -55,10 +55,22 @@ fn try_append(path: &Path, record: &Value) -> std::io::Result<()> {
 fn rotate_if_needed(path: &Path) {
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() >= MAX_BYTES {
-            let backup = PathBuf::from(format!("{}.1", path.display()));
-            let _ = std::fs::rename(path, backup);
+            let oldest = rotated_path(path, MAX_GENERATIONS);
+            let _ = std::fs::remove_file(oldest);
+            for generation in (1..MAX_GENERATIONS).rev() {
+                let from = rotated_path(path, generation);
+                let to = rotated_path(path, generation + 1);
+                if from.exists() {
+                    let _ = std::fs::rename(from, to);
+                }
+            }
+            let _ = std::fs::rename(path, rotated_path(path, 1));
         }
     }
+}
+
+fn rotated_path(path: &Path, generation: usize) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.display(), generation))
 }
 
 fn warn_throttled(path: &Path, error: &std::io::Error) {
@@ -123,6 +135,27 @@ mod tests {
             body.lines().count(),
             1,
             "post-rotation file starts fresh with just the new line"
+        );
+    }
+
+    #[test]
+    fn rotation_keeps_three_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.ndjson");
+
+        for value in ["first", "second", "third", "fourth"] {
+            let file = std::fs::File::create(&path).unwrap();
+            file.set_len(MAX_BYTES).unwrap();
+            drop(file);
+            append_ndjson(&path, &json!({ "value": value }));
+        }
+
+        assert!(PathBuf::from(format!("{}.1", path.display())).exists());
+        assert!(PathBuf::from(format!("{}.2", path.display())).exists());
+        assert!(PathBuf::from(format!("{}.3", path.display())).exists());
+        assert!(
+            !PathBuf::from(format!("{}.4", path.display())).exists(),
+            "diagnostics rotation must keep only three generations"
         );
     }
 }

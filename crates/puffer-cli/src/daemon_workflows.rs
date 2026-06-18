@@ -11,6 +11,7 @@ mod monitor_rules;
 mod monitor_self_gate;
 mod monitor_task_complete;
 mod monitor_task_ignore;
+mod monitor_trace;
 mod planned;
 mod snapshot_json;
 mod task_snapshot;
@@ -25,6 +26,7 @@ pub(crate) use monitor_rules::{handle_monitor_rule_add, handle_monitor_rule_dele
 pub(crate) use monitor_self_gate::MonitorSelfGate;
 pub(crate) use monitor_task_complete::handle_monitor_task_complete;
 pub(crate) use monitor_task_ignore::handle_monitor_task_ignore;
+pub(crate) use monitor_trace::handle_monitor_trace_list;
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;

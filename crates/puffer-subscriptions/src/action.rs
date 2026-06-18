@@ -74,6 +74,8 @@ pub struct ActionResult {
     pub turn_started_at_ms: Option<i128>,
     /// When the agent turn finished executing.
     pub turn_ended_at_ms: Option<i128>,
+    /// Optional per-envelope monitor triage diagnostic decisions.
+    pub triage_decisions: Vec<TriageDecision>,
 }
 
 impl ActionResult {
@@ -85,6 +87,7 @@ impl ActionResult {
             usage: None,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         }
     }
 
@@ -96,6 +99,7 @@ impl ActionResult {
             usage,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         }
     }
 
@@ -108,6 +112,7 @@ impl ActionResult {
             usage: output.usage,
             turn_started_at_ms: output.turn_started_at_ms,
             turn_ended_at_ms: output.turn_ended_at_ms,
+            triage_decisions: output.triage_decisions,
         }
     }
 
@@ -119,8 +124,33 @@ impl ActionResult {
             usage: None,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         }
     }
+
+    /// Attaches per-envelope monitor triage diagnostics.
+    pub fn with_triage_decisions(mut self, decisions: Vec<TriageDecision>) -> Self {
+        self.triage_decisions = decisions;
+        self
+    }
+}
+
+/// Diagnostic outcome emitted by the monitor triage agent for one envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriageDecisionOutcome {
+    /// The agent intentionally did not create, update, or complete a task.
+    NoTask,
+}
+
+/// Diagnostic reason for a monitor triage decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriageDecision {
+    pub envelope_id: String,
+    pub outcome: TriageDecisionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    pub reason: String,
 }
 
 /// Token usage reported by an agent-backed workflow action.
@@ -157,6 +187,8 @@ pub struct WorkflowActionOutput {
     pub turn_started_at_ms: Option<i128>,
     /// When the agent turn finished executing.
     pub turn_ended_at_ms: Option<i128>,
+    /// Optional per-envelope monitor triage diagnostic decisions.
+    pub triage_decisions: Vec<TriageDecision>,
 }
 
 impl WorkflowActionOutput {
@@ -167,6 +199,7 @@ impl WorkflowActionOutput {
             usage: None,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         }
     }
 
@@ -177,6 +210,7 @@ impl WorkflowActionOutput {
             usage,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         }
     }
 
@@ -184,6 +218,12 @@ impl WorkflowActionOutput {
     pub fn with_turn_window(mut self, started_at_ms: i128, ended_at_ms: i128) -> Self {
         self.turn_started_at_ms = Some(started_at_ms);
         self.turn_ended_at_ms = Some(ended_at_ms);
+        self
+    }
+
+    /// Attaches per-envelope monitor triage diagnostics.
+    pub fn with_triage_decisions(mut self, decisions: Vec<TriageDecision>) -> Self {
+        self.triage_decisions = decisions;
         self
     }
 }
@@ -741,6 +781,7 @@ fn dispatch_batch_sequential<D: ActionDispatcher + ?Sized>(
             usage,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         }
     }
 }

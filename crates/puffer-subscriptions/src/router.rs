@@ -8,6 +8,7 @@ use crate::history::{
     now_ms, DedupDecision, WorkflowActionLog, WorkflowBindingRunStatus, WorkflowHistoryStore,
     MAX_FAILED_ATTEMPTS,
 };
+use crate::monitor_trace::{MonitorTraceStage, MonitorTraceStore};
 use crate::self_gate::{SelfMessageGate, SELF_MESSAGE_KIND};
 use crate::spec::{
     filter_matches, ActionSpec, FilterSpec, WorkflowBindingSpec, WorkflowBindingStatus,
@@ -92,6 +93,7 @@ pub fn process_envelope_result(
         classifier,
         gate,
         None,
+        None,
         stats,
     )
 }
@@ -105,6 +107,7 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
     classifier: &Arc<dyn Classifier>,
     gate: &Arc<dyn SelfMessageGate>,
     monitor_digest: Option<&MonitorDigestQueue>,
+    trace_store: Option<&MonitorTraceStore>,
     stats: Option<&RouterStats>,
 ) -> EnvelopeProcessResult {
     let mut result = EnvelopeProcessResult::default();
@@ -129,8 +132,24 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
             continue;
         }
         topic_matched_any = true;
+        record_router_trace(
+            trace_store,
+            &spec,
+            envelope,
+            "router_topic_matched",
+            "subscription_router",
+            "Matched workflow binding topic.",
+        );
         if spec.status == WorkflowBindingStatus::Paused {
             log_router_skip(&spec, envelope, "binding_paused");
+            record_router_trace(
+                trace_store,
+                &spec,
+                envelope,
+                "router_binding_paused",
+                "subscription_router",
+                "Workflow binding is paused.",
+            );
             continue;
         }
         if event_is_self(&envelope.event) {
@@ -140,6 +159,14 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
             // the router holds no monitor/task knowledge.
             if !gate.should_dispatch_self_message(&envelope.event) {
                 log_router_skip(&spec, envelope, "self_no_open_task");
+                record_router_trace(
+                    trace_store,
+                    &spec,
+                    envelope,
+                    "router_self_gate_skipped",
+                    "subscription_router",
+                    "Outgoing/self message had no open task in this conversation.",
+                );
                 continue;
             }
             result.matched = true;
@@ -147,6 +174,7 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
                 &spec,
                 envelope,
                 history_store,
+                trace_store,
                 dispatcher,
                 stats,
                 &mut result,
@@ -155,10 +183,26 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
         }
         if event_dedup_key_seen(history_store, &spec, envelope) {
             log_router_skip(&spec, envelope, "dedup_seen");
+            record_router_trace(
+                trace_store,
+                &spec,
+                envelope,
+                "router_dedup_seen",
+                "subscription_router",
+                "Event dedup key was already processed for this binding.",
+            );
             continue;
         }
         if monitor_binding_should_skip_event(&spec, &envelope.event.payload) {
             log_router_skip(&spec, envelope, "monitor_muted_skip");
+            record_router_trace(
+                trace_store,
+                &spec,
+                envelope,
+                "router_muted_skip",
+                "subscription_router",
+                "Muted or silent notification skipped before monitor triage.",
+            );
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -170,6 +214,14 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
         }
         if ignore_filter_matches(&spec, &envelope.event.text, &envelope.event.payload) {
             log_router_skip(&spec, envelope, "monitor_ignore_filter");
+            record_router_trace(
+                trace_store,
+                &spec,
+                envelope,
+                "router_ignore_filter",
+                "subscription_router",
+                "Matched an installed monitor ignore filter before triage.",
+            );
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -181,6 +233,14 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
         }
         if !contact_filter_matches(&spec.contact_ids, &envelope.event.payload) {
             log_router_skip(&spec, envelope, "monitor_contact_filter_skip");
+            record_router_trace(
+                trace_store,
+                &spec,
+                envelope,
+                "router_contact_filter_skip",
+                "subscription_router",
+                "Did not match the monitor contact filter.",
+            );
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -196,6 +256,14 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
             &envelope.event.payload,
         ) {
             log_router_skip(&spec, envelope, "monitor_filter_skip");
+            record_router_trace(
+                trace_store,
+                &spec,
+                envelope,
+                "router_filter_skip",
+                "subscription_router",
+                "Did not match the monitor trigger filter.",
+            );
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -210,6 +278,14 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
                 ClassifyDecision::Pass => {}
                 ClassifyDecision::Reject | ClassifyDecision::Inconclusive => {
                     log_router_skip(&spec, envelope, "monitor_classifier_skip");
+                    record_router_trace(
+                        trace_store,
+                        &spec,
+                        envelope,
+                        "router_classifier_skip",
+                        "subscription_router",
+                        "Classifier rejected the event before monitor triage.",
+                    );
                     record_monitor_router_outcome(
                         history_store,
                         &spec,
@@ -224,6 +300,14 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
         result.matched = true;
         if let Some(monitor_digest) = monitor_digest.filter(|queue| queue.handles(&spec)) {
             monitor_digest.enqueue(&spec, envelope);
+            record_router_trace(
+                trace_store,
+                &spec,
+                envelope,
+                "router_digest_queued",
+                "subscription_router",
+                "Queued monitor event for digest triage.",
+            );
             record_monitor_router_outcome(
                 history_store,
                 &spec,
@@ -245,6 +329,17 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
             "workflow router dispatching event"
         );
         let started_at_ms = now_ms();
+        record_router_trace_at(
+            trace_store,
+            &spec,
+            envelope,
+            MonitorTraceStage::running(
+                "triage_started",
+                "subscription_router",
+                "Started workflow action dispatch.",
+                started_at_ms,
+            ),
+        );
         let started_history_idx = history_store.and_then(|history_store| {
             match history_store.append_action_started(
                 &spec,
@@ -309,6 +404,24 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
             }
         }
         if action_result.success {
+            record_router_trace_at(
+                trace_store,
+                &spec,
+                envelope,
+                MonitorTraceStage::completed(
+                    "triage_completed",
+                    "subscription_router",
+                    action_result.summary.clone(),
+                    ended_at_ms,
+                ),
+            );
+            record_triage_decision_trace_at(
+                trace_store,
+                &spec,
+                envelope,
+                &action_result,
+                ended_at_ms,
+            );
             result.acted += 1;
             if let Some(stats) = stats {
                 stats.events_acted.fetch_add(1, Ordering::Relaxed);
@@ -320,6 +433,17 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
                 action_result.summary
             );
         } else {
+            record_router_trace_at(
+                trace_store,
+                &spec,
+                envelope,
+                MonitorTraceStage::failed(
+                    "triage_completed",
+                    "subscription_router",
+                    action_result.summary.clone(),
+                    ended_at_ms,
+                ),
+            );
             result.failed += 1;
             if let Some(stats) = stats {
                 stats.events_failed.fetch_add(1, Ordering::Relaxed);
@@ -333,6 +457,14 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
         }
     }
     if !result.matched {
+        if !topic_matched_any {
+            record_unbound_trace(
+                trace_store,
+                envelope,
+                "router_no_monitor_binding",
+                "No monitor workflow binding matched this event topic.",
+            );
+        }
         tracing::info!(
             subscriber = %envelope.subscriber_id,
             envelope = %envelope.envelope_id,
@@ -366,6 +498,7 @@ pub fn process_envelope_batch_result(
         classifier,
         gate,
         None,
+        None,
         stats,
     )
 }
@@ -379,6 +512,7 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
     classifier: &Arc<dyn Classifier>,
     gate: &Arc<dyn SelfMessageGate>,
     monitor_digest: Option<&MonitorDigestQueue>,
+    trace_store: Option<&MonitorTraceStore>,
     stats: Option<&RouterStats>,
 ) -> EnvelopeProcessResult {
     let mut result = EnvelopeProcessResult::default();
@@ -391,6 +525,23 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
     }
     for spec in store.list() {
         if spec.status == WorkflowBindingStatus::Paused {
+            for envelope in &envelopes {
+                let topic_matches = spec.connection_slug == envelope.event.topic
+                    || spec
+                        .connector_slug
+                        .as_deref()
+                        .is_some_and(|connector_slug| connector_slug == envelope.event.topic);
+                if topic_matches {
+                    record_router_trace(
+                        trace_store,
+                        &spec,
+                        envelope,
+                        "router_binding_paused",
+                        "subscription_router",
+                        "Workflow binding is paused.",
+                    );
+                }
+            }
             continue;
         }
         let mut triage_batch = Vec::new();
@@ -412,6 +563,14 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
                 }
                 if !gate.should_dispatch_self_message(&envelope.event) {
                     log_router_skip(&spec, envelope, "self_no_open_task");
+                    record_router_trace(
+                        trace_store,
+                        &spec,
+                        envelope,
+                        "router_self_gate_skipped",
+                        "subscription_router",
+                        "Outgoing/self message had no open task in this conversation.",
+                    );
                     continue;
                 }
                 result.matched = true;
@@ -419,15 +578,20 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
                     &spec,
                     envelope,
                     history_store,
+                    trace_store,
                     dispatcher,
                     stats,
                     &mut result,
                 );
                 continue;
             }
-            let Some(prefiltered) =
-                prefilter_envelope_for_spec(&spec, envelope, history_store, classifier)
-            else {
+            let Some(prefiltered) = prefilter_envelope_for_spec(
+                &spec,
+                envelope,
+                history_store,
+                classifier,
+                trace_store,
+            ) else {
                 continue;
             };
             result.matched = true;
@@ -439,6 +603,7 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
                 &spec,
                 prefiltered,
                 history_store,
+                trace_store,
                 dispatcher,
                 stats,
                 &mut result,
@@ -455,12 +620,21 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
                         "monitor_digest_queued",
                         "Queued monitor event for digest triage.",
                     );
+                    record_router_trace(
+                        trace_store,
+                        &spec,
+                        envelope,
+                        "router_digest_queued",
+                        "subscription_router",
+                        "Queued monitor event for digest triage.",
+                    );
                 }
             } else {
                 dispatch_matched_batch(
                     &spec,
                     &triage_batch,
                     history_store,
+                    trace_store,
                     dispatcher,
                     stats,
                     &mut result,
@@ -476,6 +650,7 @@ fn prefilter_envelope_for_spec<'a>(
     envelope: &'a EventEnvelope,
     history_store: Option<&WorkflowHistoryStore>,
     classifier: &Arc<dyn Classifier>,
+    trace_store: Option<&MonitorTraceStore>,
 ) -> Option<&'a EventEnvelope> {
     let topic_matches = spec.connection_slug == envelope.event.topic
         || spec
@@ -485,12 +660,36 @@ fn prefilter_envelope_for_spec<'a>(
     if !topic_matches {
         return None;
     }
+    record_router_trace(
+        trace_store,
+        spec,
+        envelope,
+        "router_topic_matched",
+        "subscription_router",
+        "Matched workflow binding topic.",
+    );
     if event_dedup_key_seen(history_store, spec, envelope) {
         log_router_skip(spec, envelope, "dedup_seen");
+        record_router_trace(
+            trace_store,
+            spec,
+            envelope,
+            "router_dedup_seen",
+            "subscription_router",
+            "Event dedup key was already processed for this binding.",
+        );
         return None;
     }
     if monitor_binding_should_skip_event(spec, &envelope.event.payload) {
         log_router_skip(spec, envelope, "monitor_muted_skip");
+        record_router_trace(
+            trace_store,
+            spec,
+            envelope,
+            "router_muted_skip",
+            "subscription_router",
+            "Muted or silent notification skipped before monitor triage.",
+        );
         record_monitor_router_outcome(
             history_store,
             spec,
@@ -502,6 +701,14 @@ fn prefilter_envelope_for_spec<'a>(
     }
     if ignore_filter_matches(spec, &envelope.event.text, &envelope.event.payload) {
         log_router_skip(spec, envelope, "monitor_ignore_filter");
+        record_router_trace(
+            trace_store,
+            spec,
+            envelope,
+            "router_ignore_filter",
+            "subscription_router",
+            "Matched an installed monitor ignore filter before triage.",
+        );
         record_monitor_router_outcome(
             history_store,
             spec,
@@ -511,12 +718,39 @@ fn prefilter_envelope_for_spec<'a>(
         );
         return None;
     }
+    if !contact_filter_matches(&spec.contact_ids, &envelope.event.payload) {
+        log_router_skip(spec, envelope, "monitor_contact_filter_skip");
+        record_router_trace(
+            trace_store,
+            spec,
+            envelope,
+            "router_contact_filter_skip",
+            "subscription_router",
+            "Did not match the monitor contact filter.",
+        );
+        record_monitor_router_outcome(
+            history_store,
+            spec,
+            envelope,
+            "monitor_contact_filter_skip",
+            "Did not match the monitor contact filter.",
+        );
+        return None;
+    }
     if !filter_matches(
         spec.filter.as_ref(),
         &envelope.event.text,
         &envelope.event.payload,
     ) {
         log_router_skip(spec, envelope, "monitor_filter_skip");
+        record_router_trace(
+            trace_store,
+            spec,
+            envelope,
+            "router_filter_skip",
+            "subscription_router",
+            "Did not match the monitor trigger filter.",
+        );
         record_monitor_router_outcome(
             history_store,
             spec,
@@ -531,6 +765,14 @@ fn prefilter_envelope_for_spec<'a>(
             ClassifyDecision::Pass => {}
             ClassifyDecision::Reject | ClassifyDecision::Inconclusive => {
                 log_router_skip(spec, envelope, "monitor_classifier_skip");
+                record_router_trace(
+                    trace_store,
+                    spec,
+                    envelope,
+                    "router_classifier_skip",
+                    "subscription_router",
+                    "Classifier rejected the event before monitor triage.",
+                );
                 record_monitor_router_outcome(
                     history_store,
                     spec,
@@ -549,11 +791,23 @@ fn dispatch_one_matched_envelope(
     spec: &WorkflowBindingSpec,
     envelope: &EventEnvelope,
     history_store: Option<&WorkflowHistoryStore>,
+    trace_store: Option<&MonitorTraceStore>,
     dispatcher: &Arc<dyn ActionDispatcher>,
     stats: Option<&RouterStats>,
     result: &mut EnvelopeProcessResult,
 ) {
     let started_at_ms = now_ms();
+    record_router_trace_at(
+        trace_store,
+        spec,
+        envelope,
+        MonitorTraceStage::running(
+            "triage_started",
+            "subscription_router",
+            "Started workflow action dispatch.",
+            started_at_ms,
+        ),
+    );
     let action = effective_action_for_dispatch(spec);
     let started_history_idx = history_store.and_then(|history_store| {
         match history_store.append_action_started(spec, envelope, action.as_ref(), started_at_ms) {
@@ -581,6 +835,32 @@ fn dispatch_one_matched_envelope(
         started_history_idx,
         history_store,
     );
+    if action_result.success {
+        record_router_trace_at(
+            trace_store,
+            spec,
+            envelope,
+            MonitorTraceStage::completed(
+                "triage_completed",
+                "subscription_router",
+                action_result.summary.clone(),
+                ended_at_ms,
+            ),
+        );
+        record_triage_decision_trace_at(trace_store, spec, envelope, &action_result, ended_at_ms);
+    } else {
+        record_router_trace_at(
+            trace_store,
+            spec,
+            envelope,
+            MonitorTraceStage::failed(
+                "triage_completed",
+                "subscription_router",
+                action_result.summary.clone(),
+                ended_at_ms,
+            ),
+        );
+    }
     account_action_result(spec, envelope, &action_result, stats, result);
 }
 
@@ -588,6 +868,7 @@ fn dispatch_matched_batch(
     spec: &WorkflowBindingSpec,
     envelopes: &[&EventEnvelope],
     history_store: Option<&WorkflowHistoryStore>,
+    trace_store: Option<&MonitorTraceStore>,
     dispatcher: &Arc<dyn ActionDispatcher>,
     stats: Option<&RouterStats>,
     result: &mut EnvelopeProcessResult,
@@ -595,6 +876,19 @@ fn dispatch_matched_batch(
     let started_at_ms = now_ms();
     let mut started_history = HashMap::new();
     let action = effective_action_for_dispatch(spec);
+    for envelope in envelopes {
+        record_router_trace_at(
+            trace_store,
+            spec,
+            envelope,
+            MonitorTraceStage::running(
+                "triage_started",
+                "subscription_router",
+                "Started workflow action batch dispatch.",
+                started_at_ms,
+            ),
+        );
+    }
     if let Some(history_store) = history_store {
         for envelope in envelopes {
             match history_store.append_action_started(
@@ -641,7 +935,69 @@ fn dispatch_matched_batch(
             started_history_idx,
             history_store,
         );
+        if action_result.success {
+            record_router_trace_at(
+                trace_store,
+                spec,
+                envelope,
+                MonitorTraceStage::completed(
+                    "triage_completed",
+                    "subscription_router",
+                    action_result.summary.clone(),
+                    ended_at_ms,
+                ),
+            );
+            record_triage_decision_trace_at(
+                trace_store,
+                spec,
+                envelope,
+                &action_result,
+                ended_at_ms,
+            );
+        } else {
+            record_router_trace_at(
+                trace_store,
+                spec,
+                envelope,
+                MonitorTraceStage::failed(
+                    "triage_completed",
+                    "subscription_router",
+                    action_result.summary.clone(),
+                    ended_at_ms,
+                ),
+            );
+        }
         account_action_result(spec, envelope, &action_result, stats, result);
+    }
+}
+
+fn record_triage_decision_trace_at(
+    trace_store: Option<&MonitorTraceStore>,
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+    action_result: &crate::action::ActionResult,
+    at_ms: i128,
+) {
+    if !action_result.success {
+        return;
+    }
+    for decision in action_result
+        .triage_decisions
+        .iter()
+        .filter(|decision| decision.envelope_id == envelope.envelope_id)
+    {
+        record_router_trace_at(
+            trace_store,
+            spec,
+            envelope,
+            MonitorTraceStage::completed(
+                "triage_decision",
+                "subscription_router",
+                decision.reason.clone(),
+                at_ms,
+            )
+            .with_decision(decision.clone()),
+        );
     }
 }
 
@@ -847,6 +1203,70 @@ fn record_monitor_router_outcome(
             envelope = %envelope.envelope_id,
             %error,
             "failed to persist monitor router history"
+        );
+    }
+}
+
+fn record_router_trace(
+    trace_store: Option<&MonitorTraceStore>,
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+    id: &str,
+    source: &str,
+    summary: &str,
+) {
+    record_router_trace_at(
+        trace_store,
+        spec,
+        envelope,
+        MonitorTraceStage::completed(id, source, summary, now_ms()),
+    );
+}
+
+fn record_router_trace_at(
+    trace_store: Option<&MonitorTraceStore>,
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+    stage: MonitorTraceStage,
+) {
+    let Some(trace_store) = trace_store else {
+        return;
+    };
+    if let Err(error) = trace_store.record_envelope_stage(
+        &spec.connection_slug,
+        spec.connector_slug.as_deref(),
+        envelope,
+        stage.with_binding(spec.slug.clone()),
+    ) {
+        tracing::warn!(
+            workflow_binding = %spec.slug,
+            envelope = %envelope.envelope_id,
+            %error,
+            "failed to persist monitor trace stage"
+        );
+    }
+}
+
+fn record_unbound_trace(
+    trace_store: Option<&MonitorTraceStore>,
+    envelope: &EventEnvelope,
+    id: &str,
+    summary: &str,
+) {
+    let Some(trace_store) = trace_store else {
+        return;
+    };
+    if let Err(error) = trace_store.record_envelope_stage(
+        &envelope.event.topic,
+        None,
+        envelope,
+        MonitorTraceStage::completed(id, "subscription_router", summary, now_ms()),
+    ) {
+        tracing::warn!(
+            envelope = %envelope.envelope_id,
+            topic = %envelope.event.topic,
+            %error,
+            "failed to persist unbound monitor trace stage"
         );
     }
 }
