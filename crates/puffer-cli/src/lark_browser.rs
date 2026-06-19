@@ -62,10 +62,16 @@ impl Brand {
             Brand::Feishu => "feishu-browser-accounts",
         }
     }
+    /// The MESSENGER entry URL. The connector opens this every poll; it must land
+    /// on the message feed, not the default app. Opening the web root lands on
+    /// Drive (per-tenant), so the connector would re-open Drive each poll and
+    /// fight the feed-script's navigation. The `/messenger/` entry redirects
+    /// (post-login) straight to `<tenant>/next/messenger/` and stays there.
+    /// Pre-login it redirects to the QR login, so it also works for setup.
     pub(crate) fn web_url(&self) -> &'static str {
         match self {
-            Brand::Lark => "https://web.larksuite.com/",
-            Brand::Feishu => "https://web.feishu.cn/",
+            Brand::Lark => "https://web.larksuite.com/messenger/",
+            Brand::Feishu => "https://web.feishu.cn/messenger/",
         }
     }
 }
@@ -1096,8 +1102,8 @@ mod tests {
 
     #[test]
     fn brand_web_url_and_platform() {
-        assert_eq!(Brand::Lark.web_url(), "https://web.larksuite.com/");
-        assert_eq!(Brand::Feishu.web_url(), "https://web.feishu.cn/");
+        assert_eq!(Brand::Lark.web_url(), "https://web.larksuite.com/messenger/");
+        assert_eq!(Brand::Feishu.web_url(), "https://web.feishu.cn/messenger/");
         assert_eq!(Brand::Lark.platform(), "lark-browser");
         assert_eq!(Brand::Feishu.platform(), "feishu-browser");
     }
