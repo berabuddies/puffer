@@ -52,6 +52,16 @@ impl Brand {
     pub(crate) fn platform(&self) -> &'static str {
         self.slug()
     }
+    /// User-config subdirectory root for this brand's per-connection subscriber
+    /// state. MUST match the catalog template's `subscriber.state_root` so the
+    /// runtime's `PUFFER_SKILL_STATE_DIR` resolves to the same directory that
+    /// `save_config` writes into.
+    pub(crate) fn state_root(&self) -> &'static str {
+        match self {
+            Brand::Lark => "lark-browser-accounts",
+            Brand::Feishu => "feishu-browser-accounts",
+        }
+    }
     pub(crate) fn web_url(&self) -> &'static str {
         match self {
             Brand::Lark => "https://web.larksuite.com/",
@@ -135,24 +145,21 @@ impl CommandStream {
     }
 }
 
-/// The state-directory root name used for lark/feishu browser subscriber instances.
-/// Mirrors how `gmail_browser::STATE_ROOT` and the subscriber manifests relate:
-/// the builtin manifest at `builtin_resources_dir/subscribers/<brand>/manifest.toml`
-/// declares `dir = "state"` (relative), so the supervisor sets
-/// `PUFFER_SKILL_STATE_DIR = builtin_resources_dir/subscribers/<brand>/state`.
-pub(crate) const SUBSCRIBERS_DIR: &str = "subscribers";
-const STATE_SUBDIR: &str = "state";
-
 /// Returns the per-connection state directory for a lark/feishu browser subscriber.
 ///
-/// Matches the path the subscriber runtime computes from the manifest:
-/// `builtin_resources_dir/subscribers/<brand_slug>/state`.
-pub(crate) fn state_dir(paths: &puffer_config::ConfigPaths, brand: Brand) -> PathBuf {
+/// MUST match the path the subscriber runtime computes from the catalog
+/// template's `subscriber.state_root` via `instantiated_state_dir`:
+/// `user_config_dir/<brand-state-root>/<connection_slug>` (mirrors
+/// `gmail_browser::state_dir`, but the root depends on brand).
+pub(crate) fn state_dir(
+    paths: &puffer_config::ConfigPaths,
+    brand: Brand,
+    connection_slug: &str,
+) -> PathBuf {
     paths
-        .builtin_resources_dir
-        .join(SUBSCRIBERS_DIR)
-        .join(brand.slug())
-        .join(STATE_SUBDIR)
+        .user_config_dir
+        .join(brand.state_root())
+        .join(connection_slug)
 }
 
 /// Writes `LarkBrowserConfig` as `config.toml` into the per-connection state dir
@@ -166,7 +173,7 @@ pub(crate) fn save_config(
         brand: brand.slug().to_string(),
         connection: connection_slug.to_string(),
     };
-    let dir = state_dir(paths, brand);
+    let dir = state_dir(paths, brand, connection_slug);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let raw = toml::to_string_pretty(&config).context("serialize Lark browser config")?;
     let path = dir.join(CONFIG_FILE);
@@ -993,12 +1000,25 @@ mod config_tests {
     fn save_and_load_config_round_trip_lark() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = test_paths(tmp.path());
-        save_config(&paths, Brand::Lark, "lark-browser").unwrap();
+        save_config(&paths, Brand::Lark, "myconn").unwrap();
 
-        let dir = state_dir(&paths, Brand::Lark);
+        let dir = state_dir(&paths, Brand::Lark, "myconn");
+        // The state dir MUST live under user_config_dir/lark-browser-accounts/<conn>,
+        // exactly what the runtime's instantiated_state_dir computes from the
+        // catalog state_root.
+        assert!(
+            dir.ends_with("lark-browser-accounts/myconn"),
+            "lark state dir must end with lark-browser-accounts/myconn, got {}",
+            dir.display()
+        );
+        assert!(
+            dir.starts_with(&paths.user_config_dir),
+            "lark state dir must live under user_config_dir, got {}",
+            dir.display()
+        );
         let loaded = load_config_from_dir(&dir).unwrap().expect("config must exist");
         assert_eq!(loaded.brand, "lark-browser");
-        assert_eq!(loaded.connection, "lark-browser");
+        assert_eq!(loaded.connection, "myconn");
         assert_eq!(
             brand_from_config_str(&loaded.brand),
             Some(Brand::Lark),
@@ -1010,12 +1030,22 @@ mod config_tests {
     fn save_and_load_config_round_trip_feishu() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = test_paths(tmp.path());
-        save_config(&paths, Brand::Feishu, "my-feishu").unwrap();
+        save_config(&paths, Brand::Feishu, "myconn").unwrap();
 
-        let dir = state_dir(&paths, Brand::Feishu);
+        let dir = state_dir(&paths, Brand::Feishu, "myconn");
+        assert!(
+            dir.ends_with("feishu-browser-accounts/myconn"),
+            "feishu state dir must end with feishu-browser-accounts/myconn, got {}",
+            dir.display()
+        );
+        assert!(
+            dir.starts_with(&paths.user_config_dir),
+            "feishu state dir must live under user_config_dir, got {}",
+            dir.display()
+        );
         let loaded = load_config_from_dir(&dir).unwrap().expect("config must exist");
         assert_eq!(loaded.brand, "feishu-browser");
-        assert_eq!(loaded.connection, "my-feishu");
+        assert_eq!(loaded.connection, "myconn");
         assert_eq!(
             brand_from_config_str(&loaded.brand),
             Some(Brand::Feishu),
@@ -1027,7 +1057,7 @@ mod config_tests {
     fn load_config_returns_none_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = test_paths(tmp.path());
-        let dir = state_dir(&paths, Brand::Lark);
+        let dir = state_dir(&paths, Brand::Lark, "myconn");
         // dir may not even exist — should return None without error
         let result = load_config_from_dir(&dir).unwrap();
         assert!(result.is_none(), "missing config.toml must return None");
