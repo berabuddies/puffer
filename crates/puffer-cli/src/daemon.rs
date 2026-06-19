@@ -1479,6 +1479,9 @@ async fn dispatch_request(
         "monitor_history_list" | "task_monitor_history_list" => respond!(
             crate::daemon_workflows::handle_monitor_history_list(&state.paths, &params)
         ),
+        "telegram_diagnostics_export" | "task_telegram_diagnostics_export" => respond!(
+            crate::daemon_workflows::handle_telegram_diagnostics_export(&state.paths, &params)
+        ),
         "workflow_binding_delete" => respond!(
             crate::daemon_workflows::handle_workflow_binding_delete(&state.paths, &params)
         ),
