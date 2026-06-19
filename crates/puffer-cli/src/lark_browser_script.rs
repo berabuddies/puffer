@@ -1,12 +1,16 @@
 //! JS snippets for the Lark/Feishu browser connector.
 
-/// Returns logged-in status for the Lark/Feishu web app. Logged in once the
-/// messenger shell is present and we're no longer on the accounts/login page.
-/// Uses only stable hooks (no hashed classes).
+/// Returns logged-in status for the Lark/Feishu web app. After login the web app
+/// redirects to a PER-TENANT subdomain (e.g. `plarkush1ube0xnn.usttp.larksuite.com`)
+/// and lands on the default app (Drive), NOT the messenger — so login must NOT be
+/// gated on the messenger shell. Detect login by being on a tenant brand host, off
+/// the known pre-login/entry/login hosts (`accounts.`/`www.`/`web.`/…) and login paths.
 pub(crate) const LARK_LOGIN_MARKER_JS: &str = r#"(() => {
-  const onLogin = /accounts\.(larksuite|feishu)\.(com|cn)\/.*login/i.test(location.href);
-  const shell = !!document.querySelector('.lark_feedMainList, .a11y_feed_main_list, [class*="page-content-messenger"]');
-  return JSON.stringify({ loggedIn: shell && !onLogin, href: location.href });
+  const h = location.host, p = location.pathname;
+  const preLogin = /^(accounts|www|web|passport|sso|open|o|id)\./i.test(h);
+  const onBrand = /(larksuite\.com|feishu\.cn)$/i.test(h);
+  const onLoginPath = /\/(login|sso|passport|accounts)/i.test(p);
+  return JSON.stringify({ loggedIn: onBrand && !preLogin && !onLoginPath, href: location.href });
 })()"#;
 
 /// Reads every conversation feed card (stable `[data-feed-id]` hook). Returns
@@ -17,6 +21,14 @@ pub(crate) const LARK_LOGIN_MARKER_JS: &str = r#"(() => {
 /// DOM (same stable selectors as the login marker), so callers can distinguish
 /// "page not yet loaded / logged out" from "loaded but 0 conversations".
 pub(crate) const LARK_FEED_SCRIPT: &str = r#"(() => {
+  // The connector opens the web root, which lands on the default app (Drive) after
+  // login; the message feed only exists under /next/messenger/. Navigate there once
+  // (using the live tenant origin); the next poll finds the feed. Report loaded:false
+  // while navigating so first-poll init isn't seeded on a non-messenger page.
+  if (!/\/next\/messenger/.test(location.pathname)) {
+    try { location.assign(location.origin + '/next/messenger/'); } catch (e) {}
+    return JSON.stringify({ loaded: false, rows: [], navigating: true });
+  }
   const loaded = !!document.querySelector('.lark_feedMainList, .a11y_feed_main_list, [class*="page-content-messenger"]');
   const cards = Array.from(document.querySelectorAll('[data-feed-id]'));
   const rows = cards.map(c => {
