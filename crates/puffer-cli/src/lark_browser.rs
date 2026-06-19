@@ -84,6 +84,13 @@ fn brand_from_config_str(s: &str) -> Option<Brand> {
 /// Persisted Lark/Feishu browser connector configuration.
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LarkBrowserConfig {
+    /// The user workspace the connection was created in. The subscriber MUST
+    /// connect to the browser daemon for THIS workspace (not the subscriber's
+    /// cwd, which is the manifest dir) — otherwise it discovers the wrong
+    /// workspace, fails to find the running daemon, and tries (and fails) to
+    /// start its own. Mirrors `GmailBrowserConfig::workspace_root`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace_root: Option<PathBuf>,
     #[serde(default)]
     pub(crate) brand: String,
     #[serde(default)]
@@ -166,10 +173,12 @@ pub(crate) fn state_dir(
 /// so the subscriber's `load_config_from_dir` can find it on next poll.
 pub(crate) fn save_config(
     paths: &puffer_config::ConfigPaths,
+    workspace_root: &Path,
     brand: Brand,
     connection_slug: &str,
 ) -> Result<LarkBrowserConfig> {
     let config = LarkBrowserConfig {
+        workspace_root: Some(workspace_root.to_path_buf()),
         brand: brand.slug().to_string(),
         connection: connection_slug.to_string(),
     };
@@ -297,12 +306,18 @@ fn emit_control(topic: &str, kind: &str, payload: Value) -> Result<()> {
 }
 
 fn ensure_browser_daemon<'a>(
+    config: &LarkBrowserConfig,
     handshake: &'a mut Option<crate::daemon::Handshake>,
 ) -> Result<&'a crate::daemon::Handshake> {
     if handshake.is_none() {
-        let paths = ConfigPaths::discover(
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        );
+        // Connect to the browser daemon for the connection's WORKSPACE, not the
+        // subscriber's cwd (the manifest dir) — otherwise we discover the wrong
+        // workspace and fail to find the already-running daemon. Mirrors gmail.
+        let workspace_root = config
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let paths = ConfigPaths::discover(workspace_root);
         eprintln!(
             "lark-browser: browser_daemon_connect workspace_root={} user_config_dir={}",
             paths.workspace_root.display(),
@@ -503,7 +518,7 @@ fn poll_once_feed(
     seen: &mut SeenState,
     handshake: &mut Option<crate::daemon::Handshake>,
 ) -> Result<()> {
-    let handshake_ref = ensure_browser_daemon(handshake)?;
+    let handshake_ref = ensure_browser_daemon(config, handshake)?;
 
     let session_id = format!("lark-browser-{}", safe_session_part(&env.topic));
 
@@ -1000,7 +1015,8 @@ mod config_tests {
     fn save_and_load_config_round_trip_lark() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = test_paths(tmp.path());
-        save_config(&paths, Brand::Lark, "myconn").unwrap();
+        let ws = std::path::Path::new("/workspace/ws");
+        save_config(&paths, ws, Brand::Lark, "myconn").unwrap();
 
         let dir = state_dir(&paths, Brand::Lark, "myconn");
         // The state dir MUST live under user_config_dir/lark-browser-accounts/<conn>,
@@ -1019,6 +1035,9 @@ mod config_tests {
         let loaded = load_config_from_dir(&dir).unwrap().expect("config must exist");
         assert_eq!(loaded.brand, "lark-browser");
         assert_eq!(loaded.connection, "myconn");
+        // workspace_root must round-trip so the subscriber connects to the right
+        // browser daemon (not the manifest-dir cwd).
+        assert_eq!(loaded.workspace_root.as_deref(), Some(ws));
         assert_eq!(
             brand_from_config_str(&loaded.brand),
             Some(Brand::Lark),
@@ -1030,7 +1049,7 @@ mod config_tests {
     fn save_and_load_config_round_trip_feishu() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = test_paths(tmp.path());
-        save_config(&paths, Brand::Feishu, "myconn").unwrap();
+        save_config(&paths, std::path::Path::new("/workspace/ws"), Brand::Feishu, "myconn").unwrap();
 
         let dir = state_dir(&paths, Brand::Feishu, "myconn");
         assert!(

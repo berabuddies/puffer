@@ -79,6 +79,7 @@ impl SetupFlow {
         self.poll_until_logged_in()?;
         crate::lark_browser::save_config(
             self.state.config_paths(),
+            self.state.cwd_path(),
             self.brand,
             &self.connection_slug,
         )?;

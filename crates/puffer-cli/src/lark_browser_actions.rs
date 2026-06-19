@@ -18,15 +18,15 @@ const LARK_EVALUATE_INTERVAL: Duration = Duration::from_millis(500);
 /// profile. Dispatches on `action` ∈ {`send_message`, `read_history`, `react`}.
 pub(super) fn handle_action(
     env: &SubscriberEnv,
-    _config: &LarkBrowserConfig,
+    config: &LarkBrowserConfig,
     handshake: &mut Option<crate::daemon::Handshake>,
     action: &str,
     input: &Value,
 ) -> Result<Value> {
     match action {
-        "send_message" => lark_send_message(env, handshake, action, input),
-        "read_history" => lark_read_history(env, handshake, action, input),
-        "react" => lark_react(env, handshake, action, input),
+        "send_message" => lark_send_message(env, config, handshake, action, input),
+        "read_history" => lark_read_history(env, config, handshake, action, input),
+        "react" => lark_react(env, config, handshake, action, input),
         other => anyhow::bail!("unsupported lark-browser action `{other}`"),
     }
 }
@@ -90,12 +90,13 @@ pub(super) fn react_fields(input: &Value) -> Result<ReactFields> {
 
 fn lark_send_message(
     env: &SubscriberEnv,
+    config: &LarkBrowserConfig,
     handshake: &mut Option<crate::daemon::Handshake>,
     action: &str,
     input: &Value,
 ) -> Result<Value> {
     let fields = send_message_fields(input)?;
-    let handshake_ref = ensure_browser_daemon(handshake)?;
+    let handshake_ref = ensure_browser_daemon(config, handshake)?;
     // Navigate to the target chat feed card by data-feed-id, then type and send.
     let result = evaluate_lark_script(
         env,
@@ -122,12 +123,13 @@ fn lark_send_message(
 
 fn lark_read_history(
     env: &SubscriberEnv,
+    config: &LarkBrowserConfig,
     handshake: &mut Option<crate::daemon::Handshake>,
     action: &str,
     input: &Value,
 ) -> Result<Value> {
     let fields = read_history_fields(input)?;
-    let handshake_ref = ensure_browser_daemon(handshake)?;
+    let handshake_ref = ensure_browser_daemon(config, handshake)?;
 
     // Install the observer (idempotent) after navigating to the chat.
     let nav = evaluate_lark_script(
@@ -180,12 +182,13 @@ fn lark_read_history(
 
 fn lark_react(
     env: &SubscriberEnv,
+    config: &LarkBrowserConfig,
     handshake: &mut Option<crate::daemon::Handshake>,
     action: &str,
     input: &Value,
 ) -> Result<Value> {
     let fields = react_fields(input)?;
-    let handshake_ref = ensure_browser_daemon(handshake)?;
+    let handshake_ref = ensure_browser_daemon(config, handshake)?;
     let result = evaluate_lark_script(
         env,
         handshake_ref,
