@@ -1,3 +1,4 @@
+use super::platform_media;
 use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_config::MediaGenerationConfig;
@@ -54,6 +55,12 @@ pub fn execute_video_generation(
 ) -> Result<String> {
     let parsed: VideoGenerationInput =
         serde_json::from_value(input).context("invalid VideoGeneration input")?;
+    if let Some(platform) = state.config.platform_media.as_ref() {
+        let request = build_platform_video_request(cwd, parsed, state.config.media.video.as_ref())?;
+        let result = platform_media::generate_platform_media(platform, request)?;
+        let output = platform_media::platform_media_tool_output(&result)?;
+        return Ok(serde_json::to_string_pretty(&output)?);
+    }
     let settings = state
         .config
         .media
@@ -92,6 +99,28 @@ fn build_video_request(
         image_references,
         parameters,
         purpose: input.purpose,
+    })
+}
+
+fn build_platform_video_request(
+    cwd: &Path,
+    input: VideoGenerationInput,
+    settings: Option<&MediaGenerationConfig>,
+) -> Result<platform_media::PlatformMediaGenerateRequest> {
+    let prompt = prompt_text(cwd, &input.prompt)?;
+    let image_references = validate_video_image_references(&input.image_references)?;
+    let mut parameters = settings
+        .map(|settings| settings.selections.clone())
+        .unwrap_or_default();
+    parameters.extend(input.parameters);
+    Ok(platform_media::PlatformMediaGenerateRequest {
+        kind: "video".to_string(),
+        prompt,
+        count: None,
+        image_references,
+        parameter_overrides: parameters,
+        turn_id: None,
+        tool_call_id: None,
     })
 }
 
@@ -503,6 +532,37 @@ mod tests {
         (base_url, handle)
     }
 
+    fn spawn_platform_media_server(kind: &'static str) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "jobId": format!("job-{kind}-1"),
+                "assetId": format!("asset-{kind}-1"),
+                "mediaType": kind,
+                "status": "pending",
+                "providerType": "byteplus",
+                "upstreamId": "upstream-1",
+                "modelId": "seedance-pro",
+                "prompt": "make a ship launch video",
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (
+            format!("http://{address}/v1/internal/managed-agents/agent-1/media/generate"),
+            handle,
+        )
+    }
+
     fn video_generation_tool_definition() -> ToolDefinition {
         ToolDefinition {
             id: "VideoGeneration".to_string(),
@@ -870,6 +930,79 @@ mod tests {
         let artifact_path = std::path::PathBuf::from(artifacts[0]["path"].as_str().unwrap());
         assert_eq!(std::fs::read(&artifact_path).unwrap(), b"mp4-bytes");
         assert!(artifact_path.starts_with(dir.path().join(".puffer/media/videos")));
+    }
+
+    #[test]
+    fn video_generation_uses_platform_media_when_configured() {
+        let (endpoint, server) = spawn_platform_media_server("video");
+        let dir = tempdir().unwrap();
+        let mut state = test_state(Some(video_settings()), dir.path());
+        state.config.platform_media = Some(puffer_config::PlatformMediaConfig {
+            endpoint,
+            auth_token_env: "PUFFER_TEST_VIDEO_AGENT_TOKEN".to_string(),
+            agent_id: "agent-1".to_string(),
+        });
+        std::env::set_var("PUFFER_TEST_VIDEO_AGENT_TOKEN", "agent-token");
+
+        let output = execute_video_generation(
+            &mut state,
+            dir.path(),
+            json!({
+                "prompt": "make a ship launch video",
+                "imageReferences": ["https://example.com/frame.png"],
+                "parameters": { "aspect_ratio": "1:1" }
+            }),
+            None,
+        )
+        .expect("platform video output");
+
+        let request_text = server.join().expect("server");
+        std::env::remove_var("PUFFER_TEST_VIDEO_AGENT_TOKEN");
+        assert!(request_text
+            .starts_with("POST /v1/internal/managed-agents/agent-1/media/generate HTTP/1.1"));
+        assert!(request_text
+            .to_ascii_lowercase()
+            .contains("authorization: bearer agent-token"));
+        assert!(request_text.contains("\"kind\":\"video\""));
+        assert!(request_text.contains("\"imageReferences\":[\"https://example.com/frame.png\"]"));
+        assert!(request_text.contains("\"aspect_ratio\":\"1:1\""));
+        assert!(output.contains("\"assetId\""));
+    }
+
+    #[test]
+    fn video_generation_uses_platform_media_without_local_media_selection() {
+        let (endpoint, server) = spawn_platform_media_server("video");
+        let dir = tempdir().unwrap();
+        let mut state = test_state(None, dir.path());
+        state.config.platform_media = Some(puffer_config::PlatformMediaConfig {
+            endpoint,
+            auth_token_env: "PUFFER_TEST_VIDEO_NO_LOCAL_TOKEN".to_string(),
+            agent_id: "agent-1".to_string(),
+        });
+        std::env::set_var("PUFFER_TEST_VIDEO_NO_LOCAL_TOKEN", "agent-token");
+
+        let output = execute_video_generation(
+            &mut state,
+            dir.path(),
+            json!({
+                "prompt": "make a ship launch video",
+                "imageReferences": ["https://example.com/frame.png"],
+                "parameters": { "aspect_ratio": "1:1" }
+            }),
+            None,
+        );
+        if let Err(error) = &output {
+            std::env::remove_var("PUFFER_TEST_VIDEO_NO_LOCAL_TOKEN");
+            panic!("platform video output without local settings: {error}");
+        }
+
+        let request_text = server.join().expect("server");
+        std::env::remove_var("PUFFER_TEST_VIDEO_NO_LOCAL_TOKEN");
+        assert!(request_text.contains("\"kind\":\"video\""));
+        assert!(request_text.contains("\"prompt\":\"make a ship launch video\""));
+        assert!(request_text.contains("\"imageReferences\":[\"https://example.com/frame.png\"]"));
+        assert!(request_text.contains("\"aspect_ratio\":\"1:1\""));
+        assert!(output.expect("output").contains("\"assetId\""));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use super::platform_media;
 use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_config::MediaGenerationConfig;
@@ -81,6 +82,12 @@ pub fn execute_image_generation(
 ) -> Result<String> {
     let parsed: ImageGenerationInput =
         serde_json::from_value(input).context("invalid ImageGeneration input")?;
+    if let Some(platform) = state.config.platform_media.as_ref() {
+        let request = build_platform_image_request(cwd, parsed, state.config.media.image.as_ref())?;
+        let result = platform_media::generate_platform_media(platform, request)?;
+        let output = platform_media::platform_media_tool_output(&result)?;
+        return Ok(serde_json::to_string_pretty(&output)?);
+    }
     let settings = state
         .config
         .media
@@ -148,6 +155,28 @@ fn build_image_request(
         count: input.count,
         purpose: input.purpose,
         retry_from_error: input.retry_from_error,
+    })
+}
+
+fn build_platform_image_request(
+    cwd: &Path,
+    input: ImageGenerationInput,
+    settings: Option<&MediaGenerationConfig>,
+) -> Result<platform_media::PlatformMediaGenerateRequest> {
+    let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
+    let mut parameters = settings
+        .map(|settings| settings.selections.clone())
+        .unwrap_or_default();
+    apply_count_override(&mut parameters, input.count)?;
+    apply_aspect_parameter(&mut parameters, input.aspect.as_deref())?;
+    Ok(platform_media::PlatformMediaGenerateRequest {
+        kind: "image".to_string(),
+        prompt,
+        count: input.count,
+        image_references: Vec::new(),
+        parameter_overrides: parameters,
+        turn_id: None,
+        tool_call_id: None,
     })
 }
 
@@ -328,6 +357,25 @@ mod tests {
         )
     }
 
+    fn test_state_without_image_settings(cwd: &Path) -> AppState {
+        AppState::new(
+            puffer_config::PufferConfig::default(),
+            cwd.to_path_buf(),
+            SessionMetadata {
+                id: Uuid::new_v4(),
+                display_name: None,
+                generated_title: None,
+                cwd: cwd.to_path_buf(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        )
+    }
+
     fn registry_with_provider(base_url: String) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
         registry.register(ProviderDescriptor {
@@ -444,9 +492,45 @@ mod tests {
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {
-        let mut buffer = [0_u8; 8192];
-        let size = stream.read(&mut buffer).expect("read request");
-        String::from_utf8_lossy(&buffer[..size]).to_string()
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let size = stream.read(&mut buffer).expect("read request");
+            if size == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..size]);
+            let Some(header_end) = header_end(&request) else {
+                continue;
+            };
+            let content_length = content_length(&request[..header_end]).unwrap_or(0);
+            let expected_size = header_end + b"\r\n\r\n".len() + content_length;
+            while request.len() < expected_size {
+                let size = stream.read(&mut buffer).expect("read request body");
+                if size == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..size]);
+            }
+            break;
+        }
+        String::from_utf8_lossy(&request).to_string()
+    }
+
+    fn header_end(request: &[u8]) -> Option<usize> {
+        request
+            .windows(b"\r\n\r\n".len())
+            .position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &[u8]) -> Option<usize> {
+        let headers = String::from_utf8_lossy(headers);
+        headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
     }
 
     fn spawn_image_generation_server() -> (String, thread::JoinHandle<String>) {
@@ -468,6 +552,37 @@ mod tests {
             request_text
         });
         (format!("http://{address}"), handle)
+    }
+
+    fn spawn_platform_media_server(kind: &'static str) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request_text = read_http_request(&mut stream);
+            let body = json!({
+                "jobId": format!("job-{kind}-1"),
+                "assetId": format!("asset-{kind}-1"),
+                "mediaType": kind,
+                "status": "stored",
+                "providerType": "byteplus",
+                "upstreamId": "upstream-1",
+                "modelId": "seedream-4",
+                "prompt": "chair",
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("response");
+            request_text
+        });
+        (
+            format!("http://{address}/v1/internal/managed-agents/agent-1/media/generate"),
+            handle,
+        )
     }
 
     #[path = "image_generation_tool_tests.rs"]
@@ -833,6 +948,71 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("stale-image-model"), "{error}");
+    }
+
+    #[test]
+    fn image_generation_uses_platform_media_when_configured() {
+        let (endpoint, server) = spawn_platform_media_server("image");
+        let dir = tempdir().unwrap();
+        let mut state = test_state(image_settings(), dir.path());
+        state.config.platform_media = Some(puffer_config::PlatformMediaConfig {
+            endpoint,
+            auth_token_env: "PUFFER_TEST_IMAGE_AGENT_TOKEN".to_string(),
+            agent_id: "agent-1".to_string(),
+        });
+        std::env::set_var("PUFFER_TEST_IMAGE_AGENT_TOKEN", "agent-token");
+
+        let output = execute_image_generation(
+            &mut state,
+            dir.path(),
+            json!({ "prompt": "chair", "count": 1 }),
+            None,
+        )
+        .expect("platform image output");
+
+        let request_text = server.join().expect("server");
+        std::env::remove_var("PUFFER_TEST_IMAGE_AGENT_TOKEN");
+        assert!(request_text
+            .starts_with("POST /v1/internal/managed-agents/agent-1/media/generate HTTP/1.1"));
+        assert!(request_text
+            .to_ascii_lowercase()
+            .contains("authorization: bearer agent-token"));
+        assert!(request_text.contains("\"kind\":\"image\""));
+        assert!(request_text.contains("\"prompt\":\"chair\""));
+        assert!(request_text.contains("\"count\":1"));
+        assert!(output.contains("\"assetId\""));
+    }
+
+    #[test]
+    fn image_generation_uses_platform_media_without_local_media_selection() {
+        let (endpoint, server) = spawn_platform_media_server("image");
+        let dir = tempdir().unwrap();
+        let mut state = test_state_without_image_settings(dir.path());
+        state.config.platform_media = Some(puffer_config::PlatformMediaConfig {
+            endpoint,
+            auth_token_env: "PUFFER_TEST_IMAGE_NO_LOCAL_TOKEN".to_string(),
+            agent_id: "agent-1".to_string(),
+        });
+        std::env::set_var("PUFFER_TEST_IMAGE_NO_LOCAL_TOKEN", "agent-token");
+
+        let output = execute_image_generation(
+            &mut state,
+            dir.path(),
+            json!({ "prompt": "chair", "count": 1, "aspect": "16:9" }),
+            None,
+        );
+        if let Err(error) = &output {
+            std::env::remove_var("PUFFER_TEST_IMAGE_NO_LOCAL_TOKEN");
+            panic!("platform image output without local settings: {error}");
+        }
+
+        let request_text = server.join().expect("server");
+        std::env::remove_var("PUFFER_TEST_IMAGE_NO_LOCAL_TOKEN");
+        assert!(request_text.contains("\"kind\":\"image\""));
+        assert!(request_text.contains("\"prompt\":\"chair\""));
+        assert!(request_text.contains("\"count\":1"));
+        assert!(request_text.contains("\"ratio\":\"16:9\""));
+        assert!(output.expect("output").contains("\"assetId\""));
     }
 
     #[test]

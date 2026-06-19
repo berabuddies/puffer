@@ -525,6 +525,7 @@ fn app_state_defaults_expose_command_state() {
             browser: puffer_config::BrowserConfig::default(),
             network: puffer_config::NetworkConfig::default(),
             media: puffer_config::MediaConfig::default(),
+            platform_media: None,
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),

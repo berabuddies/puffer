@@ -30,6 +30,7 @@ pub mod modal_action;
 pub mod monitor_reply_draft;
 pub mod monitor_reply_send;
 pub mod native_mcp_action;
+pub mod platform_media;
 pub mod powershell;
 pub mod process_control;
 pub mod recall;

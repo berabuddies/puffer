@@ -65,6 +65,8 @@ pub struct PufferConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub media: MediaConfig,
+    #[serde(default)]
+    pub platform_media: Option<PlatformMediaConfig>,
     pub mascot: MascotConfig,
     pub ui: UiConfig,
     /// When set, the runtime constructs a remote `RemoteToolRunner` against
@@ -196,6 +198,13 @@ pub struct MediaGenerationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlatformMediaConfig {
+    pub endpoint: String,
+    pub auth_token_env: String,
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryConfig {
     #[serde(default = "default_memory_enabled")]
     pub enabled: bool,
@@ -298,6 +307,7 @@ impl Default for PufferConfig {
             browser: BrowserConfig::default(),
             network: NetworkConfig::default(),
             media: MediaConfig::default(),
+            platform_media: None,
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),
@@ -753,6 +763,32 @@ parameters = { size = "1024x1024" }
         let config = MediaConfig::default();
         assert!(config.image.is_none());
         assert!(config.video.is_none());
+    }
+
+    #[test]
+    fn platform_media_config_parses_endpoint_and_token_env() {
+        let config: PufferConfig = toml::from_str(
+            r#"
+        app_name = "Puffer"
+        theme = "system"
+        mascot = { id = "none", display_name = "None", enabled = false }
+        ui = { no_alt_screen = false, tmux_golden_mode = false }
+
+        [platform_media]
+        endpoint = "http://api.internal/v1/internal/managed-agents/agent-1/media/generate"
+        auth_token_env = "AGENTENV_API_KEY"
+        agent_id = "agent-1"
+        "#,
+        )
+        .expect("config parses");
+
+        let platform = config.platform_media.expect("platform media");
+        assert_eq!(
+            platform.endpoint,
+            "http://api.internal/v1/internal/managed-agents/agent-1/media/generate"
+        );
+        assert_eq!(platform.auth_token_env, "AGENTENV_API_KEY");
+        assert_eq!(platform.agent_id, "agent-1");
     }
 
     #[test]
