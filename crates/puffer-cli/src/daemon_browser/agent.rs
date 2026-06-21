@@ -13,7 +13,8 @@ use super::dom_inspect::dom_inspect_expression;
 use super::params::{optional_u32, required_string, required_string_array};
 use super::ref_resolution::{
     fill_expression, focus_expression, hosted_fill_focus_check_expression,
-    hosted_fill_point_expression, scroll_into_view_expression, select_expression,
+    hosted_fill_point_expression, in_frame_prepare_fill_fn, in_frame_readback_fn,
+    in_frame_select_fn, in_frame_set_checked_fn, scroll_into_view_expression, select_expression,
     set_checkable_state_expression, target_point_expression, upload_input_handle_expression,
 };
 use super::screenshot::{parse_agent_screenshot_options, BrowserElementRef};
@@ -498,8 +499,12 @@ impl BrowserRegistry {
     /// Focuses an element ref from the last agent snapshot.
     pub(crate) fn agent_focus(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(focus_expression(&target)?)?;
+        let session = self.get(backend_session_id)?;
+        if let Some(backend_node_id) = in_frame_backend_node_id(&target) {
+            session.cdp_call("DOM.focus", json!({ "backendNodeId": backend_node_id }))?;
+            return Ok(());
+        }
+        session.evaluate(focus_expression(&target)?)?;
         Ok(())
     }
 
@@ -520,6 +525,9 @@ impl BrowserRegistry {
     ) -> Result<Value> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
         let session = self.get(backend_session_id)?;
+        if target.in_frame {
+            return in_frame_fill(&session, &target, text);
+        }
         let outcome = session.evaluate(fill_expression(&target, text)?)?.value;
         let hosted = outcome
             .get("hostedFrameFill")
@@ -547,8 +555,11 @@ impl BrowserRegistry {
         value: &str,
     ) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(select_expression(&target, value)?)?;
+        let session = self.get(backend_session_id)?;
+        if target.in_frame {
+            return in_frame_select(&session, &target, value);
+        }
+        session.evaluate(select_expression(&target, value)?)?;
         Ok(())
     }
 
@@ -567,17 +578,30 @@ impl BrowserRegistry {
 
     /// Checks one checkbox-like ref from the last agent snapshot.
     pub(crate) fn agent_check(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(set_checkable_state_expression(&target, true)?)?;
-        Ok(())
+        self.set_checkable(backend_session_id, ref_id, true)
     }
 
     /// Unchecks one checkbox-like ref from the last agent snapshot.
     pub(crate) fn agent_uncheck(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
+        self.set_checkable(backend_session_id, ref_id, false)
+    }
+
+    fn set_checkable(&self, backend_session_id: &str, ref_id: &str, checked: bool) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        self.get(backend_session_id)?
-            .evaluate(set_checkable_state_expression(&target, false)?)?;
+        let session = self.get(backend_session_id)?;
+        if let Some(backend_node_id) = in_frame_backend_node_id(&target) {
+            let object_id = resolve_in_frame_object_id(&session, backend_node_id)?;
+            session.cdp_call(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration": in_frame_set_checked_fn(checked),
+                    "returnByValue": true,
+                }),
+            )?;
+            return Ok(());
+        }
+        session.evaluate(set_checkable_state_expression(&target, checked)?)?;
         Ok(())
     }
 
@@ -640,6 +664,12 @@ impl BrowserRegistry {
         ref_id: &str,
     ) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
+        // An in-frame ref already carries a captured top-viewport quad center, so
+        // it was rendered and in view at snapshot time; the top-document scroll
+        // helper can't reach it. Treat scroll-into-view as a no-op.
+        if target.in_frame {
+            return Ok(());
+        }
         self.get(backend_session_id)?
             .evaluate(scroll_into_view_expression(&target)?)?;
         Ok(())
@@ -656,6 +686,15 @@ impl BrowserRegistry {
 
     fn agent_target_point(&self, backend_session_id: &str, ref_id: &str) -> Result<(f64, f64)> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
+        if target.in_frame {
+            // The top document can't re-resolve a cross-origin node, so trust the
+            // field's quad center captured at snapshot time. A coordinate click
+            // there is routed into the OOPIF by browser-side hit testing.
+            if target.x.is_finite() && target.y.is_finite() {
+                return Ok((target.x, target.y));
+            }
+            bail!("in-frame ref `{ref_id}` has no finite viewport point; re-snapshot");
+        }
         let evaluated = self
             .get(backend_session_id)?
             .evaluate(target_point_expression(&target)?)?;
@@ -674,6 +713,200 @@ impl BrowserRegistry {
         }
         Ok((x, y))
     }
+}
+
+/// Fills one field that lives inside a cross-origin payment iframe (#656),
+/// addressed by CDP node identity because the top document can't see into the
+/// OOPIF. Focuses the field via `DOM.focus`, verifies focus actually landed
+/// (the #580 guard) and clears it, then types one real keystroke per character
+/// (`Input.dispatchKeyEvent`) — a guarded widget like Amazon's APX reverts a
+/// bulk `Input.insertText` value, so per-character typing is required. Finally
+/// reads the value back to confirm it persisted, which — unlike a top-document
+/// hosted fill — is possible here.
+fn in_frame_fill(session: &BrowserSession, target: &BrowserElementRef, text: &str) -> Result<Value> {
+    let backend_node_id = target
+        .backend_node_id
+        .context("in-frame ref is missing a backend node id; re-snapshot")?;
+    session
+        .cdp_call("DOM.focus", json!({ "backendNodeId": backend_node_id }))
+        .context("focus the in-frame field")?;
+    let object_id = resolve_in_frame_object_id(session, backend_node_id)?;
+    let prepared = session.cdp_call(
+        "Runtime.callFunctionOn",
+        json!({
+            "objectId": object_id,
+            "functionDeclaration": in_frame_prepare_fill_fn(),
+            "returnByValue": true,
+        }),
+    )?;
+    let focused = prepared
+        .pointer("/result/value/focused")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !focused {
+        bail!(
+            "fill failed: focus did not land on the in-frame field (it may be covered or still \
+             loading). No text was sent."
+        );
+    }
+    // Type one real keystroke per character instead of a single Input.insertText.
+    // A guarded card widget (e.g. Amazon's APX) builds its submitted value from
+    // genuine keydown events and reverts a bulk programmatic/insertText value, so
+    // insertText leaves the field empty at submit time even though it briefly
+    // shows in the DOM (#656 follow-up).
+    for ch in text.chars() {
+        type_in_frame_char(session, ch)?;
+    }
+    // Let the widget's re-render settle, then read the value back. Unlike a
+    // top-document hosted fill, an in-frame field's value CAN be read — so a
+    // reverted/guarded fill is caught honestly instead of being reported as a
+    // false success (which previously caused retries until Amazon rate-limited).
+    thread::sleep(Duration::from_millis(180));
+    let readback = session.cdp_call(
+        "Runtime.callFunctionOn",
+        json!({
+            "objectId": object_id,
+            "functionDeclaration": in_frame_readback_fn(),
+            "returnByValue": true,
+        }),
+    )?;
+    let value = readback
+        .pointer("/result/value/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !text.is_empty() && value.is_empty() {
+        bail!(
+            "fill failed: the in-frame field reverted to empty after typing — the payment widget \
+             rejected the input and did not keep it. No value stuck."
+        );
+    }
+    Ok(json!({
+        "ok": true,
+        "mode": "inFrame",
+        "note": "Typed into a field inside a cross-origin payment iframe and confirmed the value \
+                 persisted."
+    }))
+}
+
+/// Types one character into the focused in-frame field as a real keystroke
+/// (`keyDown` carrying the text, then `keyUp`). `nativeVirtualKeyCode` is never
+/// set (see input.rs / #636), so this stays on the renderer-only path.
+fn type_in_frame_char(session: &BrowserSession, ch: char) -> Result<()> {
+    let key = ch.to_string();
+    let code = dom_code_for_char(ch);
+    session.input(BrowserInputEvent::Key {
+        event_type: "keyDown".to_string(),
+        key: key.clone(),
+        code: code.clone(),
+        text: Some(key.clone()),
+        modifiers: 0,
+        commands: Vec::new(),
+    })?;
+    session.input(BrowserInputEvent::Key {
+        event_type: "keyUp".to_string(),
+        key,
+        code,
+        text: None,
+        modifiers: 0,
+        commands: Vec::new(),
+    })
+}
+
+/// Best-effort DOM `code` (e.g. `Digit4`, `KeyA`) for a character so guarded
+/// fields that inspect `event.code`/`keyCode` see a plausible key. Empty for
+/// other characters; the carried `text` still inserts them.
+fn dom_code_for_char(ch: char) -> String {
+    if ch.is_ascii_digit() {
+        format!("Digit{ch}")
+    } else if ch.is_ascii_alphabetic() {
+        format!("Key{}", ch.to_ascii_uppercase())
+    } else {
+        String::new()
+    }
+}
+
+/// Selects one option on a native `<select>` inside a cross-origin payment
+/// iframe (the Amazon expiry month/year). A native popup can't be driven by
+/// coordinate clicks, so the value is set inside the frame via `callFunctionOn`,
+/// firing `input`/`change`. Fails loudly when no option matches (#580: never
+/// claim success silently).
+fn in_frame_select(session: &BrowserSession, target: &BrowserElementRef, value: &str) -> Result<()> {
+    let backend_node_id = target
+        .backend_node_id
+        .context("in-frame ref is missing a backend node id; re-snapshot")?;
+    let object_id = resolve_in_frame_object_id(session, backend_node_id)?;
+    let outcome = session.cdp_call(
+        "Runtime.callFunctionOn",
+        json!({
+            "objectId": object_id,
+            "functionDeclaration": in_frame_select_fn(value)?,
+            "returnByValue": true,
+        }),
+    )?;
+    let matched = outcome
+        .pointer("/result/value/matched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !matched {
+        let available = outcome
+            .pointer("/result/value/available")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if available.is_empty() {
+            bail!("select failed: no option matched \"{value}\" in the in-frame dropdown");
+        }
+        bail!("select failed: no option matched \"{value}\". Available: {available}");
+    }
+    let selected = outcome
+        .pointer("/result/value/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    // Confirm the selection persisted: a guarded/controlled dropdown can revert a
+    // programmatic value after re-render, which would otherwise submit as the
+    // default (#656 follow-up). Read it back after a beat and fail honestly.
+    thread::sleep(Duration::from_millis(180));
+    let readback = session.cdp_call(
+        "Runtime.callFunctionOn",
+        json!({
+            "objectId": object_id,
+            "functionDeclaration": in_frame_readback_fn(),
+            "returnByValue": true,
+        }),
+    )?;
+    let now = readback
+        .pointer("/result/value/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if now != selected {
+        bail!(
+            "select failed: the in-frame dropdown reverted after selecting \"{value}\" (the widget \
+             did not keep the selection)."
+        );
+    }
+    Ok(())
+}
+
+/// Returns the CDP backend node id when a ref points inside a cross-origin
+/// payment iframe, so ref actions can route through node-identity CDP calls
+/// instead of the top-document `findTarget` path that can't reach it.
+fn in_frame_backend_node_id(target: &BrowserElementRef) -> Option<i64> {
+    if target.in_frame {
+        target.backend_node_id
+    } else {
+        None
+    }
+}
+
+/// Resolves a backend node inside a cross-origin frame to a JS object id in that
+/// frame's own context, so `Runtime.callFunctionOn` runs inside the OOPIF.
+fn resolve_in_frame_object_id(session: &BrowserSession, backend_node_id: i64) -> Result<String> {
+    let resolved = session.cdp_call("DOM.resolveNode", json!({ "backendNodeId": backend_node_id }))?;
+    resolved
+        .pointer("/object/objectId")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .context("in-frame node could not be resolved to a script object")
 }
 
 /// Completes a fill that targets a hosted (cross-origin) field iframe.

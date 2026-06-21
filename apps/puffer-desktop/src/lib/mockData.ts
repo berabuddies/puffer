@@ -651,6 +651,7 @@ export const mockSettingsSnapshot: SettingsSnapshot = {
     defaultProvider: "anthropic",
     defaultModel: "claude-sonnet-4-5",
     openaiBaseUrl: null,
+    openaiDisplayName: null,
     theme: "puffer",
     media: {
       image: null,

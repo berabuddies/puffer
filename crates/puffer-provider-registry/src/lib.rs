@@ -1,6 +1,8 @@
 mod auth;
 mod discovery;
+mod discovery_cache;
 mod import;
+mod input_capability;
 mod media_capability;
 mod model;
 mod registry;

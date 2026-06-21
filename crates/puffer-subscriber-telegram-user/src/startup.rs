@@ -12,14 +12,14 @@ use grammers_client::{
 use tracing::{info, warn};
 
 use crate::delivery::{emit_message_if_new, DeliveryCursor};
+use crate::history_cache::{TelegramHistoryCache, DEFAULT_HISTORY_MESSAGES_PER_CHAT};
 use crate::notifications::NotificationMuteCache;
-use crate::peer_cache::{
-    hydrate_contact_book, hydrate_saved_contact_usernames, TelegramPeerCache,
-};
+use crate::peer_cache::{hydrate_contact_book, hydrate_saved_contact_usernames, TelegramPeerCache};
 use crate::state::SkillEnv;
 
 const MAX_STARTUP_DIALOGS: usize = 2_000;
 const MAX_RESUME_MESSAGES_PER_CHAT: usize = 200;
+const MAX_STARTUP_HISTORY_DIALOGS: usize = 100;
 const DELIVERY_SOURCE_RESUME: &str = "resume";
 
 /// Hydrates dialog state, suppression state, and missed messages before live streaming.
@@ -46,6 +46,8 @@ pub(crate) async fn hydrate_dialog_state(
     let was_initialized = cursor.is_initialized();
     let original_peer_cache = TelegramPeerCache::load(env).unwrap_or_default();
     let mut peer_cache = original_peer_cache.clone();
+    let original_history_cache = TelegramHistoryCache::load(env).unwrap_or_default();
+    let mut history_cache = original_history_cache.clone();
     if let Err(error) = hydrate_contact_book(client, &mut peer_cache).await {
         warn!(
             error = %error,
@@ -68,6 +70,8 @@ pub(crate) async fn hydrate_dialog_state(
     let mut pending_avatar_chats: Vec<Chat> = Vec::new();
     let mut chats_backfilled = 0usize;
     let mut messages_emitted = 0usize;
+    let mut history_dialogs_backfilled = 0usize;
+    let mut history_messages_cached = 0usize;
     let mut iter = client.iter_dialogs();
     while dialogs_seen < MAX_STARTUP_DIALOGS {
         let dialog = match iter.next().await {
@@ -94,6 +98,35 @@ pub(crate) async fn hydrate_dialog_state(
         );
         if !peer_cache.has_avatar(dialog.chat()) {
             pending_avatar_chats.push(dialog.chat().clone());
+        }
+        if history_dialogs_backfilled < MAX_STARTUP_HISTORY_DIALOGS
+            && is_history_cache_target_chat(dialog.chat())
+        {
+            match collect_limited_history_messages(
+                client,
+                dialog.chat(),
+                DEFAULT_HISTORY_MESSAGES_PER_CHAT,
+            )
+            .await
+            {
+                Ok(messages) => {
+                    if !messages.is_empty() {
+                        history_dialogs_backfilled += 1;
+                    }
+                    for message in messages {
+                        if history_cache.observe_message(&message) {
+                            history_messages_cached += 1;
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        chat = %dialog.chat().id(),
+                        error = %error,
+                        "failed to backfill Telegram bounded history cache during startup hydration"
+                    );
+                }
+            }
         }
         let suppressed = notification_mutes.observe_dialog(&dialog);
         if suppressed {
@@ -160,6 +193,7 @@ pub(crate) async fn hydrate_dialog_state(
         cursor.mark_initialized();
     }
     peer_cache.save_if_changed(env, &original_peer_cache)?;
+    history_cache.save_merged_with_current(env)?;
     cursor.save(env)?;
     info!(
         dialogs_seen,
@@ -168,6 +202,8 @@ pub(crate) async fn hydrate_dialog_state(
         avatars_pending = pending_avatar_chats.len(),
         chats_backfilled,
         messages_emitted,
+        history_dialogs_backfilled,
+        history_messages_cached,
         initialized = was_initialized,
         "hydrated Telegram startup dialog state"
     );
@@ -217,8 +253,14 @@ async fn collect_resume_messages(
     cursor: &DeliveryCursor,
     since_ms: Option<i64>,
 ) -> anyhow::Result<Vec<Message>> {
-    collect_limited_resume_messages(client, dialog, cursor, MAX_RESUME_MESSAGES_PER_CHAT, since_ms)
-        .await
+    collect_limited_resume_messages(
+        client,
+        dialog,
+        cursor,
+        MAX_RESUME_MESSAGES_PER_CHAT,
+        since_ms,
+    )
+    .await
 }
 
 async fn collect_limited_resume_messages(
@@ -254,6 +296,27 @@ async fn collect_limited_messages_for_chat(
         pending.push(message);
     }
     Ok(pending)
+}
+
+async fn collect_limited_history_messages(
+    client: &Client,
+    chat: &Chat,
+    limit: usize,
+) -> anyhow::Result<Vec<Message>> {
+    let mut messages = Vec::new();
+    let mut iter = client.iter_messages(chat.pack()).limit(limit.max(1));
+    while let Some(message) = iter
+        .next()
+        .await
+        .with_context(|| format!("iterate bounded history for Telegram chat {}", chat.id()))?
+    {
+        messages.push(message);
+    }
+    Ok(messages)
+}
+
+fn is_history_cache_target_chat(chat: &Chat) -> bool {
+    matches!(chat, Chat::User(user) if !user.raw.bot && chat.id() != 777000)
 }
 
 #[cfg(test)]
@@ -299,6 +362,17 @@ mod tests {
         assert_eq!(
             startup_dialog_disposition(false, true, LIVE_SINCE_MS - 5_000, true, LIVE_SINCE_MS),
             StartupDialogDisposition::MarkSeen,
+        );
+    }
+
+    #[test]
+    fn untracked_chat_during_offline_window_is_backfilled_from_offline_boundary() {
+        let offline_since_ms = LIVE_SINCE_MS - 70 * 60 * 1_000;
+        assert_eq!(
+            startup_dialog_disposition(false, true, LIVE_SINCE_MS - 5_000, true, offline_since_ms),
+            StartupDialogDisposition::Backfill {
+                since_ms: Some(offline_since_ms)
+            },
         );
     }
 

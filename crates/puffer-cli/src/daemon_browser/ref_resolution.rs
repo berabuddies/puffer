@@ -400,6 +400,81 @@ pub(super) fn hosted_fill_point_expression() -> &'static str {
 })()"#
 }
 
+/// `Runtime.callFunctionOn` body, run on a node resolved INSIDE a cross-origin
+/// payment iframe (#656). Confirms focus actually landed on this field — the
+/// only #580 guard available cross-origin — then clears any existing content so
+/// the runtime's per-character keystroke typing replaces rather than appends.
+/// `this` is the resolved field; returns `{ focused, tag, origin }`.
+pub(super) fn in_frame_prepare_fill_fn() -> &'static str {
+    r#"function() {
+  const focused = document.activeElement === this;
+  if (focused && 'value' in this) {
+    const proto = this instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) { descriptor.set.call(this, ''); } else { this.value = ''; }
+    this.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+  } else if (focused && this.isContentEditable) {
+    this.textContent = '';
+    this.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+  }
+  return { focused, tag: this.tagName, origin: location.origin };
+}"#
+}
+
+/// `Runtime.callFunctionOn` body that reads a field's value back after a fill.
+/// Unlike a top-document hosted fill, an in-frame field CAN be read back, so a
+/// fill that silently did not stick is caught (#580). Falls back to
+/// `textContent` for contenteditable fields, which have no `value`. Returns
+/// `{ value }`.
+pub(super) fn in_frame_readback_fn() -> &'static str {
+    r#"function() { return { value: ('value' in this) ? String(this.value ?? '') : String(this.textContent ?? '') }; }"#
+}
+
+/// `Runtime.callFunctionOn` body that selects an option on a native `<select>`
+/// resolved inside a cross-origin payment iframe (the expiry month/year on the
+/// Amazon card form). A native popup can't be driven by coordinate clicks, so
+/// the value is set programmatically and `input`/`change` are fired for the
+/// widget to observe. Matches by option value or visible label. Returns
+/// `{ matched, value | available }`.
+pub(super) fn in_frame_select_fn(value: &str) -> Result<String> {
+    let value = serde_json::to_string(value)?;
+    Ok(format!(
+        r#"function() {{
+  const normalize = (v) => String(v ?? '').trim();
+  const requested = normalize({value});
+  const options = Array.from(this.options || []);
+  const match = options.find((option) => {{
+    const optionValue = normalize(option.value);
+    const optionLabel = normalize(option.label || option.textContent || option.value);
+    return optionValue === requested || optionLabel === requested;
+  }});
+  if (!match) {{
+    const available = options.slice(0, 16).map((o) => normalize(o.label || o.textContent || o.value)).filter(Boolean).join(', ');
+    return {{ matched: false, available }};
+  }}
+  for (const option of options) option.selected = option === match;
+  this.value = match.value;
+  this.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  this.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return {{ matched: true, value: match.value }};
+}}"#
+    ))
+}
+
+/// `Runtime.callFunctionOn` body that sets the checked state of a checkbox/radio
+/// resolved inside a cross-origin payment iframe, firing `input`/`change`.
+pub(super) fn in_frame_set_checked_fn(checked: bool) -> String {
+    format!(
+        r#"function() {{
+  if (!('checked' in this)) {{ return {{ ok: false }}; }}
+  this.checked = {checked};
+  this.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  this.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return {{ ok: true }};
+}}"#
+    )
+}
+
 fn ref_script(target: &BrowserElementRef, body: &str) -> Result<String> {
     let target = serde_json::to_string(target)?;
     Ok(format!(

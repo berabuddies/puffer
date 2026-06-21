@@ -159,6 +159,9 @@ fn main() -> Result<()> {
         );
     }
     providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+    if let Some(display_name) = config.openai_display_name.as_deref() {
+        providers.set_openai_display_name(display_name);
+    }
     if !config.openai_headers.is_empty() {
         providers.set_openai_headers(
             config

@@ -680,6 +680,7 @@ pub(super) fn register_background_shell_task(
         created_at_ms: Some(started_at_ms),
         updated_at_ms: Some(started_at_ms),
         exit_code: None,
+        completed_via: None,
     });
     save_store(&tasks_path(cwd, session_id), &store)
 }

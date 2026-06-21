@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 
 use super::params::optional_u32;
 use super::{BrowserRegistry, BrowserSession};
@@ -14,7 +15,7 @@ const ANNOTATED_SCREENSHOT_INSTRUCTION: &str =
 const SCREENSHOT_OVERLAY_ID: &str = "__puffer_screenshot_overlay__";
 
 /// Element reference captured from the last agent browser snapshot.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserElementRef {
     #[serde(rename = "ref")]
@@ -26,6 +27,15 @@ pub(crate) struct BrowserElementRef {
     pub(crate) href: Option<String>,
     pub(crate) x: f64,
     pub(crate) y: f64,
+    // Internal routing metadata for a field living inside a cross-origin payment
+    // iframe (#656). Never serialized: the agent sees a plain ref, and these
+    // never round-trip through the top-frame snapshot JSON. The runtime fills the
+    // field by CDP node identity (`DOM.resolveNode` resolves `backend_node_id`
+    // into its owning frame's context) instead of a top-document handle.
+    #[serde(skip)]
+    pub(crate) in_frame: bool,
+    #[serde(skip)]
+    pub(crate) backend_node_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +45,347 @@ struct BrowserSnapshot {
     title: String,
     text: String,
     elements: Vec<BrowserElementRef>,
+}
+
+/// A fillable/actionable field discovered inside a cross-origin payment iframe
+/// by piercing the frame tree with `DOM.getDocument`. The top document cannot
+/// see into the OOPIF, so the runtime addresses these fields by CDP node
+/// identity (`backend_node_id`, which `DOM.resolveNode` resolves into the
+/// owning frame) instead of a live JS handle.
+#[derive(Clone, Debug)]
+pub(crate) struct InFrameFieldNode {
+    pub(crate) backend_node_id: i64,
+    pub(crate) role: String,
+    pub(crate) name: String,
+    pub(crate) tag: String,
+}
+
+/// Parses a `DOM.getDocument` node's flat `[k, v, k, v, ...]` attribute array.
+fn dom_attributes(node: &Value) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Some(arr) = node.get("attributes").and_then(Value::as_array) {
+        let mut i = 0;
+        while i + 1 < arr.len() {
+            if let (Some(key), Some(value)) = (arr[i].as_str(), arr[i + 1].as_str()) {
+                map.insert(key.to_ascii_lowercase(), value.to_string());
+            }
+            i += 2;
+        }
+    }
+    map
+}
+
+fn dom_children(node: &Value) -> &[Value] {
+    node.get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+/// Splits camelCase / snake_case / kebab-case identifiers into a readable label.
+fn humanize_identifier(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for ch in raw.chars() {
+        if ch == '_' || ch == '-' || ch == ':' || ch == '.' {
+            if !out.ends_with(' ') && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && prev_lower {
+            out.push(' ');
+        }
+        out.push(ch);
+        prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Derives an agent-facing name for an in-frame field from its attributes.
+fn derive_in_frame_name(attrs: &HashMap<String, String>, tag: &str) -> String {
+    for key in ["aria-label", "placeholder", "title", "name", "id"] {
+        if let Some(value) = attrs.get(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return humanize_identifier(trimmed);
+            }
+        }
+    }
+    tag.to_string()
+}
+
+/// Classifies one DOM node into an in-frame field (role, fillable). Returns
+/// `None` for hidden inputs and non-fillable elements.
+fn classify_field_node(node: &Value) -> Option<InFrameFieldNode> {
+    let tag = node.get("nodeName").and_then(Value::as_str)?.to_ascii_lowercase();
+    let backend_node_id = node.get("backendNodeId").and_then(Value::as_i64)?;
+    let attrs = dom_attributes(node);
+    let role = match tag.as_str() {
+        "input" => {
+            let input_type = attrs
+                .get("type")
+                .map(String::as_str)
+                .unwrap_or("text")
+                .to_ascii_lowercase();
+            match input_type.as_str() {
+                // Not text-fillable: skip so the agent never types into them.
+                "hidden" | "file" => return None,
+                "submit" | "button" | "image" | "reset" => "button",
+                "checkbox" => "checkbox",
+                "radio" => "radio",
+                // text / tel / number / email / password / search / url / date / ...
+                _ => "textbox",
+            }
+        }
+        "select" => "combobox",
+        "textarea" => "textbox",
+        "button" => "button",
+        _ => {
+            let editable = attrs
+                .get("contenteditable")
+                .map(|value| value != "false")
+                .unwrap_or(false);
+            if editable {
+                "textbox"
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(InFrameFieldNode {
+        backend_node_id,
+        role: role.to_string(),
+        name: derive_in_frame_name(&attrs, &tag),
+        tag,
+    })
+}
+
+/// Walks a `DOM.getDocument { depth: -1, pierce: true }` tree and collects the
+/// fillable fields that live inside one of `payment_frame_ids`. Descends into
+/// iframe `contentDocument`s, switching the active frame at each boundary, so a
+/// field is only surfaced when its nearest enclosing frame is a gated payment
+/// frame. Hidden inputs and fields outside the gated frames are ignored.
+pub(crate) fn collect_in_frame_field_nodes(
+    doc_root: &Value,
+    payment_frame_ids: &HashSet<String>,
+) -> Vec<InFrameFieldNode> {
+    let mut out = Vec::new();
+    walk_dom_for_fields(doc_root, None, payment_frame_ids, &mut out);
+    out
+}
+
+/// True when an iframe element carries an accessible name (title / aria-label /
+/// alt). Such iframes are already surfaced as refs by the top-document snapshot
+/// and filled by `hosted_frame_fill` (Stripe/Shopify single-field frames), so
+/// the deep pass must leave them alone to avoid duplicate refs.
+fn iframe_has_accessible_name(node: &Value) -> bool {
+    let attrs = dom_attributes(node);
+    ["title", "aria-label", "alt"]
+        .iter()
+        .any(|key| attrs.get(*key).map(|v| !v.trim().is_empty()).unwrap_or(false))
+}
+
+fn walk_dom_for_fields(
+    node: &Value,
+    current_frame: Option<&str>,
+    payment_frame_ids: &HashSet<String>,
+    out: &mut Vec<InFrameFieldNode>,
+) {
+    let node_name = node
+        .get("nodeName")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if node_name.eq_ignore_ascii_case("iframe") {
+        if let Some(content) = node.get("contentDocument") {
+            let frame_id = node.get("frameId").and_then(Value::as_str);
+            // Only collect fields when this iframe is a gated payment frame that
+            // the titled-iframe path can't already handle (i.e. it is untitled).
+            let is_payment = frame_id
+                .map(|frame| payment_frame_ids.contains(frame))
+                .unwrap_or(false);
+            let active = if is_payment && !iframe_has_accessible_name(node) {
+                frame_id
+            } else {
+                None
+            };
+            walk_dom_for_fields(content, active, payment_frame_ids, out);
+        }
+        // Light-DOM children (rare) stay in the parent frame.
+        for child in dom_children(node) {
+            walk_dom_for_fields(child, current_frame, payment_frame_ids, out);
+        }
+        return;
+    }
+    if let Some(frame) = current_frame {
+        if payment_frame_ids.contains(frame) {
+            if let Some(field) = classify_field_node(node) {
+                out.push(field);
+            }
+        }
+    }
+    for child in dom_children(node) {
+        walk_dom_for_fields(child, current_frame, payment_frame_ids, out);
+    }
+}
+
+/// Hosts of payment iframes whose card form is reachable by the same-process
+/// deep pass — i.e. the iframe is cross-ORIGIN but same-SITE as the page, so
+/// `DOM.getDocument { pierce }` can descend into it. Amazon's APX iframe
+/// (apx-security.amazon.com embedded in www.amazon.com) is the canonical case.
+/// Matched on a domain boundary (exact host or a real subdomain), never as a
+/// raw substring. Cross-SITE processors (Stripe/Shopify/etc.) are intentionally
+/// absent: their card frames are true OOPIFs this pass can't reach, and they
+/// already work via the titled single-field hosted-fill path.
+const PAYMENT_FRAME_HOSTS: &[&str] = &["apx-security.amazon.com", "payments.amazon.com"];
+
+/// Frame `name` substrings (case-insensitive) of secure payment iframes. This is
+/// the primary gate (host may vary); complements [`PAYMENT_FRAME_HOSTS`].
+const PAYMENT_FRAME_NAME_PATTERNS: &[&str] = &["apxsecureiframe", "securepaymentframe"];
+
+fn host_of(url: &str) -> Option<String> {
+    let after_scheme = url.split("://").nth(1)?;
+    let authority = after_scheme.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// True when `host` is exactly `pattern` or a subdomain of it — anchored to a
+/// label boundary so `notpaypal.com` / `apx-security.amazon.com.evil.com` never
+/// match `paypal.com` / `apx-security.amazon.com`.
+fn host_matches(host: &str, pattern: &str) -> bool {
+    host == pattern || host.ends_with(&format!(".{pattern}"))
+}
+
+fn frame_is_payment(url: &str, name: &str) -> bool {
+    if let Some(host) = host_of(url) {
+        if PAYMENT_FRAME_HOSTS
+            .iter()
+            .any(|pattern| host_matches(&host, pattern))
+        {
+            return true;
+        }
+    }
+    let name = name.to_ascii_lowercase();
+    PAYMENT_FRAME_NAME_PATTERNS
+        .iter()
+        .any(|pattern| name.contains(pattern))
+}
+
+/// Walks a `Page.getFrameTree` result and returns the ids of child frames that
+/// look like third-party payment iframes. The root (main) frame is never
+/// included. This is the cheap gate that decides whether the deep pierce runs.
+pub(crate) fn payment_frame_ids_from_tree(frame_tree_result: &Value) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Some(root) = frame_tree_result.get("frameTree") else {
+        return out;
+    };
+    collect_payment_frames(root, true, &mut out);
+    out
+}
+
+fn collect_payment_frames(tree_node: &Value, is_root: bool, out: &mut HashSet<String>) {
+    if let Some(frame) = tree_node.get("frame") {
+        let id = frame.get("id").and_then(Value::as_str).unwrap_or_default();
+        let url = frame.get("url").and_then(Value::as_str).unwrap_or_default();
+        let name = frame.get("name").and_then(Value::as_str).unwrap_or_default();
+        if !is_root && !id.is_empty() && frame_is_payment(url, name) {
+            out.insert(id.to_string());
+        }
+    }
+    if let Some(children) = tree_node.get("childFrames").and_then(Value::as_array) {
+        for child in children {
+            collect_payment_frames(child, false, out);
+        }
+    }
+}
+
+/// Promotes collected in-frame fields to agent refs, numbering them after the
+/// top-document refs (`start_index`). A field without a resolved top-viewport
+/// quad center is dropped: a ref the runtime can't click is worse than none.
+pub(crate) fn field_nodes_to_refs(
+    nodes: &[InFrameFieldNode],
+    quad_centers: &HashMap<i64, (f64, f64)>,
+    start_index: usize,
+) -> Vec<BrowserElementRef> {
+    let mut refs = Vec::new();
+    let mut index = start_index;
+    for node in nodes {
+        let Some(&(x, y)) = quad_centers.get(&node.backend_node_id) else {
+            continue;
+        };
+        index += 1;
+        refs.push(BrowserElementRef {
+            ref_id: format!("@e{index}"),
+            role: node.role.clone(),
+            name: node.name.clone(),
+            tag: node.tag.clone(),
+            href: None,
+            x,
+            y,
+            in_frame: true,
+            backend_node_id: Some(node.backend_node_id),
+        });
+    }
+    refs
+}
+
+/// Averages a `DOM.getContentQuads` first quad `[x1,y1,...,x4,y4]` into its
+/// top-viewport center. Returns `None` for a node with no rendered geometry,
+/// which drops it from the snapshot.
+fn content_quad_center(session: &BrowserSession, backend_node_id: i64) -> Option<(f64, f64)> {
+    let result = session
+        .cdp_call(
+            "DOM.getContentQuads",
+            json!({ "backendNodeId": backend_node_id }),
+        )
+        .ok()?;
+    let quad = result.get("quads")?.as_array()?.first()?.as_array()?;
+    if quad.len() < 8 {
+        return None;
+    }
+    let coord = |i: usize| quad.get(i).and_then(Value::as_f64);
+    let mut sx = 0.0;
+    let mut sy = 0.0;
+    for corner in 0..4 {
+        sx += coord(corner * 2)?;
+        sy += coord(corner * 2 + 1)?;
+    }
+    Some((sx / 4.0, sy / 4.0))
+}
+
+/// Surfaces fillable fields inside cross-origin payment iframes as agent refs
+/// (#656). Gated cheaply on the frame tree so the expensive pierce only runs on
+/// pages with a third-party payment iframe. Returns refs numbered after
+/// `start_index`; the caller appends them to the top-document refs.
+fn deep_snapshot_payment_iframes(
+    session: &BrowserSession,
+    start_index: usize,
+) -> Result<Vec<BrowserElementRef>> {
+    let tree = session.cdp_call("Page.getFrameTree", json!({}))?;
+    let payment_frames = payment_frame_ids_from_tree(&tree);
+    if payment_frames.is_empty() {
+        return Ok(Vec::new());
+    }
+    let document = session.cdp_call("DOM.getDocument", json!({ "depth": -1, "pierce": true }))?;
+    let root = document.get("root").cloned().unwrap_or(Value::Null);
+    let nodes = collect_in_frame_field_nodes(&root, &payment_frames);
+    if nodes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut quad_centers = HashMap::new();
+    for node in &nodes {
+        if let Some(center) = content_quad_center(session, node.backend_node_id) {
+            quad_centers.insert(node.backend_node_id, center);
+        }
+    }
+    Ok(field_nodes_to_refs(&nodes, &quad_centers, start_index))
 }
 
 /// Screenshot format supported by the managed browser worker.
@@ -149,21 +500,29 @@ pub(super) fn parse_capture_screenshot_response(
 impl BrowserRegistry {
     /// Captures an agent-readable DOM snapshot and fresh element refs.
     pub(super) fn agent_snapshot(&self, backend_session_id: &str) -> Result<Value> {
-        let snapshot_value = self
-            .get(backend_session_id)?
-            .evaluate(snapshot_expression().to_string())?
-            .value;
+        let session = self.get(backend_session_id)?;
+        let snapshot_value = session.evaluate(snapshot_expression().to_string())?.value;
         let snapshot: BrowserSnapshot =
             serde_json::from_value(snapshot_value).context("decode browser snapshot")?;
+        let mut elements = snapshot.elements;
+        // Deep pass: surface fillable fields inside cross-origin payment iframes
+        // the top document can't reach (#656). Best-effort — a failure here must
+        // never break the ordinary snapshot.
+        match deep_snapshot_payment_iframes(&session, elements.len()) {
+            Ok(extra) => elements.extend(extra),
+            Err(error) => {
+                tracing::debug!(target: "puffer::browser", %error, "payment-iframe deep snapshot skipped");
+            }
+        }
         self.agent_refs
             .lock()
             .unwrap()
-            .insert(backend_session_id.to_string(), snapshot.elements.clone());
+            .insert(backend_session_id.to_string(), elements.clone());
         Ok(json!({
             "url": snapshot.url,
             "title": snapshot.title,
             "text": snapshot.text,
-            "elements": snapshot.elements,
+            "elements": elements,
             "instruction": SNAPSHOT_INSTRUCTION
         }))
     }

@@ -1389,11 +1389,12 @@
   async function handleApiKeyLogin(
     providerId: string,
     apiKey: string,
-    options: { baseUrl?: string | null } = {}
+    options: { baseUrl?: string | null; displayName?: string | null } = {}
   ) {
     if (authBusyProviderId || importBusyKey) return;
     const loginProviderId = providerId === "custom" ? "openai" : providerId;
     const trimmedBaseUrl = options.baseUrl?.trim() ?? "";
+    const trimmedDisplayName = options.displayName?.trim() ?? "";
     const customProvider = providerId === "custom";
     const fingerprint = await apiKeyConnectionFingerprint(
       customProvider ? "custom" : loginProviderId,
@@ -1414,7 +1415,8 @@
       if (providerId === "custom") {
         settingsSnapshot = await updateConfig({
           defaultProvider: "openai",
-          openaiBaseUrl: trimmedBaseUrl || null
+          openaiBaseUrl: trimmedBaseUrl || null,
+          openaiDisplayName: trimmedDisplayName || null
         });
       }
       // Prefer the daemon path; it reuses the workspace auth store and

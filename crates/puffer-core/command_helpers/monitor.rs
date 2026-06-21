@@ -15,6 +15,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const RESEARCH_ACTION_PROMPT_GUIDANCE: &str = "\n\nResearch action prompt guidance:\n- For any Research action, actionPrompt must define the specific research question, include source chat/contact context, cap web research to at most 3 web searches and 8 total research/tool steps, avoid repeated equivalent queries, prefer official or primary sources, and tell the action agent to stop once it has enough evidence for a concise reply.";
+const TASK_UPDATE_SOURCE_ISOLATION_POLICY: &str = "\n\nTaskUpdate source isolation policy:\n- Same chat/contact is not enough to call something a duplicate. If the current source event asks a new question, changes topic, or creates a separate request, create a new monitor task even when another task from the same sender is still pending.\n- If TaskUpdate changes an existing monitor task's subject, description, or activeForm, metadata MUST include monitor_envelope_id copied from the current workflow trigger and MUST replace or clear actions. Never leave action prompts from the previous source message attached to updated task text.";
+const TASK_FIELD_GUIDANCE: &str = "\n\nMonitor task field guidance\n- Write the subject as a next-step title for the user, not a neutral summary of the message. Prefer imperative verbs such as Reply, Review, Approve, Decide, Confirm, Schedule, Pay, Update, or Investigate.\n- The subject should answer \"what should I do next?\" without requiring the user to open the description. For example, use \"Reply with Friday availability\" instead of \"Friday availability question\".\n- Write the description to explain why this needs attention, who or what triggered it, any exact deadline/value that matters, and the concrete next step. Keep it concise, but include enough context for the user or action agent to act.\n- For awareness-only score-4 items, phrase the subject around the required user follow-up or decision. If there is no follow-up, decision, risk, deadline, or changed commitment, do not create a task.\n- Action names should be concrete user choices, and action prompts should carry the selected next step forward rather than merely summarize the source event.";
 
 /// Creates monitor workflows for one or more connector connections.
 pub(crate) fn handle_monitor_command(
@@ -442,16 +444,26 @@ Puffer task creation protocol
 2. If the event matches ignore memory, do not create a task. Do not edit memory or subscription filters.
 3. Muted or silent notification events are filtered before this agent runs. If an event payload still says `notification_muted` or `notification_silent`, do not create a task.
 4. For candidate items scored 1, 2, or 3, do not call TaskList, TaskCreate, or TaskUpdate.
-5. For candidate items scored 4 or 5, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks.
+5. For candidate items scored 4 or 5, use TaskList first to avoid duplicates. Use TaskCreate for new tasks and TaskUpdate for materially changed existing monitor tasks. For ordinary content edits, update content fields only and leave `status` unchanged. Task completion is governed by the Completion protocol below.
 6. Every monitor TaskCreate MUST include `receivedAt` from the workflow trigger's RFC3339 `receivedAt` field and an RFC3339 `expiresAt` chosen from the event urgency. If no better deadline is evident, set `expiresAt` 24 hours after `receivedAt`.
 7. Every monitor TaskCreate MUST include metadata with `_monitor: true`, `monitor_connection: "{connection_slug}"`, `monitor_connector: "{connector_slug}"`, and `monitor_memory_path: "{}"`.
 8. Every monitor TaskCreate SHOULD include `actions`: an array of objects with `actionName` and `actionPrompt`, and `possibleIgnoreReasons`: a short array of suggested ignore reasons.
 9. Keep action prompts ready to send to the current coding agent. Include enough source context from the connector event for the agent to act without rereading the whole stream.
 
+Completion protocol
+- The workflow trigger has a `direction` field: `incoming` (a message from a contact) or `outgoing` (a message I sent myself).
+- When the current message indicates that an existing open monitor task in THIS conversation has been done/handled/resolved, complete that task with TaskUpdate with `status: completed`. Match the conversation by the task metadata identity fields (e.g. `chat_id`) you previously stored.
+- First TaskList; only complete a task you can see in this conversation. If several are open and the message is ambiguous, complete none. If the message is a reply quoting an earlier message, prefer the task whose stored source matches that quote.
+- A message like "not done yet" / "还没" must NOT complete a task.
+- If `direction` is `outgoing`: you may ONLY complete or update existing tasks — never create a task from my own message.
+- Completing a task only marks it done and never sends a reply, so you may complete tasks that have a reply/delivery target too.
+
 Do not send connector replies unless a selected action later asks for it."#,
         memory_path.display(),
         memory_path.display()
     );
+    prompt.push_str(TASK_UPDATE_SOURCE_ISOLATION_POLICY);
+    prompt.push_str(TASK_FIELD_GUIDANCE);
     prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
     prompt
 }
@@ -489,6 +501,8 @@ Apply this personal triage policy to historical messages:
 - If the source message is mixed-language and you cannot identify a primary language, use the user's preferred language or owner language from available profile/context. If no user language is available, preserve the source's dominant actionable language and do not default to English only because this prompt is English.
 - English source messages follow the same source-primary-language rule: English source messages should create English task fields and reply prompts.
 - Preserve explicit product names, person names, company names, file names, commands, URLs, quoted text, and domain terms exactly; translate only surrounding explanatory prose.
+- Write task subjects as next-step titles for the user, not neutral message summaries. The subject should answer "what should I do next?" without requiring the user to open the description.
+- Write descriptions with the source context, why it needs attention, and the concrete next step.
 
 Read monitor memory `{}` first and skip ignored examples. Skip muted or silent notifications. Avoid duplicates by calling TaskList first.
 
@@ -584,12 +598,36 @@ mod tests {
         assert!(prompt.contains("receivedAt"));
         assert!(prompt.contains("expiresAt"));
         assert!(prompt.contains("Research action prompt guidance"));
+        assert!(prompt.contains("TaskUpdate source isolation policy"));
+        assert!(prompt.contains("Monitor task field guidance"));
+        assert!(prompt.contains("what should I do next?"));
+        assert!(prompt.contains("Reply with Friday availability"));
+        assert!(prompt.contains("Same chat/contact is not enough"));
+        assert!(prompt.contains("replace or clear actions"));
         assert!(prompt.contains("avoid repeated equivalent queries"));
         assert!(prompt.contains("Use the same language as the source message's primary language"));
         assert!(prompt.contains("subject, description, actions[].actionPrompt"));
         assert!(prompt.contains("If the source message is mixed-language"));
         assert!(prompt.contains("English source messages"));
         assert!(prompt.contains("Preserve explicit product names"));
+    }
+
+    #[test]
+    fn monitor_prompt_allows_direction_aware_completion() {
+        let prompt = monitor_triage_prompt(
+            "telegram-user",
+            "telegram-login",
+            "Personal Telegram",
+            Path::new("/tmp/memory.md"),
+        );
+        // The blanket "never change status" rule is gone…
+        assert!(!prompt.contains("never change its `status`"));
+        // …replaced by an explicit completion rule keyed on trigger direction.
+        assert!(prompt.contains("Completion protocol"));
+        assert!(prompt.contains("`direction`"));
+        assert!(prompt.contains("TaskUpdate with `status: completed`"));
+        // Outgoing must never create tasks.
+        assert!(prompt.contains("never create a task"));
     }
 
     #[test]

@@ -63,8 +63,8 @@ use puffer_provider_registry::{
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{
-    MessageActor, SessionMetadata, SessionStore, StoredAttachment, TranscriptEvent,
-    TurnBoundaryState,
+    MessageActor, SessionMetadata, SessionStore, StoredAttachment, StoredAttachmentKind,
+    TranscriptEvent, TurnBoundaryState,
 };
 use puffer_transport_anthropic::{
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
@@ -680,6 +680,9 @@ impl DaemonState {
         }
         let config = self.config.lock().unwrap().clone();
         providers.apply_openai_base_url_override(config.openai_base_url.as_deref());
+        if let Some(display_name) = config.openai_display_name.as_deref() {
+            providers.set_openai_display_name(display_name);
+        }
         if !config.openai_headers.is_empty() {
             providers.set_openai_headers(
                 config
@@ -1692,6 +1695,45 @@ fn apply_session_routing_to_detail(
     Ok(())
 }
 
+fn apply_session_runtime_turn_state(
+    state: &DaemonState,
+    session_store: &SessionStore,
+    detail: &mut SessionDetailDto,
+) -> Result<()> {
+    let session_uuid = Uuid::parse_str(&detail.session_id).context("invalid session id")?;
+    let record = session_store.load_session(session_uuid)?;
+    detail.active_turn_id = active_turn_id_for_session(state, session_uuid, &record.events);
+    Ok(())
+}
+
+fn active_turn_id_for_session(
+    state: &DaemonState,
+    session_uuid: Uuid,
+    events: &[TranscriptEvent],
+) -> Option<Option<String>> {
+    if let Some(turn_id) = state
+        .turns
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|(turn_id, handle)| {
+            (handle.session_uuid == Some(session_uuid)).then(|| turn_id.clone())
+        })
+    {
+        return Some(Some(turn_id));
+    }
+
+    if events.is_empty()
+        || events
+            .iter()
+            .any(|event| matches!(event, TranscriptEvent::TurnBoundary { .. }))
+    {
+        return Some(None);
+    }
+
+    None
+}
+
 fn handle_load_desktop_pins(state: &DaemonState) -> Result<Value> {
     let pins = load_pin_state(&state.paths.user_config_dir)?;
     Ok(serde_json::to_value(pins)?)
@@ -1795,6 +1837,7 @@ fn handle_load_session_detail(state: &DaemonState, params: &Value) -> Result<Val
     let session_store = SessionStore::from_paths(&state.paths)?;
     let mut detail: SessionDetailDto =
         desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_runtime_turn_state(state, &session_store, &mut detail)?;
     apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
@@ -1826,6 +1869,7 @@ fn handle_rename_session(state: &DaemonState, params: &Value) -> Result<Value> {
     });
     let mut detail: SessionDetailDto =
         desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_runtime_turn_state(state, &session_store, &mut detail)?;
     apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
@@ -1875,6 +1919,7 @@ fn handle_set_session_tags(state: &DaemonState, params: &Value) -> Result<Value>
     });
     let mut detail: SessionDetailDto =
         desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_runtime_turn_state(state, &session_store, &mut detail)?;
     apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
@@ -3124,6 +3169,14 @@ fn handle_update_config(state: &DaemonState, params: &Value) -> Result<Value> {
                     Value::String(s) if s.trim().is_empty() => None,
                     Value::String(s) => Some(s.clone()),
                     _ => anyhow::bail!("openaiBaseUrl must be string or null"),
+                };
+            }
+            "openaiDisplayName" | "openai_display_name" => {
+                guard.openai_display_name = match value {
+                    Value::Null => None,
+                    Value::String(s) if s.trim().is_empty() => None,
+                    Value::String(s) => Some(s.trim().to_string()),
+                    _ => anyhow::bail!("openaiDisplayName must be string or null"),
                 };
             }
             "media" => {
@@ -4994,27 +5047,50 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 .append_event(session_uuid, app_state.snapshot_event());
         }
 
-        // Materialize uploaded attachments to agent-readable temp paths and
-        // build the model-facing message that references them. The persisted
-        // transcript event below keeps the original text so the UI is
-        // unchanged; `model_input` must be used at BOTH push_message and the
-        // turn call so `transcript_to_items` dedups to a single user message.
-        // `push_message` stores `model_input` in the in-memory `app_state`, so
-        // the path-annotated text (not the UI text) is what later continuation
-        // turns re-send as history — intentional and benign: the `/tmp` paths
-        // are deterministic and never rendered in the UI, which always replays
-        // the original `UserMessage` event.
-        let materialized = crate::attachment_bridge::materialize_attachments(
+        // File attachments still receive temp path hints for Read. Image
+        // attachments stay as metadata here and hydrate to transient data URLs
+        // on AppState below.
+        let file_attachments = staged_attachments_for_thread
+            .iter()
+            .filter(|attachment| attachment.kind == StoredAttachmentKind::File)
+            .cloned()
+            .collect::<Vec<_>>();
+        let materialized_files = crate::attachment_bridge::materialize_attachments(
             &inputs.session_store,
             session_uuid,
-            &staged_attachments_for_thread,
+            &file_attachments,
         );
         let model_input =
-            crate::attachment_bridge::build_model_input(&message_for_thread, &materialized);
+            crate::attachment_bridge::build_model_input(&message_for_thread, &materialized_files);
+
+        app_state.push_user_message_with_attachments(
+            model_input.clone(),
+            staged_attachments_for_thread
+                .iter()
+                .cloned()
+                .map(puffer_core::RenderedAttachment::from_stored)
+                .collect(),
+        );
+        if let Err(err) = crate::attachment_bridge::hydrate_model_image_urls(
+            &mut app_state,
+            &inputs.session_store,
+            session_uuid,
+        ) {
+            publish_turn_error_event(
+                &setup_state,
+                &channel_thread,
+                &session_id_for_thread,
+                &turn_id_thread,
+                format!("{err:#}"),
+                None,
+                Some("attachment-hydration"),
+            );
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
 
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
-        app_state.push_message(MessageRole::User, model_input.clone());
         if !user_prompt_persisted_thread.swap(true, Ordering::SeqCst) {
             let _ = inputs.session_store.append_event(
                 session_uuid,
@@ -6325,12 +6401,12 @@ mod tests {
         handle_create_generated_video_access, handle_create_openai_realtime_client_secret,
         handle_create_session, handle_generate_media, handle_import_external_credential,
         handle_list_lambda_skill_libraries, handle_list_media_capabilities,
-        handle_list_permissions, handle_list_provider_models, handle_local_model_status,
-        handle_login_with_api_key, handle_logout_provider, handle_read_generated_media_preview,
-        handle_remove_lambda_skill_library, handle_save_lambda_skill_library,
-        handle_save_permissions, handle_save_proxy_settings, handle_set_lambda_skill_approval,
-        handle_set_lambda_skill_enabled, handle_update_config, model_descriptor_dto,
-        parse_single_byte_range, permission_review_payload_json,
+        handle_list_permissions, handle_list_provider_models, handle_load_session_detail,
+        handle_local_model_status, handle_login_with_api_key, handle_logout_provider,
+        handle_read_generated_media_preview, handle_remove_lambda_skill_library,
+        handle_save_lambda_skill_library, handle_save_permissions, handle_save_proxy_settings,
+        handle_set_lambda_skill_approval, handle_set_lambda_skill_enabled, handle_update_config,
+        model_descriptor_dto, parse_single_byte_range, permission_review_payload_json,
         realtime_session_config_from_params, report_cancelled_turn, requires_explicit_subscription,
         resolve_create_session_model_id, run_off_runtime, session_used_browser_tool,
         start_connector_setup_turn, turn_browser_tab_context, CancelToken, ConnectionGuard,
@@ -6351,8 +6427,8 @@ mod tests {
     use puffer_provider_registry::{
         AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
-    use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
-    use serde_json::json;
+    use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent, TurnBoundaryState};
+    use serde_json::{json, Value};
     use std::collections::{BTreeMap, HashMap};
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -6924,6 +7000,115 @@ models: []
         ensure_workspace_dirs(&paths).expect("workspace dirs");
         DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
             .expect("daemon state")
+    }
+
+    fn insert_session_turn(state: &DaemonState, session_id: Uuid, turn_id: &str) {
+        let cancel = CancelToken::new();
+        let mut handle = empty_turn_handle(cancel);
+        handle.session_id = Some(session_id.to_string());
+        handle.session_uuid = Some(session_id);
+        handle.channel = format!("session:{session_id}:event");
+        state
+            .turns
+            .lock()
+            .unwrap()
+            .insert(turn_id.to_string(), handle);
+    }
+
+    #[test]
+    fn load_session_detail_reports_active_turn_from_registry() {
+        let state = test_daemon_state();
+        let session_store = SessionStore::from_paths(&state.paths).unwrap();
+        let session = session_store
+            .create_session(state.cwd_path().to_path_buf())
+            .unwrap();
+        insert_session_turn(&state, session.id, "t-live");
+
+        let detail = handle_load_session_detail(
+            &state,
+            &json!({
+                "sessionId": session.id.to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(detail.get("activeTurnId"), Some(&json!("t-live")));
+    }
+
+    #[test]
+    fn load_session_detail_does_not_infer_active_turn_from_started_boundary() {
+        let state = test_daemon_state();
+        let session_store = SessionStore::from_paths(&state.paths).unwrap();
+        let session = session_store
+            .create_session(state.cwd_path().to_path_buf())
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::TurnBoundary {
+                    turn_id: "persisted-start-only".to_string(),
+                    state: TurnBoundaryState::Started,
+                },
+            )
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "hello".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+
+        let detail = handle_load_session_detail(
+            &state,
+            &json!({
+                "sessionId": session.id.to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(detail.get("activeTurnId"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn load_session_detail_omits_active_turn_for_legacy_transcript_without_boundaries() {
+        let state = test_daemon_state();
+        let session_store = SessionStore::from_paths(&state.paths).unwrap();
+        let session = session_store
+            .create_session(state.cwd_path().to_path_buf())
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::UserMessage {
+                    text: "legacy prompt".to_string(),
+                    attachments: Vec::new(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+        session_store
+            .append_event(
+                session.id,
+                TranscriptEvent::AssistantMessage {
+                    text: "legacy answer".to_string(),
+                    actor: None,
+                },
+            )
+            .unwrap();
+
+        let detail = handle_load_session_detail(
+            &state,
+            &json!({
+                "sessionId": session.id.to_string(),
+            }),
+        )
+        .unwrap();
+
+        assert!(detail.get("activeTurnId").is_none());
     }
 
     fn bash_invocation(command: &str) -> TranscriptEvent {

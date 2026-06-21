@@ -1,4 +1,6 @@
-use puffer_session_store::{GitDiffSnapshot, TranscriptEvent, TranscriptRewrite};
+use puffer_session_store::{
+    GitDiffSnapshot, TranscriptEvent, TranscriptRewrite, TurnBoundaryState,
+};
 
 pub(crate) const ACTIVITY_IDLE: &str = "idle";
 pub(crate) const ACTIVITY_RUNNING: &str = "running";
@@ -49,6 +51,10 @@ fn apply_activity_rewrite(events: &mut Vec<TranscriptEvent>, rewrite: &Transcrip
 fn latest_action_requires_permission(events: &[TranscriptEvent]) -> bool {
     for event in events.iter().rev() {
         match event {
+            TranscriptEvent::TurnBoundary {
+                state: TurnBoundaryState::Finished,
+                ..
+            } => return false,
             TranscriptEvent::SystemMessage { text, .. } => {
                 return text_requires_permission(text);
             }
@@ -60,7 +66,10 @@ fn latest_action_requires_permission(events: &[TranscriptEvent]) -> bool {
             | TranscriptEvent::CommandInvoked { .. }
             | TranscriptEvent::GitDiffSnapshot { .. } => return false,
             TranscriptEvent::SessionRenamed { .. }
-            | TranscriptEvent::TurnBoundary { .. }
+            | TranscriptEvent::TurnBoundary {
+                state: TurnBoundaryState::Started,
+                ..
+            }
             | TranscriptEvent::TranscriptRewritten { .. }
             | TranscriptEvent::StateSnapshot { .. } => {}
         }
@@ -71,6 +80,10 @@ fn latest_action_requires_permission(events: &[TranscriptEvent]) -> bool {
 fn latest_action_is_unanswered(events: &[TranscriptEvent]) -> bool {
     for event in events.iter().rev() {
         match event {
+            TranscriptEvent::TurnBoundary {
+                state: TurnBoundaryState::Finished,
+                ..
+            } => return false,
             TranscriptEvent::UserMessage { .. } | TranscriptEvent::CommandInvoked { .. } => {
                 return true;
             }
@@ -79,7 +92,10 @@ fn latest_action_is_unanswered(events: &[TranscriptEvent]) -> bool {
             | TranscriptEvent::ToolInvocation { .. }
             | TranscriptEvent::GitDiffSnapshot { .. } => return false,
             TranscriptEvent::SessionRenamed { .. }
-            | TranscriptEvent::TurnBoundary { .. }
+            | TranscriptEvent::TurnBoundary {
+                state: TurnBoundaryState::Started,
+                ..
+            }
             | TranscriptEvent::TranscriptRewritten { .. }
             | TranscriptEvent::StateSnapshot { .. } => {}
         }
@@ -134,7 +150,9 @@ fn output_requires_permission(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{session_activity_status, ACTIVITY_AWAITING, ACTIVITY_IDLE, ACTIVITY_RUNNING};
-    use puffer_session_store::{GitDiffSnapshot, TranscriptEvent, TranscriptRewrite};
+    use puffer_session_store::{
+        GitDiffSnapshot, TranscriptEvent, TranscriptRewrite, TurnBoundaryState,
+    };
 
     #[test]
     fn detects_unanswered_user_turns_as_running() {
@@ -161,6 +179,32 @@ mod tests {
         }];
 
         assert_eq!(session_activity_status(&events), ACTIVITY_AWAITING);
+    }
+
+    #[test]
+    fn finished_turn_after_permission_request_is_idle() {
+        let events = vec![
+            TranscriptEvent::TurnBoundary {
+                turn_id: "turn-1".to_string(),
+                state: TurnBoundaryState::Started,
+            },
+            TranscriptEvent::ToolInvocation {
+                call_id: "call-1".to_string(),
+                tool_id: "Bash".to_string(),
+                input: r#"{"command":"cargo test"}"#.to_string(),
+                output: "Permission required: command needs approval".to_string(),
+                success: false,
+                metadata: None,
+                actor: None,
+                subject: None,
+            },
+            TranscriptEvent::TurnBoundary {
+                turn_id: "turn-1".to_string(),
+                state: TurnBoundaryState::Finished,
+            },
+        ];
+
+        assert_eq!(session_activity_status(&events), ACTIVITY_IDLE);
     }
 
     #[test]
@@ -201,6 +245,27 @@ mod tests {
             TranscriptEvent::AssistantMessage {
                 text: "hi".to_string(),
                 actor: None,
+            },
+        ];
+
+        assert_eq!(session_activity_status(&events), ACTIVITY_IDLE);
+    }
+
+    #[test]
+    fn finished_turn_without_assistant_response_is_idle() {
+        let events = vec![
+            TranscriptEvent::TurnBoundary {
+                turn_id: "turn-1".to_string(),
+                state: TurnBoundaryState::Started,
+            },
+            TranscriptEvent::UserMessage {
+                text: "hello".to_string(),
+                attachments: Vec::new(),
+                actor: None,
+            },
+            TranscriptEvent::TurnBoundary {
+                turn_id: "turn-1".to_string(),
+                state: TurnBoundaryState::Finished,
             },
         ];
 

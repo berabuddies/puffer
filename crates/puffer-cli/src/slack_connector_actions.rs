@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Result};
 use puffer_config::ConfigPaths;
-use puffer_subscriptions::{ConnectionAuthChecker, ConnectorTemplate};
+use puffer_subscriptions::{ConnectionAuthChecker, ConnectionAuthStatus, ConnectorTemplate};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -16,17 +16,21 @@ impl ConnectionAuthChecker for SlackConnectionAuthChecker {
         _manager: &puffer_subscriptions::SubscriptionManager,
         template: &ConnectorTemplate,
         connection_slug: &str,
-    ) -> Result<Option<bool>> {
+    ) -> Result<Option<ConnectionAuthStatus>> {
         if !is_slack_credential_connector(&template.slug) {
             return Ok(None);
         }
         let path = puffer_slack::credential_path(&self.paths.user_config_dir, connection_slug);
         if !path.exists() {
-            return Ok(Some(false));
+            return Ok(Some(ConnectionAuthStatus::Broken));
         }
         let credential = puffer_slack::load_credential(&path)?;
         let client = puffer_slack::SlackClient::new(credential)?;
-        client.is_auth_ok().map(Some)
+        Ok(Some(if client.is_auth_ok()? {
+            ConnectionAuthStatus::Healthy
+        } else {
+            ConnectionAuthStatus::Broken
+        }))
     }
 }
 

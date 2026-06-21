@@ -44,6 +44,41 @@ pub(crate) fn parse_evaluation_response(value: &Value) -> Result<BrowserEvaluati
     })
 }
 
+/// Decodes one raw CDP method response (e.g. `DOM.getDocument`,
+/// `DOM.getContentQuads`, `Page.getFrameTree`), returning the `result` object
+/// directly. Unlike [`parse_evaluation_response`], these methods put their
+/// payload under `/result`, not `/result/result/value`. A protocol-level
+/// `error` is surfaced as an `Err`.
+pub(crate) fn parse_cdp_call_response(value: &Value) -> Result<Value> {
+    if let Some(error) = value.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown CDP error");
+        if let Some(code) = error.get("code").and_then(Value::as_i64) {
+            bail!("CDP call failed ({code}): {message}");
+        }
+        bail!("CDP call failed: {message}");
+    }
+    // `Runtime.callFunctionOn` reports a thrown script error via
+    // `result.exceptionDetails`, not a top-level `error`. Surface it rather than
+    // returning the exception payload as if it were a successful result.
+    if let Some(details) = value.pointer("/result/exceptionDetails") {
+        let message = details
+            .pointer("/exception/description")
+            .and_then(Value::as_str)
+            .or_else(|| details.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .unwrap_or("unknown script exception");
+        bail!("CDP call raised: {message}");
+    }
+    let Some(result) = value.get("result") else {
+        bail!("CDP call returned no result");
+    };
+    Ok(result.clone())
+}
+
 /// Sends one raw CDP message and returns the assigned request id.
 pub(crate) fn send_cdp(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,

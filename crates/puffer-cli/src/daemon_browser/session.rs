@@ -35,8 +35,9 @@ use super::worker::{
     set_read_timeout, start_screencast,
 };
 use super::{
-    parse_evaluation_response, send_cdp, BrowserCopySelection, BrowserCursor, BrowserEvaluation,
-    BrowserHistoryDirection, BrowserInputEvent, BrowserState, CDP_READ_TIMEOUT, DEFAULT_URL,
+    parse_cdp_call_response, parse_evaluation_response, send_cdp, BrowserCopySelection,
+    BrowserCursor, BrowserEvaluation, BrowserHistoryDirection, BrowserInputEvent, BrowserState,
+    CDP_READ_TIMEOUT, DEFAULT_URL,
 };
 use crate::browser_profiles::prepare_managed_profile;
 use crate::daemon::ServerEnvelope;
@@ -625,6 +626,21 @@ impl BrowserSession {
             .map_err(|message| anyhow!("{message}"))
     }
 
+    /// Issues one raw CDP method on the page target and returns its `result`
+    /// object. Used by the cross-origin payment-iframe deep pass to enumerate
+    /// and fill OOPIF fields the top document cannot reach (#656).
+    pub(super) fn cdp_call(&self, method: &str, params: Value) -> Result<Value> {
+        let (reply, rx) = mpsc::channel();
+        self.send(BrowserCommand::CdpCall {
+            method: method.to_string(),
+            params,
+            reply,
+        })?;
+        rx.recv_timeout(Duration::from_secs(5))
+            .with_context(|| format!("timed out waiting for CDP `{method}`"))?
+            .map_err(|message| anyhow!("{message}"))
+    }
+
     /// Captures one still screenshot of the current browser viewport.
     pub(super) fn capture_screenshot(
         &self,
@@ -948,6 +964,14 @@ fn handle_command(
             );
             pending.insert(id, PendingKind::Evaluate { reply });
         }
+        BrowserCommand::CdpCall {
+            method,
+            params,
+            reply,
+        } => {
+            let id = send_cdp(socket, next_id, &method, params);
+            pending.insert(id, PendingKind::CdpCall { reply });
+        }
         BrowserCommand::CaptureScreenshot { options, reply } => {
             let id = send_cdp(
                 socket,
@@ -1019,6 +1043,10 @@ fn handle_cdp_message(
             Some(PendingKind::Evaluate { reply }) => {
                 let result =
                     parse_evaluation_response(&value).map_err(|error| format!("{error:#}"));
+                let _ = reply.send(result);
+            }
+            Some(PendingKind::CdpCall { reply }) => {
+                let result = parse_cdp_call_response(&value).map_err(|error| format!("{error:#}"));
                 let _ = reply.send(result);
             }
             Some(PendingKind::CaptureScreenshot { format, reply }) => {

@@ -53,6 +53,8 @@ pub(super) struct StoredTask {
     pub(super) updated_at_ms: Option<u64>,
     #[serde(default)]
     pub(super) exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) completed_via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

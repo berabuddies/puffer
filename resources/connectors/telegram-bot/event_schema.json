@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "event_source": "telegram-bot",
+  "text_fields": [
+    { "path": "text", "label": "Message text" }
+  ],
+  "fields": [
+    {
+      "path": "is_group",
+      "label": "Group chat",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    },
+    {
+      "path": "bot_mentioned",
+      "label": "Bot mentioned",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    }
+  ]
+}

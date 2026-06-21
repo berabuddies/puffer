@@ -186,18 +186,13 @@ fn run_llm_judge_single_call(
         auth_store,
         &prompt,
         TurnRequestOptions {
-            structured_output: None,
-            tool_filter: None,
-            reflection: None,
             // Inherit parent's cancel so user Ctrl+C interrupts an
             // in-flight single-call judge — mirrors CC's `M85`
             // reactive-compact (`maxTurns:1`) which checks
             // `abortController.signal.aborted` after the fork returns
             // (claude-2.1.133 bundle line 2212).
             cancel,
-            max_turns: None,
-            lightweight_context: false,
-            observability: None,
+            ..TurnRequestOptions::default()
         },
     ) {
         Ok(response) => LlmJudgeAttempt {
@@ -318,7 +313,6 @@ fn run_llm_judge_subagent(
         auth_store,
         &prompt,
         TurnRequestOptions {
-            structured_output: None,
             tool_filter: tool_filter.as_ref(),
             // Recursive reflection inside a reflection sub-agent would
             // burn tokens for negligible signal — disable. Note: we
@@ -326,7 +320,6 @@ fn run_llm_judge_subagent(
             // `build_llm_judge_side_state` because
             // `apply_session_reflection_default` would otherwise
             // re-inject it from the cloned parent state.
-            reflection: None,
             // Inherit the parent's cancel token so user Ctrl+C
             // interrupts a long judge run mid-iteration. The agent
             // loop checks the token at every turn boundary.
@@ -336,8 +329,7 @@ fn run_llm_judge_subagent(
             // configured budget. The prompt also advertises this
             // limit; this is the belt to that suspenders.
             max_turns: Some(max_iterations),
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
     ) {
         Ok(response) => LlmJudgeAttempt {

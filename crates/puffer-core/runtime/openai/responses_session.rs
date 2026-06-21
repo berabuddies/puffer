@@ -517,12 +517,23 @@ pub(super) fn setup_responses_session(
         },
     )?;
     let text = openai_responses_text_config(options.structured_output, use_native);
-    let tools = openai_tool_definitions_for_request(
+    let mut tools = openai_tool_definitions_for_request(
         &registry,
         options.structured_output,
         use_native,
         Some(&permission_context),
     )?;
+    if !options.excluded_tools.is_empty() {
+        tools.retain(|tool| {
+            options
+                .excluded_tools
+                .iter()
+                .all(|ex| ex.as_str() != tool.name.as_str())
+        });
+    }
+    if super::super::state_has_image_attachments(state) {
+        tools.retain(|tool| tool.name != "VisionAnalyze");
+    }
     // Native server-side tools (e.g. `web_search`) serialize without a name,
     // so filter empty entries out of the system-prompt tool set.
     let enabled_tool_names = tools

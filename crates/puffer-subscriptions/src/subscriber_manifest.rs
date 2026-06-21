@@ -63,6 +63,15 @@ pub fn connection_subscriber_manifest_exists(
     connection_subscriber_source(roots, connection, template).is_some()
 }
 
+/// Resolves the manifest directory that backs a connection subscriber.
+pub fn connection_subscriber_manifest_dir(
+    roots: &SubscriberManifestRoots,
+    connection: &ConnectionRecord,
+    template: &ConnectorTemplate,
+) -> Option<PathBuf> {
+    connection_subscriber_source(roots, connection, template).map(|source| source.dir)
+}
+
 /// Returns whether a connector template can start workflow trigger events.
 pub fn connector_workflow_trigger_supported(
     roots: &SubscriberManifestRoots,

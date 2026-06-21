@@ -38,6 +38,7 @@ import type {
   MediaKind,
   MessageActor,
   MessageAttachment,
+  MonitorRuleAddRequest,
   OpenAIRealtimeClientSecret,
   OpenAIRealtimeClientSecretOptions,
   TimelineItem,
@@ -1577,19 +1578,23 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
 }
 
 /** Add one include or exclude monitor rule and return the refreshed workflow snapshot. */
-export async function addMonitorRule(params: {
-  connection_slug: string;
-  mode: "exclude" | "include";
-  keywords: string[];
-  case_insensitive?: boolean;
-}): Promise<WorkflowSnapshot> {
+export async function addMonitorRule(params: MonitorRuleAddRequest): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
-  return client.request<WorkflowSnapshot>("task_monitor_rule_add", {
+  const payload: Record<string, unknown> = {
     connection_slug: params.connection_slug,
     mode: params.mode,
-    keywords: params.keywords,
-    case_insensitive: params.case_insensitive ?? true
-  });
+    kind: params.kind
+  };
+  if (params.kind === "keyword") {
+    payload.keywords = params.keywords;
+    payload.operator = params.operator ?? "contains";
+    payload.case_insensitive = params.case_insensitive ?? true;
+  } else {
+    payload.field = params.field;
+    payload.operator = params.operator;
+    payload.value = params.value ?? null;
+  }
+  return client.request<WorkflowSnapshot>("task_monitor_rule_add", payload);
 }
 
 /** Delete one displayed include or exclude monitor rule. */
@@ -2643,6 +2648,7 @@ export type ConfigPatch = {
   defaultModel?: string | null;
   theme?: string;
   openaiBaseUrl?: string | null;
+  openaiDisplayName?: string | null;
   media?: MediaSettings;
 };
 

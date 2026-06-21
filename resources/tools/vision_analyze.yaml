@@ -1,8 +1,12 @@
 id: VisionAnalyze
 name: VisionAnalyze
 description: |-
-  Analyze a local image through Puffer's configured OpenAI vision backend and
+  Explicitly analyze a local image through Puffer's OpenAI-only vision helper and
   return a concise text report.
+
+  Uploaded chat image attachments are sent through native multimodal model input
+  when the selected model supports images. Do not use this tool as the default
+  path for uploaded attachments.
 
   Use this for verified Lambda Skill contracts that bind a screenshot/image
   path and a concrete question. The tool reads the image bytes locally and

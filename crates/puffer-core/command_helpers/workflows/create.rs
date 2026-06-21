@@ -492,6 +492,7 @@ mod tests {
             has_consumer: false,
             cursor: None,
             auth_failure_notified: false,
+            health: None,
         }
     }
 }

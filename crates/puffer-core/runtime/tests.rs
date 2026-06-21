@@ -251,6 +251,171 @@ fn openai_provider(base_url: String) -> ProviderDescriptor {
     }
 }
 
+fn test_image_attachment() -> puffer_session_store::StoredAttachment {
+    puffer_session_store::StoredAttachment {
+        id: "11111111-1111-1111-1111-111111111111".to_string(),
+        name: "pixel.png".to_string(),
+        mime_type: "image/png".to_string(),
+        size: 3,
+        extension: "PNG".to_string(),
+        kind: puffer_session_store::StoredAttachmentKind::Image,
+        storage_key: "11111111-1111-1111-1111-111111111111/original".to_string(),
+    }
+}
+
+fn provider_with_api_and_modalities(
+    api: &str,
+    input: Vec<puffer_provider_registry::Modality>,
+) -> puffer_provider_registry::ProviderDescriptor {
+    let mut provider = openai_provider("http://127.0.0.1:9".to_string());
+    provider.default_api = api.to_string();
+    provider.models[0].api = api.to_string();
+    provider.models[0].input = input;
+    provider
+}
+
+#[test]
+fn native_image_gate_rejects_text_only_model() {
+    let mut state = state();
+    state.current_provider = Some("openai-completions-test".to_string());
+    state.current_model = Some("openai-completions-test/gpt-5".to_string());
+    state.push_user_message_with_attachments(
+        "read image",
+        vec![
+            crate::RenderedAttachment::from_stored(test_image_attachment())
+                .with_model_url("data:image/png;base64,AQID".to_string()),
+        ],
+    );
+    let provider = provider_with_api_and_modalities(
+        "openai-completions",
+        vec![puffer_provider_registry::Modality::Text],
+    );
+
+    let err = super::validate_native_image_input(&state, &provider, "gpt-5", "openai-completions")
+        .unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("not declared to support image input"));
+}
+
+#[test]
+fn native_image_gate_rejects_unhydrated_image() {
+    let mut state = state();
+    state.push_user_message_with_attachments(
+        "read image",
+        vec![crate::RenderedAttachment::from_stored(
+            test_image_attachment(),
+        )],
+    );
+    let provider = provider_with_api_and_modalities(
+        "openai-completions",
+        vec![
+            puffer_provider_registry::Modality::Text,
+            puffer_provider_registry::Modality::Image,
+        ],
+    );
+
+    let err = super::validate_native_image_input(&state, &provider, "gpt-5", "openai-completions")
+        .unwrap_err();
+
+    assert!(err.to_string().contains("missing hydrated model_url"));
+}
+
+#[test]
+fn native_image_gate_allows_all_implemented_image_apis() {
+    for api in [
+        "openai-completions",
+        "openai-responses",
+        "anthropic-messages",
+    ] {
+        let mut state = state();
+        state.push_user_message_with_attachments(
+            "read image",
+            vec![
+                crate::RenderedAttachment::from_stored(test_image_attachment())
+                    .with_model_url("data:image/png;base64,AQID".to_string()),
+            ],
+        );
+        let provider = provider_with_api_and_modalities(
+            api,
+            vec![
+                puffer_provider_registry::Modality::Text,
+                puffer_provider_registry::Modality::Image,
+            ],
+        );
+
+        super::validate_native_image_input(&state, &provider, "gpt-5", api).unwrap();
+    }
+}
+
+#[test]
+fn native_image_gate_rejects_unsupported_image_api() {
+    let mut state = state();
+    state.push_user_message_with_attachments(
+        "read image",
+        vec![
+            crate::RenderedAttachment::from_stored(test_image_attachment())
+                .with_model_url("data:image/png;base64,AQID".to_string()),
+        ],
+    );
+    let provider = provider_with_api_and_modalities(
+        "custom-text-api",
+        vec![
+            puffer_provider_registry::Modality::Text,
+            puffer_provider_registry::Modality::Image,
+        ],
+    );
+
+    let err = super::validate_native_image_input(&state, &provider, "gpt-5", "custom-text-api")
+        .unwrap_err();
+
+    assert!(err.to_string().contains("not yet enabled for image input"));
+}
+
+#[test]
+fn native_image_gate_rejects_malformed_model_data_url() {
+    let mut state = state();
+    state.push_user_message_with_attachments(
+        "read image",
+        vec![
+            crate::RenderedAttachment::from_stored(test_image_attachment())
+                .with_model_url("file:///tmp/pixel.png".to_string()),
+        ],
+    );
+    let provider = provider_with_api_and_modalities(
+        "anthropic-messages",
+        vec![
+            puffer_provider_registry::Modality::Text,
+            puffer_provider_registry::Modality::Image,
+        ],
+    );
+
+    let err = super::validate_native_image_input(&state, &provider, "gpt-5", "anthropic-messages")
+        .unwrap_err();
+
+    assert!(err.to_string().contains("malformed model data URL"));
+}
+
+#[test]
+fn native_image_gate_disables_simple_turn_suppression() {
+    let _guard = env_lock();
+    std::env::set_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV, "1");
+    let mut state = state();
+    assert!(super::suppress_tools_for_turn(&state, "hi"));
+
+    state.push_user_message_with_attachments(
+        "hi",
+        vec![
+            crate::RenderedAttachment::from_stored(test_image_attachment())
+                .with_model_url("data:image/png;base64,AQID".to_string()),
+        ],
+    );
+
+    assert!(!super::suppress_tools_for_turn(&state, "hi"));
+    std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
+}
+
 fn test_anthropic_request_config() -> AnthropicRequestConfig {
     AnthropicRequestConfig {
         base_url: "https://api.anthropic.com".to_string(),

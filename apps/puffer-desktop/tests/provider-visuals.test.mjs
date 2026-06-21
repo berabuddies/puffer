@@ -6,8 +6,10 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(testDir, "..");
 const repoRoot = resolve(appRoot, "../..");
 const providerVisualsPath = resolve(appRoot, "src/lib/providerVisuals.ts");
+const googleIconPath = resolve(appRoot, "public/service-icons/google.svg");
 const providerDir = resolve(repoRoot, "resources/providers");
 const providerVisuals = readFileSync(providerVisualsPath, "utf8");
+const googleIcon = readFileSync(googleIconPath, "utf8");
 
 const nativeAliases = ["puffer", "codex", "claude"];
 const resourceProviderIds = readdirSync(providerDir)
@@ -57,6 +59,10 @@ for (const providerId of ids) {
   if (!existsSync(assetPath)) {
     throw new Error(`Mapped icon asset for ${providerId} does not exist: ${assetPath}`);
   }
+}
+
+if (/<filter\b|<feGaussianBlur\b/.test(googleIcon)) {
+  throw new Error("Google provider icon must avoid blur filters so it stays sharp in provider cards.");
 }
 
 console.log(`Verified provider visuals for ${ids.length} known provider ids.`);

@@ -9,7 +9,7 @@ use puffer_media::ExactMediaDiscoveryCache;
 use puffer_runner_api::ToolRunner;
 use puffer_session_store::{
     ClaudeReadSnapshotEvent, MessageActor, MessageActorKind, SessionMetadata, SessionRecord,
-    TranscriptEvent, TranscriptRewrite,
+    StoredAttachment, TranscriptEvent, TranscriptRewrite,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -27,6 +27,30 @@ pub enum MessageRole {
     ToolCall,
     /// Structured tool result — preserves call_id for API reconstruction.
     ToolResult,
+}
+
+/// A transcript attachment reference plus an optional in-memory model URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderedAttachment {
+    pub attachment: StoredAttachment,
+    #[serde(skip)]
+    pub model_url: Option<String>,
+}
+
+impl RenderedAttachment {
+    /// Builds a rendered attachment from durable session-store metadata.
+    pub fn from_stored(attachment: StoredAttachment) -> Self {
+        Self {
+            attachment,
+            model_url: None,
+        }
+    }
+
+    /// Stores the data URL used by model request serialization.
+    pub fn with_model_url(mut self, model_url: String) -> Self {
+        self.model_url = Some(model_url);
+        self
+    }
 }
 
 /// Represents one rendered transcript message in the interactive UI.
@@ -49,6 +73,9 @@ pub struct RenderedMessage {
     /// Whether the tool call succeeded (ToolResult role).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub success: Option<bool>,
+    /// Attachments associated with this user message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<RenderedAttachment>,
 }
 
 /// Describes the completion state of one recorded task.
@@ -272,6 +299,11 @@ pub struct AppState {
     /// Request-scoped monitor reply binding. Set by daemon-validated monitor
     /// action turns so `MonitorReplyDraft` cannot write arbitrary tasks.
     pub(crate) monitor_reply_scope: Option<MonitorReplyScope>,
+    /// True while a monitor triage turn is running. Lets the triage agent complete
+    /// human-gated monitor tasks from a conversational "done" signal (the message
+    /// is the human action); TaskUpdate never sends a reply, so the reply-approval
+    /// gate does not apply to mark-done.
+    pub monitor_triage_turn: bool,
     /// Wall-clock timestamp of the most recent committed assistant message.
     /// Set by `push_message` when role == Assistant. Consumed by the
     /// microcompact time-based trigger to mirror Claude Code's "gap since
@@ -393,6 +425,7 @@ impl AppState {
             last_input_tokens: None,
             pentest_in_scope_origin: None,
             monitor_reply_scope: None,
+            monitor_triage_turn: false,
             last_assistant_at: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,
@@ -468,9 +501,15 @@ impl AppState {
         let mut state = Self::new(config, cwd, session.metadata);
         for event in session.events {
             match event {
-                TranscriptEvent::UserMessage { text, .. } => {
-                    state.push_message(MessageRole::User, text)
-                }
+                TranscriptEvent::UserMessage {
+                    text, attachments, ..
+                } => state.push_user_message_with_attachments(
+                    text,
+                    attachments
+                        .into_iter()
+                        .map(RenderedAttachment::from_stored)
+                        .collect(),
+                ),
                 TranscriptEvent::AssistantMessage { text, actor } => {
                     state.restore_current_actor(actor);
                     state.push_message(MessageRole::Assistant, text)
@@ -594,10 +633,29 @@ impl AppState {
             tool_id: None,
             tool_input: None,
             success: None,
+            attachments: Vec::new(),
         });
         if was_assistant {
             self.last_assistant_at = Some(std::time::SystemTime::now());
         }
+    }
+
+    /// Appends a user message with attachment references to the in-memory transcript.
+    pub fn push_user_message_with_attachments(
+        &mut self,
+        text: impl Into<String>,
+        attachments: Vec<RenderedAttachment>,
+    ) {
+        self.transcript.push(RenderedMessage {
+            role: MessageRole::User,
+            text: text.into(),
+            thinking: None,
+            call_id: None,
+            tool_id: None,
+            tool_input: None,
+            success: None,
+            attachments,
+        });
     }
 
     /// Appends a structured tool invocation (call + result) to the transcript.
@@ -617,6 +675,7 @@ impl AppState {
             tool_id: Some(tool_id.to_string()),
             tool_input: Some(input.to_string()),
             success: None,
+            attachments: Vec::new(),
         });
         self.transcript.push(RenderedMessage {
             role: MessageRole::ToolResult,
@@ -626,6 +685,7 @@ impl AppState {
             tool_id: Some(tool_id.to_string()),
             tool_input: Some(input.to_string()),
             success: Some(success),
+            attachments: Vec::new(),
         });
     }
 
@@ -1132,6 +1192,18 @@ mod tests {
         }
     }
 
+    fn stored_image_attachment() -> puffer_session_store::StoredAttachment {
+        puffer_session_store::StoredAttachment {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            name: "pixel.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: 3,
+            extension: "PNG".to_string(),
+            kind: puffer_session_store::StoredAttachmentKind::Image,
+            storage_key: "11111111-1111-1111-1111-111111111111/original".to_string(),
+        }
+    }
+
     fn browser_tool_definition() -> puffer_tools::ToolDefinition {
         puffer_tools::ToolDefinition {
             id: "Browser".to_string(),
@@ -1148,6 +1220,43 @@ mod tests {
             enabled_if: None,
             display: puffer_tools::ToolDisplayHints::default(),
         }
+    }
+
+    #[test]
+    fn from_session_record_preserves_user_message_attachments() {
+        let mut session = puffer_session_store::SessionRecord {
+            metadata: sample_metadata(),
+            events: Vec::new(),
+        };
+        let attachment = stored_image_attachment();
+        session.events.push(TranscriptEvent::UserMessage {
+            text: "[Image: pixel.png]".to_string(),
+            attachments: vec![attachment.clone()],
+            actor: None,
+        });
+
+        let state = AppState::from_session_record(PufferConfig::default(), session);
+
+        assert_eq!(state.transcript.len(), 1);
+        assert_eq!(state.transcript[0].attachments.len(), 1);
+        assert_eq!(state.transcript[0].attachments[0].attachment, attachment);
+        assert_eq!(state.transcript[0].attachments[0].model_url, None);
+    }
+
+    #[test]
+    fn push_user_message_with_attachments_stores_attachment_refs() {
+        let metadata = sample_metadata();
+        let mut state = AppState::new(PufferConfig::default(), metadata.cwd.clone(), metadata);
+        let attachment = stored_image_attachment();
+
+        state.push_user_message_with_attachments(
+            "read this",
+            vec![RenderedAttachment::from_stored(attachment.clone())],
+        );
+
+        assert_eq!(state.transcript[0].role, MessageRole::User);
+        assert_eq!(state.transcript[0].text, "read this");
+        assert_eq!(state.transcript[0].attachments[0].attachment, attachment);
     }
 
     #[test]

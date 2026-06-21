@@ -33,6 +33,24 @@ test("empty provider registry still offers built-in setup options", async ({ pag
   await expect(page.getByRole("button", { name: "Project", exact: true })).toBeVisible();
 });
 
+test("provider cards describe model families instead of model counts", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: [], providers: [] });
+  await daemon.install(page);
+  await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
+
+  const googleCard = page.locator(".provider-card").filter({ hasText: "Google" }).last();
+  await expect(googleCard).toContainText("Gemini models for quick, structured responses.");
+  await expect(googleCard).not.toContainText(/\b\d+ models?\b/);
+  const googleIconBox = await googleCard.locator('img[src="/service-icons/google.svg"]').boundingBox();
+  expect(googleIconBox?.width).toBeCloseTo(23, 1);
+  expect(googleIconBox?.height).toBeCloseTo(23, 1);
+
+  await googleCard.getByRole("button", { name: "Add connect" }).click();
+  const modal = page.getByRole("dialog", { name: "Connect Google" });
+  await expect(modal).toContainText("Gemini models for quick, structured responses.");
+  await expect(modal).not.toContainText(/\b\d+ models? available\b/);
+});
+
 test("custom provider modal saves base URL and API key", async ({ page }) => {
   const daemon = new FakeDaemon({ auth: [], providers: [] });
   await daemon.install(page);
@@ -42,11 +60,13 @@ test("custom provider modal saves base URL and API key", async ({ page }) => {
   await customCard.getByRole("button", { name: "Add connect" }).click();
 
   const modal = page.getByRole("dialog", { name: "Connect Custom provider" });
+  await expect(modal.getByLabel("Display name")).toBeVisible();
   await expect(modal.getByLabel("Base URL")).toBeVisible();
   await expect(modal.getByLabel("API key")).toBeVisible();
   await expect(modal.getByText("Saved credentials")).toHaveCount(0);
   await expect(modal.getByText("OAuth")).toHaveCount(0);
 
+  await modal.getByLabel("Display name").fill("Acme Proxy");
   await modal.getByLabel("Base URL").fill("https://proxy.example/v1");
   await modal.getByLabel("API key").fill("sk-custom-test");
   await modal.getByRole("button", { name: "Add connect" }).click();
@@ -56,7 +76,8 @@ test("custom provider modal saves base URL and API key", async ({ page }) => {
   );
   expect(configRequest.params).toMatchObject({
     defaultProvider: "openai",
-    openaiBaseUrl: "https://proxy.example/v1"
+    openaiBaseUrl: "https://proxy.example/v1",
+    openaiDisplayName: "Acme Proxy"
   });
 
   const loginRequest = await daemon.waitForRequest("login_with_api_key", (request) =>

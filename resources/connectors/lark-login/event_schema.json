@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "event_source": "lark-login",
+  "text_fields": [
+    { "path": "text", "label": "Message text" }
+  ],
+  "fields": [
+    {
+      "path": "message_type",
+      "label": "Message type",
+      "type": "enum",
+      "operators": ["equals"],
+      "values": [
+        { "value": "text", "label": "Text" },
+        { "value": "post", "label": "Post" },
+        { "value": "image", "label": "Image" },
+        { "value": "file", "label": "File" },
+        { "value": "audio", "label": "Audio" },
+        { "value": "media", "label": "Media" },
+        { "value": "sticker", "label": "Sticker" },
+        { "value": "interactive", "label": "Interactive" },
+        { "value": "share_chat", "label": "Shared chat" },
+        { "value": "share_user", "label": "Shared user" }
+      ]
+    },
+    {
+      "path": "chat_type",
+      "label": "Chat type",
+      "type": "enum",
+      "operators": ["equals"],
+      "values": [
+        { "value": "p2p", "label": "Direct message" },
+        { "value": "group", "label": "Group chat" }
+      ]
+    }
+  ]
+}

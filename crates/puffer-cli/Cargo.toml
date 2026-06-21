@@ -46,6 +46,7 @@ puffer-tools = { path = "../puffer-tools" }
 puffer-tui = { path = "../puffer-tui" }
 puffer-workflow = { path = "../puffer-workflow" }
 reqwest.workspace = true
+regex.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "process", "io-util", "io-std"] }
 tungstenite.workspace = true
 webbrowser = "1.0"

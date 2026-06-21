@@ -19,12 +19,13 @@ fn daemon_persists_staged_attachment_ids_on_user_turn() {
     let puffer_config = puffer_home.join(".puffer");
     std::fs::create_dir_all(&workspace).expect("workspace");
     std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    write_worldrouter_provider_override(&workspace, &mock.base_url);
     std::fs::write(
         puffer_config.join("auth.json"),
         json!({
             "format_version": 1,
             "providers": {
-                "openai": { "kind": "api_key", "key": "sk-test" }
+                "worldrouter": { "kind": "api_key", "key": "sk-test" }
             }
         })
         .to_string(),
@@ -39,17 +40,16 @@ fn daemon_persists_staged_attachment_ids_on_user_turn() {
     client.rpc(
         "update_config",
         json!({
-            "openaiBaseUrl": mock.base_url,
-            "defaultProvider": "openai",
-            "defaultModel": "openai/gpt-5",
+            "defaultProvider": "worldrouter",
+            "defaultModel": "worldrouter/gpt-5.5",
         }),
     );
     let session = client.rpc(
         "create_session",
         json!({
             "cwd": workspace.display().to_string(),
-            "providerId": "codex",
-            "modelId": "codex/gpt-5",
+            "providerId": "worldrouter",
+            "modelId": "worldrouter/gpt-5.5",
         }),
     );
     let session_id = session["sessionId"].as_str().expect("session id");
@@ -85,8 +85,8 @@ fn daemon_persists_staged_attachment_ids_on_user_turn() {
             "sessionId": session_id,
             "message": "[Image: pixel.png]",
             "attachmentIds": [attachment.id],
-            "providerId": "codex",
-            "modelId": "codex/gpt-5",
+            "providerId": "worldrouter",
+            "modelId": "worldrouter/gpt-5.5",
             "permissionMode": "read-only",
         }),
     );
@@ -111,12 +111,31 @@ fn daemon_persists_staged_attachment_ids_on_user_turn() {
     // desktop_api_types.rs:180-186).
     assert_eq!(user["text"], "[Image: pixel.png]");
 
-    // The model received the materialized temp path (path bridge), not the
-    // bare basename — this is what stops the filesystem-guessing crash.
-    let model_body = mock.last_responses_body();
+    let model_body = mock.last_chat_body();
+    assert_eq!(mock.chat_calls.load(Ordering::SeqCst), 1);
+    let body: Value = serde_json::from_str(&model_body).expect("chat body json");
+    let messages = body["messages"].as_array().expect("messages array");
+    let user_message = messages
+        .iter()
+        .find(|message| message["role"] == "user")
+        .expect("user message");
+    let content = user_message["content"].as_array().expect("content array");
     assert!(
-        model_body.contains("/tmp/puffer-attachments/"),
-        "provider request body should carry the attachment temp path: {model_body}"
+        content.iter().any(|part| {
+            part["type"] == "image_url"
+                && part["image_url"]["url"]
+                    .as_str()
+                    .is_some_and(|url| url == "data:image/png;base64,AQID")
+        }),
+        "provider request body should carry the image data URL: {model_body}"
+    );
+    assert!(
+        !model_body.contains("/tmp/puffer-attachments"),
+        "provider request body must not carry temp attachment paths: {model_body}"
+    );
+    assert!(
+        !model_body.contains("VisionAnalyze"),
+        "provider request body must not prompt VisionAnalyze: {model_body}"
     );
 
     daemon.stop();
@@ -988,7 +1007,9 @@ fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) {
 struct MockOpenAiServer {
     base_url: String,
     responses_calls: Arc<AtomicUsize>,
+    chat_calls: Arc<AtomicUsize>,
     last_body: Arc<Mutex<String>>,
+    last_chat_body: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -1016,10 +1037,14 @@ impl MockOpenAiServer {
         let address = listener.local_addr().expect("mock address");
         let stop = Arc::new(AtomicBool::new(false));
         let responses_calls = Arc::new(AtomicUsize::new(0));
+        let chat_calls = Arc::new(AtomicUsize::new(0));
         let last_body = Arc::new(Mutex::new(String::new()));
+        let last_chat_body = Arc::new(Mutex::new(String::new()));
         let thread_stop = Arc::clone(&stop);
         let thread_calls = Arc::clone(&responses_calls);
+        let thread_chat_calls = Arc::clone(&chat_calls);
         let thread_body = Arc::clone(&last_body);
+        let thread_chat_body = Arc::clone(&last_chat_body);
         let handle = thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
@@ -1030,7 +1055,9 @@ impl MockOpenAiServer {
                             response_delay,
                             error_status,
                             &thread_calls,
+                            &thread_chat_calls,
                             &thread_body,
+                            &thread_chat_body,
                         );
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1043,7 +1070,9 @@ impl MockOpenAiServer {
         Self {
             base_url: format!("http://{address}"),
             responses_calls,
+            chat_calls,
             last_body,
+            last_chat_body,
             stop,
             handle: Some(handle),
         }
@@ -1051,6 +1080,10 @@ impl MockOpenAiServer {
 
     fn last_responses_body(&self) -> String {
         self.last_body.lock().unwrap().clone()
+    }
+
+    fn last_chat_body(&self) -> String {
+        self.last_chat_body.lock().unwrap().clone()
     }
 }
 
@@ -1158,7 +1191,9 @@ fn handle_mock_openai_stream(
     response_delay: Duration,
     error_status: Option<u16>,
     responses_calls: &AtomicUsize,
+    chat_calls: &AtomicUsize,
     last_body: &Mutex<String>,
+    last_chat_body: &Mutex<String>,
 ) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -1230,6 +1265,42 @@ fn handle_mock_openai_stream(
                         "input_tokens": 10,
                         "output_tokens": 4,
                         "input_tokens_details": { "cached_tokens": 0 }
+                    }
+                }),
+            );
+        }
+        "/v1/chat/completions" => {
+            chat_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(body) = text.split("\r\n\r\n").nth(1) {
+                *last_chat_body.lock().unwrap() = body.to_string();
+            }
+            thread::sleep(response_delay);
+            if let Some(status) = error_status {
+                write_http_response(
+                    &mut stream,
+                    status,
+                    "application/json",
+                    json!({ "error": { "message": reply } })
+                        .to_string()
+                        .as_bytes(),
+                );
+                return;
+            }
+            write_http_json(
+                &mut stream,
+                json!({
+                    "id": "chatcmpl_smoke",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": { "role": "assistant", "content": "Attachment reply" },
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 4,
+                        "total_tokens": 14
                     }
                 }),
             );
@@ -1432,6 +1503,37 @@ models:
         ),
     )
     .expect("write anthropic provider override");
+}
+
+fn write_worldrouter_provider_override(workspace: &Path, base_url: &str) {
+    let provider_dir = workspace
+        .join(".puffer")
+        .join("resources")
+        .join("providers");
+    std::fs::create_dir_all(&provider_dir).expect("workspace provider dir");
+    std::fs::write(
+        provider_dir.join("worldrouter.yaml"),
+        format!(
+            r#"id: worldrouter
+display_name: WorldRouter
+base_url: "{base_url}/v1"
+default_api: openai-completions
+chat_completions_path: /chat/completions
+auth_modes:
+  - api_key
+models:
+  - id: gpt-5.5
+    display_name: gpt-5.5
+    provider: worldrouter
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 16384
+    supports_reasoning: true
+    input: [text, image]
+"#
+        ),
+    )
+    .expect("write worldrouter provider override");
 }
 
 fn set_daemon_socket_read_timeout(

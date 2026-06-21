@@ -9,6 +9,7 @@
     providerCatalogForSetup,
     usesFallbackProviderCatalog
   } from "../providerFallbacks";
+  import { providerModelIntro } from "../providerModelIntro";
   import type { ExternalCredential, ProviderSummary, SettingsSnapshot } from "../types";
 
   const HIDDEN_PROVIDER_IDS = new Set([
@@ -95,7 +96,7 @@
   export let onLoginApiKey: (
     providerId: string,
     apiKey: string,
-    options?: { baseUrl?: string | null }
+    options?: { baseUrl?: string | null; displayName?: string | null }
   ) => void = () => {};
   export let onLogout: (providerId: string) => void = () => {};
   export let onImportExternal: (providerId: string, source: "claude" | "codex") => void = () => {};
@@ -103,6 +104,7 @@
 
   let apiKeys: Record<string, string> = {};
   let baseUrls: Record<string, string> = {};
+  let displayNames: Record<string, string> = {};
   let query = "";
   let pendingApiKeyProvider: string | null = null;
   let pendingApiKeyBusyObserved = false;
@@ -125,8 +127,16 @@
     baseUrls = { ...baseUrls, [providerId]: value };
   }
 
+  function updateDisplayName(providerId: string, value: string) {
+    displayNames = { ...displayNames, [providerId]: value };
+  }
+
   function apiKeyValue(providerId: string): string {
     return apiKeys[providerId] ?? "";
+  }
+
+  function displayNameValue(provider: ProviderSummary): string {
+    return displayNames[provider.id] ?? provider.displayName ?? "";
   }
 
   function baseUrlValue(provider: ProviderSummary): string {
@@ -156,12 +166,13 @@
   function submitCustomProvider(provider: ProviderSummary) {
     if (credentialBusy) return;
     const apiKey = apiKeyValue(provider.id).trim();
+    const displayName = displayNameValue(provider).trim();
     const baseUrl = baseUrlValue(provider).trim();
-    if (!baseUrl || !apiKey) return;
+    if (!displayName || !baseUrl || !apiKey) return;
     pendingApiKeyProvider = provider.id;
     pendingApiKeyBusyObserved = false;
     beginPendingConnection(provider.id);
-    onLoginApiKey(provider.id, apiKey, { baseUrl });
+    onLoginApiKey(provider.id, apiKey, { baseUrl, displayName });
   }
 
   function submitOauth(providerId: string) {
@@ -449,7 +460,7 @@
               </span>
               <div class="head-text">
                 <h2 class="name">{provider.displayName}</h2>
-                <p class="meta">{provider.modelCount} model{provider.modelCount === 1 ? "" : "s"}</p>
+                <p class="meta">{providerModelIntro(provider)}</p>
               </div>
               {#if auth || authFree}
                 <span class="status" data-connected="true">
@@ -510,7 +521,7 @@
                 ? connectedHint(auth)
                 : authFree
                   ? "This provider can run without saved credentials."
-                  : `${activeProvider.modelCount} model${activeProvider.modelCount === 1 ? "" : "s"} available`}
+                  : providerModelIntro(activeProvider)}
             </p>
           </div>
           <button type="button" class="modal-close" aria-label="Close" on:click={closeProviderModal}>
@@ -522,6 +533,24 @@
           {#if isCustomProvider(activeProvider)}
             <div class="provider-modal-section">
               <div class="custom-provider-form">
+                <label>
+                  <span>Display name</span>
+                  <input
+                    type="text"
+                    aria-label="Display name"
+                    value={displayNameValue(activeProvider)}
+                    placeholder="My provider"
+                    autocomplete="organization"
+                    spellcheck="false"
+                    disabled={credentialBusy}
+                    on:input={(event) =>
+                      updateDisplayName(activeProvider.id, (event.currentTarget as HTMLInputElement).value)}
+                    on:keydown={(event) => {
+                      if (event.key === "Enter") submitCustomProvider(activeProvider);
+                    }}
+                  />
+                </label>
+
                 <label>
                   <span>Base URL</span>
                   <input
@@ -559,7 +588,7 @@
 
                 <button
                   class="apikey-btn"
-                  disabled={credentialBusy || !baseUrlValue(activeProvider).trim() || !(apiKeys[activeProvider.id] ?? "").trim()}
+                  disabled={credentialBusy || !displayNameValue(activeProvider).trim() || !baseUrlValue(activeProvider).trim() || !(apiKeys[activeProvider.id] ?? "").trim()}
                   on:click={() => submitCustomProvider(activeProvider)}
                 >
                   Add connect

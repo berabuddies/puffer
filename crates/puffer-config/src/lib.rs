@@ -41,6 +41,8 @@ pub struct PufferConfig {
     pub default_provider: Option<String>,
     pub openai_base_url: Option<String>,
     #[serde(default)]
+    pub openai_display_name: Option<String>,
+    #[serde(default)]
     pub openai_headers: BTreeMap<String, String>,
     #[serde(default)]
     pub openai_query_params: BTreeMap<String, String>,
@@ -294,6 +296,7 @@ impl Default for PufferConfig {
             default_model: None,
             default_provider: Some("anthropic".to_string()),
             openai_base_url: None,
+            openai_display_name: None,
             openai_headers: BTreeMap::new(),
             openai_query_params: BTreeMap::new(),
             theme: "puffer".to_string(),

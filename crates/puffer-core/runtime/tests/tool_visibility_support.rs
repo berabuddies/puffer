@@ -356,8 +356,16 @@ fn reference_task_create_prompt() -> String {
             "- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., \"Fixing authentication bug\"). If omitted, the spinner shows the subject instead.\n- **receivedAt** (optional): RFC3339 timestamp for when the task source event was received.\n- **expiresAt** (optional): RFC3339 timestamp for when the task should stop being considered current.\n\nAll tasks are created with status `pending`.",
         )
         .replace(
+            "- **subject**: A brief, actionable title in imperative form (e.g., \"Fix authentication bug in login flow\")\n- **description**: What needs to be done",
+            "- **subject**: A brief, actionable title in imperative form that names what\n  the user or assigned agent should do next (e.g., \"Fix authentication bug in\n  login flow\"). Do not use a neutral summary such as \"Authentication bug\n  reported\".\n- **description**: Why this needs attention and the concrete next step. For\n  monitor tasks, include the relevant source request/context and make the\n  recommended user action clear.",
+        )
+        .replace(
             "\n## Tips",
             "\nMonitor triage agents may create workspace-level connector tasks by setting\n`metadata._monitor=true` or `metadata.monitor_connection`. For those tasks,\ninclude `receivedAt`, `expiresAt`, `actions`, and `possibleIgnoreReasons` so\n`/tasks` can offer concrete user choices without another triage pass.\nMonitor triage agents must only create tasks for explicit requests,\nschedules, deadlines, or service notifications that clearly assign work or\nrequest review/approval from the user. Do not create monitor tasks for\ngreetings, thanks, acknowledgements, FYI/status-only updates, generic bot\nsummaries, GitHub-style commits/comments/notifications, or repeated source\nupdates without an explicit request, assignment, review request, approval\nrequest, or schedule for the user. Useful information is not a task unless it\nhas a clear next action for the user. Monitor triage agents may check\nsurrounding context such as recent messages, thread history, linked task\ncontext, or connector-provided event details when an event is ambiguous, but\ncontext alone must not turn FYI/status information into a task. When unsure,\ndo not create a task.\n\nNormal agents should not call TaskCreate unless the user explicitly asked to\ncreate a durable task. For ordinary current-session progress tracking, use\nTodoWrite instead.\n\n## Tips",
+        )
+        .replace(
+            "- Create tasks with clear, specific subjects that describe the outcome\n- After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed",
+            "- Create tasks with clear, specific subjects that describe the outcome\n- Prefer next-step wording over summaries: \"Reply with availability for\n  Friday\" is better than \"Friday availability question\"\n- After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed",
         )
 }
 

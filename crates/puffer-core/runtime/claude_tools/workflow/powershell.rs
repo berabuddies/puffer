@@ -61,6 +61,7 @@ pub fn execute_powershell(state: &mut AppState, cwd: &Path, input: Value) -> Res
             created_at_ms: Some(now_ms()),
             updated_at_ms: Some(now_ms()),
             exit_code: None,
+            completed_via: None,
         });
         save_store(&tp, &tasks)?;
         return Ok(serde_json::to_string_pretty(&serde_json::json!({

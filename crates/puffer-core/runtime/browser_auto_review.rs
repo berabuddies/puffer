@@ -633,12 +633,9 @@ fn run_browser_auto_review_with_timeout(
             &prompt,
             super::TurnRequestOptions {
                 structured_output: Some(&structured_output),
-                tool_filter: None,
-                reflection: None,
                 cancel: Some(cancel),
                 max_turns,
-                observability: None,
-                lightweight_context: false,
+                ..super::TurnRequestOptions::default()
             },
         )
         .map(|turn| browser_auto_review_runtime_result_from_json(turn.assistant_text.trim()))

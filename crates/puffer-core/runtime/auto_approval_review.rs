@@ -274,11 +274,10 @@ fn run_auto_permission_review_attempt(
                 super::TurnRequestOptions {
                     structured_output: Some(&structured_output),
                     tool_filter: Some(RequestToolFilter::empty_static()),
-                    reflection: None,
                     cancel: Some(cancel),
                     max_turns: Some(1),
-                    observability: None,
                     lightweight_context: true,
+                    ..super::TurnRequestOptions::default()
                 },
             )
             .map(|turn| auto_permission_review_result_from_json(turn.assistant_text.trim()))

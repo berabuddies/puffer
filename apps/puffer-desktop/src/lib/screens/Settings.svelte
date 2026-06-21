@@ -78,7 +78,7 @@
     onApiKeyLogin?: (
       providerId: string,
       apiKey: string,
-      options?: { baseUrl?: string | null }
+      options?: { baseUrl?: string | null; displayName?: string | null }
     ) => void;
     onImportExternal?: (providerId: string, source: "claude" | "codex") => void;
     busyProviderId?: string | null;

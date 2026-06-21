@@ -8,9 +8,11 @@ mod monitor_ignore_result;
 mod monitor_memory;
 mod monitor_reply_send;
 mod monitor_rules;
+mod monitor_self_gate;
 mod monitor_task_complete;
 mod monitor_task_ignore;
 mod planned;
+mod snapshot_json;
 mod task_snapshot;
 
 pub(crate) use binding_delete::handle_workflow_binding_delete;
@@ -20,6 +22,7 @@ pub(crate) use monitor_history::handle_monitor_history_list;
 pub(crate) use monitor_memory::handle_monitor_memory_save;
 pub(crate) use monitor_reply_send::handle_monitor_reply_send;
 pub(crate) use monitor_rules::{handle_monitor_rule_add, handle_monitor_rule_delete};
+pub(crate) use monitor_self_gate::MonitorSelfGate;
 pub(crate) use monitor_task_complete::handle_monitor_task_complete;
 pub(crate) use monitor_task_ignore::handle_monitor_task_ignore;
 
@@ -35,6 +38,7 @@ use puffer_subscriptions::{
 use puffer_workflow::{RegisterOptions, WorkflowStore};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use snapshot_json::connection_snapshot_json;
 use std::collections::HashMap;
 use std::fs;
 
@@ -229,13 +233,18 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
                 .list()
                 .into_iter()
                 .map(|connection| {
+                    let schema = monitor_rules::connection_monitor_rule_schema_json(
+                        paths,
+                        manager.as_ref(),
+                        &connection,
+                    );
                     let can_trigger_workflow = manager
                         .connector_store()
                         .get(&connection.connector_slug)
                         .is_some_and(|template| {
                             connection_workflow_trigger_supported(&roots, &connection, &template)
                         });
-                    connection_snapshot_json(connection, can_trigger_workflow)
+                    connection_snapshot_json(connection, can_trigger_workflow, schema)
                 })
                 .collect::<Vec<_>>();
             (connectors, connections, refresh_error)
@@ -331,6 +340,7 @@ fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> V
         "ignore_filters": ignore_filters,
         "contact_ids": binding.contact_ids.clone(),
         "monitor": monitor,
+        "monitor_rule_schema": monitor_rules::binding_monitor_rule_schema_json(paths, &binding),
         "monitor_memory_path": monitor_memory_path,
         "created_at_ms": binding.created_at_ms,
     })
@@ -762,22 +772,6 @@ fn string_value(value: Option<&Value>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn connection_snapshot_json(connection: ConnectionRecord, can_trigger_workflow: bool) -> Value {
-    let monitor_command = can_trigger_workflow.then(|| format!("/monitor {}", connection.slug));
-    let connect_command = format!("/connect {} {}", connection.connector_slug, connection.slug);
-    json!({
-        "slug": connection.slug,
-        "connector_slug": connection.connector_slug,
-        "description": connection.description,
-        "state": connection.state,
-        "has_consumer": connection.has_consumer,
-        "auth_failure_notified": connection.auth_failure_notified,
-        "can_trigger_workflow": can_trigger_workflow,
-        "connect_command": connect_command,
-        "monitor_command": monitor_command,
-    })
-}
-
 fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
     SubscriberManifestRoots::new(
         paths.workspace_config_dir.clone(),
@@ -789,13 +783,14 @@ fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_subscriptions::ConnectionState;
 
     #[test]
     fn trigger_ready_connection_snapshot_includes_monitor_command() {
         let connection =
             ConnectionRecord::authenticated("telegram-user", "telegram-login", "Personal Telegram");
 
-        let snapshot = connection_snapshot_json(connection, true);
+        let snapshot = connection_snapshot_json(connection, true, None);
 
         assert_eq!(
             snapshot["connect_command"],
@@ -809,11 +804,37 @@ mod tests {
     fn non_trigger_connection_snapshot_omits_monitor_command() {
         let connection = ConnectionRecord::authenticated("slack-app", "slack-app", "Slack");
 
-        let snapshot = connection_snapshot_json(connection, false);
+        let snapshot = connection_snapshot_json(connection, false, None);
 
         assert_eq!(snapshot["connect_command"], "/connect slack-app slack-app");
         assert!(snapshot["monitor_command"].is_null());
         assert_eq!(snapshot["can_trigger_workflow"], false);
+    }
+
+    #[test]
+    fn connection_snapshot_includes_health_when_present() {
+        let mut connection =
+            ConnectionRecord::authenticated("telegram-user", "telegram-login", "Personal Telegram");
+        connection.state = ConnectionState::Degraded;
+        connection.health = Some(puffer_subscriptions::ConnectionHealth {
+            status: puffer_subscriptions::ConnectionHealthStatus::Retrying,
+            reason: Some("connect_failed".into()),
+            detail: Some("read 0 bytes".into()),
+            updated_at_ms: 1_700_000_000_000,
+            next_retry_at_ms: Some(1_700_000_010_000),
+        });
+
+        let snapshot = connection_snapshot_json(connection, true, None);
+
+        assert_eq!(snapshot["state"], "degraded");
+        assert_eq!(snapshot["health"]["status"], "retrying");
+        assert_eq!(snapshot["health"]["reason"], "connect_failed");
+        assert_eq!(snapshot["health"]["detail"], "read 0 bytes");
+        assert_eq!(snapshot["health"]["updated_at_ms"], 1_700_000_000_000_i64);
+        assert_eq!(
+            snapshot["health"]["next_retry_at_ms"],
+            1_700_000_010_000_i64
+        );
     }
 
     #[test]

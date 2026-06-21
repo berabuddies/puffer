@@ -4,6 +4,7 @@ pub(crate) mod loop_status;
 mod overlay_content;
 mod overlay_list;
 mod panes;
+mod pending_submit;
 mod summary;
 mod tool_messages;
 mod top_panel;
@@ -18,6 +19,8 @@ use self::overlay_content::render_model_entry;
 use self::overlay_content::{masked_secret, overlay_rows, overlay_title, OverlayRow};
 use self::overlay_list::{onboarding_fixed_line_count, overlay_selection, visible_overlay_rows};
 use self::panes::render_help_pane;
+pub(crate) use self::pending_submit::set_pending_submit_state;
+use self::pending_submit::{pending_submit_state, PendingSubmitRenderState};
 #[cfg(test)]
 use self::summary::{footer_lines, header_lines, session_lines};
 use self::summary::{footer_status_line, top_panel_height};
@@ -33,7 +36,7 @@ use crate::task_overlay::{is_task_overlay, render_task_overlay};
 use crate::text_overlay::render_text_overlay;
 use crate::usage::render_usage_overlay;
 use crate::OverlayState;
-use puffer_core::{AppState, CommandSpec, MessageRole, RenderedMessage, ToolCallRequest};
+use puffer_core::{AppState, CommandSpec, MessageRole, RenderedMessage};
 use puffer_provider_registry::AuthStore;
 use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
@@ -47,20 +50,8 @@ use std::cell::RefCell;
 use unicode_width::UnicodeWidthStr;
 const COMPOSER_SEPARATOR_COLOR: Color = Color::Indexed(214);
 
-#[derive(Default)]
-struct PendingSubmitRenderState {
-    loading_prompt: Option<String>,
-    pending_tool_calls: Vec<ToolCallRequest>,
-    queued_prompts: Vec<String>,
-    started_at: Option<std::time::Instant>,
-    /// True when the model is actively producing thinking/reasoning tokens.
-    thinking_active: bool,
-    /// Transient status hint (e.g. "Retrying (2/3)…").
-    status_hint: Option<String>,
-}
 thread_local! {
     static ACTIVE_OVERLAY: RefCell<Option<OverlayState>> = const { RefCell::new(None) };
-    static ACTIVE_PENDING_SUBMIT: RefCell<PendingSubmitRenderState> = RefCell::new(PendingSubmitRenderState::default());
     static ACTIVE_TOOL_DETAILS_EXPANDED: RefCell<bool> = const { RefCell::new(false) };
     static ACTIVE_FOLLOW_OUTPUT: RefCell<bool> = const { RefCell::new(true) };
     static ACTIVE_TRANSCRIPT_VIEWPORT: RefCell<Option<Rect>> = const { RefCell::new(None) };
@@ -71,27 +62,6 @@ thread_local! {
 /// Sets the active overlay rendered by the TUI on the next draw.
 pub(crate) fn set_active_overlay(overlay: Option<OverlayState>) {
     ACTIVE_OVERLAY.with(|value| *value.borrow_mut() = overlay);
-}
-
-/// Sets the pending submit render state for the current frame.
-pub(crate) fn set_pending_submit_state(
-    loading_prompt: Option<String>,
-    pending_tool_calls: Vec<ToolCallRequest>,
-    queued_prompts: Vec<String>,
-    started_at: Option<std::time::Instant>,
-    thinking_active: bool,
-    status_hint: Option<String>,
-) {
-    ACTIVE_PENDING_SUBMIT.with(|value| {
-        *value.borrow_mut() = PendingSubmitRenderState {
-            loading_prompt,
-            pending_tool_calls,
-            queued_prompts,
-            started_at,
-            thinking_active,
-            status_hint,
-        };
-    });
 }
 
 /// Sets whether transcript tool messages should render their raw details.
@@ -168,7 +138,7 @@ pub(crate) fn desired_height(
         resources,
         providers,
         auth_store,
-        pending_submit.loading_prompt.is_some() || !pending_submit.queued_prompts.is_empty(),
+        pending_submit.is_active() || !pending_submit.queued_prompts.is_empty(),
     )
     .max(1);
     let body_height = if help_active || full_panel_overlay {
@@ -286,8 +256,7 @@ pub(crate) fn render(
                 resources,
                 providers,
                 auth_store,
-                pending_submit.loading_prompt.is_some()
-                    || !pending_submit.queued_prompts.is_empty(),
+                pending_submit.is_active() || !pending_submit.queued_prompts.is_empty(),
             )
             .saturating_sub(layout[1].height.max(1))
         } else {
@@ -482,7 +451,7 @@ fn transcript_text(
     for message in &state.transcript {
         lines.extend(render_transcript_message(message, false));
     }
-    if pending_submit.loading_prompt.is_some() || !pending_submit.queued_prompts.is_empty() {
+    if pending_submit.is_active() || !pending_submit.queued_prompts.is_empty() {
         lines.extend(pending_submit_lines(&pending_submit));
     }
     Text::from(lines)
@@ -496,7 +465,7 @@ fn use_fixed_top_panel_surface(
 ) -> bool {
     !help_active
         && state.transcript.is_empty()
-        && pending_submit.loading_prompt.is_none()
+        && !pending_submit.is_active()
         && pending_submit.queued_prompts.is_empty()
 }
 
@@ -636,17 +605,6 @@ fn render_thinking_block(thinking: &str) -> Vec<Line<'static>> {
     lines
 }
 
-fn pending_submit_state() -> PendingSubmitRenderState {
-    ACTIVE_PENDING_SUBMIT.with(|value| PendingSubmitRenderState {
-        loading_prompt: value.borrow().loading_prompt.clone(),
-        pending_tool_calls: value.borrow().pending_tool_calls.clone(),
-        queued_prompts: value.borrow().queued_prompts.clone(),
-        started_at: value.borrow().started_at,
-        thinking_active: value.borrow().thinking_active,
-        status_hint: value.borrow().status_hint.clone(),
-    })
-}
-
 fn pending_submit_lines(pending_submit: &PendingSubmitRenderState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for tool_call in &pending_submit.pending_tool_calls {
@@ -662,7 +620,7 @@ fn pending_submit_lines(pending_submit: &PendingSubmitRenderState) -> Vec<Line<'
             lines.extend(tool_lines);
         }
     }
-    if pending_submit.loading_prompt.is_some() {
+    if pending_submit.is_active() {
         let base_label = if let Some(hint) = &pending_submit.status_hint {
             hint.as_str()
         } else if pending_submit.thinking_active {
@@ -991,6 +949,26 @@ mod overlay_tests;
 mod prompt_tests;
 #[cfg(test)]
 mod scroll_tests;
+#[cfg(test)]
+mod pending_submit_tests {
+    use super::*;
+
+    #[test]
+    fn active_pending_submit_without_prompt_still_renders_loading_line() {
+        let pending = PendingSubmitRenderState {
+            started_at: Some(std::time::Instant::now()),
+            ..PendingSubmitRenderState::default()
+        };
+
+        let rendered = pending_submit_lines(&pending)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Loading..."));
+    }
+}
 #[cfg(test)]
 #[rustfmt::skip]
 mod tests;

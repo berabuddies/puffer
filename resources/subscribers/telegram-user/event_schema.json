@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "event_source": "telegram-user",
+  "text_fields": [],
+  "fields": [
+    {
+      "path": "group_channel_name",
+      "label": "Group/Channel Name",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "chat_kind",
+      "label": "Chat type",
+      "type": "enum",
+      "operators": ["equals"],
+      "values": [
+        { "value": "user", "label": "Direct message" },
+        { "value": "group", "label": "Group" },
+        { "value": "channel", "label": "Channel" }
+      ]
+    },
+    {
+      "path": "chat_is_bot",
+      "label": "Bot chat",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    },
+    {
+      "path": "sender_name",
+      "label": "Sender name",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "sender_username",
+      "label": "Sender username",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "sender_is_bot",
+      "label": "Bot sender",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    },
+    {
+      "path": "notification_muted",
+      "label": "Muted notification",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    },
+    {
+      "path": "notification_silent",
+      "label": "Silent notification",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    },
+    {
+      "path": "media",
+      "label": "Has media",
+      "type": "exists",
+      "operators": ["exists"]
+    },
+    {
+      "path": "poll",
+      "label": "Has poll",
+      "type": "exists",
+      "operators": ["exists"]
+    }
+  ]
+}

@@ -189,9 +189,23 @@ fn render_session_entry(session: &SessionSummary) -> String {
     format!(
         "{}  {}  {}",
         short_id(&session.id.to_string()),
-        session.display_name.as_deref().unwrap_or("<unnamed>"),
+        session_title(session),
         context.join("  ")
     )
+}
+
+fn session_title(session: &SessionSummary) -> &str {
+    session
+        .display_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            session
+                .generated_title
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("<unnamed>")
 }
 
 fn path_tail(path: &std::path::Path) -> String {
@@ -199,4 +213,33 @@ fn path_tail(path: &std::path::Path) -> String {
         .and_then(|value| value.to_str())
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    #[test]
+    fn render_session_entry_uses_generated_title_when_display_name_missing() {
+        let session = SessionSummary {
+            id: Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap(),
+            display_name: None,
+            generated_title: Some("Fix session naming".to_string()),
+            cwd: PathBuf::from("/workspace/puffer"),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            event_count: 3,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+
+        let row = render_session_entry(&session);
+
+        assert!(row.contains("Fix session naming"));
+        assert!(!row.contains("<unnamed>"));
+    }
 }

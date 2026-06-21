@@ -47,6 +47,7 @@ mod upload;
 mod worker;
 
 pub(crate) use agent::handle_browser_agent;
+pub(super) use cdp::parse_cdp_call_response;
 pub(super) use cdp::parse_evaluation_response;
 pub(super) use cdp::send_cdp;
 pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};

@@ -25,8 +25,13 @@ description: |-
 
   ## Task Fields
 
-  - **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
-  - **description**: What needs to be done
+  - **subject**: A brief, actionable title in imperative form that names the
+    next decision, reply, review, or implementation step (e.g., "Fix
+    authentication bug in login flow"). Do not use a neutral topic summary such
+    as "Authentication bug reported" or "PR #404 discussion".
+  - **description**: Why this needs attention and the concrete next step. For
+    monitor tasks, include the relevant source request/context and make the
+    recommended user action clear.
   - **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
   - **receivedAt** (optional): RFC3339 timestamp for when the task source event was received.
   - **expiresAt** (optional): RFC3339 timestamp for when the task should stop being considered current.
@@ -57,6 +62,10 @@ description: |-
   ## Tips
 
   - Create tasks with clear, specific subjects that describe the outcome
+  - Prefer next-step wording over summaries: "Reply with availability for
+    Friday" is better than "Friday availability question"
+  - For monitor digest tasks, consolidate related messages into one task and
+    mention ignored/noisy context only when it explains the next action
   - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
   - Include enough detail in the description for another agent to understand and complete the task
   - New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them

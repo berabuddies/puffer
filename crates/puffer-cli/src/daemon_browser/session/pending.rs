@@ -1,6 +1,7 @@
 use super::super::command::UploadReply;
 use super::super::screenshot::{BrowserCapturedScreenshot, BrowserScreenshotFormat};
 use super::super::{BrowserCopySelection, BrowserCursor, BrowserEvaluation};
+use serde_json::Value;
 use std::sync::mpsc::Sender;
 
 pub(super) enum PendingKind {
@@ -13,6 +14,9 @@ pub(super) enum PendingKind {
     },
     Evaluate {
         reply: Sender<std::result::Result<BrowserEvaluation, String>>,
+    },
+    CdpCall {
+        reply: Sender<std::result::Result<Value, String>>,
     },
     CaptureScreenshot {
         format: BrowserScreenshotFormat,

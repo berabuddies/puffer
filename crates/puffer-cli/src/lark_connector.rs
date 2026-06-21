@@ -609,6 +609,10 @@ fn event_line_to_frame(line: &str) -> Option<ConnectorSubscribeFrame> {
     let chat_id = message.get("chat_id").and_then(Value::as_str);
     let sender = extract_sender(event, message);
     let create_time = message.get("create_time").and_then(Value::as_str);
+    let chat_type = message
+        .get("chat_type")
+        .and_then(Value::as_str)
+        .or_else(|| event.get("chat_type").and_then(Value::as_str));
     let message_type = message
         .get("message_type")
         .and_then(Value::as_str)
@@ -623,6 +627,7 @@ fn event_line_to_frame(line: &str) -> Option<ConnectorSubscribeFrame> {
         "chat_id": chat_id,
         "sender_open_id": sender,
         "create_time": create_time,
+        "chat_type": chat_type,
         "message_type": message_type,
     });
 
@@ -924,6 +929,7 @@ mod tests {
                 assert_eq!(id, "om_real");
                 assert_eq!(payload["text"], "hello there");
                 assert_eq!(payload["chat_id"], "oc_p2p");
+                assert_eq!(payload["chat_type"], "p2p");
                 assert_eq!(payload["sender_open_id"], "ou_alice");
                 assert_eq!(payload["message_type"], "text");
             }

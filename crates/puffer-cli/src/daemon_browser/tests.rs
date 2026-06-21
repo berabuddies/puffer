@@ -1053,3 +1053,253 @@ fn shutdown_ack_wait_uses_one_shared_deadline() {
 
     assert!(start.elapsed() < Duration::from_millis(140));
 }
+
+/// Real end-to-end proof for issue #656 against an actual Chromium with site
+/// isolation forced on, so the card iframe is a true out-of-process iframe
+/// (OOPIF) — exactly like Amazon's `ApxSecureIframe`. Verifies the cross-origin
+/// payment-iframe deep pass: the snapshot surfaces the OOPIF's interior fields
+/// as refs (which the top document can't reach), and `agent_fill` / `agent_select`
+/// drive them by CDP node identity and confirm the values stuck.
+///
+/// Run with:
+///   `cargo test -p puffer-cli --bins real_chrome_fills_oopif -- --ignored --nocapture`
+#[test]
+#[ignore = "needs real Google Chrome; run with --ignored"]
+fn real_chrome_fills_oopif_payment_card_fields() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::{Command, Stdio};
+
+    let _guard = cef_env_lock().lock().unwrap();
+    let chrome = std::env::var("CHROME_BIN").unwrap_or_else(|_| {
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string()
+    });
+    assert!(
+        std::path::Path::new(&chrome).exists(),
+        "Chrome not found at {chrome}; set CHROME_BIN"
+    );
+
+    // Two-origin fixture that mirrors Amazon's real structure: the card iframe
+    // is CROSS-ORIGIN from the parent (so the top-document snapshot can't read
+    // it) but SAME-SITE — both on 127.0.0.1, differing only by port. Like
+    // Amazon's apx-security.amazon.com vs www.amazon.com (same eTLD+1), site
+    // isolation keeps it in the SAME renderer process, so the page-session
+    // `DOM.getDocument { pierce }` deep pass can reach its interior. (A true
+    // cross-SITE OOPIF in a separate process is a harder case this approach does
+    // not cover; #656 does not need it.) The iframe `name` hits the payment gate.
+    let parent_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let parent_port = parent_listener.local_addr().unwrap().port();
+    let card_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let card_port = card_listener.local_addr().unwrap().port();
+    let parent_html = format!(
+        "<html><head><title>OOPIF-CHECKOUT-656</title></head><body>\
+         <h1>Pay 27 dollars</h1>\
+         <iframe name=\"ApxSecureIframe-test\" src=\"http://127.0.0.1:{card_port}/card\" \
+         width=\"500\" height=\"360\" style=\"border:0\"></iframe>\
+         </body></html>"
+    );
+    // The card-number field is a GUARDED controlled input that mirrors Amazon's
+    // APX widget: it builds its real value only from genuine keystrokes and
+    // reverts any bulk/programmatic value (insertText / direct `.value`). This
+    // proves the fill path types real per-character keystrokes — a single
+    // insertText would leave it empty and the fill's read-back guard would fail.
+    let card_html = "<html><body style=\"font-family:sans-serif\">\
+         <p><label>Card number <input id=\"cardnumber\" name=\"cardnumber\" type=\"tel\" autocomplete=\"off\"></label></p>\
+         <p><label>Name on card <input id=\"cardname\" name=\"cardname\" type=\"text\"></label></p>\
+         <p><label>Month <select id=\"expmonth\" name=\"expmonth\">\
+           <option value=\"1\">01</option><option value=\"8\">08</option><option value=\"12\">12</option></select></label>\
+         <label>Year <select id=\"expyear\" name=\"expyear\">\
+           <option value=\"2026\">2026</option><option value=\"2030\">2030</option></select></label></p>\
+         <p><label>CVV <input id=\"cvv\" name=\"cvv\" type=\"tel\"></label></p>\
+         <script>\
+           (function(){\
+             var el=document.getElementById('cardnumber');\
+             var proto=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');\
+             var model='';\
+             el.addEventListener('keydown',function(e){\
+               if(e.key&&e.key.length===1){model+=e.key;}\
+               else if(e.key==='Backspace'){model=model.slice(0,-1);}\
+             });\
+             setInterval(function(){if(proto.get.call(el)!==model){proto.set.call(el,model);}},25);\
+           })();\
+         </script>\
+         </body></html>"
+        .to_string();
+    let serve = |listener: TcpListener, body: String| {
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = stream.try_clone().unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = reader.read(&mut buf);
+                let mut writer = stream;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = writer.write_all(response.as_bytes());
+                let _ = writer.flush();
+            }
+        });
+    };
+    serve(parent_listener, parent_html);
+    serve(card_listener, card_html);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let page_url = format!("http://127.0.0.1:{parent_port}/");
+    let cdp_port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let user_data = tmp.path().join("chrome-profile");
+
+    let mut child = Command::new(&chrome)
+        .arg("--headless=new")
+        .arg(format!("--remote-debugging-port={cdp_port}"))
+        .arg(format!("--user-data-dir={}", user_data.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-gpu")
+        .arg("about:blank")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("launch Chrome");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if client
+            .get(format!("http://127.0.0.1:{cdp_port}/json/version"))
+            .send()
+            .and_then(|r| r.error_for_status())
+            .is_ok()
+        {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "Chrome DevTools never came up");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    client
+        .put(format!("http://127.0.0.1:{cdp_port}/json/new?{page_url}"))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .expect("open the checkout tab via /json/new");
+
+    let previous_port = std::env::var_os("PUFFER_CEF_REMOTE_DEBUGGING_PORT");
+    let previous_profile = std::env::var_os("PUFFER_CEF_PROFILE_DIR");
+    std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", cdp_port.to_string());
+    std::env::set_var("PUFFER_CEF_PROFILE_DIR", user_data.display().to_string());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let registry =
+            BrowserRegistry::new(tmp.path().to_path_buf(), true, BrowserLaunchSettings::default());
+        let (events, _rx) = tokio::sync::broadcast::channel::<ServerEnvelope>(256);
+        let root = "sess-oopif";
+
+        registry
+            .open(events.clone(), backend_session_id(root, "t1"), None, 1024, 768, false)
+            .expect("agent open should claim the about:blank slot");
+        registry.tabs.lock().unwrap().record_opened_backend(
+            root,
+            "t1",
+            backend_session_id(root, "t1"),
+            registry
+                .live_session(&backend_session_id(root, "t1"))
+                .unwrap()
+                .native_cef_session_id(),
+            registry.live_session(&backend_session_id(root, "t1")).unwrap().state(),
+        );
+        registry.sync_native_tabs(&events, root, 1024, 768);
+
+        let adopted = registry
+            .list_tabs(root)
+            .tabs
+            .iter()
+            .find(|tab| tab.url.contains(&format!("{parent_port}")))
+            .expect("checkout tab not adopted")
+            .clone();
+
+        // Give the cross-origin iframe a beat to load and lay out.
+        std::thread::sleep(Duration::from_secs(3));
+
+        let snapshot = registry
+            .agent_snapshot(&adopted.backend_session_id)
+            .expect("snapshot of the checkout tab");
+        let elements = snapshot
+            .get("elements")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let find_ref = |name: &str, role: &str| -> Option<String> {
+            elements.iter().find_map(|element| {
+                let matches_name = element
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.contains(name))
+                    .unwrap_or(false);
+                let matches_role = element
+                    .get("role")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value == role)
+                    .unwrap_or(false);
+                if matches_name && matches_role {
+                    element.get("ref").and_then(|value| value.as_str()).map(ToString::to_string)
+                } else {
+                    None
+                }
+            })
+        };
+
+        // The OOPIF interior fields must be surfaced as refs (top doc can't see them).
+        let cardnumber = find_ref("cardnumber", "textbox").unwrap_or_else(|| {
+            panic!(
+                "card number field not surfaced from the OOPIF; refs: {:?}",
+                elements
+                    .iter()
+                    .map(|e| (e.get("ref"), e.get("role"), e.get("name")))
+                    .collect::<Vec<_>>()
+            )
+        });
+        let cardname = find_ref("cardname", "textbox").expect("name field not surfaced");
+        let expmonth = find_ref("expmonth", "combobox").expect("expiry month not surfaced");
+        let expyear = find_ref("expyear", "combobox").expect("expiry year not surfaced");
+
+        // Fill the cross-origin text fields — in_frame_fill reads the value back
+        // and errors if it did not stick, so Ok proves the round trip.
+        registry
+            .agent_fill(&adopted.backend_session_id, &cardnumber, "4242424242424242")
+            .expect("fill card number inside the OOPIF");
+        registry
+            .agent_fill(&adopted.backend_session_id, &cardname, "Toby Wen")
+            .expect("fill name inside the OOPIF");
+        // Drive the native <select> expiry dropdowns by visible label and value.
+        registry
+            .agent_select(&adopted.backend_session_id, &expmonth, "08")
+            .expect("select expiry month inside the OOPIF");
+        registry
+            .agent_select(&adopted.backend_session_id, &expyear, "2030")
+            .expect("select expiry year inside the OOPIF");
+
+        eprintln!("[real-chrome] OOPIF card fields filled and verified");
+    }));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    match previous_port {
+        Some(value) => std::env::set_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT", value),
+        None => std::env::remove_var("PUFFER_CEF_REMOTE_DEBUGGING_PORT"),
+    }
+    match previous_profile {
+        Some(value) => std::env::set_var("PUFFER_CEF_PROFILE_DIR", value),
+        None => std::env::remove_var("PUFFER_CEF_PROFILE_DIR"),
+    }
+    let _ = std::io::stderr().flush();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

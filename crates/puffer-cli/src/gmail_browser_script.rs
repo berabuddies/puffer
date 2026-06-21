@@ -27,6 +27,19 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
     return rect.width > 0 && rect.height > 0;
   };
   const text = (node) => (node && node.textContent ? node.textContent.trim().replace(/\s+/g, " ") : "");
+  const rowHasAttachment = (row, aria) => {
+    if (aria.includes("attachment")) return true;
+    if (row.querySelector(".aZo, .brg")) return true;
+    const labeled = Array.from(row.querySelectorAll("[aria-label], [data-tooltip], [title]"));
+    return labeled.some((node) => {
+      const label = [
+        node.getAttribute("aria-label") || "",
+        node.getAttribute("data-tooltip") || "",
+        node.getAttribute("title") || ""
+      ].join(" ");
+      return /attachment/i.test(label);
+    });
+  };
   const candidateRows = Array.from(document.querySelectorAll('tr[role="row"]'));
   const visibleRows = candidateRows.filter(visible);
   const rows = visibleRows
@@ -64,6 +77,7 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
         row.classList.contains("zE") ||
         row.querySelector(".zF") !== null ||
         aria.includes("unread");
+      const hasAttachment = rowHasAttachment(row, aria);
       const fallback = [sender, subject, snippet, index].join(":");
       return {
         id: messageId || fallback,
@@ -75,6 +89,7 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
         subject,
         snippet,
         unread,
+        hasAttachment,
         url: href,
         index
       };

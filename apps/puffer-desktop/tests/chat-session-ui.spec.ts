@@ -4144,6 +4144,9 @@ test("sidebar marks the selected agent thinking while turn start is pending", as
   const activeRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Browser regression" });
   await expect(activeRow).toContainText("thinking");
   await expect(activeRow.locator('.state[data-state="thinking"]')).toBeVisible();
+  const typing = page.locator('.pf-msg[data-role="agent"] .typing');
+  await expect(typing.locator(".pf-loading-dots")).toBeVisible();
+  await expect(typing.locator(".pf-loading-dot")).toHaveCount(3);
 });
 
 test("persisted prompt during pending turn replaces the optimistic row", async ({ page }) => {

@@ -4,6 +4,7 @@
   import { onDestroy, tick } from "svelte";
   import BrandLogo from "../../design/BrandLogo.svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
+  import LoadingDots from "../../design/LoadingDots.svelte";
   import MessageBody from "../../components/MessageBody.svelte";
   import ToolCard from "./ToolCard.svelte";
   import DiffCard from "./DiffCard.svelte";
@@ -1479,10 +1480,15 @@
     return false;
   });
 
+  let typingElapsedLabel = $derived(formatElapsed(turnStartedAtMs));
+  let typingDotsActive = $derived.by(
+    () => turnRunning && turnThinking && (!turnStatusHint || turnStatusHint === "Thinking")
+  );
   let typingLabel = $derived.by(() => {
     const elapsed = formatElapsed(turnStartedAtMs);
     const suffix = elapsed ? ` (${elapsed})` : "";
     if (turnRunning) {
+      if (typingDotsActive) return null;
       if (turnStatusHint) return `${turnStatusHint}${suffix}`;
       if (turnThinking) return `Thinking${suffix}`;
       if (activeTurnHasVisibleText) return null;
@@ -1491,6 +1497,7 @@
     if (agentState === "awaiting") return `${engineerName} paused - waiting for your response`;
     return null;
   });
+  let showTyping = $derived(Boolean(typingLabel) || typingDotsActive);
 
   $effect(() => {
     void session?.id;
@@ -1499,6 +1506,7 @@
     void pendingPermissions;
     void pendingQuestions;
     void typingLabel;
+    void showTyping;
     scheduleThreadScrollButtonStateRefresh();
   });
 
@@ -2143,7 +2151,7 @@
       <div class="pf-chat-thread-inner">
         {#if loading && rows.length === 0}
           <div class="state">Loading conversation…</div>
-        {:else if rows.length === 0 && !typingLabel}
+        {:else if rows.length === 0 && !showTyping}
           <div class="state">No messages in this session yet. Send a prompt to get started.</div>
         {:else}
           {#each distributedRows as row, idx (row.key)}
@@ -2416,11 +2424,20 @@
             {/if}
           {/each}
 
-          {#if typingLabel}
+          {#if showTyping}
             <div class="pf-msg" data-role="agent" style="opacity: 0.85;">
               <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
               <div class="pf-msg-body">
-                <div class="typing">{typingLabel}</div>
+                <div class="typing">
+                  {#if typingDotsActive}
+                    <LoadingDots label="Thinking" />
+                    {#if typingElapsedLabel}
+                      <span class="typing-elapsed">({typingElapsedLabel})</span>
+                    {/if}
+                  {:else}
+                    {typingLabel}
+                  {/if}
+                </div>
               </div>
             </div>
           {/if}
@@ -3158,6 +3175,10 @@
     font-size: var(--pf-chat-detail-size);
     color: var(--muted-foreground);
     font-family: var(--font-sans);
+  }
+  .typing-elapsed {
+    color: var(--muted-foreground);
+    font-size: var(--pf-chat-meta-size);
   }
   .activity-thought {
     display: flex;

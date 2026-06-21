@@ -1,6 +1,6 @@
 use crate::AppState;
 use anyhow::{anyhow, bail, Result};
-use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry};
+use puffer_provider_registry::{AuthStore, Modality, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_tools::{ToolExecutionResult, ToolRegistry};
 #[cfg(test)]
@@ -177,6 +177,11 @@ const OPENAI_CODEX_COMPAT_VERSION: &str = "0.125.0";
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_SUPPRESS_TOOLS_FOR_SIMPLE_TURNS";
 const LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_LOCAL_REPLY_FOR_SIMPLE_TURNS";
+const NATIVE_IMAGE_INPUT_APIS: &[&str] = &[
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+];
 
 #[derive(Clone, Default)]
 struct TurnRequestOptions<'a> {
@@ -204,6 +209,12 @@ struct TurnRequestOptions<'a> {
     /// process-wide handle without lifetime gymnastics.
     observability: Option<puffer_observability::ObservabilityHandle>,
     lightweight_context: bool,
+    /// Tool ids to exclude from the model-visible tool list for this turn.
+    /// Applied as a post-filter after the provider assembles its tool
+    /// definitions, so it works regardless of provider and does not
+    /// require an allowlist enumeration of every other tool. Used by the
+    /// monitor triage runner to withhold `TaskCreate` on outgoing turns.
+    excluded_tools: Vec<String>,
 }
 
 /// Cooperative cancellation handle threaded through the agent loop and
@@ -409,13 +420,8 @@ pub fn execute_user_prompt_without_tools(
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
             tool_filter: Some(RequestToolFilter::empty_static()),
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
     )
 }
@@ -462,13 +468,8 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
             tool_filter,
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
     )
 }
@@ -587,12 +588,7 @@ pub fn execute_user_prompt_with_structured_output(
         input,
         TurnRequestOptions {
             structured_output: Some(structured_output),
-            tool_filter: None,
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
     )
 }
@@ -622,6 +618,7 @@ fn execute_user_prompt_with_options(
     let is_side_turn = options.tool_filter.is_some();
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     let api = resolve_model_api(state, providers, provider, &model_id);
+    validate_native_image_input(state, provider, &model_id, &api)?;
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {
         bail!(
             "provider {} with api {api} is not executable yet",
@@ -714,12 +711,7 @@ where
             input,
             TurnRequestOptions {
                 structured_output,
-                tool_filter: None,
-                reflection: None,
-                cancel: None,
-                max_turns: None,
-                observability: None,
-                lightweight_context: false,
+                ..TurnRequestOptions::default()
             },
             &mut on_event,
         )
@@ -756,12 +748,8 @@ where
             input,
             TurnRequestOptions {
                 structured_output,
-                tool_filter: None,
-                reflection: None,
                 cancel: Some(cancel),
-                max_turns: None,
-                observability: None,
-                lightweight_context: false,
+                ..TurnRequestOptions::default()
             },
             &mut on_event,
         )
@@ -801,11 +789,8 @@ where
             TurnRequestOptions {
                 structured_output,
                 tool_filter: tool_filter.as_ref(),
-                reflection: None,
                 cancel: Some(cancel),
-                max_turns: None,
-                observability: None,
-                lightweight_context: false,
+                ..TurnRequestOptions::default()
             },
             &mut on_event,
         )
@@ -834,12 +819,7 @@ where
         input,
         TurnRequestOptions {
             structured_output: Some(structured_output),
-            tool_filter: None,
-            reflection: None,
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
         &mut on_event,
     )
@@ -870,13 +850,38 @@ where
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
-            tool_filter: None,
-            reflection: None,
             cancel: Some(cancel),
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
+        },
+        &mut on_event,
+    )
+}
+
+/// Executes one user prompt with streaming events, withholding named tools from
+/// the model-visible tool list for this turn. Used by the monitor triage runner
+/// to suppress `TaskCreate` on outgoing message turns so the agent can only
+/// complete or update existing tasks.
+pub fn execute_user_prompt_streaming_excluding_tools<F>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    excluded_tools: Vec<String>,
+    mut on_event: F,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+{
+    execute_user_prompt_streaming_with_options(
+        state,
+        resources,
+        providers,
+        auth_store,
+        input,
+        TurnRequestOptions {
+            excluded_tools,
+            ..TurnRequestOptions::default()
         },
         &mut on_event,
     )
@@ -902,13 +907,8 @@ where
         auth_store,
         input,
         TurnRequestOptions {
-            structured_output: None,
-            tool_filter: None,
             reflection: Some(reflection),
-            cancel: None,
-            max_turns: None,
-            observability: None,
-            lightweight_context: false,
+            ..TurnRequestOptions::default()
         },
         &mut on_event,
     )
@@ -942,7 +942,7 @@ where
         options.observability = observability_handle();
     }
     let is_side_turn = options.tool_filter.is_some();
-    let suppress_tools = suppress_tools_for_simple_turn(input);
+    let suppress_tools = suppress_tools_for_turn(state, input);
     if suppress_tools && local_reply_for_simple_turns_enabled() {
         // simple-turn shortcut: no provider call, no memory review.
         let assistant_text = local_simple_turn_reply(input);
@@ -955,6 +955,7 @@ where
     }
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     let api = resolve_model_api(state, providers, provider, &model_id);
+    validate_native_image_input(state, provider, &model_id, &api)?;
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {
         // Adapter unknown → fall through to non-streaming dispatch which
         // emits the canonical "not executable yet" error message.
@@ -1009,6 +1010,83 @@ fn local_simple_turn_reply(input: &str) -> &'static str {
         _ => "Hi.",
     }
 }
+
+/// Returns whether the in-memory transcript contains any image attachments.
+pub(super) fn state_has_image_attachments(state: &AppState) -> bool {
+    state.transcript.iter().any(|message| {
+        message.attachments.iter().any(|attachment| {
+            attachment.attachment.kind == puffer_session_store::StoredAttachmentKind::Image
+        })
+    })
+}
+
+/// Validates native image input support before a provider request is built.
+pub(super) fn validate_native_image_input(
+    state: &AppState,
+    provider: &ProviderDescriptor,
+    model_id: &str,
+    api: &str,
+) -> Result<()> {
+    if !state_has_image_attachments(state) {
+        return Ok(());
+    }
+
+    let model = provider
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| anyhow!("model {}/{} not found", provider.id, model_id))?;
+    if !model.input.contains(&Modality::Image) {
+        bail!(
+            "current model {}/{} is not declared to support image input",
+            provider.id,
+            model_id
+        );
+    }
+    if !NATIVE_IMAGE_INPUT_APIS.contains(&api) {
+        bail!(
+            "current provider API {api} for {}/{} is not yet enabled for image input",
+            provider.id,
+            model_id
+        );
+    }
+    for message in &state.transcript {
+        for attachment in &message.attachments {
+            if attachment.attachment.kind != puffer_session_store::StoredAttachmentKind::Image {
+                continue;
+            }
+            let Some(model_url) = attachment.model_url.as_deref() else {
+                bail!(
+                    "image attachment {} ({}) is missing hydrated model_url",
+                    attachment.attachment.name,
+                    attachment.attachment.id
+                );
+            };
+            validate_model_image_data_url(&attachment.attachment, model_url)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_image_data_url(
+    attachment: &puffer_session_store::StoredAttachment,
+    model_url: &str,
+) -> Result<()> {
+    let expected_prefix = format!("data:{};base64,", attachment.mime_type);
+    if !model_url.starts_with(&expected_prefix) || model_url[expected_prefix.len()..].is_empty() {
+        bail!(
+            "image attachment {} ({}) has malformed model data URL",
+            attachment.name,
+            attachment.id
+        );
+    }
+    Ok(())
+}
+
+fn suppress_tools_for_turn(state: &AppState, input: &str) -> bool {
+    suppress_tools_for_simple_turn(input) && !state_has_image_attachments(state)
+}
+
 /// Resolves the active provider descriptor and model id for a runtime turn.
 pub(super) fn resolve_provider_and_model<'a>(
     state: &AppState,

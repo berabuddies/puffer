@@ -6,6 +6,7 @@
     RemoteOperation,
     SettingsSnapshot
   } from "../types";
+  import { providerModelIntro } from "../providerModelIntro";
 
   export let snapshot: SettingsSnapshot | null = null;
   export let loading = false;
@@ -387,7 +388,7 @@
                 <span>{provider.id} · {provider.defaultApi}</span>
               </div>
               <div>
-                <strong>{provider.modelCount} models</strong>
+                <strong>{providerModelIntro(provider)}</strong>
                 <span>{provider.authModes.join(", ")}</span>
               </div>
               <div class="path-cell">

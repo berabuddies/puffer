@@ -2,13 +2,301 @@
 mod tests {
     use super::*;
     use crate::action::{ActionResult, BuiltinActionDispatcher};
-    use crate::classify::NullClassifier;
+    use crate::classify::{ClassifyDecision, NullClassifier};
+    use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
     use crate::spec::{ActionSpec, FileAppendFormat, TaggedFilterSpec, WorkflowBindingSpec};
     use puffer_subscriber_runtime::{Event, EventBus, EventEnvelope};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
+
+    /// Drops all self messages (matches `DropAllSelfGate`) but is a local handle
+    /// so tests can also flip to allow. Used as the default in self-gate tests.
+    fn drop_all_gate() -> Arc<dyn SelfMessageGate> {
+        Arc::new(DropAllSelfGate)
+    }
+
+    /// Test double: allows every self/outgoing message through the gate.
+    struct AllowAllSelfGate;
+    impl SelfMessageGate for AllowAllSelfGate {
+        fn should_dispatch_self_message(&self, _event: &Event) -> bool {
+            true
+        }
+    }
+
+    /// Test double: panics if `classify` runs. Proves the self/outgoing path
+    /// short-circuits the classifier (the #569 credit-burn guard).
+    struct PanicClassifier;
+    impl Classifier for PanicClassifier {
+        fn classify(
+            &self,
+            _spec: &WorkflowBindingSpec,
+            _event: &Event,
+        ) -> ClassifyDecision {
+            panic!("classifier must not run for self/outgoing events");
+        }
+    }
+
+    /// Test double: records dispatch calls and reports success.
+    struct CountingDispatcher {
+        calls: Arc<AtomicUsize>,
+    }
+    impl ActionDispatcher for CountingDispatcher {
+        fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            ActionResult::success("dispatched")
+        }
+    }
+
+    fn monitor_binding_with_classify_prompt() -> WorkflowBindingSpec {
+        WorkflowBindingSpec {
+            slug: "monitor-telegram-user".into(),
+            description: "Monitor telegram-user for actionable tasks".into(),
+            connection_slug: "telegram-user".into(),
+            connector_slug: Some("telegram-login".into()),
+            status: WorkflowBindingStatus::Enabled,
+            filter: None,
+            ignore_filters: Vec::new(),
+            contact_ids: Vec::new(),
+            classify_prompt: Some("classify".into()),
+            classify_model: None,
+            action: ActionSpec::TriageAgent {
+                prompt: "triage".into(),
+                model: None,
+            },
+            created_at_ms: 0,
+        }
+    }
+
+    fn outgoing_envelope() -> EventEnvelope {
+        EventEnvelope {
+            envelope_id: "env-outgoing".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "done, sent it".into(),
+                payload: serde_json::json!({"is_outgoing": true, "chat_id": 42}),
+            },
+        }
+    }
+
+    #[test]
+    fn outgoing_event_with_dropping_gate_is_not_dispatched_or_classified() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_with_classify_prompt()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+        let gate = drop_all_gate();
+
+        let result = process_envelope_result(
+            &outgoing_envelope(),
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(!result.matched, "dropped self message must not match");
+        assert_eq!(result.acted, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0, "dispatcher must not run");
+    }
+
+    #[test]
+    fn outgoing_event_with_allowing_gate_is_dispatched_without_classify() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_with_classify_prompt()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(AllowAllSelfGate);
+
+        let result = process_envelope_result(
+            &outgoing_envelope(),
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(result.matched, "allowed self message must match");
+        assert_eq!(result.acted, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "dispatcher runs exactly once"
+        );
+        // PanicClassifier never panicked => classify was bypassed for self event.
+    }
+
+    #[test]
+    fn incoming_event_is_unaffected_by_gate() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        // No classify_prompt so the normal incoming path dispatches without an
+        // LLM classify (and the NullClassifier would Pass anyway).
+        let mut spec = monitor_binding_with_classify_prompt();
+        spec.classify_prompt = None;
+        store.create(spec).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let gate = drop_all_gate();
+
+        let incoming = EventEnvelope {
+            envelope_id: "env-incoming".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "please file the report".into(),
+                payload: serde_json::json!({"is_outgoing": false, "chat_id": 42}),
+            },
+        };
+
+        let result = process_envelope_result(
+            &incoming, &store, None, &dispatcher, &classifier, None, &gate,
+        );
+
+        assert!(result.matched, "incoming event still dispatches with drop gate");
+        assert_eq!(result.acted, 1);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn batch_outgoing_event_with_dropping_gate_is_not_dispatched_or_classified() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_with_classify_prompt()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+        let gate = drop_all_gate();
+
+        let result = process_envelope_batch_result(
+            &[outgoing_envelope()],
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(!result.matched, "dropped self message must not match on batch path");
+        assert_eq!(result.acted, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "dispatcher must not run"
+        );
+    }
+
+    #[test]
+    fn batch_outgoing_event_with_allowing_gate_is_dispatched_without_classify() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(monitor_binding_with_classify_prompt()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(AllowAllSelfGate);
+
+        let result = process_envelope_batch_result(
+            &[outgoing_envelope()],
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(result.matched, "allowed self message must match on batch path");
+        assert_eq!(result.acted, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "dispatcher runs exactly once"
+        );
+        // PanicClassifier never panicked => classify was bypassed for self event.
+    }
+
+    #[test]
+    fn batch_incoming_event_is_unaffected_by_gate() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        // No classify_prompt so the normal incoming path dispatches without an
+        // LLM classify (and the NullClassifier would Pass anyway).
+        let mut spec = monitor_binding_with_classify_prompt();
+        spec.classify_prompt = None;
+        store.create(spec).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let gate = drop_all_gate();
+
+        let incoming = EventEnvelope {
+            envelope_id: "env-incoming".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "please file the report".into(),
+                payload: serde_json::json!({"is_outgoing": false, "chat_id": 42}),
+            },
+        };
+
+        let result = process_envelope_batch_result(
+            &[incoming],
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(
+            result.matched,
+            "incoming event still dispatches through batch path with drop gate"
+        );
+        assert_eq!(result.acted, 1);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
 
     #[test]
     fn case_insensitive_regex_matches() {
@@ -67,7 +355,7 @@ mod tests {
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
 
         let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(!result.matched);
         assert_eq!(result.acted, 0);
@@ -86,6 +374,7 @@ mod tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(!result.matched);
@@ -134,7 +423,7 @@ mod tests {
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
 
         let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(result.matched);
         assert_eq!(result.acted, 0);
@@ -202,8 +491,8 @@ mod tests {
                     kind: "message".into(),
                     control: false,
                     dedup_key: Some("chat:1".into()),
-                    text: "first".into(),
-                    payload: serde_json::json!({"message":"first"}),
+                    text: "please review first".into(),
+                    payload: serde_json::json!({"message":"please review first"}),
                 },
             },
             EventEnvelope {
@@ -215,8 +504,8 @@ mod tests {
                     kind: "message".into(),
                     control: false,
                     dedup_key: Some("chat:2".into()),
-                    text: "second".into(),
-                    payload: serde_json::json!({"message":"second"}),
+                    text: "please review second".into(),
+                    payload: serde_json::json!({"message":"please review second"}),
                 },
             },
         ];
@@ -229,6 +518,7 @@ mod tests {
             &dispatcher_trait,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(result.matched);
@@ -236,7 +526,116 @@ mod tests {
         assert_eq!(result.failed, 0);
         assert_eq!(
             dispatcher.batches.lock().unwrap().as_slice(),
-            &[vec!["first".to_string(), "second".to_string()]]
+            &[vec![
+                "please review first".to_string(),
+                "please review second".to_string()
+            ]]
+        );
+    }
+
+    #[test]
+    fn monitor_debounce_key_uses_stable_conversation_scope() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let envelope = EventEnvelope {
+            envelope_id: "env-1".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("42:1".into()),
+                text: "first".into(),
+                payload: serde_json::json!({"chat_id": 42, "message":"first"}),
+            },
+        };
+
+        assert_eq!(
+            crate::router_debounce::monitor_debounce_key(&envelope, &store).as_deref(),
+            Some("telegram-user:chat_id=42")
+        );
+    }
+
+    #[test]
+    fn monitor_debounce_key_skips_topics_with_immediate_workflows() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "forward-telegram-user".into(),
+                description: "Forward telegram messages".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::ForwardMessage {
+                    platform: "telegram".into(),
+                    target: "@ops".into(),
+                    template: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let envelope = EventEnvelope {
+            envelope_id: "env-1".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("42:1".into()),
+                text: "first".into(),
+                payload: serde_json::json!({"chat_id": 42, "message":"first"}),
+            },
+        };
+
+        assert_eq!(
+            crate::router_debounce::monitor_debounce_key(&envelope, &store),
+            None
         );
     }
 
@@ -299,7 +698,7 @@ mod tests {
         };
 
         let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None, &drop_all_gate());
 
         assert!(result.matched);
         assert_eq!(result.acted, 1);
@@ -310,7 +709,15 @@ mod tests {
         assert!(prompts[0].contains("For Chinese source text"));
         assert!(prompts[0].contains("subject, description, actions[].actionPrompt"));
         assert!(prompts[0].contains("exactly as written in the current source event text"));
-        assert!(prompts[0].contains("never change its status"));
+        assert!(prompts[0].contains("conversation_context"));
+        assert!(prompts[0].contains("telegram_server_history_cache"));
+        assert!(prompts[0].contains("subscriber_diagnostics"));
+        assert!(prompts[0].contains("ambiguous short messages"));
+        assert!(prompts[0].contains("Same chat/contact is not enough"));
+        assert!(prompts[0].contains("replace or clear `metadata.actions`"));
+        assert!(!MONITOR_RUNTIME_LANGUAGE_POLICY.contains("never change its status"));
+        assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("status: completed"));
+        assert!(MONITOR_RUNTIME_LANGUAGE_POLICY.contains("direction"));
         match store.get("monitor-telegram-user").unwrap().action {
             ActionSpec::TriageAgent { prompt, .. } => assert_eq!(prompt, "legacy monitor prompt"),
             _ => panic!("expected triage agent"),
@@ -376,7 +783,7 @@ mod tests {
         };
 
         let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher_trait, &classifier, None, &drop_all_gate());
 
         assert!(result.matched);
         assert_eq!(result.acted, 1);
@@ -459,6 +866,7 @@ mod tests {
             &dispatcher_trait,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(result.matched);
@@ -467,6 +875,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].contains("legacy batch prompt"));
         assert!(prompts[0].contains("Monitor source-language runtime guard"));
+        assert!(prompts[0].contains("Same chat/contact is not enough"));
     }
 
     #[test]
@@ -512,7 +921,7 @@ mod tests {
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
 
         let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(!result.matched);
         assert_eq!(result.acted, 0);
@@ -563,7 +972,7 @@ mod tests {
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
 
         let result =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(result.matched);
         assert_eq!(result.acted, 1);
@@ -624,6 +1033,7 @@ mod tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(!ignored.matched);
         assert_eq!(ignored.acted, 0);
@@ -641,7 +1051,7 @@ mod tests {
             "message": "alert"
         });
         let passed =
-            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
         assert!(passed.matched);
         assert_eq!(passed.failed, 1);
     }
@@ -707,9 +1117,9 @@ mod tests {
         };
 
         let skipped =
-            process_envelope_result(&unrelated, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&unrelated, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
         let passed =
-            process_envelope_result(&related, &store, None, &dispatcher, &classifier, None);
+            process_envelope_result(&related, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
 
         assert!(!skipped.matched);
         assert_eq!(skipped.acted, 0);
@@ -779,6 +1189,7 @@ mod tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(first.matched);
         assert_eq!(first.acted, 1);
@@ -793,6 +1204,7 @@ mod tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
 
         assert!(!second.matched);
@@ -868,6 +1280,7 @@ mod tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
         assert!(first.matched);
         assert_eq!(first.failed, 1, "first delivery fails");
@@ -886,8 +1299,12 @@ mod tests {
             &dispatcher,
             &classifier,
             None,
+            &drop_all_gate(),
         );
-        assert!(second.matched, "failed message must be retried, not dedup-skipped");
+        assert!(
+            second.matched,
+            "failed message must be retried, not dedup-skipped"
+        );
         assert_eq!(second.acted, 1, "retry succeeds and creates the task");
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2, "dispatched twice");
         // Now Completed → future replays are suppressed.
@@ -922,7 +1339,7 @@ mod tests {
             Arc::new(BuiltinActionDispatcher::with_storage_root(dir.path()));
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
         let router =
-            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier);
+            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier, drop_all_gate());
 
         bus.publish(EventEnvelope {
             envelope_id: "env-race".into(),
@@ -998,6 +1415,7 @@ mod tests {
             Some(history.clone()),
             dispatcher,
             classifier,
+            drop_all_gate(),
         );
 
         bus.publish(EventEnvelope {
@@ -1067,7 +1485,7 @@ mod tests {
         });
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
         let router =
-            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier);
+            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier, drop_all_gate());
 
         for index in 0..2 {
             bus.publish(EventEnvelope {

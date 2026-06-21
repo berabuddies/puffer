@@ -924,6 +924,12 @@ mod tests {
         })));
     }
 
+    #[test]
+    fn gmail_inbox_script_emits_attachment_flag() {
+        assert!(GMAIL_INBOX_SCRIPT.contains("hasAttachment"));
+        assert!(GMAIL_INBOX_SCRIPT.contains("attachment"));
+    }
+
     fn test_paths(temp: &tempfile::TempDir) -> ConfigPaths {
         let workspace_root = temp.path().join("workspace");
         ConfigPaths {

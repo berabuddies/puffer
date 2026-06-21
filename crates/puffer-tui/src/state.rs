@@ -1465,6 +1465,11 @@ fn session_matches_query(session: &SessionSummary, query: &str) -> bool {
             .map(|name| name.to_ascii_lowercase().contains(query))
             .unwrap_or(false)
         || session
+            .generated_title
+            .as_deref()
+            .map(|title| title.to_ascii_lowercase().contains(query))
+            .unwrap_or(false)
+        || session
             .slug
             .as_deref()
             .map(|slug| slug.to_ascii_lowercase().contains(query))
@@ -1514,7 +1519,29 @@ fn max_scroll_offset(line_count: u16, viewport_height: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::TuiState;
+    use super::{session_matches_query, TuiState};
+    use puffer_session_store::SessionSummary;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    #[test]
+    fn session_matches_query_uses_generated_title() {
+        let session = SessionSummary {
+            id: Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap(),
+            display_name: None,
+            generated_title: Some("Fix session naming".to_string()),
+            cwd: PathBuf::from("/workspace/puffer"),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            event_count: 3,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+
+        assert!(session_matches_query(&session, "session naming"));
+    }
 
     #[test]
     fn scroll_up_detaches_from_follow_output() {

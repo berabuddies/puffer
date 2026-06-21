@@ -37,3 +37,11 @@ template: |
     source context text. Never round, convert, infer, or substitute values
     from task summaries or other messages; the verbatim source text is
     authoritative over any paraphrase.
+  - If the source context includes bounded Telegram server-history context
+    messages, read them before drafting. Use those prior same-chat messages
+    only to understand what the current source message means; do not answer
+    prior messages by themselves, and do not replace the current source
+    message's numbers, deadlines, or asks with prior-message details.
+  - If the context source is `subscriber_diagnostics`, treat it as observed
+    best-effort context that may have gaps; do not assume it is complete or
+    immediately adjacent to the current source message.

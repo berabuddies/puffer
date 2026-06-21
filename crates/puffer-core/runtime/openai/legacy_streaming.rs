@@ -113,12 +113,23 @@ where
         },
     )?;
     let text = openai_responses_text_config(structured_output, use_native);
-    let tools = openai_tool_definitions_for_request(
-        &registry,
-        structured_output,
-        use_native,
-        Some(&permission_context),
-    )?;
+    let tools = {
+        let mut t = openai_tool_definitions_for_request(
+            &registry,
+            structured_output,
+            use_native,
+            Some(&permission_context),
+        )?;
+        if !options.excluded_tools.is_empty() {
+            t.retain(|tool| {
+                options
+                    .excluded_tools
+                    .iter()
+                    .all(|ex| ex.as_str() != tool.name.as_str())
+            });
+        }
+        t
+    };
     let mut instructions = if options.lightweight_context {
         "Reply directly and concisely.".to_string()
     } else {

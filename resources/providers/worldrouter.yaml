@@ -117,3 +117,11 @@ models:
     context_window: 200000
     max_output_tokens: 16384
     supports_reasoning: true
+  - id: gpt-5.5
+    display_name: gpt-5.5
+    provider: worldrouter
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 16384
+    supports_reasoning: true
+    input: [text, image]

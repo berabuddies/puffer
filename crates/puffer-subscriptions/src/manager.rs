@@ -6,18 +6,19 @@ use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::catalog_store::ConnectorCatalogStore;
 use crate::classify::{Classifier, NullClassifier};
 use crate::command_match::command_matches_terminal_event;
-use crate::connection::{ConnectionState, ConnectionStore};
+use crate::connection::{
+    ConnectionHealth, ConnectionHealthStatus, ConnectionState, ConnectionStore,
+};
 use crate::connector_process;
 use crate::connector_stream::{ConnectorEventProcessor, ConnectorStreamHandle};
 use crate::contacts::contact_ids_for_connector;
 use crate::history::WorkflowHistoryStore;
 use crate::protocol::{ConnectorActionRequest, ConnectorActionResponse};
 use crate::proxy::{
-    builtin_agent_proxy, handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision,
-    AgentProxyStore,
+    handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision, AgentProxyStore,
 };
-use crate::router::{process_envelope_batch_result, process_envelope_result, SubscriptionRouter};
-use crate::spec::ActionSpec;
+use crate::router::{MonitorDigestQueue, SubscriptionRouter};
+use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
 use crate::store::SubscriptionStore;
 use anyhow::Result;
 use puffer_subscriber_runtime::{
@@ -30,8 +31,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const MONITOR_DIGEST_INTERVAL: Duration = Duration::from_secs(60);
+const MONITOR_DIGEST_INTERVAL_SECONDS_ENV: &str = "PUFFER_MONITOR_DIGEST_INTERVAL_SECONDS";
 /// WeChat's `act` path drives the LIVE client with deliberate human-like pacing
 /// (think-time, a length-scaled compose pause, simulated mouse paths, navigate +
 /// verify + delivery check), so a single real send legitimately takes ~40-60s —
@@ -42,7 +46,10 @@ const WECHAT_ACTION_TIMEOUT: Duration = Duration::from_secs(150);
 const COMMAND_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const COMMAND_RESTART_RESENDS: usize = 2;
 
+mod connector_processor;
 mod contact_methods;
+
+use connector_processor::ManagerConnectorEventProcessor;
 
 enum ConnectionContactScope {
     All,
@@ -53,15 +60,23 @@ enum ConnectionContactScope {
 /// Host-provided auth checker for built-in connectors whose credentials are
 /// owned by the embedding process instead of a connector subprocess.
 pub trait ConnectionAuthChecker: Send + Sync {
-    /// Returns `Some(true)` when auth is healthy, `Some(false)` when auth is
-    /// known broken, and `None` when this checker does not handle the
-    /// connector.
+    /// Returns `Some(Healthy)` when auth is healthy, `Some(Broken)` when auth is
+    /// known broken, `Some(Unknown)` when auth cannot be probed without changing
+    /// connection state, and `None` when this checker does not handle the connector.
     fn check(
         &self,
         manager: &SubscriptionManager,
         template: &crate::catalog::ConnectorTemplate,
         connection_slug: &str,
-    ) -> Result<Option<bool>>;
+    ) -> Result<Option<ConnectionAuthStatus>>;
+}
+
+/// Result of a connector auth health probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionAuthStatus {
+    Healthy,
+    Broken,
+    Unknown,
 }
 
 /// Builder for [`SubscriptionManager`]. Lets callers swap in custom
@@ -76,7 +91,9 @@ pub struct SubscriptionManagerBuilder {
     proxy_store_path: PathBuf,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
+    monitor_digest_interval: Duration,
 }
 
 impl SubscriptionManagerBuilder {
@@ -109,7 +126,12 @@ impl SubscriptionManagerBuilder {
             proxy_store_path,
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
+            // Default MUST drop self messages so absent wiring == master
+            // behaviour (outgoing never acted on); the real monitor gate is
+            // installed by the daemon in a later task.
+            self_gate: Arc::new(DropAllSelfGate),
             auth_checker: None,
+            monitor_digest_interval: monitor_digest_interval_from_env(),
         }
     }
 
@@ -155,9 +177,21 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the self/outgoing message gate. Defaults to [`DropAllSelfGate`].
+    pub fn with_self_gate(mut self, gate: Arc<dyn SelfMessageGate>) -> Self {
+        self.self_gate = gate;
+        self
+    }
+
     /// Override the process-provided connection auth checker.
     pub fn with_connection_auth_checker(mut self, checker: Arc<dyn ConnectionAuthChecker>) -> Self {
         self.auth_checker = Some(checker);
+        self
+    }
+
+    /// Override the monitor digest interval. Production defaults to one minute.
+    pub fn with_monitor_digest_interval(mut self, interval: Duration) -> Self {
+        self.monitor_digest_interval = interval;
         self
     }
 
@@ -180,19 +214,37 @@ impl SubscriptionManagerBuilder {
         let proxy_store = Arc::new(AgentProxyStore::load(&self.proxy_store_path)?);
         let dispatcher = self.dispatcher.clone();
         let classifier = self.classifier.clone();
+        let self_gate = self.self_gate.clone();
+        let monitor_digest = MonitorDigestQueue::new(
+            handle.clone(),
+            dispatcher.clone(),
+            history_store.clone(),
+            self.monitor_digest_interval,
+        );
         let bus = self.bus.clone();
         let store_for_router = store.clone();
         let history_for_router = history_store.clone();
         let dispatcher_for_router = dispatcher.clone();
         let classifier_for_router = classifier.clone();
+        let health_bus = self.bus.clone();
+        let health_connection_store = connection_store.clone();
+        let health_watcher = {
+            let _runtime_guard = handle.enter();
+            handle.spawn(async move {
+                watch_connection_health_events(health_bus, health_connection_store).await;
+            })
+        };
+        let gate_for_router = self_gate.clone();
         let router = {
             let _runtime_guard = handle.enter();
-            SubscriptionRouter::spawn(
+            SubscriptionRouter::spawn_with_monitor_digest(
                 bus,
                 store_for_router,
                 Some(history_for_router),
                 dispatcher_for_router,
                 classifier_for_router,
+                gate_for_router,
+                Some(monitor_digest.clone()),
             )
         };
         let manager = SubscriptionManager {
@@ -205,8 +257,11 @@ impl SubscriptionManagerBuilder {
             proxy_store,
             dispatcher,
             classifier,
+            self_gate,
+            monitor_digest,
             auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
+            health_watcher: Mutex::new(Some(health_watcher)),
             subscribers: Mutex::new(HashMap::new()),
             connector_streams: Mutex::new(HashMap::new()),
             command_wait_locks: Mutex::new(HashMap::new()),
@@ -214,6 +269,15 @@ impl SubscriptionManagerBuilder {
         manager.refresh_connection_consumers()?;
         Ok(manager)
     }
+}
+
+fn monitor_digest_interval_from_env() -> Duration {
+    std::env::var(MONITOR_DIGEST_INTERVAL_SECONDS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(MONITOR_DIGEST_INTERVAL)
 }
 
 /// Process-wide subscription manager. Owns the bus, store, router task,
@@ -228,8 +292,11 @@ pub struct SubscriptionManager {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    self_gate: Arc<dyn SelfMessageGate>,
+    monitor_digest: MonitorDigestQueue,
     auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
+    health_watcher: Mutex<Option<JoinHandle<()>>>,
     subscribers: Mutex<HashMap<String, SubscriberHandle>>,
     connector_streams: Mutex<HashMap<String, ConnectorStreamHandle>>,
     command_wait_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -395,14 +462,16 @@ impl SubscriptionManager {
                 let slug = connection.slug.clone();
                 let cursor = connection.cursor.clone();
                 let processor: Arc<dyn ConnectorEventProcessor> =
-                    Arc::new(ManagerConnectorEventProcessor {
-                        store: self.store.clone(),
-                        connection_store: self.connection_store.clone(),
-                        history_store: self.history_store.clone(),
-                        proxy_store: self.proxy_store.clone(),
-                        dispatcher: self.dispatcher.clone(),
-                        classifier: self.classifier.clone(),
-                    });
+                    Arc::new(ManagerConnectorEventProcessor::new(
+                        self.store.clone(),
+                        self.connection_store.clone(),
+                        self.history_store.clone(),
+                        self.proxy_store.clone(),
+                        self.dispatcher.clone(),
+                        self.classifier.clone(),
+                        self.self_gate.clone(),
+                        self.monitor_digest.clone(),
+                    ));
                 if let Some(handle) = block_on_manager_handle(
                     &self.handle,
                     ConnectorStreamHandle::spawn(
@@ -507,8 +576,8 @@ impl SubscriptionManager {
             if !template.requires_auth {
                 continue;
             }
-            let auth_ok = match self.check_connection_auth(&template, &connection.slug) {
-                Ok(Some(auth_ok)) => auth_ok,
+            let auth_status = match self.check_connection_auth(&template, &connection.slug) {
+                Ok(Some(status)) => status,
                 Ok(None) if connection.has_consumer => {
                     tracing::warn!(
                         connection = %connection.slug,
@@ -525,12 +594,16 @@ impl SubscriptionManager {
                         %error,
                         "connector auth check failed"
                     );
-                    false
+                    ConnectionAuthStatus::Broken
                 }
             };
-            if auth_ok {
+            if auth_status == ConnectionAuthStatus::Unknown {
+                continue;
+            }
+            if auth_status == ConnectionAuthStatus::Healthy {
                 self.connection_store.update(&connection.slug, |record| {
                     record.auth_failure_notified = false;
+                    record.health = None;
                     if record.state == ConnectionState::Degraded {
                         record.state = ConnectionState::Authenticated;
                         record.set_has_consumer(record.has_consumer);
@@ -540,6 +613,13 @@ impl SubscriptionManager {
                 let was_notified = connection.auth_failure_notified;
                 let updated = self.connection_store.update(&connection.slug, |record| {
                     record.state = ConnectionState::Degraded;
+                    record.health = Some(ConnectionHealth {
+                        status: ConnectionHealthStatus::AuthRequired,
+                        reason: Some("auth_failed".into()),
+                        detail: None,
+                        updated_at_ms: crate::now_ms(),
+                        next_retry_at_ms: None,
+                    });
                     record.auth_failure_notified = true;
                 })?;
                 if !was_notified {
@@ -555,7 +635,7 @@ impl SubscriptionManager {
         &self,
         template: &crate::catalog::ConnectorTemplate,
         connection_slug: &str,
-    ) -> Result<Option<bool>> {
+    ) -> Result<Option<ConnectionAuthStatus>> {
         let template = template.clone();
         let connection_slug = connection_slug.to_string();
         let process_template = template.clone();
@@ -568,8 +648,12 @@ impl SubscriptionManager {
             )
             .await
         })?;
-        if checked.is_some() {
-            return Ok(checked);
+        if let Some(checked) = checked {
+            return Ok(Some(if checked {
+                ConnectionAuthStatus::Healthy
+            } else {
+                ConnectionAuthStatus::Broken
+            }));
         }
         if let Some(checker) = &self.auth_checker {
             return checker.check(self, &template, &connection_slug);
@@ -738,10 +822,18 @@ impl SubscriptionManager {
 
     /// Shuts down router and every supervised subscriber. Best-effort.
     pub fn shutdown(&self) {
+        if let Some(handle) = self.health_watcher.lock().unwrap().take() {
+            handle.abort();
+        }
         if let Some(router) = self.router.lock().unwrap().take() {
             let _ =
                 block_on_manager_handle(&self.handle, async move { Ok(router.shutdown().await) });
         }
+        let monitor_digest = self.monitor_digest.clone();
+        let _ = block_on_manager_handle(&self.handle, async move {
+            monitor_digest.flush().await;
+            Ok(())
+        });
         let handles: Vec<_> = self
             .subscribers
             .lock()
@@ -765,6 +857,110 @@ impl SubscriptionManager {
                 block_on_manager_handle(&self.handle, async move { Ok(handle.shutdown().await) });
         }
     }
+}
+
+async fn watch_connection_health_events(bus: EventBus, connection_store: Arc<ConnectionStore>) {
+    let mut rx = bus.subscribe();
+    while let Some(envelope) = rx.recv().await {
+        apply_connection_health_event(&connection_store, &envelope);
+    }
+}
+
+fn apply_connection_health_event(connection_store: &ConnectionStore, envelope: &EventEnvelope) {
+    if !envelope.event.control {
+        return;
+    }
+    let connection_slug = if connection_store.get(&envelope.event.topic).is_some() {
+        envelope.event.topic.as_str()
+    } else if connection_store.get(&envelope.subscriber_id).is_some() {
+        envelope.subscriber_id.as_str()
+    } else {
+        return;
+    };
+    let Some(health) = health_from_control_event(envelope) else {
+        return;
+    };
+    let _ = connection_store.update(connection_slug, |record| match health.status {
+        ConnectionHealthStatus::Ok => {
+            record.health = Some(health);
+            if record.state == ConnectionState::Degraded {
+                record.state = ConnectionState::Authenticated;
+                record.set_has_consumer(record.has_consumer);
+            }
+            record.auth_failure_notified = false;
+        }
+        ConnectionHealthStatus::Offline | ConnectionHealthStatus::Retrying => {
+            if record.state != ConnectionState::Disabled {
+                record.state = ConnectionState::Degraded;
+            }
+            record.health = Some(health);
+        }
+        ConnectionHealthStatus::AuthRequired => {
+            if record.state != ConnectionState::Disabled {
+                record.state = ConnectionState::Degraded;
+            }
+            record.health = Some(health);
+            record.auth_failure_notified = true;
+        }
+    });
+}
+
+fn health_from_control_event(envelope: &EventEnvelope) -> Option<ConnectionHealth> {
+    let payload = &envelope.event.payload;
+    match envelope.event.kind.as_str() {
+        "connection_health" => {
+            let status = match payload.get("status").and_then(serde_json::Value::as_str)? {
+                "ok" => ConnectionHealthStatus::Ok,
+                "offline" => ConnectionHealthStatus::Offline,
+                "retrying" => ConnectionHealthStatus::Retrying,
+                "auth_required" => ConnectionHealthStatus::AuthRequired,
+                _ => return None,
+            };
+            Some(ConnectionHealth {
+                status,
+                reason: string_payload(payload, "reason"),
+                detail: string_payload(payload, "detail")
+                    .or_else(|| string_payload(payload, "error")),
+                updated_at_ms: envelope.received_at_ms,
+                next_retry_at_ms: payload
+                    .get("next_retry_at_ms")
+                    .and_then(serde_json::Value::as_i64),
+            })
+        }
+        "resume_offline" => Some(ConnectionHealth {
+            status: ConnectionHealthStatus::Retrying,
+            reason: Some("connect_failed".into()),
+            detail: string_payload(payload, "error"),
+            updated_at_ms: envelope.received_at_ms,
+            next_retry_at_ms: payload
+                .get("next_retry_at_ms")
+                .and_then(serde_json::Value::as_i64),
+        }),
+        "login_required" => Some(ConnectionHealth {
+            status: ConnectionHealthStatus::AuthRequired,
+            reason: Some("login_required".into()),
+            detail: None,
+            updated_at_ms: envelope.received_at_ms,
+            next_retry_at_ms: None,
+        }),
+        "ready" => Some(ConnectionHealth {
+            status: ConnectionHealthStatus::Ok,
+            reason: None,
+            detail: None,
+            updated_at_ms: envelope.received_at_ms,
+            next_retry_at_ms: None,
+        }),
+        _ => None,
+    }
+}
+
+fn string_payload(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn block_on_manager_handle<T, F>(handle: &Handle, future: F) -> Result<T>
@@ -802,146 +998,6 @@ async fn send_command_before_deadline(
                 }
                 return Err(error);
             }
-        }
-    }
-}
-
-struct ManagerConnectorEventProcessor {
-    store: Arc<SubscriptionStore>,
-    connection_store: Arc<ConnectionStore>,
-    history_store: Arc<WorkflowHistoryStore>,
-    proxy_store: Arc<AgentProxyStore>,
-    dispatcher: Arc<dyn ActionDispatcher>,
-    classifier: Arc<dyn Classifier>,
-}
-
-impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
-    fn process_connector_event(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
-        let result = process_envelope_result(
-            envelope,
-            &self.store,
-            Some(&self.history_store),
-            &self.dispatcher,
-            &self.classifier,
-            None,
-        );
-        if result.failed > 0 {
-            anyhow::bail!(
-                "{} workflow action(s) failed while processing connector event",
-                result.failed
-            );
-        }
-        Ok(())
-    }
-
-    fn process_connector_events(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelopes: &[EventEnvelope],
-    ) -> Result<()> {
-        for envelope in envelopes {
-            self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
-        }
-        let result = process_envelope_batch_result(
-            envelopes,
-            &self.store,
-            Some(&self.history_store),
-            &self.dispatcher,
-            &self.classifier,
-            None,
-        );
-        if result.failed > 0 {
-            anyhow::bail!(
-                "{} workflow action(s) failed while processing connector event batch",
-                result.failed
-            );
-        }
-        Ok(())
-    }
-}
-
-impl ManagerConnectorEventProcessor {
-    fn process_agent_proxy(
-        &self,
-        connector_slug: &str,
-        connection_slug: &str,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        match decide_agent_proxy_event(
-            connector_slug,
-            connection_slug,
-            &envelope.event.payload,
-            &self.proxy_store,
-        )? {
-            AgentProxyDecision::Ignore => Ok(()),
-            AgentProxyDecision::ConnectorAction { action, input } => {
-                self.dispatch_connector_action(connector_slug, &action, input, envelope)
-            }
-            AgentProxyDecision::BindAgent { reply, .. } => {
-                let _ = self.connection_store.update(connection_slug, |record| {
-                    record.set_has_consumer(true);
-                });
-                if let Some(input) = reply {
-                    self.dispatch_connector_action(
-                        connector_slug,
-                        "send_message",
-                        input,
-                        envelope,
-                    )?;
-                }
-                Ok(())
-            }
-            AgentProxyDecision::RouteToAgent {
-                target,
-                message,
-                binding,
-            } => {
-                let Some(proxy) = builtin_agent_proxy(connector_slug) else {
-                    return Ok(());
-                };
-                let prompt = proxy.route_prompt(&target, &message);
-                let result = self.dispatcher.dispatch(
-                    &ActionSpec::TriageAgent {
-                        prompt,
-                        model: None,
-                    },
-                    envelope,
-                );
-                if !result.success {
-                    anyhow::bail!("{}", result.summary);
-                }
-                let input = proxy.render_agent_reply(&result.summary, &binding);
-                self.dispatch_connector_action(connector_slug, "send_message", input, envelope)
-            }
-        }
-    }
-
-    fn dispatch_connector_action(
-        &self,
-        connector_slug: &str,
-        action: &str,
-        input: serde_json::Value,
-        envelope: &EventEnvelope,
-    ) -> Result<()> {
-        let result = self.dispatcher.dispatch(
-            &ActionSpec::ConnectorAct {
-                connector_slug: connector_slug.to_string(),
-                action: action.to_string(),
-                input,
-            },
-            envelope,
-        );
-        if result.success {
-            Ok(())
-        } else {
-            anyhow::bail!("{}", result.summary)
         }
     }
 }

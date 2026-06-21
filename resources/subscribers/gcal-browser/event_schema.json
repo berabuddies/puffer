@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "event_source": "gcal-browser",
+  "text_fields": [
+    { "path": "event.title", "label": "Title" },
+    { "path": "event.when", "label": "When" },
+    { "path": "event.location", "label": "Location" }
+  ],
+  "fields": [
+    {
+      "path": "event.title",
+      "label": "Event title",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    }
+  ]
+}

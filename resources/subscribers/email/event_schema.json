@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "event_source": "email",
+  "text_fields": [
+    { "path": "subject", "label": "Subject" },
+    { "path": "body_preview", "label": "Snippet" }
+  ],
+  "fields": [
+    {
+      "path": "sender_name",
+      "label": "Sender name",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "from",
+      "label": "From email",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "subject",
+      "label": "Subject",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "body_preview",
+      "label": "Snippet",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "unread",
+      "label": "Unread",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    },
+    {
+      "path": "has_attachment",
+      "label": "Has attachment",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "Yes" },
+        { "value": false, "label": "No" }
+      ]
+    }
+  ]
+}

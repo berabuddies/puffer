@@ -262,6 +262,8 @@ pub(crate) struct SessionDetailDto {
     pub(crate) created_at_ms: u64,
     pub(crate) event_count: usize,
     pub(crate) activity_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) active_turn_id: Option<Option<String>>,
     pub(crate) slug: Option<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) note: Option<String>,
@@ -528,6 +530,7 @@ pub(crate) struct SettingsConfigDto {
     pub(crate) default_provider: Option<String>,
     pub(crate) default_model: Option<String>,
     pub(crate) openai_base_url: Option<String>,
+    pub(crate) openai_display_name: Option<String>,
     pub(crate) theme: String,
     pub(crate) media: MediaSettingsDto,
     pub(crate) mascot_id: String,

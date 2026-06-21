@@ -1,4 +1,5 @@
 use crate::auth::{AuthStore, StoredCredential};
+use crate::input_capability::infer_input_modalities;
 use crate::model::{
     ModelCompat, ModelDescriptor, ModelDiscoveryConfig, ModelDiscoveryFormat,
     OpenAiCompletionsCompat, ProviderDescriptor, ThinkingFormat,
@@ -288,7 +289,7 @@ fn parse_discovered_models(
             max_output_tokens: discovery.max_output_tokens,
             supports_reasoning: discovery.supports_reasoning,
             compat: discovery_model_compat(provider, discovery),
-            input: vec![crate::Modality::Text],
+            input: infer_input_modalities(item, id),
             cost: None,
         });
     }
@@ -393,7 +394,7 @@ fn parse_codex_discovered_models(
             max_output_tokens: discovery.max_output_tokens,
             supports_reasoning,
             compat: None,
-            input: vec![crate::Modality::Text],
+            input: infer_input_modalities(item, id),
             cost: None,
         });
     }
@@ -534,6 +535,77 @@ mod tests {
                 .expect("models");
         assert_eq!(models[0].id, "reasoner");
         assert_eq!(models[0].display_name, "Reasoner");
+    }
+
+    #[test]
+    fn discovery_infers_image_input_for_worldrouter_claude_family() {
+        let discovery = ModelDiscoveryConfig {
+            path: "/models".to_string(),
+            response: ModelDiscoveryFormat::OpenAiModels,
+            api: "openai-completions".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            supports_reasoning: true,
+            items_field: "data".to_string(),
+            id_field: "id".to_string(),
+            display_name_field: Some("name".to_string()),
+            headers: IndexMap::new(),
+        };
+        let payload = serde_json::json!({
+            "data": [
+                { "id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8" }
+            ]
+        });
+        let mut provider = provider(discovery);
+        provider.id = "worldrouter".to_string();
+        provider.base_url = "https://inference-api.worldrouter.ai/v1".to_string();
+
+        let models =
+            parse_discovered_models(&provider, provider.discovery.as_ref().unwrap(), &payload)
+                .expect("models");
+
+        assert_eq!(
+            models[0].input,
+            vec![crate::Modality::Text, crate::Modality::Image]
+        );
+    }
+
+    #[test]
+    fn merge_discovered_models_preserves_curated_input_metadata() {
+        let mut models = vec![ModelDescriptor {
+            id: "gpt-5.5".to_string(),
+            display_name: "GPT-5.5".to_string(),
+            provider: "worldrouter".to_string(),
+            api: "openai-completions".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            supports_reasoning: true,
+            compat: None,
+            input: vec![crate::Modality::Text, crate::Modality::Image],
+            cost: None,
+        }];
+
+        merge_discovered_models(
+            &mut models,
+            vec![ModelDescriptor {
+                id: "gpt-5.5".to_string(),
+                display_name: "gpt-5.5".to_string(),
+                provider: "worldrouter".to_string(),
+                api: "openai-completions".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 16_384,
+                supports_reasoning: true,
+                compat: None,
+                input: vec![crate::Modality::Text],
+                cost: None,
+            }],
+        );
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].input,
+            vec![crate::Modality::Text, crate::Modality::Image]
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Browser worker command messages.
 
+use serde_json::Value;
 use std::sync::mpsc::Sender;
 
 use super::screenshot::{BrowserCaptureScreenshotOptions, BrowserCapturedScreenshot};
@@ -32,6 +33,14 @@ pub(super) enum BrowserCommand {
     Evaluate {
         expression: String,
         reply: Sender<std::result::Result<BrowserEvaluation, String>>,
+    },
+    /// A raw CDP method call on the page target, returning the `result` object.
+    /// Used by the cross-origin payment-iframe deep pass (`DOM.getDocument`,
+    /// `DOM.getContentQuads`, `DOM.resolveNode`, `Runtime.callFunctionOn`, ...).
+    CdpCall {
+        method: String,
+        params: Value,
+        reply: Sender<std::result::Result<Value, String>>,
     },
     CaptureScreenshot {
         options: BrowserCaptureScreenshotOptions,
@@ -87,6 +96,8 @@ impl BrowserCommand {
             BrowserCommand::Evaluate { expression, .. } => {
                 ("evaluate", format!("{} chars", expression.chars().count()))
             }
+            // callFunctionOn params can embed a card value; log the method only.
+            BrowserCommand::CdpCall { method, .. } => ("cdp_call", method.clone()),
             BrowserCommand::CaptureScreenshot { .. } => ("screenshot", String::new()),
             BrowserCommand::Upload { files, .. } => ("upload", format!("{} file(s)", files.len())),
             BrowserCommand::Close { .. } => ("close", String::new()),

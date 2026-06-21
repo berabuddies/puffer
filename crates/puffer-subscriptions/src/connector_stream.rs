@@ -6,8 +6,10 @@ use crate::protocol::{ConnectorSubscribeCommand, ConnectorSubscribeFrame};
 use anyhow::{Context, Result};
 use puffer_subscriber_runtime::{read_lines, write_line, Event, EventBus, EventEnvelope};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -41,6 +43,22 @@ pub trait ConnectorEventProcessor: Send + Sync {
             self.process_connector_event(connector_slug, connection_slug, envelope)?;
         }
         Ok(())
+    }
+
+    /// Returns a quiet-window debounce key for events that should be grouped
+    /// before processing.
+    fn debounce_key(
+        &self,
+        _connector_slug: &str,
+        _connection_slug: &str,
+        _envelope: &EventEnvelope,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Returns how long to wait after the last event with a debounce key.
+    fn debounce_delay(&self) -> Option<Duration> {
+        None
     }
 }
 
@@ -455,11 +473,20 @@ async fn run_processor_queue(
     mut pending_rx: mpsc::UnboundedReceiver<PendingConnectorEvent>,
     processed_tx: mpsc::UnboundedSender<ProcessedConnectorEvents>,
 ) {
-    while let Some(first) = pending_rx.recv().await {
-        let mut batch = vec![first];
-        while let Ok(next) = pending_rx.try_recv() {
-            batch.push(next);
-        }
+    let mut backlog = VecDeque::new();
+    loop {
+        let Some(first) = next_pending_event(&mut backlog, &mut pending_rx).await else {
+            break;
+        };
+        let batch = collect_processor_batch(
+            &connector_slug,
+            &connection_slug,
+            processor.as_ref(),
+            first,
+            &mut pending_rx,
+            &mut backlog,
+        )
+        .await;
         let envelopes: Vec<EventEnvelope> =
             batch.iter().map(|event| event.envelope.clone()).collect();
         let acks: Vec<ConnectorEventAck> = batch
@@ -497,6 +524,93 @@ async fn run_processor_queue(
                 let _ = processed_tx.send(ProcessedConnectorEvents::Failed(error.to_string()));
                 break;
             }
+        }
+    }
+}
+
+async fn next_pending_event(
+    backlog: &mut VecDeque<PendingConnectorEvent>,
+    pending_rx: &mut mpsc::UnboundedReceiver<PendingConnectorEvent>,
+) -> Option<PendingConnectorEvent> {
+    match backlog.pop_front() {
+        Some(event) => Some(event),
+        None => pending_rx.recv().await,
+    }
+}
+
+async fn collect_processor_batch(
+    connector_slug: &str,
+    connection_slug: &str,
+    processor: &dyn ConnectorEventProcessor,
+    first: PendingConnectorEvent,
+    pending_rx: &mut mpsc::UnboundedReceiver<PendingConnectorEvent>,
+    backlog: &mut VecDeque<PendingConnectorEvent>,
+) -> Vec<PendingConnectorEvent> {
+    let Some(key) = processor.debounce_key(connector_slug, connection_slug, &first.envelope) else {
+        let mut batch = vec![first];
+        drain_immediate_events(
+            pending_rx,
+            backlog,
+            None,
+            processor,
+            connector_slug,
+            connection_slug,
+            &mut batch,
+        );
+        return batch;
+    };
+    let Some(delay) = processor.debounce_delay() else {
+        return vec![first];
+    };
+    let mut batch = vec![first];
+    loop {
+        drain_immediate_events(
+            pending_rx,
+            backlog,
+            Some(&key),
+            processor,
+            connector_slug,
+            connection_slug,
+            &mut batch,
+        );
+        tokio::time::sleep(delay).await;
+        let before = batch.len();
+        drain_immediate_events(
+            pending_rx,
+            backlog,
+            Some(&key),
+            processor,
+            connector_slug,
+            connection_slug,
+            &mut batch,
+        );
+        if batch.len() == before {
+            return batch;
+        }
+    }
+}
+
+fn drain_immediate_events(
+    pending_rx: &mut mpsc::UnboundedReceiver<PendingConnectorEvent>,
+    backlog: &mut VecDeque<PendingConnectorEvent>,
+    debounce_key: Option<&str>,
+    processor: &dyn ConnectorEventProcessor,
+    connector_slug: &str,
+    connection_slug: &str,
+    batch: &mut Vec<PendingConnectorEvent>,
+) {
+    while let Some(event) = backlog.pop_front().or_else(|| pending_rx.try_recv().ok()) {
+        let matches_key = debounce_key.is_none_or(|key| {
+            processor
+                .debounce_key(connector_slug, connection_slug, &event.envelope)
+                .as_deref()
+                == Some(key)
+        });
+        if matches_key {
+            batch.push(event);
+        } else {
+            backlog.push_back(event);
+            break;
         }
     }
 }
@@ -660,6 +774,7 @@ printf '%s\n' "$ack" > '{}'
 
     struct BatchRecordingProcessor {
         batches: StdMutex<Vec<Vec<String>>>,
+        debounce: Option<Duration>,
     }
 
     impl ConnectorEventProcessor for BatchRecordingProcessor {
@@ -691,6 +806,25 @@ printf '%s\n' "$ack" > '{}'
             }
             Ok(())
         }
+
+        fn debounce_key(
+            &self,
+            _connector_slug: &str,
+            _connection_slug: &str,
+            envelope: &EventEnvelope,
+        ) -> Option<String> {
+            self.debounce?;
+            envelope
+                .event
+                .payload
+                .get("chat_id")
+                .and_then(Value::as_i64)
+                .map(|chat_id| format!("chat_id={chat_id}"))
+        }
+
+        fn debounce_delay(&self) -> Option<Duration> {
+            self.debounce
+        }
     }
 
     #[tokio::test]
@@ -721,6 +855,7 @@ printf '%s\n%s\n%s\n' "$ack1" "$ack2" "$ack3" > '{}'
             .unwrap();
         let processor = Arc::new(BatchRecordingProcessor {
             batches: StdMutex::new(Vec::new()),
+            debounce: None,
         });
         let handle = ConnectorStreamHandle::spawn(
             template(&script),
@@ -765,6 +900,62 @@ printf '%s\n%s\n%s\n' "$ack1" "$ack2" "$ack3" > '{}'
         assert!(acks.contains("\"event_id\":\"e2\""));
         assert!(acks.contains("\"event_id\":\"e3\""));
 
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_process_debounces_same_key_events_before_processing() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("connector.sh");
+        let ack_path = temp.path().join("ack.txt");
+        std::fs::write(
+            &script,
+            format!(
+                r#"IFS= read -r _subscribe
+printf '%s\n' '{{"type":"event","id":"e1","cursor":"c1","payload":{{"message":"one","chat_id":42}}}}'
+sleep 0.02
+printf '%s\n' '{{"type":"event","id":"e2","cursor":"c2","payload":{{"message":"two","chat_id":42}}}}'
+IFS= read -r ack1
+IFS= read -r ack2
+printf '%s\n%s\n' "$ack1" "$ack2" > '{}'
+"#,
+                ack_path.display()
+            ),
+        )
+        .unwrap();
+        let store = Arc::new(ConnectionStore::load(temp.path().join("connections.json")).unwrap());
+        store
+            .create(ConnectionRecord::authenticated("conn", "demo", "demo"))
+            .unwrap();
+        let processor = Arc::new(BatchRecordingProcessor {
+            batches: StdMutex::new(Vec::new()),
+            debounce: Some(Duration::from_millis(50)),
+        });
+        let handle = ConnectorStreamHandle::spawn(
+            template(&script),
+            "conn".into(),
+            None,
+            Vec::new(),
+            EventBus::new(),
+            store,
+            Some(processor.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ack_path.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            processor.batches.lock().unwrap().as_slice(),
+            &[vec!["one".to_string(), "two".to_string()]]
+        );
         handle.shutdown().await;
     }
 }

@@ -74,7 +74,8 @@ test("tasks history shows received monitor messages and agent outcomes", async (
   await expect(dialog.getByLabel("Received messages").getByRole("button", {
     name: /Telegram from Alice/
   })).toBeVisible();
-  await expect(dialog.getByLabel("Agent history")).toContainText("Triage agent");
+  await expect(dialog.getByLabel("Agent history")).toContainText("Shared digest outcome for message 1 of 2");
+  await expect(dialog.getByLabel("Agent history")).toContainText("Digest triage");
   await expect(dialog.getByLabel("Agent history")).toContainText("Created monitor task monitor-1.");
   await expect(dialog.getByLabel("Agent history")).toContainText("38 tokens");
   await expect(dialog.getByLabel("Agent history")).toContainText("No ignored task or ignore analysis");
@@ -520,6 +521,33 @@ test("task monitor rules renders installed include and exclude keyword chips", a
   await expect(includeRow.getByRole("button", { name: "Remove include keyword 作业" })).toBeVisible();
   await expect(excludeRow.getByRole("button", { name: "Remove exclude keyword 广告" })).toBeVisible();
   await expect(excludeRow.getByRole("button", { name: "Remove exclude keyword 通知" })).toBeVisible();
+});
+
+test("task monitor rules hides regex case-insensitive wrappers in field chips", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setWorkflowSnapshot(monitorRulesSnapshot({
+    ignore_filters: [
+      { type: "jq", expression: ".sender_name | test(\"(?i:john)\")" }
+    ],
+    monitor_rule_schema: {
+      version: 1,
+      event_source: "telegram-user",
+      text_fields: [],
+      fields: [
+        {
+          path: "sender_name",
+          label: "Sender name",
+          type: "string",
+          operators: ["contains", "equals", "matches"]
+        }
+      ]
+    }
+  }));
+
+  const dialog = await openRulesDialog(page, daemon);
+  const excludeRow = dialog.getByRole("group", { name: "Skip tasks when" });
+  await expect(excludeRow.getByRole("button", { name: "Remove skip condition Sender name contains john" })).toBeVisible();
+  await expect(excludeRow).not.toContainText("(?i:");
 });
 
 test("task monitor rules removes one saved keyword chip without deleting siblings", async ({ page }) => {
