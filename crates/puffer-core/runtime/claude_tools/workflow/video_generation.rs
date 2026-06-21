@@ -966,6 +966,10 @@ mod tests {
         assert!(request_text.contains("\"kind\":\"video\""));
         assert!(request_text.contains("\"imageReferences\":[\"https://example.com/frame.png\"]"));
         assert!(request_text.contains("\"aspect_ratio\":\"1:1\""));
+        assert!(!request_text.contains("\"providerType\""));
+        assert!(!request_text.contains("\"providerModelId\""));
+        assert!(!request_text.contains("\"modelId\""));
+        assert!(!request_text.contains("\"upstreamId\""));
         assert!(output.contains("\"assetId\""));
     }
 

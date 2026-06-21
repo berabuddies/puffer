@@ -980,6 +980,10 @@ mod tests {
         assert!(request_text.contains("\"kind\":\"image\""));
         assert!(request_text.contains("\"prompt\":\"chair\""));
         assert!(request_text.contains("\"count\":1"));
+        assert!(!request_text.contains("\"providerType\""));
+        assert!(!request_text.contains("\"providerModelId\""));
+        assert!(!request_text.contains("\"modelId\""));
+        assert!(!request_text.contains("\"upstreamId\""));
         assert!(output.contains("\"assetId\""));
     }
 
