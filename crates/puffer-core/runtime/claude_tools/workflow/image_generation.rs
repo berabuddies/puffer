@@ -83,7 +83,7 @@ pub fn execute_image_generation(
     let parsed: ImageGenerationInput =
         serde_json::from_value(input).context("invalid ImageGeneration input")?;
     if let Some(platform) = state.config.platform_media.as_ref() {
-        let request = build_platform_image_request(cwd, parsed, state.config.media.image.as_ref())?;
+        let request = build_platform_image_request(cwd, parsed)?;
         let result = platform_media::generate_platform_media(platform, request)?;
         let output = platform_media::platform_media_tool_output(&result)?;
         return Ok(serde_json::to_string_pretty(&output)?);
@@ -158,23 +158,28 @@ fn build_image_request(
     })
 }
 
+// The platform media endpoint owns the agent's persisted media configuration
+// (provider/model and default axes) server-side, so the request only needs the
+// per-request prompt, count, and aspect override. The count travels in the
+// dedicated `count` field; `parameter_overrides` carries only per-request axis
+// overrides, which the server merges over its stored axis defaults. `purpose`
+// and `retry_from_error` are native-path output metadata and are not forwarded.
 fn build_platform_image_request(
     cwd: &Path,
     input: ImageGenerationInput,
-    settings: Option<&MediaGenerationConfig>,
 ) -> Result<platform_media::PlatformMediaGenerateRequest> {
     let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
-    let mut parameters = settings
-        .map(|settings| settings.selections.clone())
-        .unwrap_or_default();
-    apply_count_override(&mut parameters, input.count)?;
-    apply_aspect_parameter(&mut parameters, input.aspect.as_deref())?;
+    if let Some(count) = input.count {
+        validate_image_generation_count(count)?;
+    }
+    let mut parameter_overrides = BTreeMap::new();
+    apply_aspect_parameter(&mut parameter_overrides, input.aspect.as_deref())?;
     Ok(platform_media::PlatformMediaGenerateRequest {
         kind: "image".to_string(),
         prompt,
         count: input.count,
         image_references: Vec::new(),
-        parameter_overrides: parameters,
+        parameter_overrides,
         turn_id: None,
         tool_call_id: None,
     })
@@ -268,6 +273,8 @@ fn image_ratio(aspect: Option<&str>) -> Result<&'static str> {
     }
 }
 
+/// Encodes the requested count as the native resolver's `output` axis. Native
+/// path only — the platform path sends the count in its dedicated `count` field.
 fn apply_count_override(
     parameters: &mut BTreeMap<String, String>,
     count: Option<u8>,
@@ -980,6 +987,9 @@ mod tests {
         assert!(request_text.contains("\"kind\":\"image\""));
         assert!(request_text.contains("\"prompt\":\"chair\""));
         assert!(request_text.contains("\"count\":1"));
+        // The native `output` count axis must never reach the platform endpoint;
+        // the count travels in the dedicated `count` field instead.
+        assert!(!request_text.contains("\"output\""));
         assert!(!request_text.contains("\"providerType\""));
         assert!(!request_text.contains("\"providerModelId\""));
         assert!(!request_text.contains("\"modelId\""));
@@ -1017,6 +1027,59 @@ mod tests {
         assert!(request_text.contains("\"count\":1"));
         assert!(request_text.contains("\"ratio\":\"16:9\""));
         assert!(output.expect("output").contains("\"assetId\""));
+    }
+
+    #[test]
+    fn platform_image_request_carries_only_per_request_overrides() {
+        let dir = tempdir().unwrap();
+
+        let request = build_platform_image_request(
+            dir.path(),
+            ImageGenerationInput {
+                prompt: "draw a chair".to_string(),
+                prompt_reference: None,
+                aspect: Some("landscape".to_string()),
+                count: Some(2),
+                purpose: None,
+                retry_from_error: None,
+            },
+        )
+        .unwrap();
+
+        // The count travels in the dedicated field, never as the native `output` axis.
+        assert_eq!(request.count, Some(2));
+        assert!(!request.parameter_overrides.contains_key("output"));
+        // Only the per-request aspect override is forwarded; persisted axes stay server-side.
+        assert_eq!(
+            request.parameter_overrides.get("ratio"),
+            Some(&"16:9".to_string())
+        );
+        assert_eq!(request.parameter_overrides.len(), 1);
+    }
+
+    #[test]
+    fn platform_image_request_rejects_count_outside_supported_range() {
+        let dir = tempdir().unwrap();
+
+        for count in [0, 10] {
+            let error = build_platform_image_request(
+                dir.path(),
+                ImageGenerationInput {
+                    prompt: "draw a chair".to_string(),
+                    prompt_reference: None,
+                    aspect: None,
+                    count: Some(count),
+                    purpose: None,
+                    retry_from_error: None,
+                },
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "image generation count must be between 1 and 9"
+            );
+        }
     }
 
     #[test]
