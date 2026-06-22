@@ -6,7 +6,7 @@ mod monitor_rule_tests {
     use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
     use crate::spec::{ActionSpec, TaggedFilterSpec, WorkflowBindingSpec};
     use crate::{
-        compile_event_field_rule, EventField, EventFieldRule, EventFieldType, EventOperator,
+        compile_event_field_rule, validate_event_schema, EventField, EventFieldRule, EventFieldType, EventOperator,
         EventSchema,
     };
     use puffer_subscriber_runtime::{Event, EventEnvelope};
@@ -863,5 +863,41 @@ mod monitor_rule_tests {
             process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate());
         assert!(passed.matched);
         assert_eq!(passed.acted, 1);
+    }
+
+    #[test]
+    fn lark_browser_schemas_list_event_type_and_message_fields() {
+        let lark = bundled_schema("lark-browser");
+        let feishu = bundled_schema("feishu-browser");
+        // both brands declare the same fields
+        assert_eq!(lark.fields, feishu.fields, "lark and feishu schemas must match");
+        // exactly the three declared filter fields, in order
+        let paths: Vec<&str> = lark.fields.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["event_type", "sender", "chat_id"]);
+        // event_type is an enum listing all six sources
+        let et = lark.fields.iter().find(|f| f.path == "event_type").unwrap();
+        assert_eq!(et.field_type, EventFieldType::Enum);
+        let values: Vec<&str> = et.values.iter().filter_map(|v| v.value.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["message", "calendar_event", "task", "approval", "doc_event", "mail"]
+        );
+        // schema validates and every declared field compiles into a filter rule
+        validate_event_schema(&lark).unwrap();
+        for field in &lark.fields {
+            for op in &field.operators {
+                let rule = EventFieldRule {
+                    field: field.path.clone(),
+                    operator: *op,
+                    value: field
+                        .values
+                        .first()
+                        .map(|v| v.value.clone())
+                        .or_else(|| Some(serde_json::json!("x"))),
+                };
+                compile_event_field_rule(&lark, &rule)
+                    .unwrap_or_else(|e| panic!("{} {:?}: {e}", field.path, op));
+            }
+        }
     }
 }

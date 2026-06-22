@@ -1,16 +1,35 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "lark-browser message event",
-  "type": "object",
-  "properties": {
-    "platform": { "type": "string", "enum": ["lark-browser", "feishu-browser"] },
-    "brand": { "type": "string", "enum": ["lark", "feishu"] },
-    "chat_id": { "type": "string" },
-    "message_id": { "type": "string" },
-    "sender": { "type": "string" },
-    "is_outgoing": { "type": "boolean" },
-    "source": { "type": "string", "enum": ["feed", "active"] },
-    "receivedAtMs": { "type": "number" }
-  },
-  "required": ["platform", "chat_id", "is_outgoing"]
+  "version": 1,
+  "event_source": "lark-browser",
+  "text_fields": [
+    { "path": "sender", "label": "Sender" }
+  ],
+  "fields": [
+    {
+      "path": "event_type",
+      "label": "Source type",
+      "type": "enum",
+      "operators": ["equals"],
+      "values": [
+        { "value": "message", "label": "消息" },
+        { "value": "calendar_event", "label": "日历" },
+        { "value": "task", "label": "任务" },
+        { "value": "approval", "label": "审批" },
+        { "value": "doc_event", "label": "文档" },
+        { "value": "mail", "label": "邮件" }
+      ]
+    },
+    {
+      "path": "sender",
+      "label": "Sender",
+      "type": "string",
+      "operators": ["contains", "equals", "matches"]
+    },
+    {
+      "path": "chat_id",
+      "label": "Chat id",
+      "type": "string",
+      "operators": ["equals"]
+    }
+  ]
 }
