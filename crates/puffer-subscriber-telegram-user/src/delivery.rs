@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
+use crate::activity_state::record_message_activity;
 use crate::events::{build_message_event, emit, message_peer_metadata};
 use crate::history_cache::TelegramHistoryCache;
 use crate::notifications::NotificationMuteCache;
@@ -149,6 +150,14 @@ pub(crate) async fn emit_message_if_new(
             message_id = message.id(),
             %error,
             "failed to record Telegram message in bounded history cache"
+        );
+    }
+    if let Err(error) = record_message_activity(env, message) {
+        warn!(
+            chat = %message.chat().id(),
+            message_id = message.id(),
+            %error,
+            "failed to record Telegram message in activity state"
         );
     }
     let is_outgoing = message.outgoing();

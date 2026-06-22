@@ -9,11 +9,13 @@ use super::task_runtime::{
     runtime_agent_terminal_status, terminal_task_status, wait_for_runtime_agent_output,
     wait_for_stored_task,
 };
-use crate::AppState;
+use crate::{AppState, MonitorTaskCreateGateContext};
 use anyhow::{anyhow, bail, Context, Result};
+use puffer_subscriptions::{MonitorTraceIdentity, MonitorTraceStage, MonitorTraceStore};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -55,6 +57,17 @@ pub(super) fn execute_task_create(
     }
     if monitor_task && expires_at.is_none() {
         bail!("monitor TaskCreate requires expiresAt in RFC3339 format");
+    }
+    if let Some(gate) = apply_monitor_task_create_gate(state, &mut metadata) {
+        record_monitor_task_create_gate_trace(&gate);
+        if gate.decision == MonitorTaskCreateGateDecision::SkipHandled {
+            return Ok(serde_json::to_string_pretty(&json!({
+                "success": true,
+                "skipped": true,
+                "reason": "handled_in_telegram",
+                "gate": gate.gate,
+            }))?);
+        }
     }
     let tp = if monitor_task {
         monitor_tasks_path(state.session.cwd.as_path())
@@ -329,10 +342,7 @@ pub(super) fn execute_task_update(
     // metadata or other fields on an already-completed task.
     // This mirrors the daemon's human-approval path (handle_monitor_task_complete)
     // which also records completed_via as a top-level field.
-    if status_change
-        .as_ref()
-        .and_then(|sc| sc["to"].as_str())
-        == Some("completed")
+    if status_change.as_ref().and_then(|sc| sc["to"].as_str()) == Some("completed")
         && (tp == monitor_tasks_path(&store_cwd) || is_monitor_task_metadata(&task.metadata))
     {
         let via = parsed
@@ -675,6 +685,320 @@ fn validate_task_create_actions(parsed: &TaskCreateInput) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorTaskCreateGateDecision {
+    SkipHandled,
+    CreateRead,
+    CreateUnknown,
+}
+
+impl MonitorTaskCreateGateDecision {
+    fn slug(self) -> &'static str {
+        match self {
+            Self::SkipHandled => "skip_handled",
+            Self::CreateRead => "create_read",
+            Self::CreateUnknown => "create_unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MonitorTaskCreateGateOutcome {
+    decision: MonitorTaskCreateGateDecision,
+    context: MonitorTaskCreateGateContext,
+    gate: Value,
+}
+
+#[derive(Debug, Clone)]
+struct TelegramActivityEvaluation {
+    read: bool,
+    replied: bool,
+    basis: Vec<&'static str>,
+    read_inbox_max_id: Option<i64>,
+    activity_updated_at_ms: Option<i64>,
+    chat_updated_at_ms: Option<i64>,
+    error: Option<String>,
+}
+
+fn apply_monitor_task_create_gate(
+    state: &AppState,
+    metadata: &mut Map<String, Value>,
+) -> Option<MonitorTaskCreateGateOutcome> {
+    let context = monitor_task_create_gate_context(state, metadata)?;
+    let evaluation = evaluate_telegram_activity(&context);
+    let decision = if evaluation.replied {
+        MonitorTaskCreateGateDecision::SkipHandled
+    } else if evaluation.read {
+        MonitorTaskCreateGateDecision::CreateRead
+    } else {
+        MonitorTaskCreateGateDecision::CreateUnknown
+    };
+    let gate = monitor_task_create_gate_json(&context, decision, &evaluation);
+    metadata.insert("monitor_task_gate".to_string(), gate.clone());
+    if evaluation.read && !evaluation.replied {
+        metadata.insert(
+            "source_state".to_string(),
+            json!({
+                "telegram": {
+                    "read": true,
+                    "replied": false,
+                    "decision": decision.slug(),
+                    "label": "已读",
+                }
+            }),
+        );
+    }
+    Some(MonitorTaskCreateGateOutcome {
+        decision,
+        context,
+        gate,
+    })
+}
+
+fn monitor_task_create_gate_context(
+    state: &AppState,
+    metadata: &Map<String, Value>,
+) -> Option<MonitorTaskCreateGateContext> {
+    let envelope_id = metadata_string(metadata, &["monitor_envelope_id", "monitorEnvelopeId"])?;
+    let connection_slug = metadata_string(metadata, &["monitor_connection", "monitorConnection"])?;
+    let connector_slug = metadata_string(metadata, &["monitor_connector", "monitorConnector"]);
+    if !connection_slug.contains("telegram")
+        && !connector_slug
+            .as_deref()
+            .is_some_and(|connector| connector.contains("telegram"))
+    {
+        return None;
+    }
+    let chat_kind = metadata_string(metadata, &["chat_kind", "chatKind"])
+        .or_else(|| {
+            metadata
+                .get("source_context")
+                .or_else(|| metadata.get("sourceContext"))
+                .and_then(|context| string_field(context, &["kind"]))
+                .map(|kind| {
+                    if kind == "telegram_direct_message" {
+                        "user".to_string()
+                    } else {
+                        kind
+                    }
+                })
+        })
+        .unwrap_or_else(|| "user".to_string());
+    if !is_direct_telegram_chat_kind(&chat_kind) {
+        return None;
+    }
+    let chat_id = metadata_i64(metadata, &["chat_id", "chatId"]);
+    state
+        .monitor_task_create_gate_contexts
+        .iter()
+        .find(|context| {
+            context.envelope_id == envelope_id
+                && context.connection_slug == connection_slug
+                && connector_matches(context.connector_slug.as_deref(), connector_slug.as_deref())
+                && chat_id.is_none_or(|chat_id| chat_id == context.chat_id)
+                && is_direct_telegram_chat_kind(&context.chat_kind)
+        })
+        .cloned()
+}
+
+fn connector_matches(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn is_direct_telegram_chat_kind(chat_kind: &str) -> bool {
+    matches!(
+        chat_kind.trim().to_ascii_lowercase().as_str(),
+        "" | "user" | "private" | "direct" | "telegram_direct_message"
+    )
+}
+
+fn evaluate_telegram_activity(
+    context: &MonitorTaskCreateGateContext,
+) -> TelegramActivityEvaluation {
+    let raw = match fs::read_to_string(&context.activity_state_path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return TelegramActivityEvaluation {
+                read: false,
+                replied: false,
+                basis: vec!["activity_state_unavailable"],
+                read_inbox_max_id: None,
+                activity_updated_at_ms: None,
+                chat_updated_at_ms: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let state: Value = match serde_json::from_str(&raw) {
+        Ok(state) => state,
+        Err(error) => {
+            return TelegramActivityEvaluation {
+                read: false,
+                replied: false,
+                basis: vec!["activity_state_parse_failed"],
+                read_inbox_max_id: None,
+                activity_updated_at_ms: None,
+                chat_updated_at_ms: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    let activity_updated_at_ms = value_i64_field(&state, &["updated_at_ms", "updatedAtMs"]);
+    let Some(chat) = state
+        .get("chats")
+        .and_then(Value::as_array)
+        .and_then(|chats| {
+            chats.iter().find(|chat| {
+                value_i64_field(chat, &["chat_id", "chatId"]) == Some(context.chat_id)
+                    && value_string_field(chat, &["chat_kind", "chatKind"])
+                        .as_deref()
+                        .map(is_direct_telegram_chat_kind)
+                        .unwrap_or(true)
+            })
+        })
+    else {
+        return TelegramActivityEvaluation {
+            read: false,
+            replied: false,
+            basis: vec!["chat_state_missing"],
+            read_inbox_max_id: None,
+            activity_updated_at_ms,
+            chat_updated_at_ms: None,
+            error: None,
+        };
+    };
+
+    let read_inbox_max_id = value_i64_field(chat, &["read_inbox_max_id", "readInboxMaxId"]);
+    let read = read_inbox_max_id.is_some_and(|max_id| max_id >= context.source_message_id);
+    let chat_updated_at_ms = value_i64_field(chat, &["updated_at_ms", "updatedAtMs"]);
+    let agent_sent_ids = chat
+        .get("agent_sent_message_ids")
+        .or_else(|| chat.get("agentSentMessageIds"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(value_i64)
+        .collect::<HashSet<_>>();
+    let replied = chat
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages.iter().any(|message| {
+                let message_id = value_i64_field(message, &["message_id", "messageId"]);
+                let agent_originated =
+                    value_bool_field(message, &["agent_originated", "agentOriginated"])
+                        || message_id.is_some_and(|id| agent_sent_ids.contains(&id));
+                value_bool_field(message, &["is_outgoing", "isOutgoing"])
+                    && value_i64_field(
+                        message,
+                        &[
+                            "reply_to_message_id",
+                            "replyToMessageId",
+                            "reply_to",
+                            "replyTo",
+                        ],
+                    ) == Some(context.source_message_id)
+                    && !agent_originated
+            })
+        })
+        .unwrap_or(false);
+    let mut basis = Vec::new();
+    if replied {
+        basis.push("outgoing_reply_to_source_message_id");
+    } else if read {
+        basis.push("read_inbox_max_id");
+    } else {
+        basis.push("no_local_read_or_reply_match");
+    }
+    TelegramActivityEvaluation {
+        read,
+        replied,
+        basis,
+        read_inbox_max_id,
+        activity_updated_at_ms,
+        chat_updated_at_ms,
+        error: None,
+    }
+}
+
+fn monitor_task_create_gate_json(
+    context: &MonitorTaskCreateGateContext,
+    decision: MonitorTaskCreateGateDecision,
+    evaluation: &TelegramActivityEvaluation,
+) -> Value {
+    json!({
+        "source": "telegram_local_activity",
+        "decision": decision.slug(),
+        "read": evaluation.read,
+        "replied": evaluation.replied,
+        "basis": evaluation.basis.clone(),
+        "connection_slug": context.connection_slug,
+        "connector_slug": context.connector_slug,
+        "envelope_id": context.envelope_id,
+        "chat_id": context.chat_id,
+        "chat_kind": context.chat_kind,
+        "source_message_id": context.source_message_id,
+        "source_date_ms": context.source_date_ms,
+        "read_inbox_max_id": evaluation.read_inbox_max_id,
+        "activity_updated_at_ms": evaluation.activity_updated_at_ms,
+        "chat_updated_at_ms": evaluation.chat_updated_at_ms,
+        "activity_state_staleness_ms": evaluation
+            .chat_updated_at_ms
+            .or(evaluation.activity_updated_at_ms)
+            .map(|updated| i64::try_from(now_ms()).unwrap_or(i64::MAX).saturating_sub(updated)),
+        "error": evaluation.error.clone(),
+    })
+}
+
+fn record_monitor_task_create_gate_trace(outcome: &MonitorTaskCreateGateOutcome) {
+    let Some(path) = outcome.context.monitor_trace_path.as_ref() else {
+        return;
+    };
+    let Ok(store) = MonitorTraceStore::load(path) else {
+        return;
+    };
+    let identity = MonitorTraceIdentity {
+        message_key: format!(
+            "{}:{}:{}",
+            outcome.context.connection_slug,
+            outcome.context.chat_id,
+            outcome.context.source_message_id
+        ),
+        connection_slug: outcome.context.connection_slug.clone(),
+        connector_slug: outcome.context.connector_slug.clone(),
+        topic: Some(outcome.context.connection_slug.clone()),
+        kind: Some("message".to_string()),
+        chat_id: Some(outcome.context.chat_id.to_string()),
+        chat_title: None,
+        sender_id: None,
+        sender_name: None,
+        message_id: Some(outcome.context.source_message_id.to_string()),
+        dedup_key: Some(format!(
+            "{}:{}",
+            outcome.context.chat_id, outcome.context.source_message_id
+        )),
+        envelope_id: Some(outcome.context.envelope_id.clone()),
+        text: None,
+        event_date_ms: outcome.context.source_date_ms.map(i128::from),
+        received_at_ms: None,
+    };
+    let mut stage = MonitorTraceStage::completed(
+        "task_create_gate",
+        "TaskCreate",
+        format!(
+            "TaskCreate Telegram read/reply gate decision: {}.",
+            outcome.decision.slug()
+        ),
+        i128::from(now_ms()),
+    )
+    .with_envelope(outcome.context.envelope_id.clone());
+    stage.raw_source = serde_json::to_string(&outcome.gate).ok();
+    let _ = store.record_stage(identity, stage);
 }
 
 fn is_monitor_task_metadata(metadata: &Map<String, Value>) -> bool {
@@ -1298,6 +1622,12 @@ fn metadata_string(metadata: &Map<String, Value>, keys: &[&str]) -> Option<Strin
         .and_then(value_to_string)
 }
 
+fn metadata_i64(metadata: &Map<String, Value>, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| metadata.get(*key))
+        .and_then(value_i64)
+}
+
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
     value
         .as_object()
@@ -1308,6 +1638,35 @@ fn string_field_from_map(object: &Map<String, Value>, keys: &[&str]) -> Option<S
     keys.iter()
         .find_map(|key| object.get(*key))
         .and_then(value_to_string)
+}
+
+fn value_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    value
+        .as_object()
+        .and_then(|object| string_field_from_map(object, keys))
+}
+
+fn value_i64_field(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(value_i64)
+}
+
+fn value_bool_field(value: &Value, keys: &[&str]) -> bool {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn value_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok())),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
 }
 
 fn value_to_string(value: &Value) -> Option<String> {
@@ -1683,6 +2042,243 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    fn telegram_monitor_task_input(envelope_id: &str) -> Value {
+        json!({
+            "subject": "Reply to Chaofan about launch risk",
+            "description": "Chaofan asked whether the launch risk is still P1.",
+            "receivedAt": "2026-06-10T13:00:00Z",
+            "expiresAt": "2026-06-11T13:00:00Z",
+            "metadata": {
+                "_monitor": true,
+                "monitor_connection": "telegram-user",
+                "monitor_connector": "telegram-login",
+                "monitor_envelope_id": envelope_id,
+                "chat_id": "42",
+                "chat_kind": "user",
+                "sender_id": "42"
+            },
+            "actions": [
+                {
+                    "actionName": "Reply",
+                    "actionPrompt": "Research the answer and draft a reply."
+                }
+            ]
+        })
+    }
+
+    fn configure_telegram_gate(
+        state: &mut AppState,
+        tmp: &TempDir,
+        envelope_id: &str,
+        activity: Value,
+    ) {
+        let activity_path = tmp.path().join("telegram-activity-state.json");
+        std::fs::write(
+            &activity_path,
+            serde_json::to_vec_pretty(&activity).unwrap(),
+        )
+        .unwrap();
+        state.set_monitor_task_create_gate_contexts(vec![crate::MonitorTaskCreateGateContext {
+            envelope_id: envelope_id.to_string(),
+            connection_slug: "telegram-user".to_string(),
+            connector_slug: Some("telegram-login".to_string()),
+            chat_id: 42,
+            chat_kind: "user".to_string(),
+            source_message_id: 6836,
+            source_date_ms: Some(1_000),
+            activity_state_path: activity_path,
+            monitor_trace_path: None,
+        }]);
+    }
+
+    fn activity_state(messages: Vec<Value>, read_inbox_max_id: Option<i64>) -> Value {
+        json!({
+            "version": 1,
+            "source": "telegram_subscriber_activity",
+            "updated_at_ms": 1_500,
+            "chats": [
+                {
+                    "chat_id": 42,
+                    "chat_kind": "user",
+                    "updated_at_ms": 1_500,
+                    "read_inbox_max_id": read_inbox_max_id,
+                    "agent_sent_message_ids": [9001],
+                    "messages": messages
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn task_create_skips_telegram_monitor_when_exact_human_reply_seen() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(
+                vec![json!({
+                    "message_id": 7001,
+                    "date_ms": 1_200,
+                    "is_outgoing": true,
+                    "reply_to_message_id": 6836
+                })],
+                None,
+            ),
+        );
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .expect("skip should be a success-shaped TaskCreate result");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["skipped"], true);
+        assert_eq!(payload["reason"], "handled_in_telegram");
+        assert_eq!(
+            payload.pointer("/gate/decision").and_then(Value::as_str),
+            Some("skip_handled")
+        );
+        let store = load_store::<TaskStore>(&monitor_tasks_path(tmp.path())).unwrap();
+        assert!(
+            store.tasks.is_empty(),
+            "skipped monitor task must not be written"
+        );
+    }
+
+    #[test]
+    fn task_create_does_not_skip_for_unrelated_later_outgoing() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(
+                vec![json!({
+                    "message_id": 7001,
+                    "date_ms": 1_200,
+                    "is_outgoing": true
+                })],
+                None,
+            ),
+        );
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let task = load_monitor_task(tmp.path(), task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata.clone());
+        assert_eq!(
+            metadata
+                .pointer("/monitor_task_gate/decision")
+                .and_then(Value::as_str),
+            Some("create_unknown")
+        );
+        assert_eq!(
+            metadata
+                .pointer("/monitor_task_gate/replied")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn task_create_does_not_skip_for_agent_originated_exact_reply() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(
+                vec![json!({
+                    "message_id": 9001,
+                    "date_ms": 1_200,
+                    "is_outgoing": true,
+                    "reply_to_message_id": 6836
+                })],
+                None,
+            ),
+        );
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let task = load_monitor_task(tmp.path(), task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata.clone());
+        assert_eq!(
+            metadata
+                .pointer("/monitor_task_gate/decision")
+                .and_then(Value::as_str),
+            Some("create_unknown")
+        );
+        assert_eq!(
+            metadata
+                .pointer("/monitor_task_gate/replied")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn task_create_marks_telegram_monitor_read_only() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(Vec::new(), Some(6836)),
+        );
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let task = load_monitor_task(tmp.path(), task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata.clone());
+        assert_eq!(
+            metadata
+                .pointer("/source_state/telegram/read")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            metadata
+                .pointer("/monitor_task_gate/decision")
+                .and_then(Value::as_str),
+            Some("create_read")
+        );
+        assert_eq!(
+            metadata
+                .pointer("/monitor_task_gate/basis")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+            vec!["read_inbox_max_id"]
+        );
     }
 
     #[test]
@@ -2424,8 +3020,7 @@ mod tests {
 
         assert_eq!(task_json["status"], "completed");
         assert_eq!(
-            task_json["completed_via"],
-            "agent_report:incoming",
+            task_json["completed_via"], "agent_report:incoming",
             "incoming-direction completion must record the incoming label"
         );
     }

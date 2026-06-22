@@ -304,6 +304,9 @@ pub struct AppState {
     /// is the human action); TaskUpdate never sends a reply, so the reply-approval
     /// gate does not apply to mark-done.
     pub monitor_triage_turn: bool,
+    /// Pre-create monitor trigger facts trusted by the workflow runner. TaskCreate
+    /// uses these to evaluate local connector state before writing monitor tasks.
+    pub(crate) monitor_task_create_gate_contexts: Vec<MonitorTaskCreateGateContext>,
     /// Wall-clock timestamp of the most recent committed assistant message.
     /// Set by `push_message` when role == Assistant. Consumed by the
     /// microcompact time-based trigger to mirror Claude Code's "gap since
@@ -343,6 +346,19 @@ pub(crate) struct MonitorReplyScope {
     pub task_id: String,
     pub session_id: String,
     pub turn_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorTaskCreateGateContext {
+    pub envelope_id: String,
+    pub connection_slug: String,
+    pub connector_slug: Option<String>,
+    pub chat_id: i64,
+    pub chat_kind: String,
+    pub source_message_id: i64,
+    pub source_date_ms: Option<i64>,
+    pub activity_state_path: PathBuf,
+    pub monitor_trace_path: Option<PathBuf>,
 }
 
 impl AppState {
@@ -426,6 +442,7 @@ impl AppState {
             pentest_in_scope_origin: None,
             monitor_reply_scope: None,
             monitor_triage_turn: false,
+            monitor_task_create_gate_contexts: Vec::new(),
             last_assistant_at: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,
@@ -456,6 +473,13 @@ impl AppState {
             session_id,
             turn_id,
         });
+    }
+
+    pub fn set_monitor_task_create_gate_contexts(
+        &mut self,
+        contexts: Vec<MonitorTaskCreateGateContext>,
+    ) {
+        self.monitor_task_create_gate_contexts = contexts;
     }
 
     /// Replaces the active tool runner. Use this from tests or remote
