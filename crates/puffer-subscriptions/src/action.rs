@@ -136,11 +136,15 @@ impl ActionResult {
 }
 
 /// Diagnostic outcome emitted by the monitor triage agent for one envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriageDecisionOutcome {
     /// The agent intentionally did not create, update, or complete a task.
     NoTask,
+    /// The agent created a monitor task for this envelope.
+    TaskCreated,
+    /// The agent updated an existing monitor task for this envelope.
+    TaskUpdated,
 }
 
 /// Diagnostic reason for a monitor triage decision.

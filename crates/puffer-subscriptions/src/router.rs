@@ -40,7 +40,8 @@ const MONITOR_RUNTIME_LANGUAGE_POLICY: &str = r#"Monitor source-language runtime
 - If the trigger payload contains `conversation_context`, read it before deciding what the current source event means. `conversation_context.source=telegram_server_history_cache` means bounded recent Telegram server-history messages from the same direct chat before the current trigger; `conversation_context.source=subscriber_diagnostics` means best-effort observed subscriber diagnostics that may have gaps. Use context only to disambiguate ambiguous short messages and reply intent; do not create tasks from prior context alone, do not assume diagnostics context is complete or immediately adjacent, and do not replace the current source event's numbers, deadlines, or asks with prior-message details.
 - Same chat/contact is not enough to call something a duplicate. If the current source event asks a new question, changes topic, or creates a separate request, create a new monitor task even when another task from the same sender is still pending.
 - Task lifecycle: for ordinary content edits via TaskUpdate, leave status unchanged. The workflow trigger carries a direction field (incoming = a contact's message, outgoing = my own). When the current message clearly indicates an existing open monitor task in THIS conversation is done/handled/resolved, complete that task with TaskUpdate status: completed. Resolution is broader than "I did it": a decisive decision, refusal, or dismissal also completes it (e.g. outgoing "不给你擦"/"不弄了" — deciding not to act still closes the loop), and an incoming contact report that it is done completes the matching task too (e.g. "擦完了"/"已处理"). Match the conversation by stored identity like chat_id; TaskList first; if ambiguous among several, complete none UNLESS the message quotes/replies to a specific earlier message (a quote is not ambiguous — match it to that task); deferrals like "还没"/"等下"/"晚点再说" never complete. If direction is outgoing, only complete or update existing tasks — never create one. You may complete a task even if it has a reply/delivery target — completing only marks it done and never sends a reply.
-- When TaskUpdate changes an existing monitor task's subject, description, or activeForm, include `metadata.monitor_envelope_id` copied from the current workflow trigger and replace or clear `metadata.actions` so stale action prompts from the prior source cannot reach the executor."#;
+- When TaskUpdate changes an existing monitor task's subject, description, or activeForm, include `metadata.monitor_envelope_id` copied from the current workflow trigger and replace or clear `metadata.actions` so stale action prompts from the prior source cannot reach the executor.
+- When a consolidated create or update depends on multiple workflow triggers in the same monitor digest, include every contributing trigger `envelope_id` in `metadata.monitor_envelope_ids` as a JSON array. Do not include unrelated/noise triggers."#;
 
 /// Summary of processing one event envelope against workflow bindings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -986,12 +987,17 @@ fn record_triage_decision_trace_at(
         .iter()
         .filter(|decision| decision.envelope_id == envelope.envelope_id)
     {
+        let stage_id = match decision.outcome {
+            crate::action::TriageDecisionOutcome::NoTask => "triage_decision",
+            crate::action::TriageDecisionOutcome::TaskCreated => "task_created",
+            crate::action::TriageDecisionOutcome::TaskUpdated => "task_updated",
+        };
         record_router_trace_at(
             trace_store,
             spec,
             envelope,
             MonitorTraceStage::completed(
-                "triage_decision",
+                stage_id,
                 "subscription_router",
                 decision.reason.clone(),
                 at_ms,
