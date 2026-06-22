@@ -74,18 +74,30 @@ pub(crate) fn import_browser_secrets(
     // into the SAME vault; elevation lasts only for the import.
     #[cfg(target_os = "windows")]
     if source_id == "chrome" {
-        if let Some(total) = run_windows_v20_helper(paths) {
-            report.imported = total;
+        // The elevated helper re-imports every row (v10/v11 + v20) into the SAME
+        // vault, so its counts — not the in-process pass's — describe the final
+        // outcome. Replace imported AND skipped together so they stay consistent:
+        // the in-process pass counted v20 rows as skipped, but the helper imported
+        // them. If the helper didn't run (user declined UAC), keep the in-process
+        // report, whose skipped count already reflects the un-imported v20 rows.
+        if let Some((imported, skipped, errors)) = run_windows_v20_helper(paths) {
+            report.imported = imported;
+            report.skipped = skipped;
+            if errors > 0 {
+                report.errors.push(format!(
+                    "{errors} Chrome credential(s) failed during the elevated v20 import"
+                ));
+            }
         }
     }
     Ok(report)
 }
 
 /// Spawns `puffer __win-chrome-import` (which self-elevates via UAC and imports
-/// v10+v20 into the vault). Returns the helper's total imported count, or None if
-/// it could not run / the user declined elevation.
+/// v10+v20 into the vault). Returns the helper's `(imported, skipped, errors)`
+/// counts, or None if it could not run / the user declined elevation.
 #[cfg(target_os = "windows")]
-fn run_windows_v20_helper(paths: &ConfigPaths) -> Option<usize> {
+fn run_windows_v20_helper(paths: &ConfigPaths) -> Option<(usize, usize, usize)> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = std::env::current_exe().ok()?;
@@ -100,8 +112,21 @@ fn run_windows_v20_helper(paths: &ConfigPaths) -> Option<usize> {
         "C:\\Users\\{user}\\AppData\\Local\\Temp\\puffer_chrome_import.txt"
     ))
     .ok()?;
-    text.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("imported=").and_then(|n| n.parse::<usize>().ok()))
+    // The success line is "CHROME_IMPORT_OK imported=N skipped=N errors=N ...".
+    // A declined/failed run leaves no fresh OK marker, so require it before
+    // trusting any counts (otherwise the import is treated as not-run -> None).
+    if !text.contains("CHROME_IMPORT_OK") {
+        return None;
+    }
+    let field = |key: &str| -> Option<usize> {
+        text.split_whitespace()
+            .find_map(|tok| tok.strip_prefix(key).and_then(|n| n.parse::<usize>().ok()))
+    };
+    Some((
+        field("imported=")?,
+        field("skipped=").unwrap_or(0),
+        field("errors=").unwrap_or(0),
+    ))
 }
 
 /// Lists every browser import source and whether it is currently available.

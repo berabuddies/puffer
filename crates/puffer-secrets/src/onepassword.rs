@@ -528,15 +528,6 @@ fn primary_url(item: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn write_fake_op(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-        let path = dir.join("op");
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
 
     #[test]
     fn recognizes_op_references() {
@@ -544,23 +535,6 @@ mod tests {
         assert!(is_op_reference("  op://vault/item/field"));
         assert!(!is_op_reference("ghp_realtoken"));
         assert!(!is_op_reference("https://example.com"));
-    }
-
-    #[test]
-    fn resolves_reference_via_cli() {
-        let dir = tempfile::tempdir().unwrap();
-        // Fake `op` echoes a fixed value (no trailing newline, like --no-newline).
-        let op = write_fake_op(dir.path(), "printf '%s' 's3cr3t-from-op'");
-        let value = resolve_with(op.to_str().unwrap(), "op://Private/GitHub/credential").unwrap();
-        assert_eq!(value, "s3cr3t-from-op");
-    }
-
-    #[test]
-    fn surfaces_cli_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let op = write_fake_op(dir.path(), "echo 'no such item' 1>&2; exit 1");
-        let err = resolve_with(op.to_str().unwrap(), "op://x/y/z").unwrap_err();
-        assert!(err.to_string().contains("failed"));
     }
 
     #[test]
@@ -583,20 +557,6 @@ mod tests {
         assert_eq!(refs[0].origin.as_deref(), Some("https://github.com"));
         assert_eq!(refs[1].id, "def456");
         assert_eq!(refs[1].origin, None);
-    }
-
-    #[test]
-    fn list_login_refs_parses_items() {
-        let dir = tempfile::tempdir().unwrap();
-        let op = write_fake_op(
-            dir.path(),
-            r#"printf '%s' '[{"id":"i1","title":"Acme","vault":{"id":"v1"},"urls":[{"primary":true,"href":"https://acme.test"}]}]'"#,
-        );
-        let refs = list_login_refs(op.to_str().unwrap()).unwrap();
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].id, "i1");
-        assert_eq!(refs[0].vault_id, "v1");
-        assert_eq!(refs[0].origin.as_deref(), Some("https://acme.test"));
     }
 
     #[test]
@@ -643,58 +603,109 @@ mod tests {
         assert_eq!(resolved.password, "hunter2");
     }
 
-    #[test]
-    fn import_resolved_logins_lists_then_gets_each() {
-        let dir = tempfile::tempdir().unwrap();
-        // Branch on `$2`: `op item list` -> array; `op item get` -> one item.
-        let op = write_fake_op(
-            dir.path(),
-            r#"if [ "$2" = "list" ]; then printf '%s' '[{"id":"i1","title":"Acme","vault":{"id":"v1"},"urls":[{"primary":true,"href":"https://acme.test"}]}]'; elif [ "$2" = "get" ]; then printf '%s' '{"id":"i1","title":"Acme","vault":{"id":"v1"},"fields":[{"purpose":"USERNAME","value":"neo"},{"purpose":"PASSWORD","value":"trinity"}]}'; fi"#,
-        );
-        let (logins, errors) = import_resolved_with(op.to_str().unwrap()).unwrap();
-        assert_eq!(logins.len(), 1);
-        assert!(errors.is_empty());
-        assert_eq!(logins[0].username.as_deref(), Some("neo"));
-        assert_eq!(logins[0].password, "trinity");
-        assert_eq!(logins[0].origin.as_deref(), Some("https://acme.test"));
-    }
+    // These tests drive a fake `op` binary, which is a `#!/bin/sh` script made
+    // executable via Unix permission bits — so they only compile/run on Unix.
+    // Gating them keeps the crate's tests compiling on Windows (where the pure
+    // parser tests above still run).
+    #[cfg(unix)]
+    mod with_fake_op {
+        use super::super::*;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
 
-    #[test]
-    fn detects_connected_account_for_biometric_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let op = write_fake_op(
-            dir.path(),
-            r#"printf '%s' '[{"url":"my.1password.com","email":"a@b.c","user_uuid":"U1"}]'"#,
-        );
-        assert!(op_has_connected_account(op.to_str().unwrap()));
-    }
+        fn write_fake_op(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+            let path = dir.join("op");
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
 
-    #[test]
-    fn no_connected_account_when_op_lists_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let op = write_fake_op(dir.path(), "printf '%s' '[]'");
-        assert!(!op_has_connected_account(op.to_str().unwrap()));
-    }
+        #[test]
+        fn resolves_reference_via_cli() {
+            let dir = tempfile::tempdir().unwrap();
+            // Fake `op` echoes a fixed value (no trailing newline, like --no-newline).
+            let op = write_fake_op(dir.path(), "printf '%s' 's3cr3t-from-op'");
+            let value =
+                resolve_with(op.to_str().unwrap(), "op://Private/GitHub/credential").unwrap();
+            assert_eq!(value, "s3cr3t-from-op");
+        }
 
-    #[test]
-    fn run_op_kills_a_hanging_call() {
-        let dir = tempfile::tempdir().unwrap();
-        // Fake `op` that hangs (mimics the app-lock hang from sdk-go#266).
-        let op = write_fake_op(dir.path(), "sleep 30");
-        let start = std::time::Instant::now();
-        let err = run_op(op.to_str().unwrap(), &["read", "x"], Duration::from_millis(300))
-            .unwrap_err();
-        assert!(err.to_string().contains("timed out"));
-        // Must return promptly (well under the fake's 30s sleep).
-        assert!(start.elapsed() < Duration::from_secs(5));
-    }
+        #[test]
+        fn surfaces_cli_failure() {
+            let dir = tempfile::tempdir().unwrap();
+            let op = write_fake_op(dir.path(), "echo 'no such item' 1>&2; exit 1");
+            let err = resolve_with(op.to_str().unwrap(), "op://x/y/z").unwrap_err();
+            assert!(err.to_string().contains("failed"));
+        }
 
-    #[test]
-    fn run_op_returns_quick_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let op = write_fake_op(dir.path(), "printf '%s' 'hello'");
-        let out = run_op(op.to_str().unwrap(), &["read", "x"], Duration::from_secs(5)).unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
-        assert!(out.status.success());
+        #[test]
+        fn list_login_refs_parses_items() {
+            let dir = tempfile::tempdir().unwrap();
+            let op = write_fake_op(
+                dir.path(),
+                r#"printf '%s' '[{"id":"i1","title":"Acme","vault":{"id":"v1"},"urls":[{"primary":true,"href":"https://acme.test"}]}]'"#,
+            );
+            let refs = list_login_refs(op.to_str().unwrap()).unwrap();
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].id, "i1");
+            assert_eq!(refs[0].vault_id, "v1");
+            assert_eq!(refs[0].origin.as_deref(), Some("https://acme.test"));
+        }
+
+        #[test]
+        fn import_resolved_logins_lists_then_gets_each() {
+            let dir = tempfile::tempdir().unwrap();
+            // Branch on `$2`: `op item list` -> array; `op item get` -> one item.
+            let op = write_fake_op(
+                dir.path(),
+                r#"if [ "$2" = "list" ]; then printf '%s' '[{"id":"i1","title":"Acme","vault":{"id":"v1"},"urls":[{"primary":true,"href":"https://acme.test"}]}]'; elif [ "$2" = "get" ]; then printf '%s' '{"id":"i1","title":"Acme","vault":{"id":"v1"},"fields":[{"purpose":"USERNAME","value":"neo"},{"purpose":"PASSWORD","value":"trinity"}]}'; fi"#,
+            );
+            let (logins, errors) = import_resolved_with(op.to_str().unwrap()).unwrap();
+            assert_eq!(logins.len(), 1);
+            assert!(errors.is_empty());
+            assert_eq!(logins[0].username.as_deref(), Some("neo"));
+            assert_eq!(logins[0].password, "trinity");
+            assert_eq!(logins[0].origin.as_deref(), Some("https://acme.test"));
+        }
+
+        #[test]
+        fn detects_connected_account_for_biometric_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let op = write_fake_op(
+                dir.path(),
+                r#"printf '%s' '[{"url":"my.1password.com","email":"a@b.c","user_uuid":"U1"}]'"#,
+            );
+            assert!(op_has_connected_account(op.to_str().unwrap()));
+        }
+
+        #[test]
+        fn no_connected_account_when_op_lists_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let op = write_fake_op(dir.path(), "printf '%s' '[]'");
+            assert!(!op_has_connected_account(op.to_str().unwrap()));
+        }
+
+        #[test]
+        fn run_op_kills_a_hanging_call() {
+            let dir = tempfile::tempdir().unwrap();
+            // Fake `op` that hangs (mimics the app-lock hang from sdk-go#266).
+            let op = write_fake_op(dir.path(), "sleep 30");
+            let start = std::time::Instant::now();
+            let err = run_op(op.to_str().unwrap(), &["read", "x"], Duration::from_millis(300))
+                .unwrap_err();
+            assert!(err.to_string().contains("timed out"));
+            // Must return promptly (well under the fake's 30s sleep).
+            assert!(start.elapsed() < Duration::from_secs(5));
+        }
+
+        #[test]
+        fn run_op_returns_quick_output() {
+            let dir = tempfile::tempdir().unwrap();
+            let op = write_fake_op(dir.path(), "printf '%s' 'hello'");
+            let out = run_op(op.to_str().unwrap(), &["read", "x"], Duration::from_secs(5)).unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+            assert!(out.status.success());
+        }
     }
 }

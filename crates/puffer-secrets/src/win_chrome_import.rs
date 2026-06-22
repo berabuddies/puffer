@@ -220,7 +220,15 @@ fn unwrap_abe(after_user: &[u8]) -> Result<[u8; 32]> {
 }
 
 fn gcm_decrypt(key: &[u8; 32], value: &[u8]) -> Result<String> {
-    let body = &value[3..];
+    // Layout: 3-byte version tag ("v10"/"v11"/"v20") + 12-byte GCM nonce + ct||tag.
+    // Validate before slicing so a short/malformed row returns an error (counted and
+    // skipped by the caller) instead of panicking and aborting the whole import.
+    let body = value
+        .get(3..)
+        .context("encrypted value shorter than its version prefix")?;
+    if body.len() < 12 {
+        bail!("encrypted value too short for a 12-byte GCM nonce");
+    }
     let (nonce, ct) = body.split_at(12);
     let pt = Aes256Gcm::new_from_slice(key)
         .unwrap()
@@ -414,6 +422,12 @@ pub fn dispatch(args: &[String]) -> Result<()> {
                 .or_else(|| std::env::var("PUFFER_VAULT_DIR").ok())
                 .unwrap_or_else(|| format!("C:\\Users\\{user}\\.puffer"));
             let pid = std::process::id();
+            // Clear any stale result from a previous run BEFORE elevating: if the
+            // user declines UAC (or PowerShell fails), the elevated stage never runs
+            // and never rewrites this file, so a leftover "OK" must not be read as a
+            // fresh success.
+            let result = result_path(&user);
+            let _ = std::fs::remove_file(&result);
             let ps = format!(
                 "Start-Process -Verb RunAs -WindowStyle Hidden -Wait -FilePath '{exe}' \
                  -ArgumentList '{SUBCOMMAND}','--elevated','{user}','{vault}','{pid}'"
@@ -423,7 +437,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
                 .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .context("launch elevated (UAC)")?;
-            let summary = std::fs::read_to_string(result_path(&user))
+            let summary = std::fs::read_to_string(&result)
                 .unwrap_or_else(|_| "no result (was UAC approved?)".into());
             println!("{summary}");
             if summary.contains("CHROME_IMPORT_ERROR") {
