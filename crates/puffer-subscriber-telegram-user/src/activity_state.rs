@@ -270,7 +270,7 @@ pub(crate) fn record_read_inbox_activity(
 
 fn upsert_message(
     messages: &mut Vec<TelegramActivityMessage>,
-    candidate: TelegramActivityMessage,
+    mut candidate: TelegramActivityMessage,
 ) -> bool {
     let Some(existing) = messages
         .iter_mut()
@@ -279,6 +279,7 @@ fn upsert_message(
         messages.push(candidate);
         return true;
     };
+    candidate.agent_originated |= existing.agent_originated;
     if *existing == candidate {
         return false;
     }
@@ -357,5 +358,38 @@ mod tests {
 
         let chat = state.chats.iter().find(|chat| chat.chat_id == 42).unwrap();
         assert_eq!(chat.read_inbox_max_id, Some(11));
+    }
+
+    #[test]
+    fn message_upsert_preserves_agent_originated_flag() {
+        let mut messages = vec![TelegramActivityMessage {
+            message_id: 9001,
+            date_ms: 1_200,
+            is_outgoing: true,
+            reply_to_message_id: Some(6836),
+            agent_originated: true,
+        }];
+
+        assert!(upsert_message(
+            &mut messages,
+            TelegramActivityMessage {
+                message_id: 9001,
+                date_ms: 1_250,
+                is_outgoing: true,
+                reply_to_message_id: Some(6836),
+                agent_originated: false,
+            }
+        ));
+
+        assert_eq!(
+            messages,
+            vec![TelegramActivityMessage {
+                message_id: 9001,
+                date_ms: 1_250,
+                is_outgoing: true,
+                reply_to_message_id: Some(6836),
+                agent_originated: true,
+            }]
+        );
     }
 }
