@@ -693,6 +693,11 @@ export const mockSettingsSnapshot: SettingsSnapshot = {
     storeFile: "/home/c/.puffer/secrets.json",
     keySource: "local-key-file",
     chromeImportSupported: false,
+    sources: [
+      { id: "chrome", label: "Chrome", available: true },
+      { id: "firefox", label: "Firefox", available: false },
+      { id: "1password", label: "1Password", available: false }
+    ],
     items: []
   }
 };

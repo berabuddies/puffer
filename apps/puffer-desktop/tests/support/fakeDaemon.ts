@@ -1561,6 +1561,8 @@ export class FakeDaemon {
         return this.importBrowserSecrets(request.params);
       case "list_secret_sources":
         return { sources: this.secretSources() };
+      case "import_onepassword_export":
+        return this.importBrowserSecrets({ source: "1password" });
       case "test_proxy":
         return this.testProxy(request.params);
       case "list_permissions":
@@ -2542,8 +2544,6 @@ export class FakeDaemon {
   private secretSources(): JsonRecord[] {
     return [
       { id: "chrome", label: "Chrome", available: true },
-      { id: "edge", label: "Edge", available: false },
-      { id: "brave", label: "Brave", available: false },
       { id: "firefox", label: "Firefox", available: false },
       { id: "1password", label: "1Password", available: false }
     ];

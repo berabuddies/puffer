@@ -4,7 +4,8 @@ use crate::dtos::{
     BrowserCaptchaSettingsDto, BrowserCaptchaSolverDto, BrowserSettingsDto, ChatAttachmentDto,
     ChatAttachmentSourceDto, DiffSummaryDto, DivergenceReportDto, ExternalCredentialDto,
     FolderGroupDto, MediaCapabilityInfoDto, MediaGenerationSettingsDto, MediaSettingsDto,
-    ProviderSummaryDto, ResourceCountsDto, SecretSummaryDto, SecretsSettingsDto, SessionDetailDto,
+    ProviderSummaryDto, ResourceCountsDto, SecretSourceDto, SecretSummaryDto, SecretsSettingsDto,
+    SessionDetailDto,
     SessionListItemDto, SettingsConfigDto, SettingsSessionSummaryDto, SettingsSnapshotDto,
     TimelineItemDto,
 };
@@ -233,6 +234,19 @@ impl BackendState {
             "list_secret_sources" => serde_value(json!({
                 "sources": puffer_secrets::available_browser_sources(),
             })),
+            "import_onepassword_export" => {
+                let path = params
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| anyhow!("import_onepassword_export requires a `path`"))?;
+                let report = self
+                    .secret_vault()?
+                    .sync_onepassword_export(std::path::Path::new(path))?;
+                serde_value(json!({
+                    "settings": self.load_settings_snapshot()?,
+                    "report": report,
+                }))
+            }
             "run_remote_bash" => self.run_remote_bash(params),
             "read_remote_file" => self.read_remote_file(params),
             "write_remote_file" => self.write_remote_file(params),
@@ -767,6 +781,14 @@ impl BackendState {
             store_file: store_file.display().to_string(),
             key_source: secret_key_source().to_string(),
             chrome_import_supported: cfg!(target_os = "macos"),
+            sources: puffer_secrets::available_browser_sources()
+                .into_iter()
+                .map(|source| SecretSourceDto {
+                    id: source.id,
+                    label: source.label,
+                    available: source.available,
+                })
+                .collect(),
             items: vault.list()?.into_iter().map(secret_summary).collect(),
         })
     }
