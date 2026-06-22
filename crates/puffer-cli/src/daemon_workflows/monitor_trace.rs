@@ -13,6 +13,7 @@ const MAX_LIMIT: usize = 1000;
 const MAX_DIAGNOSTIC_RECORDS: usize = 1000;
 const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 const SUMMARY_LIMIT: usize = 180;
+const TEXT_PREVIEW_LIMIT: usize = 200;
 
 #[derive(Debug, Deserialize)]
 struct MonitorTraceListParams {
@@ -477,6 +478,9 @@ fn finalize_messages(messages: &mut [Value], include_payload: bool) {
         if !object.contains_key("linked_tasks") {
             object.insert("linked_tasks".to_string(), Value::Array(Vec::new()));
         }
+        if !include_payload {
+            bound_text_field(object);
+        }
         if !object.contains_key("summary") {
             object.insert(
                 "summary".to_string(),
@@ -548,6 +552,24 @@ fn set_payload_fields(
     if !include_payload {
         object.insert("payload".to_string(), Value::Null);
     }
+}
+
+fn bound_text_field(object: &mut Map<String, Value>) {
+    let Some(text) = object.get("text").and_then(Value::as_str) else {
+        return;
+    };
+    object.insert(
+        "text".to_string(),
+        Value::String(truncate_text(text, TEXT_PREVIEW_LIMIT)),
+    );
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 fn push_stage(object: &mut Map<String, Value>, stage: Value) {
@@ -913,6 +935,31 @@ mod tests {
             .unwrap()
             .iter()
             .any(|stage| { stage["id"] == "delivery_emitted" }));
+    }
+
+    #[test]
+    fn store_message_text_is_bounded_when_payload_is_hidden() {
+        let full_text = "private launch notes ".repeat(20);
+        let mut messages = vec![json!({
+            "message_key": "telegram-user:42:7",
+            "connection_slug": "telegram-user",
+            "text": full_text,
+            "stages": [{
+                "id": "connector_stdout_received",
+                "status": "completed",
+                "at_ms": 1000,
+                "source": "connector_stream",
+                "summary": "received"
+            }]
+        })];
+
+        finalize_messages(&mut messages, false);
+
+        let text = messages[0]["text"].as_str().unwrap();
+        assert_ne!(text, full_text);
+        assert!(text.chars().count() <= 203);
+        assert!(text.ends_with("..."));
+        assert_eq!(messages[0]["payload"], Value::Null);
     }
 
     #[test]

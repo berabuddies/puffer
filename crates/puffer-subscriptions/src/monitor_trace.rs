@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use thiserror::Error;
 
 const DEFAULT_MAX_MESSAGES_PER_CONNECTION: usize = 1000;
+const TRACE_TEXT_PREVIEW_CHARS: usize = 200;
 
 #[derive(Debug, Error)]
 pub enum MonitorTraceStoreError {
@@ -228,7 +229,7 @@ impl MonitorTraceIdentity {
             message_id,
             dedup_key: envelope.event.dedup_key.clone(),
             envelope_id: Some(envelope.envelope_id.clone()),
-            text: Some(envelope.event.text.clone()).filter(|text| !text.is_empty()),
+            text: trace_text_preview(&envelope.event.text),
             event_date_ms: payload_i128(payload, "date_ms"),
             received_at_ms: Some(envelope.received_at_ms),
         }
@@ -283,6 +284,20 @@ fn payload_i128(payload: &Value, key: &str) -> Option<i128> {
         .map(|value| value as i128)
 }
 
+fn trace_text_preview(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut truncated = value
+        .chars()
+        .take(TRACE_TEXT_PREVIEW_CHARS)
+        .collect::<String>();
+    if value.chars().count() > TRACE_TEXT_PREVIEW_CHARS {
+        truncated.push_str("...");
+    }
+    Some(truncated)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorTraceMessage {
     pub message_key: String,
@@ -335,7 +350,7 @@ impl MonitorTraceMessage {
             message_id: identity.message_id,
             dedup_key: identity.dedup_key,
             envelope_id: identity.envelope_id,
-            text: identity.text,
+            text: identity.text.as_deref().and_then(trace_text_preview),
             event_date_ms: identity.event_date_ms,
             received_at_ms: identity.received_at_ms,
             latest_status: MonitorTraceStatus::Received,
@@ -355,7 +370,12 @@ impl MonitorTraceMessage {
         self.message_id = self.message_id.take().or(identity.message_id);
         self.dedup_key = self.dedup_key.take().or(identity.dedup_key);
         self.envelope_id = self.envelope_id.take().or(identity.envelope_id);
-        self.text = self.text.take().or(identity.text);
+        self.text = self
+            .text
+            .take()
+            .or(identity.text)
+            .as_deref()
+            .and_then(trace_text_preview);
         self.event_date_ms = self.event_date_ms.or(identity.event_date_ms);
         self.received_at_ms = self.received_at_ms.or(identity.received_at_ms);
     }
@@ -438,6 +458,7 @@ impl MonitorTraceStore {
             None => message.stages.push(stage),
         }
         message.stages.sort_by(|a, b| a.at_ms.cmp(&b.at_ms));
+        message.text = message.text.as_deref().and_then(trace_text_preview);
         message.recompute_status();
         let max_per_connection = *self.max_messages_per_connection.lock().unwrap();
         enforce_retention(&mut guard.messages, max_per_connection);
@@ -686,6 +707,35 @@ mod tests {
 
         let message = store.list_recent(Some("telegram-user"), 10)[0].clone();
         assert_eq!(message.latest_status, MonitorTraceStatus::TaskCreated);
+    }
+
+    #[test]
+    fn persisted_trace_text_is_bounded() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("monitor-trace.json");
+        let store = MonitorTraceStore::load(&path).unwrap();
+        let full_text = "private launch notes ".repeat(20);
+        let mut identity = MonitorTraceIdentity::telegram_for_test("telegram-user", "42", "7");
+        identity.text = Some(full_text.clone());
+
+        store
+            .record_stage(
+                identity,
+                MonitorTraceStage::completed(
+                    "delivery_emitted",
+                    "telegram_subscriber",
+                    "emitted",
+                    1000,
+                ),
+            )
+            .unwrap();
+
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(!raw.contains(&full_text));
+        let message = store.list_recent(Some("telegram-user"), 10)[0].clone();
+        let text = message.text.unwrap();
+        assert!(text.chars().count() <= 203);
+        assert!(text.ends_with("..."));
     }
 
     #[test]
