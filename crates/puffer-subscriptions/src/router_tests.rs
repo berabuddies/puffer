@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{ActionResult, BuiltinActionDispatcher};
+    use crate::action::{
+        ActionResult, BuiltinActionDispatcher, TriageDecision, TriageDecisionOutcome,
+    };
     use crate::classify::{ClassifyDecision, NullClassifier};
     use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
     use crate::spec::{ActionSpec, FileAppendFormat, TaggedFilterSpec, WorkflowBindingSpec};
@@ -296,6 +298,106 @@ mod tests {
         );
         assert_eq!(result.acted, 1);
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn batch_triage_decision_trace_is_written_only_to_matching_envelope() {
+        struct DecisionBatchDispatcher;
+        impl ActionDispatcher for DecisionBatchDispatcher {
+            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+                ActionResult::failure("single dispatch should not run")
+            }
+
+            fn dispatch_batch(
+                &self,
+                _action: &ActionSpec,
+                _envelopes: &[EventEnvelope],
+            ) -> ActionResult {
+                ActionResult::success("triaged").with_triage_decisions(vec![
+                    TriageDecision {
+                        envelope_id: "env-2".into(),
+                        outcome: TriageDecisionOutcome::NoTask,
+                        policy: Some("status_update_no_action".into()),
+                        reason: "这是状态通知，没有请求你回复、决策或处理。".into(),
+                    },
+                ])
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        let mut spec = monitor_binding_with_classify_prompt();
+        spec.classify_prompt = None;
+        store.create(spec).unwrap();
+        let trace_store = crate::monitor_trace::MonitorTraceStore::load(
+            dir.path().join("monitor-trace.json"),
+        )
+        .unwrap();
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(DecisionBatchDispatcher);
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let envelopes = vec![
+            EventEnvelope {
+                envelope_id: "env-1".into(),
+                subscriber_id: "telegram-user".into(),
+                received_at_ms: 1,
+                event: Event {
+                    topic: "telegram-user".into(),
+                    kind: "message".into(),
+                    control: false,
+                    dedup_key: Some("42:1".into()),
+                    text: "今天把工作总结汇报给我".into(),
+                    payload: serde_json::json!({
+                        "chat_id": 42,
+                        "message_id": 1,
+                        "sender_id": 7
+                    }),
+                },
+            },
+            EventEnvelope {
+                envelope_id: "env-2".into(),
+                subscriber_id: "telegram-user".into(),
+                received_at_ms: 2,
+                event: Event {
+                    topic: "telegram-user".into(),
+                    kind: "message".into(),
+                    control: false,
+                    dedup_key: Some("42:2".into()),
+                    text: "预发环境昨晚重启过一次，现在正常。".into(),
+                    payload: serde_json::json!({
+                        "chat_id": 42,
+                        "message_id": 2,
+                        "sender_id": 7
+                    }),
+                },
+            },
+        ];
+
+        let result = process_envelope_batch_result_with_monitor_digest(
+            &envelopes,
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            &drop_all_gate(),
+            None,
+            Some(&trace_store),
+            None,
+        );
+
+        assert!(result.matched);
+        let trace = trace_store.list_recent(Some("telegram-user"), 10);
+        let env1 = trace.iter().find(|message| message.envelope_id.as_deref() == Some("env-1")).unwrap();
+        let env2 = trace.iter().find(|message| message.envelope_id.as_deref() == Some("env-2")).unwrap();
+        assert!(env1.stages.iter().all(|stage| stage.id != "triage_decision"));
+        let decision_stage = env2
+            .stages
+            .iter()
+            .find(|stage| stage.id == "triage_decision")
+            .expect("env-2 should carry its own triage decision");
+        assert_eq!(
+            decision_stage.decision.as_ref().map(|decision| decision.reason.as_str()),
+            Some("这是状态通知，没有请求你回复、决策或处理。")
+        );
     }
 
     #[test]
@@ -1125,6 +1227,132 @@ mod tests {
         assert_eq!(skipped.acted, 0);
         assert!(passed.matched);
         assert_eq!(passed.acted, 1);
+    }
+
+    #[test]
+    fn trace_records_no_monitor_binding_for_unmatched_message() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        let trace_store = crate::monitor_trace::MonitorTraceStore::load(
+            dir.path().join("monitor-trace.json"),
+        )
+        .unwrap();
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let envelope = EventEnvelope {
+            envelope_id: "env-no-binding".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 100,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("42:7".into()),
+                text: "hello".into(),
+                payload: serde_json::json!({
+                    "chat_id": 42,
+                    "message_id": 7,
+                    "date_ms": 90
+                }),
+            },
+        };
+
+        let result = process_envelope_result_with_monitor_digest(
+            &envelope,
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            &drop_all_gate(),
+            None,
+            Some(&trace_store),
+            None,
+        );
+
+        assert!(!result.matched);
+        let trace = trace_store.list_recent(Some("telegram-user"), 10);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(
+            trace[0].latest_status,
+            crate::monitor_trace::MonitorTraceStatus::RouterSkipped
+        );
+        assert!(
+            trace[0]
+                .stages
+                .iter()
+                .any(|stage| stage.id == "router_no_monitor_binding")
+        );
+    }
+
+    #[test]
+    fn batch_trace_records_contact_filter_skip() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor selected Telegram contacts".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: vec!["telegram@alice".into()],
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let trace_store = crate::monitor_trace::MonitorTraceStore::load(
+            dir.path().join("monitor-trace.json"),
+        )
+        .unwrap();
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let envelope = EventEnvelope {
+            envelope_id: "env-bob".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 100,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: Some("42:8".into()),
+                text: "hello".into(),
+                payload: serde_json::json!({
+                    "chat_kind": "user",
+                    "chat_username": "bob",
+                    "chat_id": 42,
+                    "message_id": 8
+                }),
+            },
+        };
+
+        let result = process_envelope_batch_result_with_monitor_digest(
+            &[envelope],
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            &drop_all_gate(),
+            None,
+            Some(&trace_store),
+            None,
+        );
+
+        assert!(!result.matched);
+        let trace = trace_store.list_recent(Some("telegram-user"), 10);
+        assert_eq!(trace.len(), 1);
+        assert!(
+            trace[0]
+                .stages
+                .iter()
+                .any(|stage| stage.id == "router_contact_filter_skip")
+        );
     }
 
     #[test]

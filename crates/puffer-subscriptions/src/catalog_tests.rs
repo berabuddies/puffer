@@ -20,6 +20,71 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"email".to_string()));
     assert!(slugs.contains(&"gmail-browser".to_string()));
     assert!(slugs.contains(&"gcal-browser".to_string()));
+    assert!(slugs.contains(&"lark-browser".to_string()));
+    assert!(slugs.contains(&"feishu-browser".to_string()));
+}
+
+#[test]
+fn lark_and_feishu_browser_templates_declare_per_brand_state_roots() {
+    let lark = builtin_connector_template("lark-browser").unwrap();
+    let feishu = builtin_connector_template("feishu-browser").unwrap();
+
+    // Both stream events and are not agent proxies.
+    assert!(lark.can_subscribe);
+    assert!(!lark.can_proxy_agent);
+    assert!(feishu.can_subscribe);
+    assert!(!feishu.can_proxy_agent);
+
+    // The state_root the runtime joins onto user_config_dir must be per-brand
+    // and match what `lark_browser::save_config` writes.
+    let lark_sub = lark.subscriber.as_ref().unwrap();
+    assert_eq!(lark_sub.manifest_slug, "lark-browser");
+    assert_eq!(lark_sub.state_root.as_deref(), Some("lark-browser-accounts"));
+
+    let feishu_sub = feishu.subscriber.as_ref().unwrap();
+    assert_eq!(feishu_sub.manifest_slug, "feishu-browser");
+    assert_eq!(
+        feishu_sub.state_root.as_deref(),
+        Some("feishu-browser-accounts")
+    );
+
+    // Both share the same subscriber binary.
+    assert_eq!(lark.binary, "puffer __subscriber lark-browser");
+    assert_eq!(feishu.binary, "puffer __subscriber lark-browser");
+
+    // Three actions with the right permission categories.
+    for template in [&lark, &feishu] {
+        assert_eq!(
+            template
+                .actions
+                .get("send_message")
+                .unwrap()
+                .permission
+                .category,
+            "external_message_send"
+        );
+        assert_eq!(
+            template
+                .actions
+                .get("read_history")
+                .unwrap()
+                .permission
+                .category,
+            "external_message_read"
+        );
+        assert!(
+            !template
+                .actions
+                .get("read_history")
+                .unwrap()
+                .permission
+                .external_side_effect
+        );
+        assert_eq!(
+            template.actions.get("react").unwrap().permission.category,
+            "external_message_interaction"
+        );
+    }
 }
 
 #[test]
@@ -28,6 +93,8 @@ fn suggested_connection_slugs_match_connect_defaults() {
     assert_eq!(suggested_connection_slug("email"), "email");
     assert_eq!(suggested_connection_slug("gmail-browser"), "gmail-browser");
     assert_eq!(suggested_connection_slug("gcal-browser"), "gcal-browser");
+    assert_eq!(suggested_connection_slug("lark-browser"), "lark-browser");
+    assert_eq!(suggested_connection_slug("feishu-browser"), "feishu-browser");
     assert_eq!(suggested_connection_slug("discord-bot"), "discord-bot");
     assert_eq!(suggested_connection_slug("lark-login"), "lark-user");
     assert_eq!(suggested_connection_slug("lark-bot"), "lark-bot");

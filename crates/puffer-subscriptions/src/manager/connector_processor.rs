@@ -5,6 +5,7 @@ use crate::classify::Classifier;
 use crate::connection::ConnectionStore;
 use crate::connector_stream::ConnectorEventProcessor;
 use crate::history::WorkflowHistoryStore;
+use crate::monitor_trace::{MonitorTraceStage, MonitorTraceStore};
 use crate::proxy::{
     builtin_agent_proxy, handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision,
     AgentProxyStore,
@@ -24,6 +25,7 @@ pub(super) struct ManagerConnectorEventProcessor {
     store: Arc<SubscriptionStore>,
     connection_store: Arc<ConnectionStore>,
     history_store: Arc<WorkflowHistoryStore>,
+    monitor_trace_store: Arc<MonitorTraceStore>,
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
@@ -36,6 +38,7 @@ impl ManagerConnectorEventProcessor {
         store: Arc<SubscriptionStore>,
         connection_store: Arc<ConnectionStore>,
         history_store: Arc<WorkflowHistoryStore>,
+        monitor_trace_store: Arc<MonitorTraceStore>,
         proxy_store: Arc<AgentProxyStore>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
@@ -46,6 +49,7 @@ impl ManagerConnectorEventProcessor {
             store,
             connection_store,
             history_store,
+            monitor_trace_store,
             proxy_store,
             dispatcher,
             classifier,
@@ -139,6 +143,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
         connection_slug: &str,
         envelope: &EventEnvelope,
     ) -> Result<()> {
+        self.record_connector_stdout(connector_slug, connection_slug, envelope);
         self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
         let result = process_envelope_result_with_monitor_digest(
             envelope,
@@ -148,6 +153,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
             &self.classifier,
             &self.self_gate,
             Some(&self.monitor_digest),
+            Some(&self.monitor_trace_store),
             None,
         );
         if result.failed > 0 {
@@ -166,6 +172,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
         envelopes: &[EventEnvelope],
     ) -> Result<()> {
         for envelope in envelopes {
+            self.record_connector_stdout(connector_slug, connection_slug, envelope);
             self.process_agent_proxy(connector_slug, connection_slug, envelope)?;
         }
         let result = process_envelope_batch_result_with_monitor_digest(
@@ -176,6 +183,7 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
             &self.classifier,
             &self.self_gate,
             Some(&self.monitor_digest),
+            Some(&self.monitor_trace_store),
             None,
         );
         if result.failed > 0 {
@@ -185,5 +193,34 @@ impl ConnectorEventProcessor for ManagerConnectorEventProcessor {
             );
         }
         Ok(())
+    }
+}
+
+impl ManagerConnectorEventProcessor {
+    fn record_connector_stdout(
+        &self,
+        connector_slug: &str,
+        connection_slug: &str,
+        envelope: &EventEnvelope,
+    ) {
+        if let Err(error) = self.monitor_trace_store.record_envelope_stage(
+            connection_slug,
+            Some(connector_slug),
+            envelope,
+            MonitorTraceStage::completed(
+                "connector_stdout_received",
+                "connector_stream",
+                "Connector stdout event frame was received by the subscription processor.",
+                envelope.received_at_ms,
+            ),
+        ) {
+            tracing::warn!(
+                connection_slug,
+                connector_slug,
+                envelope = %envelope.envelope_id,
+                %error,
+                "failed to persist connector stdout monitor trace stage"
+            );
+        }
     }
 }

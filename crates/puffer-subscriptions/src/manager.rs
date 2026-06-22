@@ -13,6 +13,7 @@ use crate::connector_process;
 use crate::connector_stream::{ConnectorEventProcessor, ConnectorStreamHandle};
 use crate::contacts::contact_ids_for_connector;
 use crate::history::WorkflowHistoryStore;
+use crate::monitor_trace::MonitorTraceStore;
 use crate::protocol::{ConnectorActionRequest, ConnectorActionResponse};
 use crate::proxy::{
     handle_agent_proxy_event as decide_agent_proxy_event, AgentProxyDecision, AgentProxyStore,
@@ -88,6 +89,7 @@ pub struct SubscriptionManagerBuilder {
     connector_store_path: PathBuf,
     connection_store_path: PathBuf,
     history_store_path: PathBuf,
+    monitor_trace_store_path: PathBuf,
     proxy_store_path: PathBuf,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
@@ -113,6 +115,10 @@ impl SubscriptionManagerBuilder {
             .parent()
             .map(|parent| parent.join("workflow_history.json"))
             .unwrap_or_else(|| PathBuf::from("workflow_history.json"));
+        let monitor_trace_store_path = store_path
+            .parent()
+            .map(|parent| parent.join("monitor_trace.json"))
+            .unwrap_or_else(|| PathBuf::from("monitor_trace.json"));
         let proxy_store_path = store_path
             .parent()
             .map(|parent| parent.join("agent_proxy_bindings.json"))
@@ -123,6 +129,7 @@ impl SubscriptionManagerBuilder {
             connector_store_path,
             connection_store_path,
             history_store_path,
+            monitor_trace_store_path,
             proxy_store_path,
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
@@ -165,6 +172,12 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the monitor trace store path.
+    pub fn with_monitor_trace_store_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.monitor_trace_store_path = path.into();
+        self
+    }
+
     /// Override the agent proxy binding store path.
     pub fn with_proxy_store_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.proxy_store_path = path.into();
@@ -201,6 +214,8 @@ impl SubscriptionManagerBuilder {
         let connector_store = Arc::new(ConnectorCatalogStore::load(&self.connector_store_path)?);
         let connection_store = Arc::new(ConnectionStore::load(&self.connection_store_path)?);
         let history_store = Arc::new(WorkflowHistoryStore::load(&self.history_store_path)?);
+        let monitor_trace_store =
+            Arc::new(MonitorTraceStore::load(&self.monitor_trace_store_path)?);
         // Root cause D: reclaim runs left `Running` by a previous process (crash/kill
         // before completion) so their messages are no longer dedup-blocked forever.
         // Must run before the router starts consuming live events.
@@ -219,11 +234,13 @@ impl SubscriptionManagerBuilder {
             handle.clone(),
             dispatcher.clone(),
             history_store.clone(),
+            monitor_trace_store.clone(),
             self.monitor_digest_interval,
         );
         let bus = self.bus.clone();
         let store_for_router = store.clone();
         let history_for_router = history_store.clone();
+        let trace_for_router = monitor_trace_store.clone();
         let dispatcher_for_router = dispatcher.clone();
         let classifier_for_router = classifier.clone();
         let health_bus = self.bus.clone();
@@ -245,6 +262,7 @@ impl SubscriptionManagerBuilder {
                 classifier_for_router,
                 gate_for_router,
                 Some(monitor_digest.clone()),
+                Some(trace_for_router),
             )
         };
         let manager = SubscriptionManager {
@@ -254,6 +272,7 @@ impl SubscriptionManagerBuilder {
             connector_store,
             connection_store,
             history_store,
+            monitor_trace_store,
             proxy_store,
             dispatcher,
             classifier,
@@ -289,6 +308,7 @@ pub struct SubscriptionManager {
     connector_store: Arc<ConnectorCatalogStore>,
     connection_store: Arc<ConnectionStore>,
     history_store: Arc<WorkflowHistoryStore>,
+    monitor_trace_store: Arc<MonitorTraceStore>,
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
@@ -321,6 +341,11 @@ impl SubscriptionManager {
     /// Returns the underlying direct workflow history store.
     pub fn history_store(&self) -> Arc<WorkflowHistoryStore> {
         self.history_store.clone()
+    }
+
+    /// Returns the message-centric monitor trace store.
+    pub fn monitor_trace_store(&self) -> Arc<MonitorTraceStore> {
+        self.monitor_trace_store.clone()
     }
 
     /// Returns the underlying agent proxy binding store.
@@ -466,6 +491,7 @@ impl SubscriptionManager {
                         self.store.clone(),
                         self.connection_store.clone(),
                         self.history_store.clone(),
+                        self.monitor_trace_store.clone(),
                         self.proxy_store.clone(),
                         self.dispatcher.clone(),
                         self.classifier.clone(),

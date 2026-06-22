@@ -1,0 +1,11 @@
+manifest_version = 1
+id = "feishu-browser"
+kind = "subscriber"
+topic = "feishu-browser"
+display_name = "Feishu Browser"
+
+[run]
+cmd = ["puffer", "__subscriber", "lark-browser"]
+
+[state]
+dir = "state"

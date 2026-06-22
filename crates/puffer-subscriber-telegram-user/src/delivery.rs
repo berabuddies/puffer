@@ -118,17 +118,28 @@ pub(crate) async fn emit_message_if_new(
     delivery_source: &str,
     source_received_at_ms: Option<i128>,
 ) -> anyhow::Result<bool> {
+    let notification_muted = notification_mutes.message_chat_muted(message);
+    let notification_silent = message.silent();
+    append_message_diagnostic(
+        env,
+        "telegram_update_received",
+        message,
+        delivery_source,
+        source_received_at_ms,
+        notification_muted,
+        notification_silent,
+        None,
+    );
     if !cursor.is_new(message) {
-        let notification_muted = notification_mutes.message_chat_muted(message);
-        let notification_silent = message.silent();
         append_message_diagnostic(
             env,
-            "duplicate",
+            "delivery_duplicate",
             message,
             delivery_source,
             source_received_at_ms,
             notification_muted,
             notification_silent,
+            None,
         );
         return Ok(false);
     }
@@ -140,18 +151,17 @@ pub(crate) async fn emit_message_if_new(
             "failed to record Telegram message in bounded history cache"
         );
     }
-    let notification_muted = notification_mutes.message_chat_muted(message);
-    let notification_silent = message.silent();
     let is_outgoing = message.outgoing();
     if should_suppress_message(is_outgoing, notification_muted, notification_silent) {
         append_message_diagnostic(
             env,
-            "suppressed",
+            "delivery_suppressed",
             message,
             delivery_source,
             source_received_at_ms,
             notification_muted,
             notification_silent,
+            None,
         );
         cursor.record_seen(message);
         cursor.save(env)?;
@@ -174,15 +184,29 @@ pub(crate) async fn emit_message_if_new(
         delivery_source,
         source_received_at_ms,
     );
-    emit(&event)?;
+    if let Err(error) = emit(&event) {
+        let error_text = error.to_string();
+        append_message_diagnostic(
+            env,
+            "delivery_emit_failed",
+            message,
+            delivery_source,
+            source_received_at_ms,
+            notification_muted,
+            notification_silent,
+            Some(error_text.as_str()),
+        );
+        return Err(error);
+    }
     append_message_diagnostic(
         env,
-        "emitted",
+        "delivery_emitted",
         message,
         delivery_source,
         source_received_at_ms,
         notification_muted,
         notification_silent,
+        None,
     );
     cursor.record_seen(message);
     cursor.save(env)?;
@@ -238,6 +262,14 @@ fn message_chat_key(message: &Message) -> String {
     message.chat().id().to_string()
 }
 
+fn telegram_message_key(connection_slug: &str, chat_id: i64, message_id: i32) -> String {
+    format!("{connection_slug}:{chat_id}:{message_id}")
+}
+
+fn telegram_dedup_key(chat_id: i64, message_id: i32) -> String {
+    format!("{chat_id}:{message_id}")
+}
+
 fn append_message_diagnostic(
     env: &SkillEnv,
     stage: &str,
@@ -246,10 +278,13 @@ fn append_message_diagnostic(
     source_received_at_ms: Option<i128>,
     notification_muted: bool,
     notification_silent: bool,
+    error: Option<&str>,
 ) {
     let path = env.state_dir.join("message-diagnostics.ndjson");
     let now_ms = now_unix_millis();
     let chat = message.chat();
+    let chat_id = chat.id();
+    let message_id = message.id();
     let peer_cache = TelegramPeerCache::load(env).unwrap_or_default();
     let peer = message_peer_metadata(message, Some(&peer_cache));
     let date_ms = i128::from(message.date().timestamp_millis());
@@ -259,8 +294,11 @@ fn append_message_diagnostic(
     let record = json!({
         "at_ms": now_ms,
         "stage": stage,
+        "connection_slug": env.topic,
+        "message_key": telegram_message_key(&env.topic, chat_id, message_id),
+        "dedup_key": telegram_dedup_key(chat_id, message_id),
         "delivery_source": delivery_source,
-        "chat_id": chat.id(),
+        "chat_id": chat_id,
         "chat_kind": peer.chat_kind,
         "chat_title": peer.chat_title,
         "chat_username": peer.chat_username,
@@ -269,7 +307,7 @@ fn append_message_diagnostic(
         "sender_username": peer.sender_username,
         "sender_name": peer.sender_name,
         "sender_is_bot": peer.sender_is_bot,
-        "message_id": message.id(),
+        "message_id": message_id,
         "date_ms": date_ms,
         "source_received_at_ms": source_received_at_ms,
         "subscriber_receive_lag_ms": source_received_at_ms.map(|received_at_ms| received_at_ms - date_ms),
@@ -278,6 +316,7 @@ fn append_message_diagnostic(
         "notification_silent": notification_silent,
         "suppressed": message_notifications_suppressed(notification_muted, notification_silent),
         "is_outgoing": message.outgoing(),
+        "error": error,
         "text_prefix": truncate_text(message.text(), 200),
     });
     crate::diagnostics::append_ndjson(&path, &record);
@@ -344,5 +383,14 @@ mod tests {
         assert!(should_suppress_message(false, true, false));
         // incoming + not muted => not suppressed (unchanged)
         assert!(!should_suppress_message(false, false, false));
+    }
+
+    #[test]
+    fn telegram_message_trace_identity_uses_connection_chat_and_message() {
+        assert_eq!(
+            telegram_message_key("telegram-user", 42, 7),
+            "telegram-user:42:7"
+        );
+        assert_eq!(telegram_dedup_key(42, 7), "42:7");
     }
 }

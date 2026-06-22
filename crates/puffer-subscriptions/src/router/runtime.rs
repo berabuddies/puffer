@@ -6,6 +6,7 @@ use super::{
 use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::classify::{Classifier, NullClassifier};
 use crate::history::WorkflowHistoryStore;
+use crate::monitor_trace::MonitorTraceStore;
 use crate::self_gate::{DropAllSelfGate, SelfMessageGate};
 use crate::store::WorkflowBindingStore;
 use puffer_subscriber_runtime::{EventBus, EventEnvelope, EventReceiver};
@@ -73,6 +74,7 @@ impl SubscriptionRouter {
             classifier,
             gate,
             None,
+            None,
         )
     }
 
@@ -85,6 +87,7 @@ impl SubscriptionRouter {
         classifier: Arc<dyn Classifier>,
         gate: Arc<dyn SelfMessageGate>,
         monitor_digest: Option<MonitorDigestQueue>,
+        trace_store: Option<Arc<MonitorTraceStore>>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let stats = Arc::new(RouterStats::default());
@@ -99,6 +102,7 @@ impl SubscriptionRouter {
                 classifier,
                 gate,
                 monitor_digest,
+                trace_store,
                 shutdown_rx,
                 stats_for_task,
             )
@@ -146,6 +150,7 @@ async fn run(
     classifier: Arc<dyn Classifier>,
     gate: Arc<dyn SelfMessageGate>,
     monitor_digest: Option<MonitorDigestQueue>,
+    trace_store: Option<Arc<MonitorTraceStore>>,
     mut shutdown_rx: watch::Receiver<bool>,
     stats: Arc<RouterStats>,
 ) {
@@ -167,6 +172,7 @@ async fn run(
                     classifier.clone(),
                     gate.clone(),
                     monitor_digest.clone(),
+                    trace_store.clone(),
                     stats.clone(),
                     permits.clone(),
                 );
@@ -183,6 +189,7 @@ fn spawn_envelope_processor(
     classifier: Arc<dyn Classifier>,
     gate: Arc<dyn SelfMessageGate>,
     monitor_digest: Option<MonitorDigestQueue>,
+    trace_store: Option<Arc<MonitorTraceStore>>,
     stats: Arc<RouterStats>,
     permits: Arc<Semaphore>,
 ) {
@@ -203,6 +210,7 @@ fn spawn_envelope_processor(
             classifier,
             gate,
             monitor_digest,
+            trace_store,
             stats.clone(),
         )
         .await;
@@ -220,6 +228,7 @@ async fn process_envelope_blocking(
     classifier: Arc<dyn Classifier>,
     gate: Arc<dyn SelfMessageGate>,
     monitor_digest: Option<MonitorDigestQueue>,
+    trace_store: Option<Arc<MonitorTraceStore>>,
     stats: Arc<RouterStats>,
 ) -> EnvelopeProcessResult {
     let stats_for_processing = stats.clone();
@@ -232,6 +241,7 @@ async fn process_envelope_blocking(
             &classifier,
             &gate,
             monitor_digest.as_ref(),
+            trace_store.as_deref(),
             Some(stats_for_processing.as_ref()),
         )
     })

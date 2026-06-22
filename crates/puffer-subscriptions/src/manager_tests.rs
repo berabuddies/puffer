@@ -137,6 +137,7 @@ fn monitor_events_flush_as_delayed_digest_batch() {
         manager.store.clone(),
         manager.connection_store.clone(),
         manager.history_store.clone(),
+        manager.monitor_trace_store.clone(),
         manager.proxy_store.clone(),
         manager.dispatcher.clone(),
         manager.classifier.clone(),

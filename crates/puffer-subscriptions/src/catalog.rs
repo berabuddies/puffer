@@ -112,6 +112,8 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         email_template(),
         gmail_browser_template(),
         gcal_browser_template(),
+        lark_browser_template(),
+        feishu_browser_template(),
         wechat_login_template(),
     ]
 }
@@ -130,6 +132,8 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "email" => "email".to_string(),
         "gmail-browser" => "gmail-browser".to_string(),
         "gcal-browser" => "gcal-browser".to_string(),
+        "lark-browser" => "lark-browser".to_string(),
+        "feishu-browser" => "feishu-browser".to_string(),
         "lark-login" => "lark-user".to_string(),
         "lark-bot" => "lark-bot".to_string(),
         "wechat-login" => "wechat-user".to_string(),
@@ -557,6 +561,98 @@ fn gcal_browser_template() -> ConnectorTemplate {
         output_schema: message_output_schema(),
         actions: gcal_browser_actions(),
     }
+}
+
+fn lark_browser_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "lark-browser".to_string(),
+        description: "Lark web connector via the Puffer browser".to_string(),
+        skill: "lark-browser".to_string(),
+        binary: "puffer __subscriber lark-browser".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        subscriber: Some(ConnectorSubscriberTemplate {
+            manifest_slug: "lark-browser".to_string(),
+            state_root: Some("lark-browser-accounts".to_string()),
+            display_name: Some("Lark Browser".to_string()),
+        }),
+        output_schema: message_output_schema(),
+        actions: lark_browser_actions(),
+    }
+}
+
+fn feishu_browser_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "feishu-browser".to_string(),
+        description: "Feishu web connector via the Puffer browser".to_string(),
+        // Shares the lark-browser skill and the shared subscriber binary.
+        skill: "lark-browser".to_string(),
+        binary: "puffer __subscriber lark-browser".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        subscriber: Some(ConnectorSubscriberTemplate {
+            manifest_slug: "feishu-browser".to_string(),
+            state_root: Some("feishu-browser-accounts".to_string()),
+            display_name: Some("Feishu Browser".to_string()),
+        }),
+        output_schema: message_output_schema(),
+        actions: lark_browser_actions(),
+    }
+}
+
+/// Lark/Feishu browser connector actions: `send_message`, `read_history`, and
+/// `react`. The input field aliases mirror `lark_browser_actions.rs`'s
+/// `send_message_fields`/`read_history_fields`/`react_fields` parsers.
+fn lark_browser_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = BTreeMap::new();
+    for action in [
+        ConnectorActionDefinition {
+            slug: "send_message".to_string(),
+            description: "Send a Lark/Feishu message to a chat (fields `chat_id`/`chat`/`to` and \
+                `text`/`message`/`body`)"
+                .to_string(),
+            input_schema: lark_message_action_schema(),
+            output_schema: action_output_schema(),
+            permission: ConnectorPermissionDefinition {
+                category: "external_message_send".to_string(),
+                summary: "Send a message through this connector".to_string(),
+                external_side_effect: true,
+            },
+        },
+        ConnectorActionDefinition {
+            slug: "read_history".to_string(),
+            description: "Read recent Lark/Feishu chat history (fields `chat_id`/`chat`, optional \
+                `limit`)"
+                .to_string(),
+            input_schema: lark_message_action_schema(),
+            output_schema: action_output_schema(),
+            permission: ConnectorPermissionDefinition {
+                category: "external_message_read".to_string(),
+                summary: "Read external Lark/Feishu chat history".to_string(),
+                external_side_effect: false,
+            },
+        },
+        ConnectorActionDefinition {
+            slug: "react".to_string(),
+            description: "React to a Lark/Feishu message (fields `chat_id`/`chat`, \
+                `message_id`/`id`, optional `emoji`/`reaction`)"
+                .to_string(),
+            input_schema: lark_message_action_schema(),
+            output_schema: action_output_schema(),
+            permission: ConnectorPermissionDefinition {
+                category: "external_message_interaction".to_string(),
+                summary: "React to an external Lark/Feishu message".to_string(),
+                external_side_effect: true,
+            },
+        },
+    ] {
+        actions.insert(action.slug.clone(), action);
+    }
+    actions
 }
 
 fn email_actions() -> BTreeMap<String, ConnectorActionDefinition> {

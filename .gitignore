@@ -36,3 +36,6 @@ apps/puffer-desktop/tests/fuzz/__pycache__/
 apps/puffer-desktop/tests/fuzz/**/*.pyc
 apps/puffer-desktop/tests/*.tmp.spec.ts
 test-results/
+
+# Git worktrees
+.worktrees/

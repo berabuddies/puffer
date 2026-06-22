@@ -1479,6 +1479,9 @@ async fn dispatch_request(
         "monitor_history_list" | "task_monitor_history_list" => respond!(
             crate::daemon_workflows::handle_monitor_history_list(&state.paths, &params)
         ),
+        "monitor_trace_list" | "task_monitor_trace_list" => respond!(
+            crate::daemon_workflows::handle_monitor_trace_list(&state.paths, &params)
+        ),
         "telegram_diagnostics_export" | "task_telegram_diagnostics_export" => respond!(
             crate::daemon_workflows::handle_telegram_diagnostics_export(&state.paths, &params)
         ),
@@ -5833,6 +5836,45 @@ async fn start_connector_setup_turn(state: Arc<DaemonState>, params: Value) -> R
 
         if crate::daemon_gmail_browser_setup::connect_args_are_gmail_browser(&connect_args) {
             let outcome = crate::daemon_gmail_browser_setup::execute_gmail_browser_setup(
+                setup_state.clone(),
+                channel_thread.clone(),
+                turn_id_thread.clone(),
+                connect_args.clone(),
+                next_req_id.clone(),
+                pending_questions.clone(),
+                cancel_thread.clone(),
+            );
+            match outcome {
+                Ok(assistant_text) => {
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread.clone(),
+                            "assistantText": assistant_text,
+                        }),
+                    });
+                }
+                Err(error) => {
+                    if !(cancel_thread.is_cancelled()
+                        && cancel_reported_thread.load(Ordering::SeqCst))
+                    {
+                        publish_sessionless_turn_error_event(
+                            &setup_state,
+                            &channel_thread,
+                            &turn_id_thread,
+                            format!("{error:#}"),
+                            None,
+                        );
+                    }
+                }
+            }
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
+
+        if crate::daemon_lark_browser_setup::connect_args_are_lark_browser(&connect_args) {
+            let outcome = crate::daemon_lark_browser_setup::execute_lark_browser_setup(
                 setup_state.clone(),
                 channel_thread.clone(),
                 turn_id_thread.clone(),
