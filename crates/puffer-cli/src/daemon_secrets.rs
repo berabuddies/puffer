@@ -56,18 +56,63 @@ pub(crate) fn import_chrome_secrets(paths: &ConfigPaths) -> Result<ImportReport>
 }
 
 /// Imports saved credentials from one named source (browser or 1Password).
-pub(crate) fn import_browser_secrets(paths: &ConfigPaths, source_id: &str) -> Result<ImportReport> {
+/// 1Password imports every accessible vault.
+pub(crate) fn import_browser_secrets(
+    paths: &ConfigPaths,
+    source_id: &str,
+) -> Result<ImportReport> {
     if source_id == "1password" {
         return vault(paths)?.sync_onepassword_references();
     }
     let source = BrowserSource::from_id(source_id)
         .with_context(|| format!("unknown import source `{source_id}`"))?;
-    vault(paths)?.sync_browser_source(source)
+    #[allow(unused_mut)]
+    let mut report = vault(paths)?.sync_browser_source(source)?;
+    // On Windows, Chromium v20 (App-Bound Encryption) keys are SYSTEM-protected,
+    // so the user-context daemon cannot decrypt them in-process. Launch the
+    // self-elevating helper (one user-consented UAC prompt) which imports v20
+    // into the SAME vault; elevation lasts only for the import.
+    #[cfg(target_os = "windows")]
+    if source_id == "chrome" {
+        if let Some(total) = run_windows_v20_helper(paths) {
+            report.imported = total;
+        }
+    }
+    Ok(report)
+}
+
+/// Spawns `puffer __win-chrome-import` (which self-elevates via UAC and imports
+/// v10+v20 into the vault). Returns the helper's total imported count, or None if
+/// it could not run / the user declined elevation.
+#[cfg(target_os = "windows")]
+fn run_windows_v20_helper(paths: &ConfigPaths) -> Option<usize> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = std::env::current_exe().ok()?;
+    let vault_dir = paths.user_config_dir.to_string_lossy().to_string();
+    std::process::Command::new(exe)
+        .args(["__win-chrome-import", "--vault-dir", &vault_dir])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .ok()?;
+    let user = std::env::var("USERNAME").ok()?;
+    let text = std::fs::read_to_string(format!(
+        "C:\\Users\\{user}\\AppData\\Local\\Temp\\puffer_chrome_import.txt"
+    ))
+    .ok()?;
+    text.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("imported=").and_then(|n| n.parse::<usize>().ok()))
 }
 
 /// Lists every browser import source and whether it is currently available.
 pub(crate) fn list_secret_sources() -> Vec<SourceAvailability> {
     puffer_secrets::available_browser_sources()
+}
+
+/// Imports 1Password logins from a `.1pux` export file (no `op` CLI), every vault
+/// in the file.
+pub(crate) fn import_onepassword_export(paths: &ConfigPaths, path: &str) -> Result<ImportReport> {
+    vault(paths)?.sync_onepassword_export(std::path::Path::new(path))
 }
 
 fn vault(paths: &ConfigPaths) -> Result<SecretVault> {

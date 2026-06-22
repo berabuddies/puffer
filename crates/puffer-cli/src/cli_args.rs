@@ -127,6 +127,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ToolCommand,
     },
+    /// Internal: self-elevating Windows Chrome v20 import stages. Hidden.
+    #[command(hide = true, name = "__win-chrome-import")]
+    WinChromeImport {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Resume a stored session in the TUI.
     #[command(hide = true)]
     Resume {

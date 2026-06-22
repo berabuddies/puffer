@@ -1368,6 +1368,9 @@ async fn dispatch_request(
             respond!(detached!(|s, p| handle_import_browser_secrets(&s, &p)))
         }
         "list_secret_sources" => respond!(handle_list_secret_sources()),
+        "import_onepassword_export" => {
+            respond!(detached!(|s, p| handle_import_onepassword_export(&s, &p)))
+        }
         "test_proxy" => respond!(detached!(|s, p| handle_test_proxy(&s, &p))),
         "create_openai_realtime_client_secret" => {
             respond!(detached!(|s, p| {
@@ -2111,6 +2114,19 @@ fn handle_import_browser_secrets(state: &DaemonState, params: &Value) -> Result<
 
 fn handle_list_secret_sources() -> Result<Value> {
     Ok(json!({ "sources": crate::daemon_secrets::list_secret_sources() }))
+}
+
+fn handle_import_onepassword_export(state: &DaemonState, params: &Value) -> Result<Value> {
+    let path = params
+        .get("path")
+        .and_then(|value| value.as_str())
+        .context("import_onepassword_export requires a `path`")?;
+    let report = crate::daemon_secrets::import_onepassword_export(state.config_paths(), path)?;
+    let settings = handle_load_settings_snapshot(state)?;
+    Ok(json!({
+        "settings": settings,
+        "report": report,
+    }))
 }
 
 fn handle_save_proxy_settings(state: &DaemonState, params: &Value) -> Result<Value> {

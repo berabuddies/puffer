@@ -479,6 +479,17 @@ fn main() -> Result<()> {
             &paths,
         ),
         Some(Command::Tool { command }) => run_tool_command(command, &resources, &cwd),
+        Some(Command::WinChromeImport { args }) => {
+            #[cfg(target_os = "windows")]
+            {
+                puffer_secrets::win_chrome_import::dispatch(&args)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = args;
+                anyhow::bail!("__win-chrome-import is Windows-only")
+            }
+        }
         Some(Command::Remote {
             target,
             cwd,
