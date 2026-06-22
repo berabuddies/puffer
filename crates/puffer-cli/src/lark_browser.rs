@@ -281,6 +281,7 @@ fn build_message_event(
             "sender": sender,
             "is_outgoing": is_outgoing,
             "source": source,
+            "event_type": "message",
             "receivedAtMs": now_ms(),
         }),
     }
@@ -796,6 +797,7 @@ mod emit_tests {
         assert_eq!(ev.payload["is_outgoing"], true);
         assert_eq!(ev.payload["platform"], "lark-browser");
         assert_eq!(ev.payload["brand"], "lark");
+        assert_eq!(ev.payload["event_type"], "message");
         assert_eq!(ev.kind, "message");
         assert_eq!(ev.dedup_key.as_deref(), Some("c1:123:abc"));
     }
