@@ -18,6 +18,7 @@
 //!   lines; there is no terminal prompting.
 
 mod actions;
+mod activity_state;
 mod client;
 mod commands;
 mod delivery;

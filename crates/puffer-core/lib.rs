@@ -107,7 +107,8 @@ pub use runtime::{
 };
 pub use runtime::{install_observability, observability_handle};
 pub use state::{
-    AppState, MessageRole, RenderedAttachment, RenderedMessage, TaskRecord, TaskStatus,
+    AppState, MessageRole, MonitorTaskCreateGateContext, RenderedAttachment, RenderedMessage,
+    TaskRecord, TaskStatus,
 };
 
 use anyhow::Result;

@@ -678,6 +678,16 @@ fn monitor_task_json(
             telegram_peer_names
         ),
         "completion_policy": task_snapshot::monitor_completion_policy(&task.metadata),
+        "source_state": task_snapshot::metadata_value(
+            &task.metadata,
+            &["source_state", "sourceState"],
+            &["source_state", "sourceState"]
+        ),
+        "monitor_task_gate": task_snapshot::metadata_value(
+            &task.metadata,
+            &["monitor_task_gate", "monitorTaskGate"],
+            &["task_gate", "taskGate"]
+        ),
         "pending_reply": task_snapshot::metadata_value(
             &task.metadata,
             &["pending_reply", "pendingReply"],
@@ -875,6 +885,17 @@ mod tests {
                             "source_text": "回调失败率刚升到 18%，16:00 前给结论。",
                             "source_message_id": 6836,
                             "completion_policy": "human_gated_reply",
+                            "source_state": {
+                                "telegram": {
+                                    "read": true,
+                                    "label": "已读"
+                                }
+                            },
+                            "monitor_task_gate": {
+                                "decision": "create_read",
+                                "read": true,
+                                "replied": false
+                            },
                             "pending_reply": {
                                 "id": "draft-monitor-1-1",
                                 "status": "draft_ready",
@@ -919,6 +940,9 @@ mod tests {
         );
         assert_eq!(tasks[0]["source_context"]["message_id"], 6836);
         assert_eq!(tasks[0]["completion_policy"], "human_gated_reply");
+        assert_eq!(tasks[0]["source_state"]["telegram"]["read"], true);
+        assert_eq!(tasks[0]["source_state"]["telegram"]["label"], "已读");
+        assert_eq!(tasks[0]["monitor_task_gate"]["decision"], "create_read");
         assert_eq!(tasks[0]["pending_reply"]["id"], "draft-monitor-1-1");
         assert_eq!(tasks[0]["pending_reply"]["status"], "draft_ready");
         assert_eq!(tasks[0]["pending_reply"]["version"], 1);

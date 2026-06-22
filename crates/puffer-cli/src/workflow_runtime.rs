@@ -3,7 +3,7 @@ use puffer_config::{load_config, ConfigPaths, PufferConfig};
 use puffer_core::{
     execute_tool_action_once, execute_user_turn_streaming,
     execute_user_turn_streaming_excluding_tools, execute_user_turn_streaming_without_tools,
-    AppState, TurnStreamEvent,
+    AppState, MonitorTaskCreateGateContext, TurnStreamEvent,
 };
 use puffer_provider_registry::{canonical_provider_id, AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
@@ -186,8 +186,14 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         });
         let prompt = render_triage_batch_prompt(prompt, &triggers)?;
         let session_key = triage_session_key(model, &triggers);
-        let output =
-            self.run_task_agent_prompt_for_session(prompt, model, &session_key, is_outgoing)?;
+        let gate_contexts = monitor_task_create_gate_contexts(&self.paths, &triggers);
+        let output = self.run_task_agent_prompt_for_session(
+            prompt,
+            model,
+            &session_key,
+            is_outgoing,
+            gate_contexts,
+        )?;
         for trigger in &triggers {
             // Server-owned grounding: stamp each trigger's verbatim event text
             // onto any monitor task the triage turn created for that envelope.
@@ -283,6 +289,7 @@ impl ProcessWorkflowRunner {
         model: Option<&str>,
         session_key: &str,
         is_outgoing: bool,
+        gate_contexts: Vec<MonitorTaskCreateGateContext>,
     ) -> Result<WorkflowActionOutput> {
         let _guard = workflow_runner_lock(&self.lock);
         let cwd = self.paths.workspace_root.clone();
@@ -302,6 +309,7 @@ impl ProcessWorkflowRunner {
         // human-gated monitor tasks; the reply-approval gate stays enforced on the
         // separate reply-send path.
         state.monitor_triage_turn = true;
+        state.set_monitor_task_create_gate_contexts(gate_contexts);
         let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         // Post-lock stamp: history's run window starts at router dispatch, so
@@ -893,6 +901,80 @@ fn triage_session_key(model: Option<&str>, triggers: &[serde_json::Value]) -> St
     format!("monitor-triage:{connection}:{model}")
 }
 
+fn monitor_task_create_gate_contexts(
+    paths: &ConfigPaths,
+    triggers: &[serde_json::Value],
+) -> Vec<MonitorTaskCreateGateContext> {
+    triggers
+        .iter()
+        .filter_map(|trigger| monitor_task_create_gate_context(paths, trigger))
+        .collect()
+}
+
+fn monitor_task_create_gate_context(
+    paths: &ConfigPaths,
+    trigger: &serde_json::Value,
+) -> Option<MonitorTaskCreateGateContext> {
+    let connection_slug = trigger
+        .get("connection_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if !connection_slug.contains("telegram") || !safe_path_component(connection_slug) {
+        return None;
+    }
+    let envelope_id = trigger
+        .get("envelope_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let payload = trigger.get("payload")?;
+    let chat_id = value_i64_field(payload, "chat_id")?;
+    let chat_kind = payload
+        .get("chat_kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("user");
+    if chat_kind != "user" {
+        return None;
+    }
+    let source_message_id = value_i64_field(payload, "message_id")?;
+    let connector_slug = trigger
+        .get("connector_id")
+        .or_else(|| trigger.get("connector_slug"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| Some("telegram-login".to_string()));
+    Some(MonitorTaskCreateGateContext {
+        envelope_id: envelope_id.to_string(),
+        connection_slug: connection_slug.to_string(),
+        connector_slug,
+        chat_id,
+        chat_kind: chat_kind.to_string(),
+        source_message_id,
+        source_date_ms: value_i64_field(payload, "date_ms"),
+        activity_state_path: paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join(connection_slug)
+            .join("telegram-activity-state.json"),
+        monitor_trace_path: Some(paths.workspace_config_dir.join("monitor_trace.json")),
+    })
+}
+
+fn value_i64_field(value: &Value, key: &str) -> Option<i64> {
+    match value.get(key)? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok())),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
 /// Stamps the trigger's verbatim source grounding onto monitor tasks created
 /// for that envelope: the exact event text (`metadata.source_text`, plus
 /// `source_context.text`), the source message id (`metadata.source_message_id`,
@@ -1460,6 +1542,55 @@ mod tests {
             triage_session_key(Some("gpt-5.4-mini"), &triggers),
             "monitor-triage:telegram-user:gpt-5.4-mini"
         );
+    }
+
+    #[test]
+    fn monitor_task_create_gate_contexts_build_for_direct_telegram_trigger() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let triggers = vec![json!({
+            "connection_id": "telegram-user",
+            "connector_id": "telegram-login",
+            "envelope_id": "env-6836",
+            "payload": {
+                "chat_id": 42,
+                "chat_kind": "user",
+                "message_id": 6836,
+                "date_ms": 1000
+            }
+        })];
+
+        let contexts = super::monitor_task_create_gate_contexts(&paths, &triggers);
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].envelope_id, "env-6836");
+        assert_eq!(contexts[0].chat_id, 42);
+        assert_eq!(contexts[0].source_message_id, 6836);
+        assert_eq!(contexts[0].source_date_ms, Some(1000));
+        assert!(contexts[0]
+            .activity_state_path
+            .ends_with("telegram-accounts/telegram-user/telegram-activity-state.json"));
+    }
+
+    #[test]
+    fn monitor_task_create_gate_contexts_skip_group_telegram_trigger() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let triggers = vec![json!({
+            "connection_id": "telegram-user",
+            "envelope_id": "env-group",
+            "payload": {
+                "chat_id": -10042,
+                "chat_kind": "group",
+                "message_id": 6836
+            }
+        })];
+
+        let contexts = super::monitor_task_create_gate_contexts(&paths, &triggers);
+
+        assert!(contexts.is_empty());
     }
 
     #[test]
