@@ -148,6 +148,12 @@ fn load_profile(dir: &Path) -> Result<Vec<ImportedCredential>> {
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
+        // Skip Firefox-internal credentials (e.g. `chrome://FirefoxAccounts`,
+        // the sync/account token) — `about:logins` hides these, so importing
+        // them would surface a credential the user never saved as a site login.
+        if origin.starts_with("chrome://") {
+            continue;
+        }
         let (Some(enc_user), Some(enc_pass)) = (
             entry.get("encryptedUsername").and_then(|v| v.as_str()),
             entry.get("encryptedPassword").and_then(|v| v.as_str()),

@@ -17,8 +17,14 @@ mod der;
 mod firefox;
 mod keychain;
 pub mod onepassword;
+pub mod onepassword_1pux;
+#[cfg(target_os = "windows")]
+pub mod win_chrome_import;
 
-pub use onepassword::{is_op_reference, op_cli_available, resolve_op_reference};
+pub use onepassword::{
+    connect_onepassword, ensure_op_authorized, import_resolved_logins, is_op_reference,
+    launch_onepassword_app, op_authorized, op_cli_available, resolve_op_reference, ResolvedLogin,
+};
 
 const STORE_VERSION: u32 = 1;
 const KEY_BYTES: usize = 32;
@@ -109,9 +115,6 @@ pub(crate) struct ImportedCredential {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserSource {
     Chrome,
-    Edge,
-    Brave,
-    Chromium,
     Firefox,
 }
 
@@ -120,9 +123,6 @@ impl BrowserSource {
     pub fn id(self) -> &'static str {
         match self {
             BrowserSource::Chrome => "chrome",
-            BrowserSource::Edge => "edge",
-            BrowserSource::Brave => "brave",
-            BrowserSource::Chromium => "chromium",
             BrowserSource::Firefox => "firefox",
         }
     }
@@ -131,22 +131,13 @@ impl BrowserSource {
     pub fn label(self) -> &'static str {
         match self {
             BrowserSource::Chrome => "Chrome",
-            BrowserSource::Edge => "Edge",
-            BrowserSource::Brave => "Brave",
-            BrowserSource::Chromium => "Chromium",
             BrowserSource::Firefox => "Firefox",
         }
     }
 
     /// All known sources, in display order.
-    pub fn all() -> [BrowserSource; 5] {
-        [
-            BrowserSource::Chrome,
-            BrowserSource::Edge,
-            BrowserSource::Brave,
-            BrowserSource::Chromium,
-            BrowserSource::Firefox,
-        ]
+    pub fn all() -> [BrowserSource; 2] {
+        [BrowserSource::Chrome, BrowserSource::Firefox]
     }
 
     /// Resolves a source from its stable id.
@@ -159,11 +150,6 @@ impl BrowserSource {
     fn load_credentials(self) -> Result<Vec<ImportedCredential>> {
         match self {
             BrowserSource::Chrome => chromium::load_saved_credentials(chromium::Chromium::Chrome),
-            BrowserSource::Edge => chromium::load_saved_credentials(chromium::Chromium::Edge),
-            BrowserSource::Brave => chromium::load_saved_credentials(chromium::Chromium::Brave),
-            BrowserSource::Chromium => {
-                chromium::load_saved_credentials(chromium::Chromium::Chromium)
-            }
             BrowserSource::Firefox => firefox::load_saved_credentials(),
         }
     }
@@ -171,9 +157,6 @@ impl BrowserSource {
     fn is_available(self) -> bool {
         match self {
             BrowserSource::Chrome => chromium::is_available(chromium::Chromium::Chrome),
-            BrowserSource::Edge => chromium::is_available(chromium::Chromium::Edge),
-            BrowserSource::Brave => chromium::is_available(chromium::Chromium::Brave),
-            BrowserSource::Chromium => chromium::is_available(chromium::Chromium::Chromium),
             BrowserSource::Firefox => firefox::is_available(),
         }
     }
@@ -201,12 +184,14 @@ pub fn available_browser_sources() -> Vec<SourceAvailability> {
             available: source.is_available(),
         })
         .collect();
-    // 1Password is not a browser source: it stores op:// references resolved on
-    // demand, and is available whenever the `op` CLI is installed.
+    // 1Password is not a browser source. Offer it whenever the `op` CLI is
+    // installed OR the 1Password desktop app is present — in the app-but-no-CLI
+    // case clicking "Sync from 1Password" auto-installs the CLI, so the button
+    // must NOT be disabled there.
     sources.push(SourceAvailability {
         id: "1password".to_string(),
         label: "1Password".to_string(),
-        available: onepassword::op_cli_available(),
+        available: onepassword::op_cli_available() || onepassword::onepassword_app_installed(),
     });
     sources
 }
@@ -460,24 +445,49 @@ impl SecretVault {
         })
     }
 
-    /// Imports 1Password logins as `op://` references (resolved on demand, never
-    /// stored as plaintext) into the encrypted vault.
+    /// Imports every accessible 1Password login via the `op` CLI, resolving each
+    /// to its plaintext value and storing it in the encrypted vault.
     pub fn sync_onepassword_references(&self) -> Result<ImportReport> {
-        let logins = onepassword::import_login_references()?;
+        // Detect-first: if `op` isn't authorized yet, open the app best-effort and
+        // return actionable guidance — so the user never has to configure it by
+        // hand (falls back to the `.1pux` path the UI also offers).
+        onepassword::connect_onepassword()?;
+        // Batch-fetch every login WITH its values (one structured `op item get`
+        // per item; the whole batch is one biometric authorization). A single
+        // item that fails to fetch is skipped + reported, not fatal.
+        let (logins, fetch_errors) = onepassword::import_resolved_logins()?;
+        let mut report = self.store_resolved_logins(logins);
+        report.errors.extend(fetch_errors);
+        Ok(report)
+    }
+
+    /// Imports 1Password logins from a `.1pux` export file (no `op` CLI / no app
+    /// integration — just the file the desktop app produces). Imports every vault
+    /// in the file.
+    pub fn sync_onepassword_export(&self, path: &std::path::Path) -> Result<ImportReport> {
+        let logins = onepassword_1pux::import_logins(path)?;
+        Ok(self.store_resolved_logins(logins))
+    }
+
+    /// Stores a batch of resolved 1Password logins into the vault (encrypted at
+    /// rest, exactly like browser-imported credentials). Items without a password
+    /// are skipped; per-item `put` failures are reported, not fatal. Shared by the
+    /// `op` CLI path and the `.1pux` export-file path.
+    fn store_resolved_logins(&self, logins: Vec<onepassword::ResolvedLogin>) -> ImportReport {
         let mut imported = 0usize;
         let mut skipped = 0usize;
         let mut errors = Vec::new();
         for login in logins {
-            if login.reference.trim().is_empty() {
+            if login.password.is_empty() {
                 skipped += 1;
                 continue;
             }
             match self.put(SecretUpsert {
                 id: None,
                 label: login.label,
-                description: Some("1Password reference".to_string()),
-                value: login.reference,
-                username: None,
+                description: Some("1Password login".to_string()),
+                value: login.password,
+                username: non_empty_option(login.username),
                 origin: login.origin,
                 source: "1password".to_string(),
             }) {
@@ -485,11 +495,11 @@ impl SecretVault {
                 Err(error) => errors.push(error.to_string()),
             }
         }
-        Ok(ImportReport {
+        ImportReport {
             imported,
             skipped,
             errors,
-        })
+        }
     }
 
     fn load_store(&self) -> Result<SecretStoreFile> {

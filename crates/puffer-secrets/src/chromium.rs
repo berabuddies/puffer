@@ -1,84 +1,51 @@
-//! Chromium-family (Chrome / Edge / Brave) saved-login extraction.
+//! Chrome saved-login extraction.
 //!
-//! All Chromium browsers share the same on-disk layout — a per-profile SQLite
-//! `Login Data` database plus a browser-level key — and differ only by install
-//! paths and the OS key store that protects the master key:
+//! Chrome stores logins as a per-profile SQLite `Login Data` database plus a
+//! browser-level key, protected by the OS key store:
 //! - **macOS**: a "<Browser> Safe Storage" Keychain item → PBKDF2-SHA1 →
 //!   AES-128-CBC (`v10`/`v11` blobs).
 //! - **Windows**: `Local State` → DPAPI-wrapped AES key → AES-256-GCM (`v10`),
 //!   plus App-Bound Encryption (`v20`) — implemented in the `windows` module.
 //! - **Linux**: Secret Service / `peanuts` fallback → AES-128-CBC (`v10`).
-//!
-//! This module exposes the per-OS pieces behind one [`Chromium`] selector so the
-//! source registry can treat every variant uniformly.
 
 use crate::ImportedCredential;
 use anyhow::Result;
 
-/// One supported Chromium-family browser.
+/// Chrome — the only Chromium-family browser Puffer imports from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Chromium {
     Chrome,
-    Edge,
-    Brave,
-    /// The open-source Chromium browser (common on Linux).
-    Chromium,
 }
 
 impl Chromium {
     /// Profile-root path relative to the user profile/home for this OS.
     #[cfg(target_os = "macos")]
     fn user_data_root(self) -> &'static str {
-        match self {
-            Chromium::Chrome => "Library/Application Support/Google/Chrome",
-            Chromium::Edge => "Library/Application Support/Microsoft Edge",
-            Chromium::Brave => "Library/Application Support/BraveSoftware/Brave-Browser",
-            Chromium::Chromium => "Library/Application Support/Chromium",
-        }
+        "Library/Application Support/Google/Chrome"
     }
 
     /// macOS Keychain service name holding the "Safe Storage" key.
     #[cfg(target_os = "macos")]
     fn keychain_service(self) -> &'static str {
-        match self {
-            Chromium::Chrome => "Chrome Safe Storage",
-            Chromium::Edge => "Microsoft Edge Safe Storage",
-            Chromium::Brave => "Brave Safe Storage",
-            Chromium::Chromium => "Chromium Safe Storage",
-        }
+        "Chrome Safe Storage"
     }
 
     /// macOS Keychain account name for the "Safe Storage" key.
     #[cfg(target_os = "macos")]
     fn keychain_account(self) -> &'static str {
-        match self {
-            Chromium::Chrome => "Chrome",
-            Chromium::Edge => "Microsoft Edge",
-            Chromium::Brave => "Brave",
-            Chromium::Chromium => "Chromium",
-        }
+        "Chrome"
     }
 
     /// `User Data` root relative to `%LOCALAPPDATA%` on Windows.
     #[cfg(target_os = "windows")]
     fn user_data_root(self) -> &'static str {
-        match self {
-            Chromium::Chrome => "Google/Chrome/User Data",
-            Chromium::Edge => "Microsoft/Edge/User Data",
-            Chromium::Brave => "BraveSoftware/Brave-Browser/User Data",
-            Chromium::Chromium => "Chromium/User Data",
-        }
+        "Google/Chrome/User Data"
     }
 
     /// `User Data` root relative to the Linux config dir.
     #[cfg(target_os = "linux")]
     fn user_data_root(self) -> &'static str {
-        match self {
-            Chromium::Chrome => "google-chrome",
-            Chromium::Edge => "microsoft-edge",
-            Chromium::Brave => "BraveSoftware/Brave-Browser",
-            Chromium::Chromium => "chromium",
-        }
+        "google-chrome"
     }
 }
 
@@ -107,8 +74,10 @@ pub(crate) fn load_saved_credentials(variant: Chromium) -> Result<Vec<ImportedCr
 /// (public constants from the runassu/xaitax research). After both DPAPI layers
 /// are peeled, the 32-byte ABE key is still AEAD-encrypted under one of these,
 /// selected by a flag byte. FLAG 0x01 = AES-256-GCM, 0x02 = ChaCha20-Poly1305.
-/// (0x03 derives a per-machine key via CNG and is not handled here.) These are
-/// Chrome-specific; Edge uses a COM-only route with a different key.
+/// FLAG 0x03 (Chrome 137+) wraps the AES-GCM key under a per-machine CNG key
+/// (`Google Chromekey1` in the Software KSP) — see `unwrap_abe_key_material` /
+/// `windows::cng_decrypt_chrome_key`. These are Chrome-specific; Edge uses a
+/// COM-only route with a different key.
 const ABE_AES_KEY_FLAG1: [u8; 32] = [
     0xB3, 0x1C, 0x6E, 0x24, 0x1A, 0xC8, 0x46, 0x72, 0x8D, 0xA9, 0xC1, 0xFA, 0xC4, 0x93, 0x66, 0x51,
     0xCF, 0xFB, 0x94, 0x4D, 0x14, 0x3A, 0xB8, 0x16, 0x27, 0x6B, 0xCC, 0x6D, 0xA0, 0x28, 0x47, 0x87,
@@ -116,6 +85,15 @@ const ABE_AES_KEY_FLAG1: [u8; 32] = [
 const ABE_CHACHA_KEY_FLAG2: [u8; 32] = [
     0xE9, 0x8F, 0x37, 0xD7, 0xF4, 0xE1, 0xFA, 0x43, 0x3D, 0x19, 0x30, 0x4D, 0xC2, 0x25, 0x80, 0x42,
     0x09, 0x0E, 0x2D, 0x1D, 0x7E, 0xEA, 0x76, 0x70, 0xD4, 0x1F, 0x73, 0x8D, 0x08, 0x72, 0x96, 0x60,
+];
+/// Flag-0x03 XOR mask lifted from Chrome's `elevation_service.exe`. The CNG
+/// (`NCryptDecrypt`) output is XORed byte-for-byte with this to yield the
+/// AES-256-GCM key that unwraps the v20 master key. Cross-validated byte-for-byte
+/// across runassu/chrome_v20_decryption, The-Viper-One/Invoke-PowerChrome, and
+/// fantasywastaken/Chrome-App-Bound-Decryption.
+const ABE_XOR_KEY_FLAG3: [u8; 32] = [
+    0xCC, 0xF8, 0xA1, 0xCE, 0xC5, 0x66, 0x05, 0xB8, 0x51, 0x75, 0x52, 0xBA, 0x1A, 0x2D, 0x06, 0x1C,
+    0x03, 0xA2, 0x9E, 0x90, 0x27, 0x4F, 0xB2, 0xFC, 0xF5, 0x9B, 0xA4, 0xB7, 0x5C, 0x39, 0x23, 0x90,
 ];
 
 /// Recovers the 32-byte App-Bound Encryption (`v20`) master key from the blob
@@ -149,23 +127,81 @@ fn unwrap_abe_key_material(post_dpapi: &[u8]) -> anyhow::Result<[u8; 32]> {
             .map_err(|_| anyhow!("ABE: 32-byte content is not a valid key"));
     }
     let flag = *content.first().context("ABE: missing flag")?;
-    let iv = content.get(1..13).context("ABE: missing iv")?;
-    let ct_tag = content.get(13..).context("ABE: missing ciphertext")?;
     let key = match flag {
-        0x01 => aes_gcm::Aes256Gcm::new_from_slice(&ABE_AES_KEY_FLAG1)
-            .unwrap()
-            .decrypt(aes_gcm::Nonce::from_slice(iv), ct_tag)
-            .map_err(|_| anyhow!("ABE flag1 AES-GCM unwrap failed"))?,
-        0x02 => chacha20poly1305::ChaCha20Poly1305::new_from_slice(&ABE_CHACHA_KEY_FLAG2)
-            .unwrap()
-            .decrypt(chacha20poly1305::Nonce::from_slice(iv), ct_tag)
-            .map_err(|_| anyhow!("ABE flag2 ChaCha20 unwrap failed"))?,
-        0x03 => bail!("ABE flag 0x03 (per-machine CNG key) is not supported"),
+        // flag1/2 content: flag(1) | iv(12) | ct(32) | tag(16).
+        0x01 => {
+            let iv = content.get(1..13).context("ABE: missing iv")?;
+            let ct_tag = content.get(13..).context("ABE: missing ciphertext")?;
+            aes_gcm::Aes256Gcm::new_from_slice(&ABE_AES_KEY_FLAG1)
+                .unwrap()
+                .decrypt(aes_gcm::Nonce::from_slice(iv), ct_tag)
+                .map_err(|_| anyhow!("ABE flag1 AES-GCM unwrap failed"))?
+        }
+        0x02 => {
+            let iv = content.get(1..13).context("ABE: missing iv")?;
+            let ct_tag = content.get(13..).context("ABE: missing ciphertext")?;
+            chacha20poly1305::ChaCha20Poly1305::new_from_slice(&ABE_CHACHA_KEY_FLAG2)
+                .unwrap()
+                .decrypt(chacha20poly1305::Nonce::from_slice(iv), ct_tag)
+                .map_err(|_| anyhow!("ABE flag2 ChaCha20 unwrap failed"))?
+        }
+        // flag3 content has an EXTRA 32-byte CNG-wrapped key before the iv:
+        // flag(1) | encrypted_aes_key(32) | iv(12) | ct(32) | tag(16).
+        0x03 => {
+            let encrypted_aes_key: [u8; 32] = content
+                .get(1..33)
+                .context("ABE flag3: missing encrypted_aes_key")?
+                .try_into()
+                .unwrap();
+            let iv = content.get(33..45).context("ABE flag3: missing iv")?;
+            let ct_tag = content.get(45..).context("ABE flag3: missing ct/tag")?;
+            // CNG unwrap (SYSTEM-gated) -> 32 bytes, then XOR + AES-GCM (pure).
+            let decrypted_aes_key = cng_decrypt_flag03(&encrypted_aes_key)?;
+            flag3_master_key(&decrypted_aes_key, iv, ct_tag)?
+        }
         other => bail!("ABE: unknown flag 0x{other:02x}"),
     };
     key.as_slice()
         .try_into()
         .map_err(|_| anyhow!("ABE key is not 32 bytes"))
+}
+
+/// The pure tail of the flag-0x03 unwrap: XOR the CNG-decrypted 32 bytes with the
+/// elevation-service constant to form the AES-256-GCM key, then GCM-decrypt the
+/// inner `iv || ct || tag` to recover the 32-byte App-Bound master key. Kept OS-
+/// agnostic so it can be unit-tested without CNG (the CNG step is injected).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn flag3_master_key(
+    decrypted_aes_key: &[u8; 32],
+    iv: &[u8],
+    ct_tag: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use anyhow::anyhow;
+    let mut xored = [0u8; 32];
+    for index in 0..32 {
+        xored[index] = decrypted_aes_key[index] ^ ABE_XOR_KEY_FLAG3[index];
+    }
+    aes_gcm::Aes256Gcm::new_from_slice(&xored)
+        .unwrap()
+        .decrypt(aes_gcm::Nonce::from_slice(iv), ct_tag)
+        .map_err(|_| anyhow!("ABE flag3 AES-GCM unwrap failed"))
+}
+
+/// Decrypts the flag-0x03 `encrypted_aes_key` via the per-machine CNG key. On
+/// Windows this opens `Google Chromekey1` in the Software KSP (requires SYSTEM,
+/// like the outer DPAPI layer); elsewhere flag 0x03 is unsupported.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn cng_decrypt_flag03(encrypted_aes_key: &[u8; 32]) -> anyhow::Result<[u8; 32]> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::cng_decrypt_chrome_key(encrypted_aes_key)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = encrypted_aes_key;
+        anyhow::bail!("ABE flag 0x03 (per-machine CNG key) requires Windows")
+    }
 }
 
 /// Reports whether this browser has at least one profile with a login database.
@@ -485,6 +521,71 @@ mod windows {
         }
     }
 
+    /// Decrypts the flag-0x03 `encrypted_aes_key` with the per-machine CNG key
+    /// `Google Chromekey1` (Microsoft Software KSP). The key's private material is
+    /// ACL'd to SYSTEM, so this must run as SYSTEM (same gate as the outer DPAPI
+    /// layer). Standard CNG two-call (size-then-data) pattern; no padding flag.
+    pub(super) fn cng_decrypt_chrome_key(encrypted_aes_key: &[u8; 32]) -> Result<[u8; 32]> {
+        use windows::core::w;
+        use windows::Win32::Security::Cryptography::{
+            NCryptDecrypt, NCryptFreeObject, NCryptOpenKey, NCryptOpenStorageProvider, CERT_KEY_SPEC,
+            NCRYPT_FLAGS, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
+        };
+        unsafe {
+            let mut prov = NCRYPT_PROV_HANDLE::default();
+            NCryptOpenStorageProvider(&mut prov, w!("Microsoft Software Key Storage Provider"), 0)
+                .map_err(|error| anyhow!("NCryptOpenStorageProvider failed: {error}"))?;
+
+            let mut key = NCRYPT_KEY_HANDLE::default();
+            if let Err(error) = NCryptOpenKey(
+                prov,
+                &mut key,
+                w!("Google Chromekey1"),
+                CERT_KEY_SPEC(0),
+                NCRYPT_FLAGS(0),
+            ) {
+                let _ = NCryptFreeObject(NCRYPT_HANDLE(prov.0));
+                return Err(anyhow!("NCryptOpenKey(Google Chromekey1) failed: {error}"));
+            }
+
+            // First call: size query (pbOutput = None) fills `cb`.
+            let mut cb: u32 = 0;
+            let result = NCryptDecrypt(
+                key,
+                Some(encrypted_aes_key.as_slice()),
+                None,
+                None,
+                &mut cb,
+                NCRYPT_SILENT_FLAG,
+            )
+            .and_then(|()| {
+                let mut out = vec![0u8; cb as usize];
+                NCryptDecrypt(
+                    key,
+                    Some(encrypted_aes_key.as_slice()),
+                    None,
+                    Some(out.as_mut_slice()),
+                    &mut cb,
+                    NCRYPT_SILENT_FLAG,
+                )
+                .map(|()| {
+                    out.truncate(cb as usize);
+                    out
+                })
+            });
+
+            let _ = NCryptFreeObject(NCRYPT_HANDLE(key.0));
+            let _ = NCryptFreeObject(NCRYPT_HANDLE(prov.0));
+
+            let out = result.map_err(|error| {
+                anyhow!("NCryptDecrypt failed (run as SYSTEM for Google Chromekey1): {error}")
+            })?;
+            out.as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("CNG output is not 32 bytes (got {})", out.len()))
+        }
+    }
+
     fn read_login_database(path: &Path, keys: &Keys) -> Result<Vec<ImportedCredential>> {
         let temp_dir = tempfile::tempdir().context("create Chromium import temp dir")?;
         let copy_path = temp_dir.path().join("Login Data");
@@ -581,14 +682,9 @@ mod linux {
     const IV: [u8; 16] = [b' '; 16];
     const ITERATIONS: u32 = 1; // Linux uses 1 iteration (macOS uses 1003).
 
-    /// The `application` attribute this browser uses for its Secret Service key.
-    fn keyring_app(variant: Chromium) -> &'static str {
-        match variant {
-            Chromium::Chrome => "chrome",
-            Chromium::Chromium => "chromium",
-            Chromium::Edge => "microsoft-edge",
-            Chromium::Brave => "brave",
-        }
+    /// The `application` attribute Chrome uses for its Secret Service key.
+    fn keyring_app(_variant: Chromium) -> &'static str {
+        "chrome"
     }
 
     /// Reads the browser's "Safe Storage" key from the Secret Service via
@@ -756,5 +852,26 @@ mod abe_tests {
         let flag_pos = 4 + br"C:\Program Files\Google\Chrome\Application\chrome.exe".len() + 4;
         blob[flag_pos] = 0x09;
         assert!(unwrap_abe_key_material(&blob).is_err());
+    }
+
+    #[test]
+    fn flag3_master_key_round_trips() {
+        // The deterministic flag-0x03 tail (XOR + AES-GCM); the CNG step that
+        // produces `decrypted_aes_key` is integration-tested on Windows.
+        let master = [0x7eu8; 32];
+        let xored_aes_key = [0x24u8; 32]; // the real AES-256-GCM key
+        let iv = [0x11u8; 12];
+        // ct||tag exactly as Chrome stores it: GCM-encrypt the master key.
+        let ct_tag = aes_gcm::Aes256Gcm::new_from_slice(&xored_aes_key)
+            .unwrap()
+            .encrypt(aes_gcm::Nonce::from_slice(&iv), master.as_slice())
+            .unwrap();
+        // CNG output is the value that XORs back to the real key.
+        let mut decrypted_aes_key = [0u8; 32];
+        for index in 0..32 {
+            decrypted_aes_key[index] = xored_aes_key[index] ^ ABE_XOR_KEY_FLAG3[index];
+        }
+        let recovered = flag3_master_key(&decrypted_aes_key, &iv, &ct_tag).unwrap();
+        assert_eq!(recovered.as_slice(), master.as_slice());
     }
 }
