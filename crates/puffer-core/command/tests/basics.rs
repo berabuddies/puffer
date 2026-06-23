@@ -296,7 +296,7 @@ fn workflows_connectors_filter_shows_connect_commands() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("showing 2/12 connectors for query=\"telegram\""));
+    assert!(text.contains("showing 2/15 connectors for query=\"telegram\""));
     assert!(text.contains("telegram-login"));
     assert!(text.contains("actions=send_message"));
     assert!(text.contains("connect=/connect telegram-login telegram-user"));
@@ -363,7 +363,7 @@ fn workflows_connectors_filter_presets_use_stable_capability_terms() {
 
     let text = &state.transcript.last().unwrap().text;
     assert!(text.contains("filters: trigger-ready | no-trigger | draft | append | has-actions"));
-    assert!(text.contains("showing 9/12 connectors for query=\"has-actions\""));
+    assert!(text.contains("showing 12/15 connectors for query=\"has-actions\""));
     assert!(text.contains("- gcal-browser [auth,events,no-trigger,actions]"));
     assert!(text.contains("- gmail-browser [auth,events,no-trigger,actions]"));
     assert!(text.contains("- telegram-login [auth,events,no-trigger,actions]"));
@@ -398,7 +398,7 @@ fn workflows_connectors_catalog_includes_serve_connectors_as_non_triggers() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("showing 1/12 connectors for query=\"discord\""));
+    assert!(text.contains("showing 1/15 connectors for query=\"discord\""));
     assert!(text.contains("discord-bot"));
     assert!(text.contains("connect=/connect discord-bot discord-bot"));
     assert!(text.contains("[auth,no-trigger]"));
@@ -431,7 +431,7 @@ fn workflows_connectors_catalog_does_not_include_http_ingress_presets() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("showing 0/12 connectors for query=\"github\""));
+    assert!(text.contains("showing 0/15 connectors for query=\"github\""));
     assert!(!text.contains("github-"));
     assert!(!text.contains("runtime=serve"));
 }

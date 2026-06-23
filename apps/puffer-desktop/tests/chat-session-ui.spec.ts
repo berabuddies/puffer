@@ -4977,12 +4977,9 @@ test("turn-tagged intermediate messages stay with their original prompt", async 
   const secondAgentRow = page.locator('.pf-msg[data-role="agent"]').filter({ hasText: secondReply });
   await expect(firstAgentRow).toHaveCount(1);
   await expect(secondAgentRow).toHaveCount(1);
-  await expect(firstAgentRow.getByRole("button", { name: /Agent activity/ })).toContainText(
-    "2 intermediate messages"
-  );
-  await firstAgentRow.getByRole("button", { name: /Agent activity/ }).click();
   await expect(firstAgentRow).toContainText(firstIntermediateOne);
   await expect(firstAgentRow).toContainText(firstIntermediateTwo);
+  await expect(firstAgentRow.getByRole("button", { name: /Agent activity/ })).toHaveCount(0);
   await expect(secondAgentRow).not.toContainText(firstIntermediateOne);
   await expect(secondAgentRow).not.toContainText(firstIntermediateTwo);
 
@@ -5696,8 +5693,7 @@ test("logging out the last provider clears active session state", async ({ page 
   const logout = await daemon.waitForRequest("logout_provider");
   expect(logout.params).toMatchObject({ providerId: "anthropic" });
 
-  await expect(page.getByText("0 providers connected")).toBeVisible();
-  await expect(page.getByText("Connect a provider before starting an agent.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pick your agent provider" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Claude history/ })).toHaveCount(0);
   await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
   await page.keyboard.press("Enter");

@@ -1005,6 +1005,14 @@
     return !skipOnboarding;
   }
 
+  let onboardingStartStep = $derived<"mode" | "provider">(
+    !forceOnboarding &&
+      !allowUnauthenticatedWorkspaceHarness &&
+      !hasAvailableAgentProvider(settingsSnapshot)
+      ? "provider"
+      : "mode"
+  );
+
   function daemonFingerprint(client: DaemonClient): string {
     const hs = client.handshake;
     return [hs.url, hs.token, hs.protocolVersion, hs.workspaceRoot].join("\n");
@@ -3761,23 +3769,29 @@
     persisted: TimelineItem[],
     transient: TimelineItem[]
   ): TimelineItem[] {
-    const transientIds = new Map<string, string[]>();
+    const transientItems = new Map<string, TimelineItem[]>();
     for (let index = transient.length - 1; index >= 0; index -= 1) {
       const item = transient[index];
       const signature = transientMessageSignature(item);
       if (!signature) continue;
-      transientIds.set(signature, [...(transientIds.get(signature) ?? []), item.id]);
+      transientItems.set(signature, [...(transientItems.get(signature) ?? []), item]);
     }
     const keyed = [...persisted];
     for (let index = keyed.length - 1; index >= 0; index -= 1) {
       const item = keyed[index];
       const signature = transientMessageSignature(item);
-      const candidates = signature ? transientIds.get(signature) : null;
+      const candidates = signature ? transientItems.get(signature) : null;
       const candidateIndex =
-        candidates?.findIndex((candidate) => !wasPersistedBeforeSubmit(candidate, item.id)) ?? -1;
+        candidates?.findIndex((candidate) => !wasPersistedBeforeSubmit(candidate.id, item.id)) ?? -1;
       const replacement =
         candidates && candidateIndex >= 0 ? candidates.splice(candidateIndex, 1)[0] : null;
-      if (replacement) keyed[index] = { ...item, id: replacement };
+      if (replacement) {
+        keyed[index] = {
+          ...item,
+          id: replacement.id,
+          turnId: item.turnId ?? replacement.turnId
+        };
+      }
     }
     return keyed;
   }
@@ -3821,13 +3835,29 @@
     );
   }
 
+  function transientAssistantSettledByPersisted(
+    items: TimelineItem[],
+    pending: TimelineItem
+  ): boolean {
+    if (pending.kind !== "assistant" || !pending.turnId) return false;
+    const turnId = pending.turnId;
+    const pendingId = pending.id;
+    if (!pendingId.startsWith(streamingAssistantPrefix(turnId)) && pendingId !== `live-complete-assistant-${turnId}`) {
+      return false;
+    }
+    return items.some((item) => item.kind === "assistant" && item.turnId === turnId);
+  }
+
   function wasPersistedBeforeSubmit(pendingId: string, persistedId: string): boolean {
     return submittedMessageBaselineIds[pendingId]?.includes(persistedId) ?? false;
   }
 
   function stillMissingFromPersisted(items: TimelineItem[], pending: TimelineItem[]): TimelineItem[] {
     return discardGeneratedMediaPreviewItems(pending)
-      .filter((item) => !timelineHasTransientMatch(items, item));
+      .filter((item) =>
+        !timelineHasTransientMatch(items, item) &&
+        !transientAssistantSettledByPersisted(items, item)
+      );
   }
 
   function isTransientOrderingAnchor(item: TimelineItem): boolean {
@@ -3897,6 +3927,7 @@
     for (const item of pending) {
       const matchIndex = findTransientMatchIndex(persisted, item, searchStart);
       if (matchIndex < 0) {
+        if (transientAssistantSettledByPersisted(persisted, item)) continue;
         pendingUnmatched = [...pendingUnmatched, item];
         continue;
       }
@@ -4635,6 +4666,7 @@
           <Onboarding
             snapshot={settingsSnapshot}
             loading={settingsLoading}
+            startStep={onboardingStartStep}
             remoteEnabled={remoteConnection.enabled}
             busyProviderId={authBusyProviderId}
             errorMessage={authError}

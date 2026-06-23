@@ -3,6 +3,29 @@
 use super::*;
 use puffer_resources::{LoadedItem, SkillSpec, SourceInfo, SourceKind};
 
+struct OpenAiWebSocketEnvGuard {
+    prior: Option<std::ffi::OsString>,
+}
+
+impl OpenAiWebSocketEnvGuard {
+    fn disabled() -> Self {
+        let prior = std::env::var_os("PUFFER_OPENAI_WEBSOCKET");
+        std::env::remove_var("PUFFER_OPENAI_WEBSOCKET");
+        crate::runtime::openai::reset_openai_websocket_http_fallbacks();
+        Self { prior }
+    }
+}
+
+impl Drop for OpenAiWebSocketEnvGuard {
+    fn drop(&mut self) {
+        match self.prior.as_ref() {
+            Some(value) => std::env::set_var("PUFFER_OPENAI_WEBSOCKET", value),
+            None => std::env::remove_var("PUFFER_OPENAI_WEBSOCKET"),
+        }
+        crate::runtime::openai::reset_openai_websocket_http_fallbacks();
+    }
+}
+
 fn session_for(cwd: &std::path::Path) -> SessionMetadata {
     SessionMetadata {
         id: Uuid::new_v4(),
@@ -163,6 +186,10 @@ fn openai_state(cwd: &std::path::Path) -> AppState {
 
 #[test]
 fn openai_responses_skill_action_obligation_reminds_then_accepts_write() {
+    let _env_lock = super::refresh_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ws_env = OpenAiWebSocketEnvGuard::disabled();
     let temp = tempfile::tempdir().unwrap();
     let write_path = temp.path().join("started.txt");
     let write_args =
@@ -220,6 +247,10 @@ fn openai_responses_skill_action_obligation_reminds_then_accepts_write() {
 
 #[test]
 fn openai_responses_skill_action_obligation_fails_after_second_no_tool_text() {
+    let _env_lock = super::refresh_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ws_env = OpenAiWebSocketEnvGuard::disabled();
     let temp = tempfile::tempdir().unwrap();
     let (base_url, requests, server) = spawn_server("text/event-stream", 3, |index| match index {
         0 => openai_responses_function_call_sse(
@@ -262,6 +293,10 @@ fn openai_responses_skill_action_obligation_fails_after_second_no_tool_text() {
 
 #[test]
 fn openai_responses_skill_action_obligation_fails_when_turn_budget_expires() {
+    let _env_lock = super::refresh_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ws_env = OpenAiWebSocketEnvGuard::disabled();
     let temp = tempfile::tempdir().unwrap();
     let (base_url, requests, server) = spawn_server("text/event-stream", 1, |_| {
         openai_responses_function_call_sse(

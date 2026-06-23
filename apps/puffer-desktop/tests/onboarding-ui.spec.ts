@@ -18,6 +18,16 @@ async function completeStubbedOnboarding(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
 }
 
+async function openAnthropicApiKeySetup(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Pick your agent provider" })).toBeVisible();
+  await page
+    .locator("article.provider-card")
+    .filter({ has: page.getByRole("heading", { name: "Anthropic" }) })
+    .getByRole("button", { name: "Add connect" })
+    .click();
+  await expect(page.getByLabel("API key for Anthropic")).toBeVisible();
+}
+
 test("onboarding Continue enters the workspace", async ({ page }) => {
   await openForcedOnboarding(page);
 
@@ -71,7 +81,7 @@ test("skip flag does not bypass provider login when auth is empty", async ({ pag
   });
   await daemon.open(page);
 
-  await expect(page.getByLabel("API key for Anthropic")).toBeVisible();
+  await openAnthropicApiKeySetup(page);
   await expect(page.getByRole("button", { name: "New agent in puffer" })).toHaveCount(0);
 });
 
@@ -81,7 +91,7 @@ test("force onboarding does not bypass provider login when auth is empty", async
   await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
 
   await page.getByRole("button", { name: /Next/ }).click();
-  await expect(page.getByLabel("API key for Anthropic")).toBeVisible();
+  await openAnthropicApiKeySetup(page);
   await expect(page.getByRole("heading", { name: "Workspace is ready" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Start using Puffer/ })).toHaveCount(0);
 });
@@ -153,7 +163,7 @@ test("skip flag does not bypass provider login with only non-agent auth", async 
   });
   await daemon.open(page);
 
-  await expect(page.getByLabel("API key for Anthropic")).toBeVisible();
+  await openAnthropicApiKeySetup(page);
   await expect(page.getByText("Workspace is ready")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "New agent in puffer" })).toHaveCount(0);
 });

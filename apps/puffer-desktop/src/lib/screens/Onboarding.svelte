@@ -25,6 +25,7 @@
     errorMessage: string | null;
     externals: ExternalCredential[];
     busyImportKey: string | null;
+    startStep?: "mode" | "provider";
     onLoginOauth: (providerId: string) => void;
     onLoginApiKey: (
       providerId: string,
@@ -40,6 +41,7 @@
   let props: Props = $props();
 
   let currentStep = $state<OnboardingStepId>("mode");
+  let lastStartStep = $state<"mode" | "provider">("mode");
   let runMode = $state<"cloud" | "local">("local");
   let toolAccess = $state({
     chrome: true,
@@ -138,6 +140,13 @@
 
   onDestroy(() => {
     if (analyzeTimer) clearTimeout(analyzeTimer);
+  });
+
+  $effect(() => {
+    const nextStartStep = props.startStep ?? "mode";
+    if (nextStartStep === lastStartStep) return;
+    lastStartStep = nextStartStep;
+    currentStep = nextStartStep;
   });
 
   async function installMcp() {
