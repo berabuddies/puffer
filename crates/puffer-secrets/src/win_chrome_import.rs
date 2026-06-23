@@ -362,6 +362,27 @@ fn result_path(user: &str, pid: u32) -> PathBuf {
     ))
 }
 
+/// Writes the SYSTEM-stage result line WITHOUT following a reparse point, failing
+/// if anything already exists at the path. The result file lives in the user's own
+/// (unprivileged-writable) Temp and this runs as SYSTEM, so a concurrent same-user
+/// process could otherwise pre-plant a junction / object-manager symlink at the
+/// predictable path and redirect this privileged write to an arbitrary target —
+/// the classic Temp TOCTOU local-privilege-escalation. `create_new` fails if
+/// anything is already there and `FILE_FLAG_OPEN_REPARSE_POINT` never traverses a
+/// reparse point, so the worst a racer can achieve is making the write fail (the
+/// import is then reported as producing no result), never an out-of-Temp redirect.
+fn write_result_no_follow(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    file.write_all(text.as_bytes())
+}
+
 /// Absolute path to a System32 tool, so the elevation path never resolves a
 /// security-sensitive helper (schtasks / powershell) through PATH or the CWD.
 /// The directory comes from the kernel via `GetSystemDirectoryW`, NOT from the
@@ -488,7 +509,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
                 Ok(s) => format!("CHROME_IMPORT_OK {s}"),
                 Err(e) => format!("CHROME_IMPORT_ERROR: {e:#}"),
             };
-            let _ = std::fs::write(result_path(&user, pid), &text);
+            let _ = write_result_no_follow(&result_path(&user, pid), &text);
             result.map(|_| ())
         }
         // ADMIN stage (post-UAC): import via a transient SYSTEM task.
