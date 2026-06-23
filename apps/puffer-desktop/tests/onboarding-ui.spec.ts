@@ -7,13 +7,26 @@ async function openForcedOnboarding(page: Page): Promise<void> {
   await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
 }
 
+async function completeStubbedOnboarding(page: Page): Promise<void> {
+  await page.getByRole("button", { name: /Next/ }).click();
+  await expect(page.getByRole("heading", { name: "Pick your agent provider" })).toBeVisible();
+  await page.getByRole("button", { name: /Next/ }).click();
+  await expect(page.getByRole("heading", { name: "Connect your tools" })).toBeVisible();
+  await page.getByRole("button", { name: /Next/ }).click();
+  await expect(page.getByRole("heading", { name: "What may Puffer learn?" })).toBeVisible();
+  await page.getByRole("button", { name: /Build profile/ }).click();
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+}
+
 test("onboarding Continue enters the workspace", async ({ page }) => {
   await openForcedOnboarding(page);
 
+  await expect(page.getByRole("heading", { name: "How should Puffer run?" })).toBeVisible();
+  await completeStubbedOnboarding(page);
   await expect(
     page.getByRole("heading", { name: "Workspace is ready" })
   ).toBeVisible();
-  await page.getByRole("button", { name: /Continue/ }).click();
+  await page.getByRole("button", { name: /Start using Puffer/ }).click();
 
   await expect(page.getByRole("button", { name: "New agent in puffer" })).toBeVisible();
   await expect(
@@ -26,8 +39,9 @@ test("completed onboarding stays dismissed after settings refresh", async ({ pag
   await daemon.install(page);
   await daemon.open(page, { skipOnboarding: false });
 
+  await completeStubbedOnboarding(page);
   await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
-  await page.getByRole("button", { name: /Continue/ }).click();
+  await page.getByRole("button", { name: /Start using Puffer/ }).click();
   await expect(page.getByRole("button", { name: "New agent in puffer" })).toBeVisible();
 
   await page.getByRole("button", { name: "Settings" }).click();
@@ -44,7 +58,7 @@ test("completed onboarding stays dismissed after settings refresh", async ({ pag
 test("onboarding does not show fake repository choices", async ({ page }) => {
   await openForcedOnboarding(page);
 
-  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+  await completeStubbedOnboarding(page);
   await expect(page.getByText("puffer-web")).toHaveCount(0);
   await expect(page.getByText("stripe-api")).toHaveCount(0);
 });
@@ -66,9 +80,10 @@ test("force onboarding does not bypass provider login when auth is empty", async
   await daemon.install(page);
   await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
 
+  await page.getByRole("button", { name: /Next/ }).click();
   await expect(page.getByLabel("API key for Anthropic")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Workspace is ready" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Continue/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Start using Puffer/ })).toHaveCount(0);
 });
 
 test("auth-free local provider satisfies onboarding provider requirement", async ({ page }) => {
@@ -90,7 +105,8 @@ test("auth-free local provider satisfies onboarding provider requirement", async
   await daemon.install(page);
   await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
 
-  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+  await page.getByRole("button", { name: /Next/ }).click();
+  await expect(page.getByRole("heading", { name: "Pick your agent provider" })).toBeVisible();
   await expect(page.getByText("1 agent provider ready")).toBeVisible();
   await expect(page.getByLabel("API key for Anthropic")).toHaveCount(0);
 });
