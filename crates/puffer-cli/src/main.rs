@@ -21,9 +21,9 @@ mod daemon_files;
 mod daemon_fs_watch;
 mod daemon_gcal_browser_setup;
 mod daemon_gmail_browser_setup;
+mod daemon_lambda_skills;
 #[path = "daemon_lark_browser_setup.rs"]
 mod daemon_lark_browser_setup;
-mod daemon_lambda_skills;
 mod daemon_local_model;
 mod daemon_lsp;
 mod daemon_pty;
@@ -45,11 +45,11 @@ mod gmail_browser;
 mod gmail_browser_log;
 mod heartbeat;
 mod internal_tools;
-mod lark_connector;
 #[path = "lark_browser.rs"]
 mod lark_browser;
 #[path = "lark_browser_script.rs"]
 mod lark_browser_script;
+mod lark_connector;
 mod media_internal_tools;
 mod non_interactive;
 mod project_metadata;

@@ -499,7 +499,10 @@ mod tests {
         let body = std::fs::read_to_string(path).unwrap();
         assert!(body.contains("<!doctype html>"));
         let state_path = parsed["statePath"].as_str().unwrap();
-        assert!(std::path::Path::new(state_path).exists(), "state file written");
+        assert!(
+            std::path::Path::new(state_path).exists(),
+            "state file written"
+        );
         assert!(parsed["canvasId"].as_str().unwrap().starts_with("canvas-"));
     }
 
@@ -533,13 +536,9 @@ mod tests {
         });
         write_canvas_state(&cwd, &session_id, "canvas-1", &spec).unwrap();
 
-        let updated = apply_canvas_state_patch(
-            &cwd,
-            &session_id,
-            "canvas-1",
-            &json!({ "run-tests": true }),
-        )
-        .unwrap();
+        let updated =
+            apply_canvas_state_patch(&cwd, &session_id, "canvas-1", &json!({ "run-tests": true }))
+                .unwrap();
 
         assert_eq!(updated["values"]["run-tests"], true);
         assert_eq!(updated["events"][0]["kind"], "patch");

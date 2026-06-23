@@ -1760,8 +1760,7 @@ fn handle_canvas_state_update(state: &DaemonState, params: &Value) -> Result<Val
         .ok_or_else(|| anyhow::anyhow!("canvas_state_update requires patch"))?;
     let session_store = SessionStore::from_paths(&state.paths)?;
     let cwd = desktop_api::load_session_cwd(&session_store, session_id)?;
-    let updated =
-        puffer_core::apply_canvas_state_patch(&cwd, session_id, canvas_id, patch)?;
+    let updated = puffer_core::apply_canvas_state_patch(&cwd, session_id, canvas_id, patch)?;
     Ok(json!({
         "ok": true,
         "canvasId": canvas_id,
