@@ -5,6 +5,7 @@ use super::{
 };
 use crate::history::WorkflowHistoryStore;
 use crate::monitor_trace::{MonitorTraceStage, MonitorTraceStore};
+use crate::router_debounce::conversation_scope;
 use crate::spec::WorkflowBindingSpec;
 use puffer_subscriber_runtime::EventEnvelope;
 use std::collections::BTreeMap;
@@ -70,11 +71,12 @@ impl MonitorDigestQueue {
     }
 
     fn enqueue_owned(&self, spec: WorkflowBindingSpec, envelope: EventEnvelope) {
+        let key = digest_bucket_key(&spec, &envelope);
         let should_schedule = {
             let mut inner = self.inner.lock().unwrap();
             inner
                 .pending
-                .entry(spec.slug.clone())
+                .entry(key)
                 .and_modify(|bucket| bucket.envelopes.push(envelope.clone()))
                 .or_insert_with(|| MonitorDigestBucket {
                     spec,
@@ -157,6 +159,13 @@ impl MonitorDigestQueue {
         if let Err(error) = processed {
             tracing::warn!(%error, "monitor digest flush task failed");
         }
+    }
+}
+
+fn digest_bucket_key(spec: &WorkflowBindingSpec, envelope: &EventEnvelope) -> String {
+    match conversation_scope(&envelope.event.payload) {
+        Some(scope) => format!("{}:{scope}", spec.slug),
+        None => format!("{}:envelope={}", spec.slug, envelope.envelope_id),
     }
 }
 

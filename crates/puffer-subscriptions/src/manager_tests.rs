@@ -145,8 +145,8 @@ fn monitor_events_flush_as_delayed_digest_batch() {
         manager.monitor_digest.clone(),
     );
     let envelopes = vec![
-        manager_test_event("env-1", "please review the first update today"),
-        manager_test_event("env-2", "can you confirm the second plan?"),
+        manager_test_event_with_chat("env-1", "please review the first update today", 42),
+        manager_test_event_with_chat("env-2", "can you confirm the second plan?", 42),
     ];
 
     processor
@@ -163,6 +163,105 @@ fn monitor_events_flush_as_delayed_digest_batch() {
             "please review the first update today".to_string(),
             "can you confirm the second plan?".to_string()
         ]]
+    );
+    manager.shutdown();
+}
+
+#[test]
+fn monitor_digest_batches_are_scoped_by_conversation() {
+    struct RecordingDispatcher {
+        batches: StdMutex<Vec<Vec<String>>>,
+    }
+
+    impl ActionDispatcher for RecordingDispatcher {
+        fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+            panic!("monitor digest should use batch dispatch")
+        }
+
+        fn dispatch_batch(
+            &self,
+            _action: &ActionSpec,
+            envelopes: &[EventEnvelope],
+        ) -> ActionResult {
+            self.batches.lock().unwrap().push(
+                envelopes
+                    .iter()
+                    .map(|envelope| envelope.event.text.clone())
+                    .collect(),
+            );
+            ActionResult::success("digest triaged")
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let dispatcher = Arc::new(RecordingDispatcher {
+        batches: StdMutex::new(Vec::new()),
+    });
+    let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+        .with_dispatcher(dispatcher.clone())
+        .with_monitor_digest_interval(std::time::Duration::from_millis(25))
+        .build(runtime.handle().clone())
+        .unwrap();
+    manager
+        .store()
+        .create(WorkflowBindingSpec {
+            slug: "monitor-telegram-user".into(),
+            description: "Monitor telegram-user for actionable tasks".into(),
+            connection_slug: "telegram-user".into(),
+            connector_slug: Some("telegram-login".into()),
+            status: WorkflowBindingStatus::Enabled,
+            filter: None,
+            ignore_filters: Vec::new(),
+            contact_ids: Vec::new(),
+            classify_prompt: None,
+            classify_model: None,
+            action: ActionSpec::TriageAgent {
+                prompt: "triage".into(),
+                model: None,
+            },
+            created_at_ms: 0,
+        })
+        .unwrap();
+    let processor = ManagerConnectorEventProcessor::new(
+        manager.store.clone(),
+        manager.connection_store.clone(),
+        manager.history_store.clone(),
+        manager.monitor_trace_store.clone(),
+        manager.proxy_store.clone(),
+        manager.dispatcher.clone(),
+        manager.classifier.clone(),
+        manager.self_gate.clone(),
+        manager.monitor_digest.clone(),
+    );
+    let envelopes = vec![
+        manager_test_event_with_chat("env-1", "please review alice update", 42),
+        manager_test_event_with_chat("env-2", "please review bob update", 99),
+        manager_test_event_with_chat("env-3", "alice follow-up detail", 42),
+    ];
+
+    processor
+        .process_connector_events("telegram-login", "telegram-user", &envelopes)
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    });
+    let mut batches = dispatcher.batches.lock().unwrap().clone();
+    batches.sort();
+    assert_eq!(
+        batches,
+        vec![
+            vec![
+                "please review alice update".to_string(),
+                "alice follow-up detail".to_string()
+            ],
+            vec!["please review bob update".to_string()],
+        ]
     );
     manager.shutdown();
 }
@@ -207,7 +306,18 @@ fn monitor_digest_interval_defaults_to_one_minute() {
     }
 }
 
-fn manager_test_event(envelope_id: &str, text: &str) -> EventEnvelope {
+fn manager_test_event_with_chat(envelope_id: &str, text: &str, chat_id: i64) -> EventEnvelope {
+    manager_test_event_with_payload(
+        envelope_id,
+        text,
+        json!({
+            "chat_id": chat_id,
+            "message": text,
+        }),
+    )
+}
+
+fn manager_test_event_with_payload(envelope_id: &str, text: &str, payload: Value) -> EventEnvelope {
     EventEnvelope {
         envelope_id: envelope_id.into(),
         subscriber_id: "telegram-user".into(),
@@ -218,7 +328,7 @@ fn manager_test_event(envelope_id: &str, text: &str) -> EventEnvelope {
             control: false,
             dedup_key: Some(envelope_id.into()),
             text: text.into(),
-            payload: json!({ "message": text }),
+            payload,
         },
     }
 }

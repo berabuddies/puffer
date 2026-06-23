@@ -177,7 +177,7 @@ fn topic_matches(spec: &crate::spec::WorkflowBindingSpec, envelope: &EventEnvelo
             .is_some_and(|connector_slug| connector_slug == envelope.event.topic)
 }
 
-fn conversation_scope(payload: &Value) -> Option<String> {
+pub(crate) fn conversation_scope(payload: &Value) -> Option<String> {
     let object = payload.as_object()?;
     for key in [
         "thread_id",
