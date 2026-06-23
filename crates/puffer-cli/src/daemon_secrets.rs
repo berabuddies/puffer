@@ -104,9 +104,11 @@ fn run_windows_v20_helper(paths: &ConfigPaths) -> Option<(usize, usize, usize)> 
     let exe = std::env::current_exe().ok()?;
     let vault_dir = paths.user_config_dir.to_string_lossy().to_string();
     // Read the helper's STDOUT (where the user stage prints the SYSTEM result line)
-    // rather than a predictable shared temp file: a same-user process can't feed the
-    // daemon a spoofed result, and piped stdio keeps the child off the daemon's
-    // handshake stdout pipe.
+    // rather than reading a predictable shared temp file ourselves: this drops the
+    // daemon's dependence on a guessable path, and piped stdio keeps the child off
+    // the daemon's handshake stdout pipe. (The user stage still relays the result via
+    // its own per-pid temp file, so a racing same-user process could at most forge
+    // the COUNTS reported here — never a secret; these are non-sensitive tallies.)
     let output = std::process::Command::new(exe)
         .args(["__win-chrome-import", "--vault-dir", &vault_dir])
         .stdin(Stdio::null())

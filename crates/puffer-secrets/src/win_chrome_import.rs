@@ -364,9 +364,19 @@ fn result_path(user: &str, pid: u32) -> PathBuf {
 
 /// Absolute path to a System32 tool, so the elevation path never resolves a
 /// security-sensitive helper (schtasks / powershell) through PATH or the CWD.
+/// The directory comes from the kernel via `GetSystemDirectoryW`, NOT from the
+/// `SystemRoot`/`windir` environment (which a same-user caller of the hidden
+/// subcommand could poison to redirect the helper to an attacker location).
 fn system32(tool: &str) -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    format!("{root}\\System32\\{tool}")
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 260]; // MAX_PATH
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    let dir = if len > 0 && len <= buf.len() {
+        String::from_utf16_lossy(&buf[..len])
+    } else {
+        "C:\\Windows\\System32".to_string()
+    };
+    format!("{dir}\\{tool}")
 }
 
 /// Rejects a value that cannot be SAFELY embedded in the elevated command lines
@@ -384,15 +394,58 @@ fn validate_elevation_arg(kind: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 32_768 {
         bail!("refusing to elevate: {kind} is empty or too long");
     }
-    if value.contains('"') || value.chars().any(|c| c.is_control()) {
+    // Reject the ASCII double quote AND the Unicode "smart" quote codepoints that
+    // PowerShell's tokenizer treats as equivalent to ASCII quotes (U+2018..U+201B
+    // single, U+201C..U+201E double): otherwise a curly single quote could close
+    // our single-quoted PowerShell argument and inject — the ASCII apostrophe is
+    // neutralised by ps_single_quote, but these are not. Also reject control chars.
+    const QUOTE_CLASS: &[char] = &[
+        '"', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}', '\u{201C}', '\u{201D}', '\u{201E}',
+    ];
+    if value.chars().any(|c| QUOTE_CLASS.contains(&c) || c.is_control()) {
         bail!("refusing to elevate: {kind} contains an unsupported character");
     }
     // A trailing backslash escapes the literal closing `\"` we wrap the value in,
     // letting it swallow the next token when CommandLineToArgvW re-parses the line
     // (the classic Windows trailing-backslash break). No legitimate account name
-    // or vault directory ends in a bare backslash.
+    // survives this; vault directories are normalised by normalize_vault_dir first.
     if value.ends_with('\\') {
         bail!("refusing to elevate: {kind} must not end with a backslash");
+    }
+    Ok(())
+}
+
+/// Trims trailing path separators from a vault directory so a user-supplied value
+/// like `D:\puffer\` is accepted (it is semantically identical) instead of tripping
+/// the trailing-backslash rejection. Leaves a bare value unchanged.
+fn normalize_vault_dir(vault: &str) -> String {
+    let trimmed = vault.trim_end_matches(|c| c == '\\' || c == '/');
+    if trimmed.is_empty() {
+        vault.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Validates the vault DIRECTORY, which (unlike the account name) legitimately
+/// contains backslashes. The SYSTEM stage opens/creates the vault here and writes
+/// the master key + encrypted store, so a crafted value must not redirect that
+/// write off the local machine or up the tree: require a local drive-letter
+/// absolute path (`X:\...`), reject UNC roots (`\\host\share`, `//host`), and reject
+/// any `..` segment. Pass the value through [`normalize_vault_dir`] first.
+fn validate_vault_dir(vault: &str) -> Result<()> {
+    validate_elevation_arg("vault directory", vault)?;
+    let bytes = vault.as_bytes();
+    let is_unc = vault.starts_with("\\\\") || vault.starts_with("//");
+    let is_drive_abs = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    if is_unc || !is_drive_abs {
+        bail!("refusing to elevate: vault directory must be a local drive-absolute path");
+    }
+    if vault.split(|c| c == '\\' || c == '/').any(|seg| seg == "..") {
+        bail!("refusing to elevate: vault directory must not contain a `..` segment");
     }
     Ok(())
 }
@@ -424,12 +477,12 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         // SYSTEM stage: do the import, write the result for the parent to read.
         Some("--system") => {
             let user = args.get(1).cloned().unwrap_or_default();
-            let vault = args.get(2).cloned().unwrap_or_default();
+            let vault = normalize_vault_dir(&args.get(2).cloned().unwrap_or_default());
             let pid: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             // This stage builds SYSTEM-context filesystem paths from these args, so
             // validate them here too (the subcommand is directly invokable).
             validate_account_name(&user)?;
-            validate_elevation_arg("vault directory", &vault)?;
+            validate_vault_dir(&vault)?;
             let result = do_import(&user, pid, &vault);
             let text = match &result {
                 Ok(s) => format!("CHROME_IMPORT_OK {s}"),
@@ -441,14 +494,14 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         // ADMIN stage (post-UAC): import via a transient SYSTEM task.
         Some("--elevated") => {
             let user = args.get(1).cloned().unwrap_or_default();
-            let vault = args.get(2).cloned().unwrap_or_default();
+            let vault = normalize_vault_dir(&args.get(2).cloned().unwrap_or_default());
             // Parse the PID as an integer so it can never carry a metacharacter into
             // the unquoted tail of the `/tr` action; validate user/vault before
             // building the SYSTEM task command — don't trust the prior stage's argv
             // (the hidden subcommand is directly callable).
             let pid: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             validate_account_name(&user)?;
-            validate_elevation_arg("vault directory", &vault)?;
+            validate_vault_dir(&vault)?;
             let tn = format!("PufferChromeImport_{pid}");
             // user/vault are double-quoted and, per validate_elevation_arg, cannot
             // contain `"` (the only breakout of a double-quoted token); pid is a
@@ -491,15 +544,17 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         // USER stage (default): ask Windows to elevate (UAC) and wait.
         _ => {
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "Administrator".into());
-            let vault = args
-                .iter()
-                .position(|a| a == "--vault-dir")
-                .and_then(|i| args.get(i + 1))
-                .cloned()
-                .or_else(|| std::env::var("PUFFER_VAULT_DIR").ok())
-                .unwrap_or_else(|| format!("C:\\Users\\{user}\\.puffer"));
+            let vault = normalize_vault_dir(
+                &args
+                    .iter()
+                    .position(|a| a == "--vault-dir")
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+                    .or_else(|| std::env::var("PUFFER_VAULT_DIR").ok())
+                    .unwrap_or_else(|| format!("C:\\Users\\{user}\\.puffer")),
+            );
             validate_account_name(&user)?;
-            validate_elevation_arg("vault directory", &vault)?;
+            validate_vault_dir(&vault)?;
             let pid = std::process::id();
             // Clear any stale result from a previous run BEFORE elevating: if the
             // user declines UAC (or PowerShell fails), the elevated stage never runs
