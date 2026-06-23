@@ -30,6 +30,7 @@ use crate::state::{
 const DEFAULT_QR_WAIT_SECONDS: u64 = 120;
 const DEFAULT_DC_ID: i32 = 2;
 const MAX_QR_MIGRATIONS: usize = 4;
+const MAX_QR_IMPORT_TOKEN_REFRESHES: usize = 2;
 
 /// In-memory state for a QR login attempt between `login-qr` and
 /// `login-qr-wait`.
@@ -38,6 +39,7 @@ pub struct QrLoginState {
     api_id: i32,
     api_hash: String,
     dc_id: i32,
+    import_token_expired_refreshes: usize,
 }
 
 /// Result produced by a QR-login command.
@@ -111,6 +113,7 @@ pub async fn start(
         api_id,
         api_hash,
         dc_id: DEFAULT_DC_ID,
+        import_token_expired_refreshes: 0,
     };
     handle_login_token(env, login_state, state, qr, token).await
 }
@@ -200,7 +203,7 @@ async fn handle_login_token(
     for _ in 0..MAX_QR_MIGRATIONS {
         match token {
             tl::enums::auth::LoginToken::Token(login_token) => {
-                emit_qr_token(env, &login_token)?;
+                emit_qr_token(env, &login_token, None)?;
                 *state = Some(qr);
                 return Ok(QrLoginOutcome::Pending);
             }
@@ -244,27 +247,78 @@ async fn handle_login_token(
                     .await
                 {
                     Ok(token) => token,
-                    Err(error) if error.is("SESSION_PASSWORD_NEEDED") => {
-                        return prepare_qr_password_challenge(
-                            env,
-                            login_state,
-                            client,
-                            qr.api_id,
-                            qr.api_hash,
-                        )
-                        .await;
-                    }
                     Err(error) => {
-                        warn!(%error, dc_id = migration.dc_id, "telegram qr import login token failed");
-                        emit_control(
-                            &env.topic,
-                            "login_error",
-                            json!({
-                                "error": format!("import login token in Telegram DC {} failed: {error:#}", migration.dc_id),
-                                "phase": "qr_import"
-                            }),
-                        )?;
-                        return Ok(QrLoginOutcome::Pending);
+                        match classify_qr_import_invocation_error(
+                            &error,
+                            qr.import_token_expired_refreshes,
+                        ) {
+                            QrImportErrorAction::AwaitPassword => {
+                                return prepare_qr_password_challenge(
+                                    env,
+                                    login_state,
+                                    client,
+                                    qr.api_id,
+                                    qr.api_hash,
+                                )
+                                .await;
+                            }
+                            QrImportErrorAction::RefreshToken => {
+                                qr.import_token_expired_refreshes += 1;
+                                warn!(
+                                    %error,
+                                    dc_id = migration.dc_id,
+                                    refreshes = qr.import_token_expired_refreshes,
+                                    "telegram qr import login token expired; issuing a new QR token"
+                                );
+                                match export_login_token(&qr.client, qr.api_id, &qr.api_hash).await
+                                {
+                                    Ok(tl::enums::auth::LoginToken::Token(login_token)) => {
+                                        emit_qr_token(
+                                            env,
+                                            &login_token,
+                                            Some("auth_token_expired"),
+                                        )?;
+                                        *state = Some(qr);
+                                        return Ok(QrLoginOutcome::Pending);
+                                    }
+                                    Ok(next_token) => {
+                                        token = next_token;
+                                        continue;
+                                    }
+                                    Err(refresh_error) => {
+                                        warn!(
+                                            error = %refresh_error,
+                                            dc_id = migration.dc_id,
+                                            "telegram qr import-expiry refresh failed"
+                                        );
+                                        emit_control(
+                                            &env.topic,
+                                            "login_error",
+                                            json!({
+                                                "error": format!(
+                                                    "import login token in Telegram DC {} expired, and refreshing the QR token failed: {refresh_error:#}",
+                                                    migration.dc_id
+                                                ),
+                                                "phase": "qr_import_refresh"
+                                            }),
+                                        )?;
+                                        return Ok(QrLoginOutcome::Pending);
+                                    }
+                                }
+                            }
+                            QrImportErrorAction::Fail => {
+                                warn!(%error, dc_id = migration.dc_id, "telegram qr import login token failed");
+                                emit_control(
+                                    &env.topic,
+                                    "login_error",
+                                    json!({
+                                        "error": format!("import login token in Telegram DC {} failed: {error:#}", migration.dc_id),
+                                        "phase": "qr_import"
+                                    }),
+                                )?;
+                                return Ok(QrLoginOutcome::Pending);
+                            }
+                        }
                     }
                 };
                 qr = QrLoginState {
@@ -272,6 +326,7 @@ async fn handle_login_token(
                     api_id: qr.api_id,
                     api_hash: qr.api_hash,
                     dc_id: migration.dc_id,
+                    import_token_expired_refreshes: qr.import_token_expired_refreshes,
                 };
             }
         }
@@ -286,6 +341,39 @@ async fn handle_login_token(
         }),
     )?;
     Ok(QrLoginOutcome::Pending)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QrImportErrorAction {
+    AwaitPassword,
+    RefreshToken,
+    Fail,
+}
+
+fn classify_qr_import_invocation_error(
+    error: &InvocationError,
+    import_token_expired_refreshes: usize,
+) -> QrImportErrorAction {
+    if error.is("SESSION_PASSWORD_NEEDED") {
+        return QrImportErrorAction::AwaitPassword;
+    }
+    if error.is("AUTH_TOKEN_EXPIRED") {
+        return classify_qr_import_error("AUTH_TOKEN_EXPIRED", import_token_expired_refreshes);
+    }
+    QrImportErrorAction::Fail
+}
+
+fn classify_qr_import_error(
+    error_name: &str,
+    import_token_expired_refreshes: usize,
+) -> QrImportErrorAction {
+    if error_name == "AUTH_TOKEN_EXPIRED"
+        && import_token_expired_refreshes < MAX_QR_IMPORT_TOKEN_REFRESHES
+    {
+        QrImportErrorAction::RefreshToken
+    } else {
+        QrImportErrorAction::Fail
+    }
 }
 
 async fn complete_qr_login(
@@ -442,18 +530,25 @@ async fn export_login_token(
         .context("export Telegram QR login token")
 }
 
-fn emit_qr_token(env: &SkillEnv, login_token: &tl::types::auth::LoginToken) -> anyhow::Result<()> {
+fn emit_qr_token(
+    env: &SkillEnv,
+    login_token: &tl::types::auth::LoginToken,
+    refresh_reason: Option<&'static str>,
+) -> anyhow::Result<()> {
     let url = qr_login_url(&login_token.token);
-    emit_control(
-        &env.topic,
-        "login_qr",
-        json!({
-            "url": url,
-            "expires_at_unix": login_token.expires,
-            "expires_in_seconds": seconds_until(login_token.expires),
-            "next": "Open this URL from a logged-in Telegram app, approve the login, then run `telegram login-qr-wait`."
-        }),
-    )
+    let mut payload = json!({
+        "url": url,
+        "expires_at_unix": login_token.expires,
+        "expires_in_seconds": seconds_until(login_token.expires),
+        "next": "Open this URL from a logged-in Telegram app, approve the login, then run `telegram login-qr-wait`."
+    });
+    if let Some(reason) = refresh_reason {
+        payload["refresh_reason"] = json!(reason);
+        if reason == "auth_token_expired" {
+            payload["message"] = json!("The QR code expired after approval. Scan the new QR code.");
+        }
+    }
+    emit_control(&env.topic, "login_qr", payload)
 }
 
 fn qr_login_url(token: &[u8]) -> String {
@@ -494,5 +589,29 @@ mod tests {
     #[test]
     fn seconds_until_saturates_for_past_expiration() {
         assert_eq!(seconds_until(1), 0);
+    }
+
+    #[test]
+    fn auth_token_expired_import_error_refreshes_until_limit() {
+        assert_eq!(
+            classify_qr_import_error("AUTH_TOKEN_EXPIRED", 0),
+            QrImportErrorAction::RefreshToken
+        );
+        assert_eq!(
+            classify_qr_import_error("AUTH_TOKEN_EXPIRED", MAX_QR_IMPORT_TOKEN_REFRESHES),
+            QrImportErrorAction::Fail
+        );
+    }
+
+    #[test]
+    fn non_expired_qr_import_errors_remain_terminal() {
+        assert_eq!(
+            classify_qr_import_error("AUTH_TOKEN_INVALID", 0),
+            QrImportErrorAction::Fail
+        );
+        assert_eq!(
+            classify_qr_import_error("NETWORK_MIGRATE_5", 0),
+            QrImportErrorAction::Fail
+        );
     }
 }

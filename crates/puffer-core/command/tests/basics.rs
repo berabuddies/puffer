@@ -512,6 +512,7 @@ fn app_state_defaults_expose_command_state() {
             default_model: None,
             default_provider: Some("anthropic".to_string()),
             openai_base_url: None,
+            openai_display_name: None,
             openai_headers: BTreeMap::new(),
             openai_query_params: BTreeMap::new(),
             theme: "puffer".to_string(),

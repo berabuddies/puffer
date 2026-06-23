@@ -1,17 +1,21 @@
-//! Bridges uploaded chat attachments to agent-readable local paths.
+//! Bridges uploaded chat attachments to model-readable turn inputs.
 //!
-//! The desktop agent turn receives only a text placeholder like
-//! `[Image: 1.jpg]`. Without a real path the model guesses where images
-//! live (e.g. the TCC-protected `~/Pictures/Photos Library.photoslibrary`)
-//! and crashes. This module materializes each staged attachment to a temp
-//! path the agent's `Read` / `VisionAnalyze` tools can access, and builds
-//! the model-facing message text that references those paths.
+//! File attachments can still be materialized to temp paths for the `Read`
+//! tool. Image attachments are hydrated to transient `data:` URLs on
+//! `AppState` immediately before provider execution.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use puffer_core::AppState;
 use puffer_session_store::{SessionStore, StoredAttachment, StoredAttachmentKind};
 use uuid::Uuid;
+
+const MAX_MODEL_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_MODEL_IMAGE_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_MODEL_IMAGES_PER_REQUEST: usize = 10;
 
 /// A staged attachment plus the temp path it was materialized to (`None` if
 /// the source bytes were missing or the copy failed).
@@ -132,37 +136,103 @@ pub(crate) fn cleanup_session_attachments(session_id: Uuid) {
     let _ = std::fs::remove_dir_all(session_temp_dir(session_id));
 }
 
-/// Builds the text the model receives: the original message plus a labeled
-/// block listing each attachment's local path. Returns the original
-/// unchanged when there are no attachments.
-pub(crate) fn build_model_input(original: &str, materialized: &[MaterializedAttachment]) -> String {
-    if materialized.is_empty() {
-        return original.to_string();
+fn model_image_mime_type(attachment: &StoredAttachment) -> Result<&str> {
+    match attachment.mime_type.as_str() {
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif" => {
+            Ok(attachment.mime_type.as_str())
+        }
+        other => anyhow::bail!(
+            "unsupported image attachment MIME type `{other}` for {} ({})",
+            attachment.name,
+            attachment.id
+        ),
     }
+}
 
+/// Fills in-memory data URLs for image attachments referenced by the transcript.
+pub(crate) fn hydrate_model_image_urls(
+    state: &mut AppState,
+    store: &SessionStore,
+    session_id: Uuid,
+) -> Result<()> {
+    let mut image_count = 0usize;
+    let mut total_image_bytes = 0u64;
+    for message in &mut state.transcript {
+        for rendered in &mut message.attachments {
+            if rendered.attachment.kind != StoredAttachmentKind::Image {
+                continue;
+            }
+            image_count += 1;
+            if image_count > MAX_MODEL_IMAGES_PER_REQUEST {
+                anyhow::bail!(
+                    "too many image attachments in model request history (max {MAX_MODEL_IMAGES_PER_REQUEST})"
+                );
+            }
+            if rendered.attachment.size > MAX_MODEL_IMAGE_BYTES {
+                anyhow::bail!(
+                    "image attachment {} ({}) exceeds {MAX_MODEL_IMAGE_BYTES} bytes",
+                    rendered.attachment.name,
+                    rendered.attachment.id
+                );
+            }
+            total_image_bytes = total_image_bytes.saturating_add(rendered.attachment.size);
+            if total_image_bytes > MAX_MODEL_IMAGE_TOTAL_BYTES {
+                anyhow::bail!(
+                    "image attachments exceed total model request budget of {MAX_MODEL_IMAGE_TOTAL_BYTES} bytes"
+                );
+            }
+            let _ = model_image_mime_type(&rendered.attachment)?;
+        }
+    }
+    for message in &mut state.transcript {
+        for rendered in &mut message.attachments {
+            if rendered.attachment.kind != StoredAttachmentKind::Image {
+                continue;
+            }
+            let mime_type = model_image_mime_type(&rendered.attachment)?;
+            let path = store.attachment_original_path(session_id, &rendered.attachment);
+            let bytes = std::fs::read(&path).with_context(|| {
+                format!(
+                    "read image attachment {} ({})",
+                    rendered.attachment.name, rendered.attachment.id
+                )
+            })?;
+            if bytes.len() as u64 != rendered.attachment.size {
+                anyhow::bail!(
+                    "image attachment {} ({}) size changed before model request",
+                    rendered.attachment.name,
+                    rendered.attachment.id
+                );
+            }
+            rendered.model_url = Some(format!(
+                "data:{mime_type};base64,{}",
+                BASE64_STANDARD.encode(bytes)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Builds the text the model receives: the original message plus a labeled
+/// block listing each file attachment's local path. Returns the original
+/// unchanged when there are no file attachments.
+pub(crate) fn build_model_input(original: &str, materialized: &[MaterializedAttachment]) -> String {
     let lines: Vec<String> = materialized
         .iter()
-        .map(|m| {
-            let label = match m.attachment.kind {
-                StoredAttachmentKind::Image => "Image",
-                StoredAttachmentKind::File => "File",
-            };
-            match &m.path {
-                Some(path) => {
-                    let hint = match m.attachment.kind {
-                        StoredAttachmentKind::Image => "read this path with VisionAnalyze or Read",
-                        StoredAttachmentKind::File => "read this path with Read",
-                    };
-                    format!(
-                        "[{label}: {} \u{2192} {} \u{2014} {hint}]",
-                        m.attachment.name,
-                        path.display()
-                    )
-                }
-                None => format!("[{label}: {} (unavailable)]", m.attachment.name),
-            }
+        .filter(|m| m.attachment.kind == StoredAttachmentKind::File)
+        .map(|m| match &m.path {
+            Some(path) => format!(
+                "[File: {} -> {} - read this path with Read]",
+                m.attachment.name,
+                path.display()
+            ),
+            None => format!("[File: {} (unavailable)]", m.attachment.name),
         })
         .collect();
+
+    if lines.is_empty() {
+        return original.to_string();
+    }
 
     let mut out = original.to_string();
     if !out.trim().is_empty() {
@@ -204,6 +274,21 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    fn sample_session_metadata(session: Uuid, cwd: &Path) -> puffer_session_store::SessionMetadata {
+        puffer_session_store::SessionMetadata {
+            id: session,
+            display_name: None,
+            generated_title: None,
+            cwd: cwd.to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        }
     }
 
     #[test]
@@ -269,15 +354,114 @@ mod tests {
     }
 
     #[test]
-    fn build_model_input_appends_image_path_with_hint() {
+    fn build_model_input_does_not_emit_image_path_hints() {
         let m = vec![MaterializedAttachment {
             attachment: attachment("1.jpg", StoredAttachmentKind::Image),
             path: Some(PathBuf::from("/tmp/puffer-attachments/s/i/1.jpg")),
         }];
-        let out = build_model_input("analyze this image", &m);
-        assert!(out.starts_with("analyze this image"));
-        assert!(out.contains("/tmp/puffer-attachments/s/i/1.jpg"));
-        assert!(out.contains("VisionAnalyze"));
+
+        let out = build_model_input("read image", &m);
+
+        assert_eq!(out, "read image");
+        assert!(!out.contains("/tmp/puffer-attachments"));
+        assert!(!out.contains("VisionAnalyze"));
+    }
+
+    #[test]
+    fn hydrate_model_image_urls_sets_data_url() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, session) = test_store(temp.path());
+        let att = stage(&store, session, "pixel.png");
+        let metadata = puffer_session_store::SessionMetadata {
+            id: session,
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = puffer_core::AppState::new(
+            puffer_config::PufferConfig::default(),
+            temp.path().to_path_buf(),
+            metadata,
+        );
+        state.push_user_message_with_attachments(
+            "[Image: pixel.png]",
+            vec![puffer_core::RenderedAttachment::from_stored(att)],
+        );
+
+        hydrate_model_image_urls(&mut state, &store, session).unwrap();
+
+        let url = state.transcript[0].attachments[0]
+            .model_url
+            .as_deref()
+            .expect("model url");
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(url.ends_with("AQID"));
+    }
+
+    #[test]
+    fn hydrate_model_image_urls_rejects_missing_original() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, session) = test_store(temp.path());
+        let mut att = stage(&store, session, "pixel.png");
+        att.id = "22222222-2222-2222-2222-222222222222".to_string();
+        let metadata = sample_session_metadata(session, temp.path());
+        let mut state = puffer_core::AppState::new(
+            puffer_config::PufferConfig::default(),
+            temp.path().to_path_buf(),
+            metadata,
+        );
+        state.push_user_message_with_attachments(
+            "[Image: pixel.png]",
+            vec![puffer_core::RenderedAttachment::from_stored(att)],
+        );
+
+        let err = hydrate_model_image_urls(&mut state, &store, session).unwrap_err();
+
+        assert!(err.to_string().contains("read image attachment"));
+    }
+
+    #[test]
+    fn hydrate_model_image_urls_rejects_total_image_budget_before_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, session) = test_store(temp.path());
+        let attachments = (0..3)
+            .map(|index| {
+                let mut att = stage(&store, session, &format!("pixel-{index}.png"));
+                att.size = 18 * 1024 * 1024;
+                att
+            })
+            .map(puffer_core::RenderedAttachment::from_stored)
+            .collect::<Vec<_>>();
+        let metadata = sample_session_metadata(session, temp.path());
+        let mut state = puffer_core::AppState::new(
+            puffer_config::PufferConfig::default(),
+            temp.path().to_path_buf(),
+            metadata,
+        );
+        state.push_user_message_with_attachments("[Image: pixels]", attachments);
+
+        let err = hydrate_model_image_urls(&mut state, &store, session).unwrap_err();
+
+        assert!(err.to_string().contains("total model request budget"));
+    }
+
+    #[test]
+    fn build_model_input_appends_file_path_with_hint() {
+        let m = vec![MaterializedAttachment {
+            attachment: attachment("report.pdf", StoredAttachmentKind::File),
+            path: Some(PathBuf::from("/tmp/puffer-attachments/s/i/report.pdf")),
+        }];
+        let out = build_model_input("read file", &m);
+        assert!(out.starts_with("read file"));
+        assert!(out.contains("/tmp/puffer-attachments/s/i/report.pdf"));
+        assert!(out.contains("read this path with Read"));
+        assert!(!out.contains("VisionAnalyze"));
     }
 
     #[test]
@@ -288,7 +472,7 @@ mod tests {
         }];
         let out = build_model_input("see file", &m);
         assert!(out.contains("[File: gone.pdf (unavailable)]"));
-        assert!(!out.contains("\u{2192}"));
+        assert!(!out.contains("->"));
     }
 
     #[test]

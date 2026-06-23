@@ -179,6 +179,7 @@ mod tests {
             tool_id: None,
             tool_input: None,
             success: None,
+            attachments: Vec::new(),
         }
     }
 

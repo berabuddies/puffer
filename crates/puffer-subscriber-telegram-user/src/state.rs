@@ -80,6 +80,11 @@ impl SkillEnv {
     pub fn history_cache_path(&self) -> PathBuf {
         self.state_dir.join("telegram-history-cache.json")
     }
+
+    /// Returns the path used to persist local read/reply activity metadata.
+    pub fn activity_state_path(&self) -> PathBuf {
+        self.state_dir.join("telegram-activity-state.json")
+    }
 }
 
 /// Persisted Telegram API credentials + last-used phone, written after a

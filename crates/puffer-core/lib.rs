@@ -106,7 +106,10 @@ pub use runtime::{
     TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use runtime::{install_observability, observability_handle};
-pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
+pub use state::{
+    AppState, MessageRole, MonitorTaskCreateGateContext, RenderedAttachment, RenderedMessage,
+    TaskRecord, TaskStatus,
+};
 
 use anyhow::Result;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};

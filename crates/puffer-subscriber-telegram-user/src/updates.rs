@@ -8,6 +8,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::activity_state::record_read_inbox_activity;
 use crate::delivery::{emit_live_message_if_new, DeliveryCursor};
 use crate::notifications::NotificationMuteCache;
 use crate::state::SkillEnv;
@@ -133,6 +134,7 @@ pub(crate) async fn handle_live_update(
         } => {
             append_update_diagnostic(env, "handling_raw", raw_kind, Some("raw"), received_at_ms);
             notification_mutes.apply_raw_update(&raw);
+            record_read_history_inbox(env, &raw);
         }
         LiveUpdateEvent::Update {
             raw_kind,
@@ -156,6 +158,30 @@ pub(crate) async fn handle_live_update(
         LiveUpdateEvent::Error(_) => unreachable!("handled before dispatch"),
     }
     Ok(())
+}
+
+fn record_read_history_inbox(env: &SkillEnv, update: &tl::enums::Update) {
+    let tl::enums::Update::ReadHistoryInbox(update) = update else {
+        return;
+    };
+    let Some(chat_id) = peer_user_chat_id(&update.peer) else {
+        return;
+    };
+    if let Err(error) = record_read_inbox_activity(env, chat_id, i64::from(update.max_id)) {
+        tracing::warn!(
+            chat = %chat_id,
+            max_id = update.max_id,
+            %error,
+            "failed to record Telegram read inbox activity"
+        );
+    }
+}
+
+fn peer_user_chat_id(peer: &tl::enums::Peer) -> Option<i64> {
+    match peer {
+        tl::enums::Peer::User(peer) => Some(peer.user_id),
+        _ => None,
+    }
 }
 
 fn append_update_diagnostic(

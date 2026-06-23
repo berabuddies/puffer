@@ -121,6 +121,7 @@ models:
     context_window: 1041920
     max_output_tokens: 128000
     supports_reasoning: true
+    input: [text, image]
   - id: gpt-5.4
     display_name: GPT-5.4
     provider: openai
@@ -128,6 +129,7 @@ models:
     context_window: 1047576
     max_output_tokens: 128000
     supports_reasoning: true
+    input: [text, image]
   - id: gpt-5.4-mini
     display_name: GPT-5.4 Mini
     provider: openai
@@ -135,6 +137,7 @@ models:
     context_window: 400000
     max_output_tokens: 128000
     supports_reasoning: true
+    input: [text, image]
   - id: gpt-5.4-nano
     display_name: GPT-5.4 Nano
     provider: openai
@@ -149,6 +152,7 @@ models:
     context_window: 400000
     max_output_tokens: 128000
     supports_reasoning: true
+    input: [text, image]
   - id: gpt-5-mini
     display_name: GPT-5 Mini
     provider: openai
@@ -156,3 +160,4 @@ models:
     context_window: 400000
     max_output_tokens: 128000
     supports_reasoning: true
+    input: [text, image]

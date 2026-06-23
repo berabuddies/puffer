@@ -292,23 +292,23 @@ pub(super) fn setup_completions_session(
         },
     )?;
     let response_format = openai_chat_response_format(options.structured_output, use_native);
-    let tools = {
-        let mut t = openai_chat_completion_tools_for_request(
-            &registry,
-            options.structured_output,
-            use_native,
-            Some(&permission_context),
-        )?;
-        if !options.excluded_tools.is_empty() {
-            t.retain(|tool| {
-                options
-                    .excluded_tools
-                    .iter()
-                    .all(|ex| ex.as_str() != tool.function.name.as_str())
-            });
-        }
-        t
-    };
+    let mut tools = openai_chat_completion_tools_for_request(
+        &registry,
+        options.structured_output,
+        use_native,
+        Some(&permission_context),
+    )?;
+    if !options.excluded_tools.is_empty() {
+        tools.retain(|tool| {
+            options
+                .excluded_tools
+                .iter()
+                .all(|ex| ex.as_str() != tool.function.name.as_str())
+        });
+    }
+    if super::super::state_has_image_attachments(state) {
+        tools.retain(|tool| tool.function.name != "VisionAnalyze");
+    }
     let (system_prompt, managed_system_prompt_1, plan_mode_context, system_reminder) =
         if options.lightweight_context {
             (

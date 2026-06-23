@@ -63,8 +63,8 @@ use puffer_provider_registry::{
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{
-    MessageActor, SessionMetadata, SessionStore, StoredAttachment, TranscriptEvent,
-    TurnBoundaryState,
+    MessageActor, SessionMetadata, SessionStore, StoredAttachment, StoredAttachmentKind,
+    TranscriptEvent, TurnBoundaryState,
 };
 use puffer_transport_anthropic::{
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
@@ -1478,6 +1478,12 @@ async fn dispatch_request(
         ),
         "monitor_history_list" | "task_monitor_history_list" => respond!(
             crate::daemon_workflows::handle_monitor_history_list(&state.paths, &params)
+        ),
+        "monitor_trace_list" | "task_monitor_trace_list" => respond!(
+            crate::daemon_workflows::handle_monitor_trace_list(&state.paths, &params)
+        ),
+        "telegram_diagnostics_export" | "task_telegram_diagnostics_export" => respond!(
+            crate::daemon_workflows::handle_telegram_diagnostics_export(&state.paths, &params)
         ),
         "workflow_binding_delete" => respond!(
             crate::daemon_workflows::handle_workflow_binding_delete(&state.paths, &params)
@@ -5047,27 +5053,50 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 .append_event(session_uuid, app_state.snapshot_event());
         }
 
-        // Materialize uploaded attachments to agent-readable temp paths and
-        // build the model-facing message that references them. The persisted
-        // transcript event below keeps the original text so the UI is
-        // unchanged; `model_input` must be used at BOTH push_message and the
-        // turn call so `transcript_to_items` dedups to a single user message.
-        // `push_message` stores `model_input` in the in-memory `app_state`, so
-        // the path-annotated text (not the UI text) is what later continuation
-        // turns re-send as history — intentional and benign: the `/tmp` paths
-        // are deterministic and never rendered in the UI, which always replays
-        // the original `UserMessage` event.
-        let materialized = crate::attachment_bridge::materialize_attachments(
+        // File attachments still receive temp path hints for Read. Image
+        // attachments stay as metadata here and hydrate to transient data URLs
+        // on AppState below.
+        let file_attachments = staged_attachments_for_thread
+            .iter()
+            .filter(|attachment| attachment.kind == StoredAttachmentKind::File)
+            .cloned()
+            .collect::<Vec<_>>();
+        let materialized_files = crate::attachment_bridge::materialize_attachments(
             &inputs.session_store,
             session_uuid,
-            &staged_attachments_for_thread,
+            &file_attachments,
         );
         let model_input =
-            crate::attachment_bridge::build_model_input(&message_for_thread, &materialized);
+            crate::attachment_bridge::build_model_input(&message_for_thread, &materialized_files);
+
+        app_state.push_user_message_with_attachments(
+            model_input.clone(),
+            staged_attachments_for_thread
+                .iter()
+                .cloned()
+                .map(puffer_core::RenderedAttachment::from_stored)
+                .collect(),
+        );
+        if let Err(err) = crate::attachment_bridge::hydrate_model_image_urls(
+            &mut app_state,
+            &inputs.session_store,
+            session_uuid,
+        ) {
+            publish_turn_error_event(
+                &setup_state,
+                &channel_thread,
+                &session_id_for_thread,
+                &turn_id_thread,
+                format!("{err:#}"),
+                None,
+                Some("attachment-hydration"),
+            );
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
 
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
-        app_state.push_message(MessageRole::User, model_input.clone());
         if !user_prompt_persisted_thread.swap(true, Ordering::SeqCst) {
             let _ = inputs.session_store.append_event(
                 session_uuid,

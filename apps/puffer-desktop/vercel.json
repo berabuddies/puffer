@@ -1,5 +1,7 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build-storybook",
   "outputDirectory": "storybook-static",
-  "installCommand": "npm ci"
+  "installCommand": "npm ci",
+  "ignoreCommand": "git diff HEAD^ HEAD --quiet -- .storybook src public package.json package-lock.json pnpm-lock.yaml vite.config.ts svelte.config.js tsconfig.json"
 }

@@ -523,6 +523,7 @@ mod tests {
             }),
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         };
         let run = store
             .append_action_result(
@@ -558,6 +559,7 @@ mod tests {
             usage: None,
             turn_started_at_ms: Some(150),
             turn_ended_at_ms: Some(190),
+            triage_decisions: Vec::new(),
         };
         let run = store
             .complete_action_result(started.idx, &triage(), &result, 100, 200)
@@ -608,6 +610,7 @@ mod tests {
                 usage: None,
                 turn_started_at_ms: None,
                 turn_ended_at_ms: None,
+                triage_decisions: Vec::new(),
             };
             store
                 .complete_action_result(started.idx, &triage(), &result, 10, 30)
@@ -654,6 +657,7 @@ mod tests {
             usage: None,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         };
         // idx 1 is the running run
         store
@@ -701,6 +705,7 @@ mod tests {
             usage: None,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         };
         store
             .complete_action_result(started.idx, &triage(), &result, 10, 30)
@@ -740,6 +745,7 @@ mod tests {
             usage: None,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         };
         store
             .complete_action_result(started.idx, &triage(), &result, 10, 30)
@@ -813,6 +819,7 @@ mod tests {
             usage: None,
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         };
         store
             .complete_action_result(started.idx, &triage(), &result, 100, 200)
@@ -858,6 +865,7 @@ mod tests {
             }),
             turn_started_at_ms: None,
             turn_ended_at_ms: None,
+            triage_decisions: Vec::new(),
         };
         let completed = store
             .complete_action_result(started.idx, &action, &result, 10, 30)

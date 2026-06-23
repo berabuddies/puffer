@@ -26,8 +26,9 @@ use super::system_prompt::render_runtime_system_prompt;
 use super::tool_executor::{execute_tool_call, ToolExecutionBackend};
 use super::{
     enforce_tool_result_budget, git_status_context, process_tool_result, resolve_max_output_tokens,
-    send_http_request, send_http_request_with_proxy, ToolCallRequest, ToolInvocation,
-    TurnExecution, TurnRequestOptions, TurnStreamEvent, APP_VERSION, MAX_TOOL_RESULT_CHARS,
+    send_http_request, send_http_request_with_proxy, state_has_image_attachments, ToolCallRequest,
+    ToolInvocation, TurnExecution, TurnRequestOptions, TurnStreamEvent, APP_VERSION,
+    MAX_TOOL_RESULT_CHARS,
 };
 use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::AppState;
@@ -118,22 +119,22 @@ fn setup_anthropic_session(
         },
     )?;
 
-    let tools = {
-        let mut t = anthropic_tool_definitions_for_request(
-            &registry,
-            options.structured_output,
-            Some(&permission_context),
-        )?;
-        if !options.excluded_tools.is_empty() {
-            t.retain(|tool| {
-                !tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| options.excluded_tools.iter().any(|ex| ex == name))
-            });
-        }
-        t
-    };
+    let mut tools = anthropic_tool_definitions_for_request(
+        &registry,
+        options.structured_output,
+        Some(&permission_context),
+    )?;
+    if !options.excluded_tools.is_empty() {
+        tools.retain(|tool| {
+            !tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| options.excluded_tools.iter().any(|ex| ex == name))
+        });
+    }
+    if state_has_image_attachments(state) {
+        tools.retain(|tool| tool.get("name").and_then(Value::as_str) != Some("VisionAnalyze"));
+    }
 
     let system_prompt = render_runtime_system_prompt(
         state,

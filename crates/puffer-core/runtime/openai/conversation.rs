@@ -329,7 +329,24 @@ pub(crate) fn transcript_to_items(state: &AppState, input: &str) -> Vec<Conversa
         .transcript
         .iter()
         .flat_map(|message| match message.role {
-            crate::MessageRole::User => vec![ConversationItem::user_message(&message.text)],
+            crate::MessageRole::User => {
+                let mut content = vec![ContentPart::Text {
+                    text: message.text.clone(),
+                }];
+                for attachment in &message.attachments {
+                    if attachment.attachment.kind
+                        == puffer_session_store::StoredAttachmentKind::Image
+                    {
+                        if let Some(url) = attachment.model_url.as_ref() {
+                            content.push(ContentPart::Image { url: url.clone() });
+                        }
+                    }
+                }
+                vec![ConversationItem::Message {
+                    role: "user".to_string(),
+                    content,
+                }]
+            }
             crate::MessageRole::Assistant => {
                 vec![ConversationItem::assistant_message(&message.text)]
             }
@@ -366,8 +383,10 @@ pub(crate) fn transcript_to_items(state: &AppState, input: &str) -> Vec<Conversa
             items.last(),
             Some(ConversationItem::Message { role, content })
                 if role == "user"
-                    && content.len() == 1
-                    && matches!(&content[0], ContentPart::Text { text } if text == input)
+                    && matches!(
+                        content.first(),
+                        Some(ContentPart::Text { text }) if text == input
+                    )
         );
         if !already_present {
             items.push(ConversationItem::user_message(input));
@@ -575,12 +594,6 @@ fn drop_transient_system_messages(items: &[ConversationItem]) -> Vec<&Conversati
 fn item_to_responses_value(item: &ConversationItem) -> Value {
     match item {
         ConversationItem::Message { role, content } => {
-            let text = content_parts_to_text(content);
-            let content_block = if role == "assistant" {
-                json!([{"type": "output_text", "text": text, "annotations": []}])
-            } else {
-                json!([{"type": "input_text", "text": text}])
-            };
             let wire_role = if role == "system" {
                 "user"
             } else {
@@ -590,7 +603,7 @@ fn item_to_responses_value(item: &ConversationItem) -> Value {
             let mut val = json!({
                 "type": "message",
                 "role": wire_role,
-                "content": content_block,
+                "content": responses_content_value(role, content),
             });
             if role == "assistant" {
                 val["status"] = json!("completed");
@@ -635,6 +648,33 @@ fn item_to_responses_value(item: &ConversationItem) -> Value {
             })
         }
     }
+}
+
+fn responses_content_value(role: &str, content: &[ContentPart]) -> Value {
+    let has_images = content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }));
+    if role != "user" || !has_images {
+        let text = content_parts_to_text(content);
+        if role == "assistant" {
+            return json!([{"type": "output_text", "text": text, "annotations": []}]);
+        }
+        return json!([{"type": "input_text", "text": text}]);
+    }
+
+    let parts = content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } if !text.is_empty() => {
+                Some(json!({ "type": "input_text", "text": text }))
+            }
+            ContentPart::Image { url } if role == "user" => {
+                Some(json!({ "type": "input_image", "image_url": url }))
+            }
+            ContentPart::Text { .. } | ContentPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    json!(parts)
 }
 
 /// Extract plain text from ContentPart array (joining Text blocks with newline).
@@ -698,8 +738,7 @@ pub(crate) fn items_to_chat_messages(
     while i < items.len() {
         match &items[i] {
             ConversationItem::Message { role, content } => {
-                let text = content_parts_to_text(content);
-                messages.push(chat_message(role, &text));
+                messages.push(chat_message_value(role, chat_content_value(role, content)));
                 i += 1;
             }
             ConversationItem::FunctionCall { .. } => {
@@ -768,13 +807,40 @@ pub(crate) fn items_to_chat_messages(
 }
 
 fn chat_message(role: &str, content: &str) -> OpenAIChatMessage {
+    chat_message_value(role, json!(content))
+}
+
+fn chat_message_value(role: &str, content: Value) -> OpenAIChatMessage {
     OpenAIChatMessage {
         role: role.to_string(),
-        content: Some(json!(content)),
+        content: Some(content),
         tool_call_id: None,
         tool_calls: Vec::new(),
         reasoning_content: None,
     }
+}
+
+fn chat_content_value(role: &str, content: &[ContentPart]) -> Value {
+    let has_images = content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }));
+    if role != "user" || !has_images {
+        return json!(content_parts_to_text(content));
+    }
+
+    let parts = content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } if !text.is_empty() => {
+                Some(json!({ "type": "text", "text": text }))
+            }
+            ContentPart::Image { url } => {
+                Some(json!({ "type": "image_url", "image_url": { "url": url } }))
+            }
+            ContentPart::Text { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    json!(parts)
 }
 
 // ---------------------------------------------------------------------------
@@ -805,8 +871,7 @@ pub(crate) fn items_to_anthropic_messages(items: &[ConversationItem]) -> Vec<Val
                     i += 1;
                     continue;
                 }
-                let text = content_parts_to_text(content);
-                push_or_merge(&mut messages, role, json!(text));
+                push_or_merge(&mut messages, role, anthropic_content_value(content));
                 i += 1;
             }
             ConversationItem::FunctionCall { .. } => {
@@ -948,6 +1013,45 @@ pub(crate) fn items_to_anthropic_messages(items: &[ConversationItem]) -> Vec<Val
     }
 
     messages
+}
+
+fn anthropic_image_source_from_data_url(url: &str) -> Option<Value> {
+    let (header, data) = url.strip_prefix("data:")?.split_once(";base64,")?;
+    match header {
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif" => Some(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": header,
+                "data": data,
+            }
+        })),
+        _ => None,
+    }
+}
+
+fn anthropic_content_value(content: &[ContentPart]) -> Value {
+    let has_images = content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }));
+    if !has_images {
+        return json!(content_parts_to_text(content));
+    }
+
+    let parts = content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } if !text.is_empty() => {
+                Some(json!({ "type": "text", "text": text }))
+            }
+            ContentPart::Image { url } => Some(
+                anthropic_image_source_from_data_url(url)
+                    .expect("native image gate validates Anthropic image data URLs"),
+            ),
+            ContentPart::Text { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    json!(parts)
 }
 
 /// Pushes a content value to the message list, merging with the last message
@@ -1226,7 +1330,7 @@ pub(crate) fn build_summary_text(items: &[ConversationItem]) -> String {
     for item in items {
         match item {
             ConversationItem::Message { role, content } => {
-                let full = content_parts_to_text(content);
+                let full = content_parts_summary_text(content);
                 let preview: String = full.chars().take(500).collect();
                 text.push_str(&format!("[{role}]: {preview}\n\n"));
             }
@@ -1250,6 +1354,27 @@ pub(crate) fn build_summary_text(items: &[ConversationItem]) -> String {
         }
     }
     text
+}
+
+fn content_parts_summary_text(content: &[ContentPart]) -> String {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } if !text.is_empty() => Some(text.clone()),
+            ContentPart::Image { url } => Some(image_summary_marker(url)),
+            ContentPart::Text { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn image_summary_marker(url: &str) -> String {
+    let media_type = url
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(";base64,"))
+        .map(|(media_type, _)| media_type)
+        .unwrap_or("image");
+    format!("[image attachment: {media_type}]")
 }
 
 /// Generates an AI summary of old context via the Responses API.
@@ -1357,6 +1482,128 @@ mod tests {
             note: None,
         };
         AppState::new(PufferConfig::default(), PathBuf::from("/tmp"), meta)
+    }
+
+    fn image_item() -> ConversationItem {
+        ConversationItem::Message {
+            role: "user".to_string(),
+            content: vec![
+                ContentPart::Text {
+                    text: "read it".to_string(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,AQID".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn native_image_transcript_to_items_emits_image_parts() {
+        let mut state = crate::runtime::tests::state();
+        let attachment = puffer_session_store::StoredAttachment {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            name: "pixel.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: 3,
+            extension: "PNG".to_string(),
+            kind: puffer_session_store::StoredAttachmentKind::Image,
+            storage_key: "11111111-1111-1111-1111-111111111111/original".to_string(),
+        };
+        state.push_user_message_with_attachments(
+            "read it",
+            vec![crate::RenderedAttachment::from_stored(attachment)
+                .with_model_url("data:image/png;base64,AQID".to_string())],
+        );
+
+        let items = transcript_to_items(&state, "read it");
+
+        let ConversationItem::Message { content, .. } = &items[0] else {
+            panic!("expected user message");
+        };
+        assert!(matches!(content[0], ContentPart::Text { .. }));
+        assert_eq!(
+            content[1],
+            ContentPart::Image {
+                url: "data:image/png;base64,AQID".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn native_image_transcript_to_items_deduplicates_current_input_with_image_parts() {
+        let mut state = crate::runtime::tests::state();
+        let attachment = puffer_session_store::StoredAttachment {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            name: "pixel.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: 3,
+            extension: "PNG".to_string(),
+            kind: puffer_session_store::StoredAttachmentKind::Image,
+            storage_key: "11111111-1111-1111-1111-111111111111/original".to_string(),
+        };
+        state.push_user_message_with_attachments(
+            "read it",
+            vec![crate::RenderedAttachment::from_stored(attachment)
+                .with_model_url("data:image/png;base64,AQID".to_string())],
+        );
+
+        let items = transcript_to_items(&state, "read it");
+
+        let user_messages = items
+            .iter()
+            .filter(|item| matches!(item, ConversationItem::Message { role, .. } if role == "user"))
+            .count();
+        assert_eq!(user_messages, 1);
+    }
+
+    #[test]
+    fn native_image_chat_messages_serializes_image_url() {
+        let items = vec![image_item()];
+
+        let messages = items_to_chat_messages(&items, None, None, None, None);
+
+        let content = messages[0].content.as_ref().expect("content");
+        assert_eq!(content[0]["type"], json!("text"));
+        assert_eq!(content[0]["text"], json!("read it"));
+        assert_eq!(content[1]["type"], json!("image_url"));
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            json!("data:image/png;base64,AQID")
+        );
+    }
+
+    #[test]
+    fn native_image_responses_input_serializes_input_image() {
+        let input = items_to_responses_input(&[image_item()]);
+
+        let content = input[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], json!("input_text"));
+        assert_eq!(content[0]["text"], json!("read it"));
+        assert_eq!(content[1]["type"], json!("input_image"));
+        assert_eq!(content[1]["image_url"], json!("data:image/png;base64,AQID"));
+    }
+
+    #[test]
+    fn native_image_anthropic_messages_serializes_image_block() {
+        let messages = items_to_anthropic_messages(&[image_item()]);
+
+        let content = messages[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], json!("text"));
+        assert_eq!(content[0]["text"], json!("read it"));
+        assert_eq!(content[1]["type"], json!("image"));
+        assert_eq!(content[1]["source"]["type"], json!("base64"));
+        assert_eq!(content[1]["source"]["media_type"], json!("image/png"));
+        assert_eq!(content[1]["source"]["data"], json!("AQID"));
+    }
+
+    #[test]
+    fn native_image_build_summary_text_uses_marker_without_data_url() {
+        let summary = build_summary_text(&[image_item()]);
+
+        assert!(summary.contains("[image attachment: image/png]"));
+        assert!(!summary.contains("data:image/png;base64"));
+        assert!(!summary.contains("AQID"));
     }
 
     #[test]
@@ -2391,6 +2638,7 @@ mod tests {
             tool_id: None,
             tool_input: None,
             success: Some(false),
+            attachments: Vec::new(),
         });
         let items = transcript_to_items(&state, "");
         // Find the FunctionCallOutput

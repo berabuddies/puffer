@@ -28,6 +28,7 @@ mod contacts;
 mod event_schema;
 mod history;
 mod manager;
+mod monitor_trace;
 mod protocol;
 mod proxy;
 mod router;
@@ -43,8 +44,8 @@ mod telegram_e2e_tests;
 pub use action::{
     install_connector_action_executor, install_outbound, install_workflow_runner,
     installed_workflow_runner, ActionDispatcher, ActionResult, ActionUsage,
-    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, WorkflowActionOutput,
-    WorkflowActionRunner,
+    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, TriageDecision,
+    TriageDecisionOutcome, WorkflowActionOutput, WorkflowActionRunner,
 };
 pub use catalog::{
     builtin_connector_template, builtin_connector_templates, suggested_connection_slug,
@@ -75,6 +76,10 @@ pub use history::{
 };
 pub use manager::{
     ConnectionAuthChecker, ConnectionAuthStatus, SubscriptionManager, SubscriptionManagerBuilder,
+};
+pub use monitor_trace::{
+    MonitorTraceIdentity, MonitorTraceMessage, MonitorTraceStage, MonitorTraceStageStatus,
+    MonitorTraceStatus, MonitorTraceStore, MonitorTraceStoreError,
 };
 pub use protocol::{
     ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,

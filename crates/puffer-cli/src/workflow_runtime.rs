@@ -3,20 +3,22 @@ use puffer_config::{load_config, ConfigPaths, PufferConfig};
 use puffer_core::{
     execute_tool_action_once, execute_user_turn_streaming,
     execute_user_turn_streaming_excluding_tools, execute_user_turn_streaming_without_tools,
-    AppState, TurnStreamEvent,
+    AppState, MonitorTaskCreateGateContext, TurnStreamEvent,
 };
 use puffer_provider_registry::{canonical_provider_id, AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, BACKGROUND_SESSION_TAG};
 use puffer_subscriber_telegram_user::TelegramHistoryCache;
 use puffer_subscriptions::{
-    install_workflow_runner, ActionUsage, WorkflowActionOutput, WorkflowActionRunner,
+    install_workflow_runner, ActionUsage, TriageDecision, TriageDecisionOutcome,
+    WorkflowActionOutput, WorkflowActionRunner,
 };
 use puffer_workflow::{
     AgentExecution, AgentExecutor, CronDeduper, CronExpression, DagRunner, ExecutionContext,
     TriggerSpec, WorkflowStore,
 };
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -28,6 +30,9 @@ use time::{OffsetDateTime, UtcOffset};
 const OPENAI_TASK_AGENT_MODEL: &str = "gpt-5.4-mini";
 const ANTHROPIC_TASK_AGENT_MODEL: &str = "claude-haiku-4-5-20251001";
 const TELEGRAM_CONVERSATION_CONTEXT_LIMIT: usize = 8;
+const NO_TASK_DECISION_MARKER: &str = "NO_TASK_DECISIONS:";
+const MAX_TRIAGE_REASON_CHARS: usize = 240;
+const MAX_TRIAGE_POLICY_CHARS: usize = 80;
 
 /// Owns native workflow trigger hooks for the current process.
 pub(crate) struct WorkflowRuntime {
@@ -182,14 +187,48 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         });
         let prompt = render_triage_batch_prompt(prompt, &triggers)?;
         let session_key = triage_session_key(model, &triggers);
-        let output =
-            self.run_task_agent_prompt_for_session(prompt, model, &session_key, is_outgoing)?;
+        let task_snapshot_before = match load_monitor_task_trace_values(&self.paths) {
+            Ok(tasks) => Some(tasks),
+            Err(error) => {
+                tracing::warn!(%error, "failed to read monitor tasks before triage");
+                None
+            }
+        };
+        let gate_contexts = monitor_task_create_gate_contexts(&self.paths, &triggers);
+        let mut output = self.run_task_agent_prompt_for_session(
+            prompt,
+            model,
+            &session_key,
+            is_outgoing,
+            gate_contexts,
+        )?;
+        let task_decisions = match task_snapshot_before {
+            Some(before) => match load_monitor_task_trace_values(&self.paths) {
+                Ok(after) => monitor_task_trace_decisions(&before, &after, &triggers),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to read monitor tasks after triage");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
         for trigger in &triggers {
             // Server-owned grounding: stamp each trigger's verbatim event text
             // onto any monitor task the triage turn created for that envelope.
             if let Err(error) = record_monitor_source_text(&self.paths, trigger) {
                 tracing::warn!(%error, "failed to record verbatim monitor source text");
             }
+        }
+        if !task_decisions.is_empty() {
+            let task_envelopes: HashSet<&str> = task_decisions
+                .iter()
+                .map(|decision| decision.envelope_id.as_str())
+                .collect();
+            output.triage_decisions.retain(|decision| {
+                decision.outcome != TriageDecisionOutcome::NoTask
+                    || !task_envelopes.contains(decision.envelope_id.as_str())
+            });
+            output.triage_decisions.extend(task_decisions);
         }
         Ok(output)
     }
@@ -279,6 +318,7 @@ impl ProcessWorkflowRunner {
         model: Option<&str>,
         session_key: &str,
         is_outgoing: bool,
+        gate_contexts: Vec<MonitorTaskCreateGateContext>,
     ) -> Result<WorkflowActionOutput> {
         let _guard = workflow_runner_lock(&self.lock);
         let cwd = self.paths.workspace_root.clone();
@@ -298,6 +338,7 @@ impl ProcessWorkflowRunner {
         // human-gated monitor tasks; the reply-approval gate stays enforced on the
         // separate reply-send path.
         state.monitor_triage_turn = true;
+        state.set_monitor_task_create_gate_contexts(gate_contexts);
         let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         // Post-lock stamp: history's run window starts at router dispatch, so
@@ -350,8 +391,10 @@ impl ProcessWorkflowRunner {
                 },
             )?
         };
+        let triage_decisions = extract_no_task_decisions(&output.assistant_text);
         Ok(
             WorkflowActionOutput::with_usage(output.assistant_text, usage)
+                .with_triage_decisions(triage_decisions)
                 .with_turn_window(turn_started_at_ms, now_unix_ms()),
         )
     }
@@ -424,7 +467,7 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
     let trigger_label = if triggers.len() == 1 {
         "Workflow trigger"
     } else {
-        "Hourly monitor digest triggers"
+        "Monitor digest triggers"
     };
     // Stamp each trigger with its direction (incoming/outgoing) so the triage
     // agent can apply the completion protocol to the right messages.
@@ -456,12 +499,226 @@ fn render_triage_batch_prompt(prompt: &str, triggers: &[serde_json::Value]) -> R
     let digest_guidance = if triggers.len() == 1 {
         String::new()
     } else {
-        "\n\nHourly digest policy:\n- Treat the triggers below as one conversation/time-window, not as independent task requests.\n- First infer the conversation-level intent, then create only consolidated tasks that still require attention.\n- Treat greetings, acknowledgements, casual chatter, and informational messages as context/noise unless they change the next action.\n- Do not create a separate task for each short question or each individual message.\n- Task subjects must be imperative next actions, not topic summaries. Prefer \"Review PR #404 and decide the triage approach\" over \"PR #404 discussion\".\n- Task descriptions must explain why the action is needed, cite the source request/context, and state the concrete next step.\n- When creating a task, copy the most relevant trigger's `envelope_id` into `metadata.monitor_envelope_id` so source grounding can be attached."
+        "\n\nMonitor digest policy:\n- Treat the triggers below as one conversation/time-window, not as independent task requests.\n- First infer the conversation-level intent, then create only consolidated tasks that still require attention.\n- Treat greetings, acknowledgements, casual chatter, and informational messages as context/noise unless they change the next action.\n- Do not create a separate task for each short question or each individual message.\n- Task subjects must be imperative next actions, not topic summaries. Prefer \"Review PR #404 and decide the triage approach\" over \"PR #404 discussion\".\n- Task descriptions must explain why the action is needed, cite the source request/context, and state the concrete next step.\n- When creating a task, copy the most relevant trigger's `envelope_id` into `metadata.monitor_envelope_id` so source grounding can be attached.\n- If one consolidated task depends on multiple triggers, also copy every contributing trigger `envelope_id` into `metadata.monitor_envelope_ids` as a JSON array. Do not include unrelated/noise triggers in that array."
             .to_string()
     };
+    let no_task_diagnostics = "\n\nNo-task diagnostic output:\n- Diagnostic only: do not change task creation, update, or completion decisions to satisfy this output.\n- After any task tool calls and your normal answer, append a compact block only for triggers that did not create, update, or complete a task.\n- The block must start with `NO_TASK_DECISIONS:` and contain a JSON array. Each item must use the trigger's exact `envelope_id`, `outcome: \"no_task\"`, a short `policy`, and a short `reason`.\n- Include only no_task items; do not include successful task-created/task-updated triggers.\n- Keep `reason` under 160 Chinese characters or 240 total characters. Do not copy the full source message.\nExample:\nNO_TASK_DECISIONS:\n```json\n[{\"envelope_id\":\"env-123\",\"outcome\":\"no_task\",\"policy\":\"status_update_no_action\",\"reason\":\"这是状态通知，没有请求你处理。\"}]\n```";
     Ok(format!(
-        "{prompt}{digest_guidance}\n\n{trigger_label}:\n```json\n{trigger}\n```"
+        "{prompt}{digest_guidance}{no_task_diagnostics}\n\n{trigger_label}:\n```json\n{trigger}\n```"
     ))
+}
+
+fn extract_no_task_decisions(text: &str) -> Vec<TriageDecision> {
+    let Some(json_text) = no_task_decision_json_text(text) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(json_text.trim()) else {
+        return Vec::new();
+    };
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items.iter().filter_map(parse_no_task_decision).collect()
+}
+
+fn no_task_decision_json_text(text: &str) -> Option<&str> {
+    let after_marker = text.split_once(NO_TASK_DECISION_MARKER)?.1.trim_start();
+    let Some(fenced) = after_marker.strip_prefix("```") else {
+        return Some(after_marker.trim());
+    };
+    let body_start = fenced.find('\n').map(|index| index + 1).unwrap_or(0);
+    let body = &fenced[body_start..];
+    let body = body
+        .split_once("\n```")
+        .map(|(body, _)| body)
+        .or_else(|| body.split_once("```").map(|(body, _)| body))
+        .unwrap_or(body);
+    Some(body.trim())
+}
+
+fn parse_no_task_decision(value: &Value) -> Option<TriageDecision> {
+    let outcome = value
+        .get("outcome")
+        .and_then(Value::as_str)
+        .map(str::trim)?;
+    if outcome != "no_task" {
+        return None;
+    }
+    let envelope_id = value
+        .get("envelope_id")
+        .and_then(Value::as_str)
+        .and_then(|value| normalize_capped(value, usize::MAX))?;
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .and_then(|value| normalize_capped(value, MAX_TRIAGE_REASON_CHARS))?;
+    let policy = value
+        .get("policy")
+        .and_then(Value::as_str)
+        .and_then(|value| normalize_capped(value, MAX_TRIAGE_POLICY_CHARS));
+    Some(TriageDecision {
+        envelope_id,
+        outcome: TriageDecisionOutcome::NoTask,
+        policy,
+        reason,
+    })
+}
+
+fn load_monitor_task_trace_values(paths: &ConfigPaths) -> Result<Vec<Value>> {
+    let path = monitor_task_store_path(paths);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()))
+        }
+    };
+    let value: Value =
+        serde_json::from_str(&raw).with_context(|| format!("invalid {}", path.display()))?;
+    if let Some(tasks) = value.as_array() {
+        return Ok(tasks.clone());
+    }
+    Ok(value
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn monitor_task_trace_decisions(
+    before: &[Value],
+    after: &[Value],
+    triggers: &[Value],
+) -> Vec<TriageDecision> {
+    let trigger_envelopes: HashSet<String> = triggers
+        .iter()
+        .filter_map(|trigger| value_string(trigger, &["envelope_id"]))
+        .collect();
+    if trigger_envelopes.is_empty() {
+        return Vec::new();
+    }
+    let before_by_id: HashMap<String, &Value> = before
+        .iter()
+        .filter_map(|task| task_identifier(task).map(|task_id| (task_id, task)))
+        .collect();
+    let mut decisions = Vec::new();
+    let mut seen_envelopes = HashSet::new();
+    for task in after {
+        let envelope_ids: Vec<String> = task_envelope_ids(task)
+            .into_iter()
+            .filter(|envelope_id| trigger_envelopes.contains(envelope_id))
+            .collect();
+        if envelope_ids.is_empty() {
+            continue;
+        };
+        let Some(task_id) = task_identifier(task) else {
+            continue;
+        };
+        let outcome = match before_by_id.get(&task_id) {
+            None => TriageDecisionOutcome::TaskCreated,
+            Some(previous) if *previous != task => TriageDecisionOutcome::TaskUpdated,
+            Some(_) => continue,
+        };
+        let verb = match outcome {
+            TriageDecisionOutcome::TaskCreated => "Created",
+            TriageDecisionOutcome::TaskUpdated => "Updated",
+            TriageDecisionOutcome::NoTask => "Processed",
+        };
+        for envelope_id in envelope_ids {
+            if !seen_envelopes.insert(envelope_id.clone()) {
+                continue;
+            }
+            decisions.push(TriageDecision {
+                envelope_id,
+                outcome,
+                policy: Some("monitor_task_store_diff".to_string()),
+                reason: format!("{verb} monitor task {task_id}."),
+            });
+        }
+    }
+    decisions
+}
+
+fn task_identifier(task: &Value) -> Option<String> {
+    value_string(task, &["task_id", "taskId", "id"])
+}
+
+fn task_envelope_ids(task: &Value) -> Vec<String> {
+    let mut envelope_ids = Vec::new();
+    for envelope_id in
+        task_strings_in_metadata(task, &["monitor_envelope_ids", "monitorEnvelopeIds"])
+    {
+        push_unique_string(&mut envelope_ids, envelope_id);
+    }
+    if let Some(envelope_id) =
+        task_string_in_metadata(task, &["monitor_envelope_id", "monitorEnvelopeId"])
+    {
+        push_unique_string(&mut envelope_ids, envelope_id);
+    }
+    envelope_ids
+}
+
+fn task_string_in_metadata(task: &Value, keys: &[&str]) -> Option<String> {
+    value_string(task, keys).or_else(|| {
+        task.get("metadata")
+            .and_then(|metadata| value_string(metadata, keys))
+    })
+}
+
+fn task_strings_in_metadata(task: &Value, keys: &[&str]) -> Vec<String> {
+    let mut values = value_strings(task, keys);
+    if let Some(metadata) = task.get("metadata") {
+        values.extend(value_strings(metadata, keys));
+    }
+    values
+}
+
+fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let Some(value) = value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        return Some(value.to_string());
+    }
+    None
+}
+
+fn value_strings(value: &Value, keys: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    for key in keys {
+        let Some(array) = value.get(*key).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in array {
+            if let Some(value) = item
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                push_unique_string(&mut values, value.to_string());
+            }
+        }
+    }
+    values
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn normalize_capped(value: &str, max_chars: usize) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.chars().take(max_chars).collect())
 }
 
 fn enrich_monitor_trigger_context(paths: &ConfigPaths, mut trigger: Value) -> Result<Value> {
@@ -822,6 +1079,80 @@ fn triage_session_key(model: Option<&str>, triggers: &[serde_json::Value]) -> St
     format!("monitor-triage:{connection}:{model}")
 }
 
+fn monitor_task_create_gate_contexts(
+    paths: &ConfigPaths,
+    triggers: &[serde_json::Value],
+) -> Vec<MonitorTaskCreateGateContext> {
+    triggers
+        .iter()
+        .filter_map(|trigger| monitor_task_create_gate_context(paths, trigger))
+        .collect()
+}
+
+fn monitor_task_create_gate_context(
+    paths: &ConfigPaths,
+    trigger: &serde_json::Value,
+) -> Option<MonitorTaskCreateGateContext> {
+    let connection_slug = trigger
+        .get("connection_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if !connection_slug.contains("telegram") || !safe_path_component(connection_slug) {
+        return None;
+    }
+    let envelope_id = trigger
+        .get("envelope_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let payload = trigger.get("payload")?;
+    let chat_id = value_i64_field(payload, "chat_id")?;
+    let chat_kind = payload
+        .get("chat_kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("user");
+    if chat_kind != "user" {
+        return None;
+    }
+    let source_message_id = value_i64_field(payload, "message_id")?;
+    let connector_slug = trigger
+        .get("connector_id")
+        .or_else(|| trigger.get("connector_slug"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| Some("telegram-login".to_string()));
+    Some(MonitorTaskCreateGateContext {
+        envelope_id: envelope_id.to_string(),
+        connection_slug: connection_slug.to_string(),
+        connector_slug,
+        chat_id,
+        chat_kind: chat_kind.to_string(),
+        source_message_id,
+        source_date_ms: value_i64_field(payload, "date_ms"),
+        activity_state_path: paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join(connection_slug)
+            .join("telegram-activity-state.json"),
+        monitor_trace_path: Some(paths.workspace_config_dir.join("monitor_trace.json")),
+    })
+}
+
+fn value_i64_field(value: &Value, key: &str) -> Option<i64> {
+    match value.get(key)? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok())),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
 /// Stamps the trigger's verbatim source grounding onto monitor tasks created
 /// for that envelope: the exact event text (`metadata.source_text`, plus
 /// `source_context.text`), the source message id (`metadata.source_message_id`,
@@ -855,11 +1186,7 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
         .get("payload")
         .and_then(|payload| payload.get("conversation_context"))
         .cloned();
-    let path = paths
-        .workspace_config_dir
-        .join("runtime")
-        .join("claude_workflow")
-        .join("monitor_tasks.json");
+    let path = monitor_task_store_path(paths);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -976,6 +1303,14 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(())
+}
+
+fn monitor_task_store_path(paths: &ConfigPaths) -> PathBuf {
+    paths
+        .workspace_config_dir
+        .join("runtime")
+        .join("claude_workflow")
+        .join("monitor_tasks.json")
 }
 
 struct PufferAgentExecutor {
@@ -1251,7 +1586,7 @@ fn local_now() -> OffsetDateTime {
 mod tests {
     use super::{
         apply_authenticated_provider_fallback, apply_task_agent_model_default,
-        authenticated_fallback_provider, render_triage_batch_prompt,
+        authenticated_fallback_provider, extract_no_task_decisions, render_triage_batch_prompt,
         selected_provider_id_for_model, triage_session_key, AuthStore, ProviderRegistry,
     };
     use puffer_config::PufferConfig;
@@ -1392,6 +1727,55 @@ mod tests {
     }
 
     #[test]
+    fn monitor_task_create_gate_contexts_build_for_direct_telegram_trigger() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let triggers = vec![json!({
+            "connection_id": "telegram-user",
+            "connector_id": "telegram-login",
+            "envelope_id": "env-6836",
+            "payload": {
+                "chat_id": 42,
+                "chat_kind": "user",
+                "message_id": 6836,
+                "date_ms": 1000
+            }
+        })];
+
+        let contexts = super::monitor_task_create_gate_contexts(&paths, &triggers);
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].envelope_id, "env-6836");
+        assert_eq!(contexts[0].chat_id, 42);
+        assert_eq!(contexts[0].source_message_id, 6836);
+        assert_eq!(contexts[0].source_date_ms, Some(1000));
+        assert!(contexts[0]
+            .activity_state_path
+            .ends_with("telegram-accounts/telegram-user/telegram-activity-state.json"));
+    }
+
+    #[test]
+    fn monitor_task_create_gate_contexts_skip_group_telegram_trigger() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = puffer_config::set_puffer_home_override(temp.path());
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let triggers = vec![json!({
+            "connection_id": "telegram-user",
+            "envelope_id": "env-group",
+            "payload": {
+                "chat_id": -10042,
+                "chat_kind": "group",
+                "message_id": 6836
+            }
+        })];
+
+        let contexts = super::monitor_task_create_gate_contexts(&paths, &triggers);
+
+        assert!(contexts.is_empty());
+    }
+
+    #[test]
     fn render_triage_batch_prompt_renders_multiple_triggers_as_digest() {
         let triggers = vec![
             json!({"connection_id": "telegram-user", "text": "first"}),
@@ -1400,9 +1784,10 @@ mod tests {
 
         let prompt = render_triage_batch_prompt("Monitor prompt", &triggers).unwrap();
 
-        assert!(prompt.contains("Hourly monitor digest triggers:"));
+        assert!(prompt.contains("Monitor digest triggers:"));
         assert!(prompt.contains("Do not create a separate task for each short question"));
         assert!(prompt.contains("Task subjects must be imperative next actions"));
+        assert!(prompt.contains("metadata.monitor_envelope_ids"));
         assert!(prompt.contains("\"first\""));
         assert!(prompt.contains("\"second\""));
     }
@@ -1416,7 +1801,125 @@ mod tests {
         assert!(prompt.contains("Workflow trigger:"));
         assert!(prompt.contains("\"first\""));
         assert!(prompt.contains("\"connection_id\""));
+        assert!(prompt.contains("NO_TASK_DECISIONS"));
+        assert!(prompt.contains("envelope_id"));
+        assert!(prompt.contains("Diagnostic only"));
         assert!(!prompt.contains("[\n  {"));
+    }
+
+    #[test]
+    fn extract_no_task_decisions_parses_marked_json_block() {
+        let text = r#"No task.
+
+NO_TASK_DECISIONS:
+```json
+[
+  {
+    "envelope_id": "env-1",
+    "outcome": "no_task",
+    "policy": "status_update_no_action",
+    "reason": "这是状态通知，没有请求你回复、决策或处理。"
+  },
+  {
+    "envelope_id": "env-2",
+    "outcome": "task_created",
+    "policy": "action_required",
+    "reason": "ignored because MVP only records no_task"
+  }
+]
+```"#;
+
+        let decisions = extract_no_task_decisions(text);
+
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].envelope_id, "env-1");
+        assert_eq!(
+            decisions[0].outcome,
+            puffer_subscriptions::TriageDecisionOutcome::NoTask
+        );
+        assert_eq!(
+            decisions[0].policy.as_deref(),
+            Some("status_update_no_action")
+        );
+        assert_eq!(
+            decisions[0].reason,
+            "这是状态通知，没有请求你回复、决策或处理。"
+        );
+    }
+
+    #[test]
+    fn monitor_task_trace_decisions_detects_created_and_updated_tasks() {
+        let before = vec![json!({
+            "task_id": "monitor-2",
+            "subject": "旧任务",
+            "metadata": { "monitor_envelope_id": "env-old" }
+        })];
+        let after = vec![
+            json!({
+                "task_id": "monitor-7",
+                "subject": "18:00 前给结论",
+                "metadata": { "monitor_envelope_id": "env-1" }
+            }),
+            json!({
+                "task_id": "monitor-2",
+                "subject": "19:00 前给结论",
+                "metadata": { "monitor_envelope_id": "env-2" }
+            }),
+            json!({
+                "task_id": "monitor-9",
+                "subject": "非本次触发",
+                "metadata": { "monitor_envelope_id": "env-other" }
+            }),
+        ];
+        let triggers = vec![
+            json!({ "envelope_id": "env-1" }),
+            json!({ "envelope_id": "env-2" }),
+            json!({ "envelope_id": "env-3" }),
+        ];
+
+        let decisions = super::monitor_task_trace_decisions(&before, &after, &triggers);
+
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].envelope_id, "env-1");
+        assert_eq!(
+            decisions[0].outcome,
+            puffer_subscriptions::TriageDecisionOutcome::TaskCreated
+        );
+        assert_eq!(decisions[1].envelope_id, "env-2");
+        assert_eq!(
+            decisions[1].outcome,
+            puffer_subscriptions::TriageDecisionOutcome::TaskUpdated
+        );
+    }
+
+    #[test]
+    fn monitor_task_trace_decisions_fans_out_digest_task_envelopes() {
+        let before = Vec::new();
+        let after = vec![json!({
+            "task_id": "monitor-7",
+            "subject": "18:00 前给结论",
+            "metadata": {
+                "monitor_envelope_id": "env-3",
+                "monitor_envelope_ids": ["env-1", "env-2", "env-3", "env-other"]
+            }
+        })];
+        let triggers = vec![
+            json!({ "envelope_id": "env-1" }),
+            json!({ "envelope_id": "env-2" }),
+            json!({ "envelope_id": "env-3" }),
+            json!({ "envelope_id": "env-noise" }),
+        ];
+
+        let decisions = super::monitor_task_trace_decisions(&before, &after, &triggers);
+
+        let envelopes: Vec<&str> = decisions
+            .iter()
+            .map(|decision| decision.envelope_id.as_str())
+            .collect();
+        assert_eq!(envelopes, vec!["env-1", "env-2", "env-3"]);
+        assert!(decisions.iter().all(|decision| {
+            decision.outcome == puffer_subscriptions::TriageDecisionOutcome::TaskCreated
+        }));
     }
 
     #[test]
