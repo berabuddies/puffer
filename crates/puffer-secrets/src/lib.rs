@@ -746,12 +746,15 @@ fn set_private_permissions(path: &Path) {
 /// Create-and-write `bytes` to `path`. On Windows the file is created with
 /// `create_new` + `FILE_FLAG_OPEN_REPARSE_POINT` so a privileged writer (e.g. the
 /// SYSTEM-context Windows Chrome v20 import) cannot be redirected by a reparse point
-/// a lower-privileged same-user process pre-planted at the path — the Windows
+/// a lower-privileged same-user process pre-planted at the LEAF path — the Windows
 /// Temp/AppData TOCTOU symlink class. A stale file is removed first (best-effort) to
 /// preserve overwrite semantics; if a racer re-plants in that gap, `create_new`
-/// fails closed rather than following the link. On other platforms this is a plain
-/// create+truncate write, byte-identical to `fs::write` (there the daemon writes as
-/// the user into its own 0700 directory, so the reparse class does not apply).
+/// fails closed rather than following the link. The flag guards only the final
+/// component; a junction on an intermediate directory is not covered here — the SYSTEM
+/// caller (do_import) separately refuses to proceed if the vault dir is a reparse
+/// point. On other platforms this is a plain create+truncate write, byte-identical to
+/// `fs::write` (there the daemon writes as the user into its own 0700 directory, so
+/// the reparse class does not apply).
 pub(crate) fn write_file_no_follow(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(windows)]
     {

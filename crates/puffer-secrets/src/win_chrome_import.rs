@@ -314,6 +314,24 @@ fn do_import(user: &str, token_pid: u32, vault_dir: &str) -> Result<String> {
         }
     }
 
+    // Defense-in-depth before this SYSTEM-context process writes inside the
+    // user-writable vault dir: refuse if the dir is itself a reparse point. The
+    // per-file writes use write_file_no_follow (which only guards the LEAF
+    // component), so a same-user process pre-planting `.puffer` as a junction could
+    // otherwise redirect every vault write out of the profile. This catches the
+    // persistent-junction case; it is not a complete TOCTOU fix (a racer could plant
+    // after this check — a handle-relative write would be needed to fully close it).
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let dir = std::path::Path::new(vault_dir);
+        if let Ok(meta) = std::fs::symlink_metadata(dir) {
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                bail!("refusing to import: vault directory is a reparse point");
+            }
+        }
+    }
+
     let path = SecretVault::default_path(std::path::Path::new(vault_dir));
     let vault = SecretVault::open(&path)?;
     let (mut imported, mut skipped, mut errors) = (0usize, 0usize, 0usize);
@@ -362,15 +380,18 @@ fn result_path(user: &str, pid: u32) -> PathBuf {
     ))
 }
 
-/// Writes the SYSTEM-stage result line WITHOUT following a reparse point, failing
-/// if anything already exists at the path. The result file lives in the user's own
-/// (unprivileged-writable) Temp and this runs as SYSTEM, so a concurrent same-user
-/// process could otherwise pre-plant a junction / object-manager symlink at the
-/// predictable path and redirect this privileged write to an arbitrary target —
-/// the classic Temp TOCTOU local-privilege-escalation. `create_new` fails if
-/// anything is already there and `FILE_FLAG_OPEN_REPARSE_POINT` never traverses a
-/// reparse point, so the worst a racer can achieve is making the write fail (the
-/// import is then reported as producing no result), never an out-of-Temp redirect.
+/// Writes the SYSTEM-stage result line WITHOUT following a reparse point on the LEAF
+/// path component, failing if anything already exists at the path. The result file
+/// lives in the user's own (unprivileged-writable) Temp and this runs as SYSTEM, so
+/// a concurrent same-user process could otherwise pre-plant a junction /
+/// object-manager symlink at the predictable filename and redirect this privileged
+/// write to an arbitrary target — the classic Temp TOCTOU local-privilege-escalation.
+/// `create_new` fails if anything is already there and `FILE_FLAG_OPEN_REPARSE_POINT`
+/// never traverses a reparse point at the final component, so a racer can at most
+/// make the write fail (import reported as no-result), never redirect the leaf.
+/// (Caveat: this flag only guards the final component — a junction on an
+/// intermediate directory is not covered here; the standard Temp ancestors are not
+/// realistically re-plantable, unlike the vault dir which do_import checks directly.)
 fn write_result_no_follow(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::windows::fs::OpenOptionsExt;
