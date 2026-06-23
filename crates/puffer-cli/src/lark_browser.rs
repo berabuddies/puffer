@@ -267,6 +267,8 @@ fn build_message_event(
     is_outgoing: bool,
     source: &str,
     dedup_key: &str,
+    unread: bool,
+    conversation_type: &str,
 ) -> Event {
     Event {
         topic: platform.to_string(),
@@ -283,6 +285,8 @@ fn build_message_event(
             "source": source,
             "event_type": "message",
             "receivedAtMs": now_ms(),
+            "unread": unread,
+            "conversation_type": conversation_type,
         }),
     }
 }
@@ -452,6 +456,8 @@ pub(crate) fn process_feed_poll(
                 row.is_outgoing,
                 "feed",
                 &key,
+                row.unread,
+                &row.conversation_type,
             ));
         }
     }
@@ -502,6 +508,8 @@ pub(crate) fn process_active_drain(
                 msg.is_outgoing,
                 "active",
                 &key,
+                false,
+                "person",
             ));
         }
     }
@@ -766,6 +774,7 @@ mod emit_tests {
             preview: preview.into(),
             unread: true,
             is_outgoing: out,
+            conversation_type: "person".into(),
         }
     }
 
@@ -792,6 +801,8 @@ mod emit_tests {
             true,
             "feed",
             "c1:123:abc",
+            false,
+            "person",
         );
         assert_eq!(ev.payload["chat_id"], "123");
         assert_eq!(ev.payload["is_outgoing"], true);
@@ -800,6 +811,24 @@ mod emit_tests {
         assert_eq!(ev.payload["event_type"], "message");
         assert_eq!(ev.kind, "message");
         assert_eq!(ev.dedup_key.as_deref(), Some("c1:123:abc"));
+    }
+
+    #[test]
+    fn feed_event_payload_has_unread_and_conversation_type() {
+        let ev = build_message_event(
+            "lark-browser",
+            "lark",
+            "42",
+            "Bob",
+            "hello",
+            false,
+            "feed",
+            "conn:42:xyz",
+            true,
+            "bot",
+        );
+        assert_eq!(ev.payload["unread"], true);
+        assert_eq!(ev.payload["conversation_type"], "bot");
     }
 
     // --- process_feed_poll loaded-gate tests ---
@@ -1140,6 +1169,7 @@ mod tests {
             preview: "hello".into(),
             unread: false,
             is_outgoing: false,
+            conversation_type: "person".into(),
         };
         let key = feed_dedup_key("my-conn", &r);
         assert!(key.starts_with("my-conn:999:"));

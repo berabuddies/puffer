@@ -40,7 +40,12 @@ pub(crate) const LARK_FEED_SCRIPT: &str = r#"(() => {
     const preview = (c.textContent || '').replace(name, '').trim().slice(0, 200);
     const unread = !!c.querySelector('[class*="badge" i]');
     const outgoing = /^you[:：]/i.test(preview);
-    return { chat_id, name, preview, unread, outgoing };
+    const ctText = (c.textContent || '');
+    const conversation_type = /\bBOT\b|机器人/.test(ctText) ? 'bot'
+      : /\bExternal\b|外部/.test(ctText) ? 'external'
+      : /\bOfficial\b|官方/.test(ctText) ? 'official'
+      : 'person';
+    return { chat_id, name, preview, unread, outgoing, conversation_type };
   }).filter(r => r.chat_id);
   return JSON.stringify({ loaded, rows });
 })()"#;
@@ -60,6 +65,7 @@ pub(crate) struct FeedRow {
     pub preview: String,
     pub unread: bool,
     pub is_outgoing: bool,
+    pub conversation_type: String,
 }
 
 pub(crate) fn parse_feed_rows(result: &serde_json::Value) -> Vec<FeedRow> {
@@ -73,6 +79,7 @@ pub(crate) fn parse_feed_rows(result: &serde_json::Value) -> Vec<FeedRow> {
                 preview: r.get("preview").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 unread: r.get("unread").and_then(|v| v.as_bool()).unwrap_or(false),
                 is_outgoing: r.get("outgoing").and_then(|v| v.as_bool()).unwrap_or(false),
+                conversation_type: r.get("conversation_type").and_then(|v| v.as_str()).unwrap_or("person").to_string(),
             })
         }).collect()
     }).unwrap_or_default()
@@ -225,5 +232,15 @@ mod feed_tests {
     fn skips_rows_without_chat_id() {
         let result = json!({"rows": [{"name": "x", "preview": "y"}]});
         assert!(parse_feed_rows(&result).is_empty());
+    }
+
+    #[test]
+    fn parses_conversation_type_and_unread() {
+        let result = serde_json::json!({"rows": [
+            {"chat_id": "1", "name": "审批 Assistant", "preview": "x", "unread": true, "outgoing": false, "conversation_type": "bot"}
+        ]});
+        let rows = parse_feed_rows(&result);
+        assert_eq!(rows[0].conversation_type, "bot");
+        assert!(rows[0].unread);
     }
 }
