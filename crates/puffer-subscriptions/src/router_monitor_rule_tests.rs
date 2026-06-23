@@ -321,6 +321,18 @@ mod monitor_rule_tests {
                 bundled_connector_schema("lark-bot"),
                 15,
             ),
+            (
+                "lark-browser",
+                "lark-browser",
+                bundled_schema("lark-browser"),
+                19,
+            ),
+            (
+                "feishu-browser",
+                "feishu-browser",
+                bundled_schema("feishu-browser"),
+                19,
+            ),
         ]
     }
 
@@ -749,7 +761,9 @@ mod monitor_rule_tests {
         assert_eq!(per_connector["telegram-bot"], 7);
         assert_eq!(per_connector["lark-login"], 15);
         assert_eq!(per_connector["lark-bot"], 15);
-        assert_eq!(cases.len(), 106);
+        assert_eq!(per_connector["lark-browser"], 19);
+        assert_eq!(per_connector["feishu-browser"], 19);
+        assert_eq!(cases.len(), 144);
 
         let mut mode_template_count = 0;
         let mut expected_actions = 0;
@@ -827,8 +841,8 @@ mod monitor_rule_tests {
             }
         }
 
-        assert_eq!(mode_template_count, 212);
-        assert_eq!(expected_actions, 208);
+        assert_eq!(mode_template_count, 288);
+        assert_eq!(expected_actions, 284);
         assert_eq!(recording.topics.lock().unwrap().len(), expected_actions);
     }
 
