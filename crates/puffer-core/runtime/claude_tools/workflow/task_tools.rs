@@ -48,15 +48,19 @@ pub(super) fn execute_task_create(
         );
     }
     let monitor_task = is_monitor_task_metadata(&metadata);
-    if monitor_task {
-        normalize_monitor_task_metadata(&mut metadata);
-        validate_monitor_task_metadata(&metadata)?;
-    }
     if monitor_task && received_at.is_none() {
         bail!("monitor TaskCreate requires receivedAt in RFC3339 format");
     }
     if monitor_task && expires_at.is_none() {
         bail!("monitor TaskCreate requires expiresAt in RFC3339 format");
+    }
+    if monitor_task {
+        validate_monitor_task_metadata(&metadata)?;
+        if let Some(skip) = monitor_task_source_scope_skip(state, &metadata) {
+            return Ok(serde_json::to_string_pretty(&skip)?);
+        }
+        normalize_monitor_task_metadata(&mut metadata);
+        validate_monitor_task_metadata(&metadata)?;
     }
     if let Some(gate) = apply_monitor_task_create_gate(state, &mut metadata) {
         record_monitor_task_create_gate_trace(&gate);
@@ -75,6 +79,11 @@ pub(super) fn execute_task_create(
         tasks_path(state.session.cwd.as_path(), &state.session.id)
     };
     let mut store = load_store::<TaskStore>(&tp)?;
+    if monitor_task {
+        if let Some(skip) = duplicate_monitor_task_skip(&store.tasks, &metadata, &parsed.subject) {
+            return Ok(serde_json::to_string_pretty(&skip)?);
+        }
+    }
     let task = StoredTask {
         task_id: if monitor_task {
             next_monitor_task_id(&store.tasks)
@@ -202,7 +211,7 @@ pub(super) fn execute_task_list(
                 .unwrap_or(false)
         })
         .map(|task| {
-            json!({
+            let mut item = json!({
                 "id": task.task_id,
                 "subject": task.subject,
                 "status": task.status,
@@ -215,7 +224,11 @@ pub(super) fn execute_task_list(
                     .filter(|task_id| !resolved.contains(task_id.as_str()))
                     .cloned()
                     .collect::<Vec<_>>(),
-            })
+            });
+            if let Some(source) = compact_monitor_source(task) {
+                item["monitorSource"] = source;
+            }
+            item
         })
         .collect::<Vec<_>>();
     Ok(serde_json::to_string_pretty(&json!({ "tasks": tasks }))?)
@@ -714,6 +727,141 @@ struct TelegramActivityEvaluation {
     error: Option<String>,
 }
 
+fn monitor_task_source_scope_skip(
+    state: &AppState,
+    metadata: &Map<String, Value>,
+) -> Option<Value> {
+    if state.monitor_task_create_gate_contexts.is_empty()
+        || !metadata_is_direct_telegram_monitor(state, metadata)
+    {
+        return None;
+    }
+    let envelope_id = metadata_string(metadata, &["monitor_envelope_id", "monitorEnvelopeId"]);
+    let Some(envelope_id) = envelope_id.as_deref() else {
+        return Some(monitor_task_skip_payload(
+            "untrusted_monitor_source",
+            None,
+            Some(json!({
+                "source": "monitor_source_scope",
+                "decision": "skip_untrusted_source",
+                "reason": "missing_monitor_envelope_id",
+                "allowed_envelope_ids": current_gate_envelope_ids(state, metadata),
+            })),
+        ));
+    };
+    if !current_gate_context_matches(state, metadata, envelope_id) {
+        return Some(monitor_task_skip_payload(
+            "untrusted_monitor_source",
+            None,
+            Some(json!({
+                "source": "monitor_source_scope",
+                "decision": "skip_untrusted_source",
+                "reason": "monitor_envelope_id_not_in_current_batch",
+                "envelope_id": envelope_id,
+                "allowed_envelope_ids": current_gate_envelope_ids(state, metadata),
+            })),
+        ));
+    }
+    for envelope_id in monitor_envelope_ids(metadata) {
+        if !current_gate_context_matches(state, metadata, &envelope_id) {
+            return Some(monitor_task_skip_payload(
+                "untrusted_monitor_source",
+                None,
+                Some(json!({
+                    "source": "monitor_source_scope",
+                    "decision": "skip_untrusted_source",
+                    "reason": "monitor_envelope_ids_contains_non_current_source",
+                    "envelope_id": envelope_id,
+                    "allowed_envelope_ids": current_gate_envelope_ids(state, metadata),
+                })),
+            ));
+        }
+    }
+    None
+}
+
+fn metadata_is_direct_telegram_monitor(state: &AppState, metadata: &Map<String, Value>) -> bool {
+    let connection_slug = metadata_string(metadata, &["monitor_connection", "monitorConnection"]);
+    let connector_slug = metadata_string(metadata, &["monitor_connector", "monitorConnector"]);
+    let is_telegram = connection_slug
+        .as_deref()
+        .is_some_and(|connection| connection.contains("telegram"))
+        || connector_slug
+            .as_deref()
+            .is_some_and(|connector| connector.contains("telegram"));
+    if !is_telegram {
+        return false;
+    }
+    let chat_kind = metadata_string(metadata, &["chat_kind", "chatKind"]).or_else(|| {
+        metadata
+            .get("source_context")
+            .or_else(|| metadata.get("sourceContext"))
+            .and_then(|context| string_field(context, &["kind"]))
+            .map(|kind| {
+                if kind == "telegram_direct_message" {
+                    "user".to_string()
+                } else {
+                    kind
+                }
+            })
+    });
+    if let Some(chat_kind) = chat_kind {
+        return is_direct_telegram_chat_kind(&chat_kind);
+    }
+    let chat_id = metadata_i64(metadata, &["chat_id", "chatId"]);
+    state
+        .monitor_task_create_gate_contexts
+        .iter()
+        .any(|context| {
+            connection_slug
+                .as_deref()
+                .is_none_or(|connection| connection == context.connection_slug)
+                && connector_matches(context.connector_slug.as_deref(), connector_slug.as_deref())
+                && chat_id.is_some_and(|chat_id| chat_id == context.chat_id)
+                && is_direct_telegram_chat_kind(&context.chat_kind)
+        })
+}
+
+fn current_gate_context_matches(
+    state: &AppState,
+    metadata: &Map<String, Value>,
+    envelope_id: &str,
+) -> bool {
+    let connection_slug = metadata_string(metadata, &["monitor_connection", "monitorConnection"]);
+    let connector_slug = metadata_string(metadata, &["monitor_connector", "monitorConnector"]);
+    let chat_id = metadata_i64(metadata, &["chat_id", "chatId"]);
+    state
+        .monitor_task_create_gate_contexts
+        .iter()
+        .any(|context| {
+            context.envelope_id == envelope_id
+                && connection_slug
+                    .as_deref()
+                    .is_none_or(|connection| connection == context.connection_slug)
+                && connector_matches(context.connector_slug.as_deref(), connector_slug.as_deref())
+                && chat_id.is_none_or(|chat_id| chat_id == context.chat_id)
+                && is_direct_telegram_chat_kind(&context.chat_kind)
+        })
+}
+
+fn current_gate_envelope_ids(state: &AppState, metadata: &Map<String, Value>) -> Vec<String> {
+    let connection_slug = metadata_string(metadata, &["monitor_connection", "monitorConnection"]);
+    let connector_slug = metadata_string(metadata, &["monitor_connector", "monitorConnector"]);
+    let chat_id = metadata_i64(metadata, &["chat_id", "chatId"]);
+    state
+        .monitor_task_create_gate_contexts
+        .iter()
+        .filter(|context| {
+            connection_slug
+                .as_deref()
+                .is_none_or(|connection| connection == context.connection_slug)
+                && connector_matches(context.connector_slug.as_deref(), connector_slug.as_deref())
+                && chat_id.is_none_or(|chat_id| chat_id == context.chat_id)
+        })
+        .map(|context| context.envelope_id.clone())
+        .collect()
+}
+
 fn apply_monitor_task_create_gate(
     state: &AppState,
     metadata: &mut Map<String, Value>,
@@ -747,6 +895,200 @@ fn apply_monitor_task_create_gate(
         context,
         gate,
     })
+}
+
+fn duplicate_monitor_task_skip(
+    tasks: &[StoredTask],
+    metadata: &Map<String, Value>,
+    subject: &str,
+) -> Option<Value> {
+    let subject = normalize_monitor_subject(subject)?;
+    let candidate_envelopes = monitor_envelope_ids(metadata);
+    let candidate_sources = monitor_source_message_ids(metadata);
+    for task in tasks {
+        if terminal_task_status(&task.status)
+            || metadata_marks_monitor_ignored(Some(&task.metadata))
+        {
+            continue;
+        }
+        if !same_monitor_task_scope(metadata, &task.metadata) {
+            continue;
+        }
+        let existing_envelopes = monitor_envelope_ids(&task.metadata);
+        if !candidate_envelopes.is_disjoint(&existing_envelopes) {
+            return Some(monitor_task_skip_payload(
+                "duplicate_source",
+                Some(task.task_id.as_str()),
+                None,
+            ));
+        }
+        let existing_sources = monitor_source_message_ids(&task.metadata);
+        if !candidate_sources.is_empty()
+            && !existing_sources.is_empty()
+            && !candidate_sources.is_disjoint(&existing_sources)
+        {
+            return Some(monitor_task_skip_payload(
+                "duplicate_source",
+                Some(task.task_id.as_str()),
+                None,
+            ));
+        }
+        if normalize_monitor_subject(&task.subject).as_deref() == Some(subject.as_str()) {
+            return Some(monitor_task_skip_payload(
+                "duplicate_monitor_task",
+                Some(task.task_id.as_str()),
+                None,
+            ));
+        }
+    }
+    None
+}
+
+fn monitor_task_skip_payload(
+    reason: &str,
+    existing_task_id: Option<&str>,
+    gate: Option<Value>,
+) -> Value {
+    let mut payload = json!({
+        "success": true,
+        "skipped": true,
+        "reason": reason,
+    });
+    if let Some(existing_task_id) = existing_task_id {
+        payload["existingTaskId"] = Value::String(existing_task_id.to_string());
+    }
+    if let Some(gate) = gate {
+        payload["gate"] = gate;
+    }
+    payload
+}
+
+fn compact_monitor_source(task: &StoredTask) -> Option<Value> {
+    if !is_monitor_task_metadata(&task.metadata) {
+        return None;
+    }
+    let mut source = Map::new();
+    if let Some(value) =
+        metadata_string(&task.metadata, &["monitor_connection", "monitorConnection"])
+    {
+        source.insert("connectionSlug".to_string(), Value::String(value));
+    }
+    if let Some(value) = metadata_string(&task.metadata, &["monitor_connector", "monitorConnector"])
+    {
+        source.insert("connectorSlug".to_string(), Value::String(value));
+    }
+    if let Some(value) = metadata_i64(&task.metadata, &["chat_id", "chatId"]) {
+        source.insert("chatId".to_string(), Value::from(value));
+    }
+    if let Some(value) = metadata_string(&task.metadata, &["chat_kind", "chatKind"]) {
+        source.insert("chatKind".to_string(), Value::String(value));
+    }
+    if let Some(value) = metadata_string(
+        &task.metadata,
+        &["monitor_envelope_id", "monitorEnvelopeId"],
+    ) {
+        source.insert("envelopeId".to_string(), Value::String(value));
+    }
+    let mut envelope_ids = monitor_envelope_ids(&task.metadata)
+        .into_iter()
+        .collect::<Vec<_>>();
+    envelope_ids.sort();
+    if envelope_ids.len() > 1 {
+        source.insert("envelopeIds".to_string(), json!(envelope_ids));
+    }
+    let mut source_message_ids = monitor_source_message_ids(&task.metadata)
+        .into_iter()
+        .collect::<Vec<_>>();
+    source_message_ids.sort();
+    if let Some(value) = source_message_ids.first() {
+        source.insert("sourceMessageId".to_string(), Value::from(*value));
+    }
+    if let Some(value) = metadata_string(&task.metadata, &["source_text", "sourceText"])
+        .and_then(|value| normalize_source_snippet(&value, 160))
+    {
+        source.insert("sourceTextSnippet".to_string(), Value::String(value));
+    }
+    (!source.is_empty()).then_some(Value::Object(source))
+}
+
+fn normalize_source_snippet(value: &str, max_chars: usize) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.chars().take(max_chars).collect())
+}
+
+fn same_monitor_task_scope(left: &Map<String, Value>, right: &Map<String, Value>) -> bool {
+    let Some(left_connection) = metadata_string(left, &["monitor_connection", "monitorConnection"])
+    else {
+        return false;
+    };
+    if metadata_string(right, &["monitor_connection", "monitorConnection"]).as_deref()
+        != Some(left_connection.as_str())
+    {
+        return false;
+    }
+    let left_connector = metadata_string(left, &["monitor_connector", "monitorConnector"]);
+    let right_connector = metadata_string(right, &["monitor_connector", "monitorConnector"]);
+    if left_connector.is_some()
+        && right_connector.is_some()
+        && left_connector.as_deref() != right_connector.as_deref()
+    {
+        return false;
+    }
+    let Some(left_chat_id) = metadata_i64(left, &["chat_id", "chatId"]) else {
+        return false;
+    };
+    metadata_i64(right, &["chat_id", "chatId"]) == Some(left_chat_id)
+}
+
+fn monitor_envelope_ids(metadata: &Map<String, Value>) -> HashSet<String> {
+    let mut envelope_ids = HashSet::new();
+    for key in ["monitor_envelope_ids", "monitorEnvelopeIds"] {
+        if let Some(items) = metadata.get(key).and_then(Value::as_array) {
+            for item in items {
+                if let Some(value) = value_to_string(item) {
+                    envelope_ids.insert(value);
+                }
+            }
+        }
+    }
+    if let Some(value) = metadata_string(metadata, &["monitor_envelope_id", "monitorEnvelopeId"]) {
+        envelope_ids.insert(value);
+    }
+    envelope_ids
+}
+
+fn monitor_source_message_ids(metadata: &Map<String, Value>) -> HashSet<i64> {
+    let mut ids = HashSet::new();
+    if let Some(id) = metadata_i64(metadata, &["source_message_id", "sourceMessageId"]) {
+        ids.insert(id);
+    }
+    for key in ["monitor_task_gate", "monitorTaskGate"] {
+        if let Some(gate) = metadata.get(key) {
+            if let Some(id) = value_i64_field(gate, &["source_message_id", "sourceMessageId"]) {
+                ids.insert(id);
+            }
+        }
+    }
+    for key in ["source_context", "sourceContext"] {
+        if let Some(context) = metadata.get(key) {
+            if let Some(id) = value_i64_field(context, &["message_id", "messageId"]) {
+                ids.insert(id);
+            }
+        }
+    }
+    ids
+}
+
+fn normalize_monitor_subject(subject: &str) -> Option<String> {
+    let normalized = subject
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn monitor_task_create_gate_context(
@@ -805,7 +1147,7 @@ fn connector_matches(left: Option<&str>, right: Option<&str>) -> bool {
 fn is_direct_telegram_chat_kind(chat_kind: &str) -> bool {
     matches!(
         chat_kind.trim().to_ascii_lowercase().as_str(),
-        "" | "user" | "private" | "direct" | "telegram_direct_message"
+        "user" | "private" | "direct" | "telegram_direct_message"
     )
 }
 
@@ -1957,6 +2299,24 @@ mod tests {
         envelope_id: &str,
         activity: Value,
     ) {
+        configure_telegram_gate_with_source_message(
+            state,
+            tmp,
+            envelope_id,
+            6836,
+            Some(1_000),
+            activity,
+        );
+    }
+
+    fn configure_telegram_gate_with_source_message(
+        state: &mut AppState,
+        tmp: &TempDir,
+        envelope_id: &str,
+        source_message_id: i64,
+        source_date_ms: Option<i64>,
+        activity: Value,
+    ) {
         let activity_path = tmp.path().join("telegram-activity-state.json");
         std::fs::write(
             &activity_path,
@@ -1969,8 +2329,8 @@ mod tests {
             connector_slug: Some("telegram-login".to_string()),
             chat_id: 42,
             chat_kind: "user".to_string(),
-            source_message_id: 6836,
-            source_date_ms: Some(1_000),
+            source_message_id,
+            source_date_ms,
             activity_state_path: activity_path,
             monitor_trace_path: None,
         }]);
@@ -2162,6 +2522,229 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["read_inbox_max_id"]
         );
+    }
+
+    #[test]
+    fn task_create_skips_telegram_monitor_when_envelope_is_not_current_batch_source() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate_with_source_message(
+            &mut state,
+            &tmp,
+            "env-current",
+            6837,
+            Some(2_000),
+            activity_state(Vec::new(), None),
+        );
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-prior-context"),
+        )
+        .expect("untrusted source should be a success-shaped skip");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["skipped"], true);
+        assert_eq!(payload["reason"], "untrusted_monitor_source");
+        let store = load_store::<TaskStore>(&monitor_tasks_path(tmp.path())).unwrap();
+        assert!(
+            store.tasks.is_empty(),
+            "monitor task from an envelope outside the current batch must not be written"
+        );
+    }
+
+    #[test]
+    fn task_create_does_not_apply_direct_source_scope_without_direct_chat_kind() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate_with_source_message(
+            &mut state,
+            &tmp,
+            "env-current",
+            6837,
+            Some(2_000),
+            activity_state(Vec::new(), None),
+        );
+        let mut input = telegram_monitor_task_input("env-prior-context");
+        input
+            .get_mut("metadata")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("chat_kind");
+        input
+            .get_mut("metadata")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "chat_id".to_string(),
+                Value::String("-10012345".to_string()),
+            );
+
+        let raw = execute_task_create(&mut state, tmp.path(), input)
+            .expect("source scope should only apply to explicit direct Telegram metadata");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            payload.pointer("/task/id").and_then(Value::as_str),
+            Some("monitor-1")
+        );
+        let store = load_store::<TaskStore>(&monitor_tasks_path(tmp.path())).unwrap();
+        assert_eq!(store.tasks.len(), 1);
+    }
+
+    #[test]
+    fn task_create_skips_duplicate_telegram_monitor_source() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(Vec::new(), None),
+        );
+        let first_raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .unwrap();
+        let first_task_id = serde_json::from_str::<Value>(&first_raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let second_raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .expect("duplicate source should be a success-shaped skip");
+        let second_payload: Value = serde_json::from_str(&second_raw).unwrap();
+
+        assert_eq!(second_payload["success"], true);
+        assert_eq!(second_payload["skipped"], true);
+        assert_eq!(second_payload["reason"], "duplicate_source");
+        assert_eq!(
+            second_payload["existingTaskId"].as_str(),
+            Some(first_task_id.as_str())
+        );
+        let store = load_store::<TaskStore>(&monitor_tasks_path(tmp.path())).unwrap();
+        assert_eq!(store.tasks.len(), 1);
+    }
+
+    #[test]
+    fn task_create_skips_duplicate_open_telegram_monitor_subject_in_same_chat() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(Vec::new(), None),
+        );
+        let first_raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .unwrap();
+        let first_task_id = serde_json::from_str::<Value>(&first_raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        configure_telegram_gate_with_source_message(
+            &mut state,
+            &tmp,
+            "env-6837",
+            6837,
+            Some(2_000),
+            activity_state(Vec::new(), None),
+        );
+        let second_raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6837"),
+        )
+        .expect("same-chat duplicate subject should be a success-shaped skip");
+        let second_payload: Value = serde_json::from_str(&second_raw).unwrap();
+
+        assert_eq!(second_payload["success"], true);
+        assert_eq!(second_payload["skipped"], true);
+        assert_eq!(second_payload["reason"], "duplicate_monitor_task");
+        assert_eq!(
+            second_payload["existingTaskId"].as_str(),
+            Some(first_task_id.as_str())
+        );
+        let store = load_store::<TaskStore>(&monitor_tasks_path(tmp.path())).unwrap();
+        assert_eq!(store.tasks.len(), 1);
+    }
+
+    #[test]
+    fn task_list_exposes_compact_monitor_source_refs() {
+        let (mut state, tmp) = make_state();
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(Vec::new(), None),
+        );
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            telegram_monitor_task_input("env-6836"),
+        )
+        .unwrap();
+        let task_id = serde_json::from_str::<Value>(&raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let store_path = monitor_tasks_path(tmp.path());
+        let mut store = load_store::<TaskStore>(&store_path).unwrap();
+        store.tasks[0].metadata.insert(
+            "source_text".to_string(),
+            Value::String("线上支付回调失败率刚升到 18%，请在 16:00 前给结论。".to_string()),
+        );
+        save_store(&store_path, &store).unwrap();
+
+        let raw = execute_task_list(&mut state, tmp.path(), json!({})).unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task = payload["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"].as_str() == Some(task_id.as_str()))
+            .unwrap();
+
+        assert_eq!(
+            task.pointer("/monitorSource/connectionSlug")
+                .and_then(Value::as_str),
+            Some("telegram-user")
+        );
+        assert_eq!(
+            task.pointer("/monitorSource/connectorSlug")
+                .and_then(Value::as_str),
+            Some("telegram-login")
+        );
+        assert_eq!(
+            task.pointer("/monitorSource/chatId")
+                .and_then(Value::as_i64),
+            Some(42)
+        );
+        assert_eq!(
+            task.pointer("/monitorSource/envelopeId")
+                .and_then(Value::as_str),
+            Some("env-6836")
+        );
+        assert_eq!(
+            task.pointer("/monitorSource/sourceMessageId")
+                .and_then(Value::as_i64),
+            Some(6836)
+        );
+        assert_eq!(
+            task.pointer("/monitorSource/sourceTextSnippet")
+                .and_then(Value::as_str),
+            Some("线上支付回调失败率刚升到 18%，请在 16:00 前给结论。")
+        );
+        assert!(task.pointer("/monitorSource/conversationContext").is_none());
     }
 
     #[test]
