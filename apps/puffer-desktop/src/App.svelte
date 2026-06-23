@@ -1998,6 +1998,7 @@
     let liveItems = cached.liveStreamItems;
     for (const req of ev.requests) {
       if (isAskUserQuestionToolName(req.toolId)) continue;
+      if (sendUserMessageText(req.toolId, req.input)) continue;
       const id = liveToolId(ev.turnId, req.callId);
       if (liveItems.some((item) => item.id === id)) continue;
       liveItems = appendCachedLiveItemForTurn(
@@ -2037,6 +2038,21 @@
     let advancesStreamAttempt = false;
     for (const inv of ev.invocations) {
       if (isAskUserQuestionToolName(inv.toolId)) continue;
+      const assistantText = sendUserMessageText(inv.toolId, inv.input);
+      if (assistantText) {
+        const id = liveAssistantMessageId(ev.turnId, inv.callId);
+        const payload: TimelineItem = timelineItemWithTurnId({
+          id,
+          kind: "assistant",
+          title: "Assistant",
+          summary: assistantText,
+          body: assistantText,
+          meta: [],
+          actor: ev.actor ?? null
+        }, ev.turnId);
+        liveItems = appendCachedLiveItem({ ...cached, liveStreamItems: liveItems }, payload);
+        continue;
+      }
       const id = liveToolId(ev.turnId, inv.callId);
       const payload: TimelineItem = timelineItemWithTurnId({
         id,
@@ -3689,6 +3705,19 @@
     return normalizedToolName(value) === "askuserquestion";
   }
 
+  function sendUserMessageText(toolId: string, inputText: string): string | null {
+    const normalized = normalizedToolName(toolId);
+    if (normalized !== "sendusermessage" && normalized !== "brief") return null;
+    const input = safeParseJson(inputText);
+    const message = input?.message;
+    if (typeof message !== "string" || !message.trim()) return null;
+    return message;
+  }
+
+  function liveAssistantMessageId(turnId: string, callId: string): string {
+    return `live-assistant-message-${turnId}-${callId}`;
+  }
+
   function normalizedGateKey(value: string | null | undefined): string {
     return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
   }
@@ -4267,6 +4296,7 @@
         // turn does not replace a previous live card while transcript reloads.
         for (const req of ev.requests) {
           if (isAskUserQuestionToolName(req.toolId)) continue;
+          if (sendUserMessageText(req.toolId, req.input)) continue;
           const id = liveToolId(ev.turnId, req.callId);
           if (liveStreamItems.some((x) => x.id === id)) continue;
           appendLiveForTurn(ev.turnId, {
@@ -4291,6 +4321,31 @@
         let advancesStreamAttempt = false;
         for (const inv of ev.invocations) {
           if (isAskUserQuestionToolName(inv.toolId)) continue;
+          const assistantText = sendUserMessageText(inv.toolId, inv.input);
+          if (assistantText) {
+            const id = liveAssistantMessageId(ev.turnId, inv.callId);
+            const payload: TimelineItem = timelineItemWithTurnId({
+              id,
+              kind: "assistant",
+              title: "Assistant",
+              summary: assistantText,
+              body: assistantText,
+              meta: [],
+              actor: ev.actor ?? null
+            }, ev.turnId);
+            const existingIdx = liveStreamItems.findIndex((x) => x.id === id);
+            if (existingIdx >= 0) {
+              const stamped = withLiveTimestamp(payload, liveStreamItems[existingIdx]);
+              liveStreamItems = [
+                ...liveStreamItems.slice(0, existingIdx),
+                stamped,
+                ...liveStreamItems.slice(existingIdx + 1)
+              ];
+            } else {
+              appendLiveForTurn(ev.turnId, payload);
+            }
+            continue;
+          }
           const id = liveToolId(ev.turnId, inv.callId);
           const existingIdx = liveStreamItems.findIndex((x) => x.id === id);
           if (!isProviderStreamInvocationMetadata(inv.metadata)) advancesStreamAttempt = true;

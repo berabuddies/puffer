@@ -1564,6 +1564,7 @@
   function shouldCollapseActivity(row: Extract<RowKind, { kind: "agent" }>, idx: number): boolean {
     const isActiveTurn = idx === activeTurnAgentRowIndex;
     if (row.children.some(isGateActivity)) return true;
+    if (row.children.some((child) => child.kind === "assistant")) return false;
     return !isActiveTurn && row.children.length > 0 && Boolean(row.item?.body.trim());
   }
 

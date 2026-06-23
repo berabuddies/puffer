@@ -1269,6 +1269,17 @@ fn timeline_items(session_store: &SessionStore, record: &SessionRecord) -> Vec<T
                 subject,
                 metadata,
             } => {
+                if let Some(text) = send_user_message_text(tool_id, input) {
+                    flush_pending_assistant(&mut items, &mut pending_assistant);
+                    items.push(TimelineItemDto::AssistantMessage {
+                        id: format!("timeline-{index}-{call_id}-message"),
+                        text,
+                        attachments: std::mem::take(&mut pending_generated_attachments),
+                        turn_id: current_turn_id.clone(),
+                        actor: actor.clone(),
+                    });
+                    continue;
+                }
                 let status = if *success { "ok" } else { "error" };
                 let summary = summarize_tool_input(tool_id, input);
                 items.push(TimelineItemDto::ToolCall {
@@ -1487,6 +1498,18 @@ fn lambda_gate_timeline_text(metadata: &Option<Value>, tool_id: &str) -> Option<
 
 fn compact_json_text(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn send_user_message_text(tool_id: &str, input: &str) -> Option<String> {
+    if !matches!(tool_id, "SendUserMessage" | "Brief") {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(input).ok()?;
+    let message = parsed.get("message")?.as_str()?.to_string();
+    if message.trim().is_empty() {
+        return None;
+    }
+    Some(message)
 }
 
 fn parse_system_message(
@@ -1986,6 +2009,7 @@ mod tests {
     use puffer_config::ConfigPaths;
     use puffer_session_store::{
         SessionMetadata, SessionRecord, SessionStore, TranscriptEvent, TranscriptRewrite,
+        TurnBoundaryState,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -2494,6 +2518,42 @@ mod tests {
 
         let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec!["user", "tool", "assistant"]);
+    }
+
+    #[test]
+    fn timeline_renders_send_user_message_as_assistant_text() {
+        let (_temp, store) = test_store();
+        let items = timeline_items(
+            &store,
+            &record(vec![
+                TranscriptEvent::TurnBoundary {
+                    turn_id: "turn-1".to_string(),
+                    state: TurnBoundaryState::Started,
+                },
+                TranscriptEvent::ToolInvocation {
+                    call_id: "call-msg-1".to_string(),
+                    tool_id: "SendUserMessage".to_string(),
+                    input: r#"{"message":"Starting Phase 1.","status":"normal"}"#.to_string(),
+                    output: "{}".to_string(),
+                    success: true,
+                    metadata: None,
+                    actor: None,
+                    subject: None,
+                },
+                TranscriptEvent::TurnBoundary {
+                    turn_id: "turn-1".to_string(),
+                    state: TurnBoundaryState::Finished,
+                },
+            ]),
+        );
+
+        let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["assistant"]);
+        assert!(matches!(
+            &items[0],
+            TimelineItemDto::AssistantMessage { text, turn_id, .. }
+                if text == "Starting Phase 1." && turn_id.as_deref() == Some("turn-1")
+        ));
     }
 
     #[test]

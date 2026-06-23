@@ -11770,6 +11770,89 @@ test("streamed assistant text stays visible through transcript reload", async ({
   expect(Math.max(...samples.slice(firstVisible))).toBe(1);
 });
 
+test("persisted turn prose stays inline around activity after interruption", async ({ page }) => {
+  const turnId = "turn-interrupted-prose";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-interrupted-prose",
+        displayName: "Interrupted prose",
+        title: "Interrupted prose",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 6,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "interrupted-prose-user",
+            text: "Run the phased sleep prompt",
+            turnId,
+            createdAtMs: baseTime + 1
+          },
+          {
+            kind: "assistant_message",
+            id: "interrupted-prose-phase-1-start",
+            text: "Phase 1 starting: I will generate 12 fictional product names.",
+            turnId,
+            createdAtMs: baseTime + 2
+          },
+          {
+            kind: "tool_call",
+            id: "interrupted-prose-sleep-1",
+            toolId: "Sleep",
+            status: "ok",
+            summary: "Wait before continuing",
+            inputText: "{\"duration_ms\":20000}",
+            outputText: "done",
+            turnId,
+            createdAtMs: baseTime + 3
+          },
+          {
+            kind: "assistant_message",
+            id: "interrupted-prose-phase-1-done",
+            text: "Phase 1 complete: here are 12 name candidates.",
+            turnId,
+            createdAtMs: baseTime + 4
+          },
+          {
+            kind: "tool_call",
+            id: "interrupted-prose-sleep-2",
+            toolId: "Sleep",
+            status: "ok",
+            summary: "Wait before continuing",
+            inputText: "{\"duration_ms\":20000}",
+            outputText: "done",
+            turnId,
+            createdAtMs: baseTime + 5
+          },
+          {
+            kind: "assistant_message",
+            id: "interrupted-prose-phase-2-start",
+            text: "Phase 2 starting: I will rank the names by clarity and memorability.",
+            turnId,
+            createdAtMs: baseTime + 6
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Interrupted prose/);
+
+  const agentRows = page.locator('.pf-msg[data-role="agent"]');
+  await expect(agentRows).toHaveCount(1);
+  const agentRow = agentRows.first();
+  await expect(agentRow).toContainText("Phase 1 starting");
+  await expect(agentRow).toContainText("Phase 1 complete");
+  await expect(agentRow).toContainText("Phase 2 starting");
+  await expect(agentRow).not.toContainText("Intermediate message");
+  await expect(agentRow.locator(".pf-tool").filter({ hasText: "Sleep" })).toHaveCount(2);
+});
+
 test("reopening the active streaming agent keeps live turn state", async ({ page }) => {
   const streamedText = "Same agent reopen keeps the active stream.";
   const daemon = new FakeDaemon({
