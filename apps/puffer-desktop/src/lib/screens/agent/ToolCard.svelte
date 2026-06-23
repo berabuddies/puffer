@@ -6,18 +6,21 @@
   import HighlightedLine from "../../components/HighlightedLine.svelte";
   import { chatFileTarget, fileOpenIntent, type ChatOpenIntent } from "../../chatOpenIntent";
   import type { ToolTimelineItem } from "../../types";
+  import InlineCanvas from "./InlineCanvas.svelte";
 
   type Props = {
     item: ToolTimelineItem;
     sessionId?: string | null;
     defaultCollapsed?: boolean;
     onOpenChatIntent?: (intent: ChatOpenIntent) => void;
+    onSubmitCanvasState?: (message: string) => boolean | void | Promise<boolean | void>;
   };
   let {
     item,
     sessionId = null,
     defaultCollapsed = true,
-    onOpenChatIntent
+    onOpenChatIntent,
+    onSubmitCanvasState
   }: Props = $props();
   type RenderRow = { kind: "ctx" | "add" | "del" | "omit"; line: number | null; text: string };
   type FileRender = { mode: "read" | "diff"; path: string; rows: RenderRow[] };
@@ -797,6 +800,11 @@
       ?? webRenderFor(name, input, output);
   }
 
+  function isCanvasToolCall(name: string, input: Record<string, unknown> | null): boolean {
+    const compact = compactToolName(name);
+    return compact === "canvas" && Array.isArray(input?.body);
+  }
+
   let toolName = $derived(
     item.toolName && item.toolName !== "undefined" ? item.toolName : "Tool"
   );
@@ -816,6 +824,8 @@
   );
   let isTerminalTool = $derived(["bash", "shell", "powershell"].includes(toolName.toLowerCase()));
   let isBrowserTool = $derived(isBrowserToolCall(toolName, inputJson));
+  let isCanvasTool = $derived(isCanvasToolCall(toolName, inputJson));
+  let canvasId = $derived(stringField(outputJson, ["canvasId", "canvas_id"]));
   let recordingFrames = $state<RecordingFrame[]>([]);
   let selectedFrameId = $state<string | null>(null);
   let recordingDisposer: (() => void) | null = null;
@@ -1023,15 +1033,24 @@
     }
   });
 
-  // Actions default closed; users can open the row when they want details.
+  // Actions default closed; Canvas is a user-facing widget and opens inline.
   function initialCollapsed(): boolean {
+    if (isCanvasTool) return false;
     return defaultCollapsed;
   }
 
   let collapsed = $state(initialCollapsed());
+  let canvasAutoExpanded = $state(false);
+
+  $effect(() => {
+    if (isCanvasTool && !canvasAutoExpanded) {
+      collapsed = false;
+      canvasAutoExpanded = true;
+    }
+  });
 
   let visibleLines = $derived(nonEmptyLines);
-  let toggleable = $derived(hasOutput || isPending || isBrowserTool);
+  let toggleable = $derived(hasOutput || isPending || isBrowserTool || isCanvasTool);
 
   let arg = $derived(
     isSubagentToolName(toolName)
@@ -1074,8 +1093,10 @@
     {/if}
   </button>
   {#if hasOutput && !collapsed}
-    <div class="pf-tool-body">
-      {#if isBrowserTool}
+    <div class:pf-tool-canvas-body={isCanvasTool} class="pf-tool-body">
+      {#if isCanvasTool && inputJson}
+        <InlineCanvas spec={inputJson} {canvasId} {sessionId} {onSubmitCanvasState} />
+      {:else if isBrowserTool}
         <div class="pf-browser-recording-render">
           {#if selectedFrame}
             <figure class="pf-browser-screen">

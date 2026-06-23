@@ -172,6 +172,7 @@
   let expandedActivityIds = $state<string[]>([]);
   let expandedRecapIds = $state<string[]>([]);
   let selectedActivityChildren = $state<Record<string, string>>({});
+  let autoExpandedCanvasActivityIds = $state<string[]>([]);
   let fastMode = $state(false);
   let permissionMode = $state<AgentPermissionMode>("workspace-write");
   let routingSelectionKey = $state<string | null>(null);
@@ -1144,6 +1145,7 @@
       resetAttachmentDropState();
       expandedActivityIds = [];
       selectedActivityChildren = {};
+      autoExpandedCanvasActivityIds = [];
       lastSessionId = nextSessionId;
       scheduleComposerResize({ anchorThread: false });
       void tick().then(() => {
@@ -1402,6 +1404,21 @@
     }
   }
 
+  async function submitCanvasStateMessage(message: string): Promise<boolean | void> {
+    const targetSessionId = session?.id ?? null;
+    if (!targetSessionId) return false;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if ((session?.id ?? null) !== targetSessionId) return false;
+      if (!turnRunning && !submitInFlight) return onSubmitMessage(message);
+      await delay(500);
+    }
+    return false;
+  }
+
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1484,6 +1501,40 @@
   let typingDotsActive = $derived.by(
     () => turnRunning && turnThinking && (!turnStatusHint || turnStatusHint === "Thinking")
   );
+
+  $effect(() => {
+    const expanded = new Set(expandedActivityIds);
+    const autoExpanded = new Set(autoExpandedCanvasActivityIds);
+    const selected = { ...selectedActivityChildren };
+    let changedExpanded = false;
+    let changedAutoExpanded = false;
+    let changedSelected = false;
+
+    for (let idx = 0; idx < distributedRows.length; idx += 1) {
+      const row = distributedRows[idx];
+      if (row.kind !== "agent" || !shouldCollapseActivity(row, idx)) continue;
+      const canvasChild = canvasActivityChild(row.children);
+      if (!canvasChild) continue;
+      const activityId = activityGroupId(row, idx);
+      if (!autoExpanded.has(activityId)) {
+        autoExpanded.add(activityId);
+        changedAutoExpanded = true;
+        if (!expanded.has(activityId)) {
+          expanded.add(activityId);
+          changedExpanded = true;
+        }
+      }
+      if (!selected[activityId] || !row.children.some((child) => child.id === selected[activityId])) {
+        selected[activityId] = canvasChild.id;
+        changedSelected = true;
+      }
+    }
+
+    if (changedExpanded) expandedActivityIds = Array.from(expanded);
+    if (changedAutoExpanded) autoExpandedCanvasActivityIds = Array.from(autoExpanded);
+    if (changedSelected) selectedActivityChildren = selected;
+  });
+
   let typingLabel = $derived.by(() => {
     const elapsed = formatElapsed(turnStartedAtMs);
     const suffix = elapsed ? ` (${elapsed})` : "";
@@ -1575,6 +1626,16 @@
 
   function compactToolName(name: string | null | undefined): string {
     return (name ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function isCanvasActivity(child: ActivityChild): child is ToolTimelineItem {
+    if (child.kind !== "tool") return false;
+    if (compactToolName(child.toolName) !== "canvas") return false;
+    return Array.isArray(parseInputObject(child)?.body);
+  }
+
+  function canvasActivityChild(children: ActivityChild[]): ToolTimelineItem | null {
+    return children.find(isCanvasActivity) ?? null;
   }
 
   function isSubagentToolName(name: string | null | undefined): boolean {
@@ -2327,6 +2388,7 @@
                                         sessionId={session?.id ?? null}
                                         defaultCollapsed={false}
                                         {onOpenChatIntent}
+                                        onSubmitCanvasState={submitCanvasStateMessage}
                                       />
                                     {:else if selected.child.kind === "diff"}
                                       <DiffCard item={selected.child as DiffTimelineItem} defaultCollapsed={false} />
@@ -2360,6 +2422,7 @@
                                 item={child as ToolTimelineItem}
                                 sessionId={session?.id ?? null}
                                 {onOpenChatIntent}
+                                onSubmitCanvasState={submitCanvasStateMessage}
                               />
                             {:else if child.kind === "diff"}
                               <DiffCard item={child as DiffTimelineItem} />
@@ -3128,6 +3191,9 @@
   }
   .activity-panel :global(.pf-tool-body) {
     max-height: 360px;
+  }
+  .activity-panel :global(.pf-tool-body.pf-tool-canvas-body) {
+    max-height: min(680px, calc(100vh - 240px));
   }
   .gate-detail-panel {
     display: flex;

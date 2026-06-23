@@ -270,6 +270,7 @@ fn spawn_daemon_attempt(workspace_cwd: PathBuf, may_replace_existing: bool) -> R
     if browser_debug && std::env::var_os("PUFFER_BROWSER_DEBUG").is_none() {
         cmd.env("PUFFER_BROWSER_DEBUG", "1");
     }
+    cmd.env("PUFFER_DESKTOP_INLINE_CANVAS", "1");
     if std::env::var_os("PUFFER_CEF_PROFILE_DIR").is_none() {
         if let Some(profile_dir) = default_cef_profile_dir() {
             cmd.env("PUFFER_CEF_PROFILE_DIR", profile_dir);

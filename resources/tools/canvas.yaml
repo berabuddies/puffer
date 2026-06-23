@@ -19,6 +19,12 @@ description: |-
              kv{rows:[[k,v]]} · table{columns,rows}
   - Viz:     bar{items:[{label,value,max?,tone?}]}
              heatmap{columns,rows:[{label,cells:[0-4]}]}
+  - Input:   toggle{id,label,value?}
+             singleSelect{id,label,options:[{id,label}],value?}
+             multiSelect{id,label,options:[{id,label}],value?:string[]}
+             barSelect{id,label,options:[{id,label}],value?}
+             slider{id,label,min?,max?,step?,value?}
+             textInput{id,label,placeholder?,value?}
   - Rich:    finding{severity,title,status?,locations?,body?,evidence?,
                      actions?:[{id,label,intent?}]}
              diff{text} · code{text} · callout{tone,title,body}
@@ -36,7 +42,12 @@ description: |-
   (carrying the finding's context) without the user typing — so a finding with no
   action is a missed entry point. Do not emit decorative nodes with no evidence.
 
-  The page is written under .puffer/canvas/ and opened in the default browser.
+  In Puffer Desktop, Canvas renders inline inside the chat. The HTML fallback is
+  still written under .puffer/canvas/ for non-inline hosts. Interactive nodes
+  write typed values into .puffer/canvas/<canvasId>.state.json.
+  Use CanvasState after the user interacts with a Canvas to read selected
+  toggles, choices, sliders, and text values. Every interactive node MUST have a
+  stable `id`; that id becomes the key in CanvasState.values.
 
   PROACTIVELY OFFERING CANVAS — when a final answer is long and structured
   (multiple findings/sections, a review/dashboard/report, lots of code/diff),
@@ -86,7 +97,7 @@ input_schema:
         properties:
           type:
             type: string
-            description: Component type (section, grid, card, metrics, table, bar, heatmap, finding, diff, code, callout, text, heading, badge, kv, columns, divider).
+            description: Component type (section, grid, card, metrics, table, bar, heatmap, toggle, singleSelect, multiSelect, barSelect, slider, textInput, finding, diff, code, callout, text, heading, badge, kv, columns, divider).
         required: [type]
         additionalProperties: true
   additionalProperties: true

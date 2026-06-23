@@ -194,6 +194,9 @@
   max-height: 280px;
   overflow: auto;
 }
+.pf-tool-body.pf-tool-canvas-body {
+  max-height: min(620px, calc(100vh - 260px));
+}
 .pf-tool-body .terminal {
   font-family: var(--font-mono);
   background: oklch(0.16 0 0);

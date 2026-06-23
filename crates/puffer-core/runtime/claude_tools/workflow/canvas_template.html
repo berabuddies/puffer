@@ -73,6 +73,17 @@ pre.code .add{background:rgba(88,166,122,.12);color:var(--ok);display:block} pre
 .bar .b-track{height:8px;background:var(--surface-2);border-radius:99px;overflow:hidden}
 .bar .b-fill{height:100%;background:var(--accent);border-radius:99px} .bar .b-fill.high{background:var(--high)} .bar .b-fill.crit{background:var(--critical)} .bar .b-fill.ok{background:var(--ok)}
 .bar .b-val{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.control{display:flex;flex-direction:column;gap:7px;color:var(--fg-soft);font-size:12.5px}
+.control .ctl-label{font-weight:600;color:var(--fg)}
+.control .ctl-help{color:var(--muted);font-size:11.5px}
+.toggle{display:flex;align-items:center;gap:8px}
+.choice-list{display:flex;flex-wrap:wrap;gap:7px}
+.choice{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border-strong);border-radius:5px;padding:5px 8px;cursor:pointer}
+.choice[data-selected="true"]{border-color:var(--accent);background:var(--accent-soft);color:var(--fg)}
+.choice input{margin:0}
+.slider{display:grid;grid-template-columns:1fr 48px;gap:10px;align-items:center}
+.slider input{width:100%}
+.text-input{height:30px;border:1px solid var(--border-strong);border-radius:5px;background:var(--surface);color:var(--fg);padding:0 8px;font:inherit}
 .heat{overflow:auto} .heat table{width:auto;border-collapse:separate;border-spacing:5px}
 .heat td.cell{width:30px;height:26px;border-radius:5px;background:var(--surface-2)}
 .heat td.cell[data-v="1"]{background:rgba(88,166,122,.5)} .heat td.cell[data-v="2"]{background:rgba(205,178,74,.6)}
@@ -88,6 +99,22 @@ pre.code .add{background:rgba(88,166,122,.12);color:var(--ok);display:block} pre
 const spec=JSON.parse(document.getElementById('spec').textContent);
 const BRIDGE=__BRIDGE__; // {url, token, sessionId} | null — lets actions continue the agent turn
 const E=(t,c,h)=>{const n=document.createElement(t);if(c)n.className=c;if(h!=null)n.innerHTML=h;return n};
+const CANVAS_ID=(BRIDGE&&BRIDGE.canvasId)||spec.canvasId||'';
+const STATE={values:{}};
+function initialValue(n){if(n.value!==undefined)return n.value;if(n.type==='toggle')return false;if(n.type==='multiSelect')return [];if(n.type==='slider')return n.min||0;if(n.type==='textInput')return '';const o=(n.options||[])[0];return o?(o.id||o.label||null):null}
+function optionId(o){return S(o.id!==undefined?o.id:o.label)}
+function initState(n){if(!n)return;if(Array.isArray(n)){n.forEach(initState);return}if(typeof n==='object'){if(n.id&&['toggle','singleSelect','multiSelect','slider','barSelect','textInput'].includes(n.type))STATE.values[n.id]=initialValue(n);if(n.children)initState(n.children);if(n.body)initState(n.body)}}
+let stateTimer=null;
+function setCanvasValue(id,value){if(!id)return;STATE.values[id]=value;if(stateTimer)clearTimeout(stateTimer);stateTimer=setTimeout(()=>sendCanvasPatch({[id]:value}),120)}
+function sendCanvasPatch(patch){
+  if(!BRIDGE||!CANVAS_ID){try{localStorage.setItem('pufferCanvasState:'+CANVAS_ID,JSON.stringify({canvasId:CANVAS_ID,values:STATE.values,updatedAtMs:Date.now()}))}catch(e){}return}
+  try{
+    const ws=new WebSocket(BRIDGE.url+'?token='+encodeURIComponent(BRIDGE.token));
+    ws.onopen=()=>{ws.send(JSON.stringify({id:String(Date.now()),method:'canvas_state_update',params:{sessionId:BRIDGE.sessionId,canvasId:CANVAS_ID,patch}}));};
+    ws.onmessage=()=>ws.close();
+    ws.onerror=()=>{try{localStorage.setItem('pufferCanvasState:'+CANVAS_ID,JSON.stringify({canvasId:CANVAS_ID,values:STATE.values,updatedAtMs:Date.now()}))}catch(e){}};
+  }catch(e){toast('Canvas state update failed: '+e.message)}
+}
 function toast(msg){let t=document.getElementById('pf-toast');if(!t){t=E('div');t.id='pf-toast';t.style.cssText='position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--surface);color:var(--fg);border:1px solid var(--border-strong);border-radius:8px;padding:9px 14px;font-size:12.5px;box-shadow:0 6px 24px rgba(0,0,0,.3);z-index:99';document.body.append(t)}t.textContent=msg;t.style.opacity='1';clearTimeout(t._h);t._h=setTimeout(()=>t.style.opacity='0',2600)}
 // Bundle a node's context into a follow-up message and continue the agent turn.
 function actionMessage(node,ac){
@@ -98,6 +125,7 @@ function actionMessage(node,ac){
   if(loc)m+='\nLocation: '+loc;
   if(node.body)m+='\nContext: '+S(node.body);
   if(node.evidence)m+='\nEvidence:\n'+S(node.evidence);
+  if(Object.keys(STATE.values).length)m+='\n\nCanvas state:\n'+JSON.stringify(STATE.values,null,2);
   if(intent==='fix')m+='\n\nPropose the concrete change and apply it.';
   if(intent==='test')m+='\n\nWrite tests covering the risk path and edge cases.';
   return m;
@@ -144,10 +172,21 @@ const COMP={
    if(n.actions&&n.actions.length){const a=E('div','acts');n.actions.forEach(ac=>{const b=E('button','btn'+(intentOf(ac)==='fix'?' primary':''),esc(ac.label||intentOf(ac)||'Action'));b.onclick=()=>fireAction(n,ac);a.append(b)});f.append(a)}
    return f},
  bar:n=>{const max=Math.max(1,...(n.items||[]).map(i=>i.value||0));const b=E('div','bar');(n.items||[]).forEach(it=>{const row=E('div','b-row');row.append(E('div','b-lab',esc(it.label)));const tr=E('div','b-track');const fl=E('div','b-fill'+(it.tone?' '+it.tone:''));fl.style.width=(100*(it.value||0)/(it.max||max))+'%';tr.append(fl);row.append(tr);row.append(E('div','b-val',esc(it.value)));b.append(row)});return b},
+ toggle:n=>{const c=E('label','control toggle');const input=E('input');input.type='checkbox';input.checked=!!STATE.values[n.id];input.onchange=()=>setCanvasValue(n.id,input.checked);c.append(input);c.append(E('span','ctl-label',esc(n.label||n.id||'Toggle')));if(n.help)c.append(E('span','ctl-help',esc(n.help)));return c},
+ singleSelect:n=>selectControl(n,false),
+ multiSelect:n=>selectControl(n,true),
+ barSelect:n=>selectControl(n,false),
+ slider:n=>{const c=E('div','control');if(n.label)c.append(E('div','ctl-label',esc(n.label)));const row=E('div','slider');const input=E('input');input.type='range';input.min=n.min??0;input.max=n.max??100;input.step=n.step??1;input.value=STATE.values[n.id]??input.min;const val=E('span',null,esc(input.value));input.oninput=()=>{val.textContent=input.value;setCanvasValue(n.id,Number(input.value))};row.append(input);row.append(val);c.append(row);if(n.help)c.append(E('div','ctl-help',esc(n.help)));return c},
+ textInput:n=>{const c=E('label','control');if(n.label)c.append(E('span','ctl-label',esc(n.label)));const input=E('input','text-input');input.type='text';input.placeholder=n.placeholder||'';input.value=STATE.values[n.id]||'';input.oninput=()=>setCanvasValue(n.id,input.value);c.append(input);if(n.help)c.append(E('span','ctl-help',esc(n.help)));return c},
  heatmap:n=>{const w=E('div','heat');const t=E('table');const hr=E('tr');hr.append(E('th'));(n.columns||[]).forEach(c=>hr.append(E('th',null,esc(c))));t.append(hr);(n.rows||[]).forEach(r=>{const tr=E('tr');tr.append(E('td','rl',esc(r.label)));(r.cells||[]).forEach(cell=>{const v=typeof cell==='object'?cell.v:cell;const td=E('td','cell');td.dataset.v=v;if(cell&&cell.note)td.title=cell.note;tr.append(td)});t.append(tr)});w.append(t);return w},
 };
+function selectControl(n,multi){
+  const c=E('div','control');if(n.label)c.append(E('div','ctl-label',esc(n.label)));const list=E('div','choice-list');
+  (n.options||[]).forEach(o=>{const id=optionId(o);const lab=E('label','choice');const input=E('input');input.type=multi?'checkbox':'radio';input.name='ctl-'+(n.id||Math.random());const selected=multi?(STATE.values[n.id]||[]).map(S).includes(id):S(STATE.values[n.id])===id;input.checked=selected;lab.dataset.selected=String(selected);input.onchange=()=>{if(multi){const cur=new Set((STATE.values[n.id]||[]).map(S));input.checked?cur.add(id):cur.delete(id);setCanvasValue(n.id,[...cur])}else{setCanvasValue(n.id,id);[...list.querySelectorAll('.choice')].forEach(x=>x.dataset.selected='false');input.checked=true}lab.dataset.selected=String(input.checked)};lab.append(input);lab.append(E('span',null,esc(o.label||o.id||'')));list.append(lab)});c.append(list);if(n.help)c.append(E('div','ctl-help',esc(n.help)));return c
+}
 function render(n){if(!n||!n.type)return E('div');const f=COMP[n.type];if(f)return f(n);const d=E('div','text');d.style.color='var(--muted-2)';d.textContent='[unknown component: '+n.type+']';return d}
 // page
+initState(spec);
 const app=document.getElementById('app');
 const hd=E('header');hd.append(E('span','h-title',esc(spec.title||'Canvas')));
 if(spec.meta&&spec.meta.length){const m=E('div','h-meta');spec.meta.forEach(x=>m.append(E('span',null,esc(x))));hd.append(m)}

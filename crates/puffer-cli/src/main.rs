@@ -109,7 +109,21 @@ use crate::auth_provider::{
     OauthFamily,
 };
 
+const CLI_MAIN_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
+
 fn main() -> Result<()> {
+    let handle = std::thread::Builder::new()
+        .name("puffer-main".to_string())
+        .stack_size(CLI_MAIN_STACK_SIZE_BYTES)
+        .spawn(run_main)
+        .context("spawn puffer main thread")?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn run_main() -> Result<()> {
     let cli = Cli::parse();
 
     // Hidden subscriber subcommand dispatches to a baked-in skill driver

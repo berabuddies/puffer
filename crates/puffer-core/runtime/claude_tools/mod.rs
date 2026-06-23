@@ -795,6 +795,7 @@ fn execute_workflow_tool_with_media_context(
             )
         }
         "Canvas" => workflow::canvas::execute_canvas(state, cwd, input),
+        "CanvasState" => workflow::canvas_state::execute_canvas_state(state, cwd, input),
         "ComfyUiAction" => workflow::comfyui_action::execute_comfyui_action(state, cwd, input),
         "ComputerUseAction" => {
             workflow::computer_use_action::execute_computer_use_action(state, cwd, input)

@@ -108,6 +108,9 @@ input_schema:
       properties:
         source:
           type: string
+        kind:
+          type: string
+          description: Optional UI specialization marker, e.g. "canvas-offer".
       description: Optional metadata for tracking purposes.
       additionalProperties: false
   required:

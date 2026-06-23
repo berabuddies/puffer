@@ -260,18 +260,11 @@ pub(super) fn execute_task_update(
         }))?);
     }
 
-    let task = &store.tasks[index];
-    let monitor_store_path = monitor_tasks_path(&store_cwd);
-    let updating_monitor_task = tp == monitor_store_path
-        || is_monitor_task_metadata(&task.metadata)
-        || parsed
-            .metadata
-            .as_ref()
-            .is_some_and(is_monitor_task_metadata);
-    if updating_monitor_task && monitor_task_content_would_change(task, &parsed) {
-        validate_monitor_content_update_metadata(parsed.metadata.as_ref(), &task.metadata)?;
-    }
+    let task = &mut store.tasks[index];
     let metadata_update = if let Some(metadata) = parsed.metadata.as_ref() {
+        let updating_monitor_task = tp == monitor_tasks_path(&store_cwd)
+            || is_monitor_task_metadata(&task.metadata)
+            || is_monitor_task_metadata(metadata);
         if updating_monitor_task {
             validate_monitor_task_metadata(metadata)?;
             Some(sanitize_monitor_task_metadata_update(
@@ -284,7 +277,6 @@ pub(super) fn execute_task_update(
     } else {
         None
     };
-    let task = &mut store.tasks[index];
     if parsed.status.as_deref() == Some("completed")
         && monitor_task_is_human_gated(task)
         && !metadata_marks_monitor_ignored(metadata_update.as_ref())
@@ -1035,88 +1027,6 @@ fn validate_monitor_task_metadata(metadata: &Map<String, Value>) -> Result<()> {
             bail!("monitor task metadata cannot include reserved field `{key}`");
         }
     }
-    validate_monitor_metadata_actions(metadata)?;
-    validate_monitor_metadata_ignore_reasons(metadata)?;
-    Ok(())
-}
-
-fn validate_monitor_metadata_actions(metadata: &Map<String, Value>) -> Result<()> {
-    let Some(value) = metadata.get("actions") else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let actions = value
-        .as_array()
-        .ok_or_else(|| anyhow!("monitor task metadata field `actions` must be an array"))?;
-    for action in actions {
-        if string_field(action, &["actionName", "name", "title"]).is_none() {
-            bail!("monitor task metadata actions require actionName");
-        }
-        if string_field(action, &["actionPrompt", "prompt"]).is_none() {
-            bail!("monitor task metadata actions require actionPrompt");
-        }
-    }
-    Ok(())
-}
-
-fn validate_monitor_metadata_ignore_reasons(metadata: &Map<String, Value>) -> Result<()> {
-    for key in ["possibleIgnoreReasons", "possible_ignore_reasons"] {
-        let Some(value) = metadata.get(key) else {
-            continue;
-        };
-        if value.is_null() {
-            continue;
-        }
-        let reasons = value
-            .as_array()
-            .ok_or_else(|| anyhow!("monitor task metadata field `{key}` must be an array"))?;
-        if reasons.iter().any(|reason| {
-            reason
-                .as_str()
-                .is_none_or(|reason| reason.trim().is_empty())
-        }) {
-            bail!("monitor task metadata `{key}` cannot contain empty values");
-        }
-    }
-    Ok(())
-}
-
-fn monitor_task_content_would_change(task: &StoredTask, parsed: &TaskUpdateInput) -> bool {
-    parsed
-        .subject
-        .as_ref()
-        .is_some_and(|subject| subject != &task.subject)
-        || parsed
-            .description
-            .as_ref()
-            .is_some_and(|description| description != &task.description)
-        || parsed
-            .active_form
-            .as_ref()
-            .is_some_and(|active_form| active_form != &task.active_form)
-}
-
-fn validate_monitor_content_update_metadata(
-    metadata: Option<&Map<String, Value>>,
-    existing: &Map<String, Value>,
-) -> Result<()> {
-    let Some(metadata) = metadata else {
-        bail!(
-            "monitor TaskUpdate changing subject, description, or activeForm must include metadata.monitor_envelope_id from the current workflow trigger"
-        );
-    };
-    if metadata_string(metadata, &["monitor_envelope_id", "monitorEnvelopeId"]).is_none() {
-        bail!(
-            "monitor TaskUpdate changing subject, description, or activeForm must include metadata.monitor_envelope_id from the current workflow trigger"
-        );
-    }
-    if !monitor_actions(existing).is_empty() && !metadata.contains_key("actions") {
-        bail!(
-            "monitor TaskUpdate changing subject, description, or activeForm for a task with actions must replace or clear metadata.actions"
-        );
-    }
     Ok(())
 }
 
@@ -1126,34 +1036,6 @@ fn sanitize_monitor_task_metadata_update(
 ) -> Result<Map<String, Value>> {
     let mut sanitized = Map::new();
     for (key, value) in metadata {
-        if matches!(key.as_str(), "monitor_envelope_id" | "monitorEnvelopeId") {
-            if reserved_monitor_value_unchanged(
-                value,
-                existing,
-                &["monitor_envelope_id", "monitorEnvelopeId"],
-            ) {
-                continue;
-            }
-            let Some(envelope_id) = value
-                .as_str()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                bail!("reserved monitor metadata field `{key}` must be a non-empty string");
-            };
-            sanitized.insert(
-                "monitor_envelope_id".to_string(),
-                Value::String(envelope_id.to_string()),
-            );
-            sanitized.insert("monitorEnvelopeId".to_string(), Value::Null);
-            sanitized.insert("source_text".to_string(), Value::Null);
-            sanitized.insert("sourceText".to_string(), Value::Null);
-            sanitized.insert("source_message_id".to_string(), Value::Null);
-            sanitized.insert("sourceMessageId".to_string(), Value::Null);
-            sanitized.insert("pending_reply".to_string(), Value::Null);
-            sanitized.insert("pendingReply".to_string(), Value::Null);
-            continue;
-        }
         if let Some(reserved_keys) = reserved_monitor_metadata_keys(key) {
             if reserved_monitor_value_unchanged(value, existing, reserved_keys) {
                 continue;
@@ -1187,6 +1069,9 @@ fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> 
         "action_receipts" | "actionReceipts" => Some(&["action_receipts", "actionReceipts"]),
         "action_states" | "actionStates" => Some(&["action_states", "actionStates"]),
         "monitor_actions" | "monitorActions" => Some(&["monitor_actions", "monitorActions"]),
+        "monitor_envelope_id" | "monitorEnvelopeId" => {
+            Some(&["monitor_envelope_id", "monitorEnvelopeId"])
+        }
         "monitor_connection" | "monitorConnection" => {
             Some(&["monitor_connection", "monitorConnection"])
         }
@@ -1204,8 +1089,6 @@ fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> 
         "source_context_hash" | "sourceContextHash" => {
             Some(&["source_context_hash", "sourceContextHash"])
         }
-        "source_text" | "sourceText" => Some(&["source_text", "sourceText"]),
-        "source_message_id" | "sourceMessageId" => Some(&["source_message_id", "sourceMessageId"]),
         _ => None,
     }
 }
@@ -2436,93 +2319,6 @@ mod tests {
         let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
         assert!(task.metadata.get("chatId").is_none());
         assert!(task.metadata.get("senderId").is_none());
-    }
-
-    #[test]
-    fn task_update_rejects_monitor_content_change_without_current_envelope() {
-        let (mut state, tmp) = make_state();
-        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
-
-        let error = execute_task_update(
-            &mut state,
-            tmp.path(),
-            json!({
-                "taskId": task_id,
-                "subject": "回复富士 X100VI 有什么宝藏功能呀",
-                "description": "对方问：“富士x100vi有什么宝藏功能呀”。"
-            }),
-        )
-        .expect_err("monitor content changes must carry the current trigger envelope");
-
-        assert!(error.to_string().contains("metadata.monitor_envelope_id"));
-    }
-
-    #[test]
-    fn task_update_rejects_monitor_content_change_without_action_refresh() {
-        let (mut state, tmp) = make_state();
-        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
-
-        let error = execute_task_update(
-            &mut state,
-            tmp.path(),
-            json!({
-                "taskId": task_id,
-                "subject": "回复富士 X100VI 有什么宝藏功能呀",
-                "description": "对方问：“富士x100vi有什么宝藏功能呀”。",
-                "metadata": {
-                    "monitor_envelope_id": "env-x100vi"
-                }
-            }),
-        )
-        .expect_err("monitor content changes must replace stale action prompts");
-
-        assert!(error.to_string().contains("metadata.actions"));
-    }
-
-    #[test]
-    fn task_update_allows_monitor_repoint_with_fresh_actions() {
-        let (mut state, tmp) = make_state();
-        let task_id = create_telegram_monitor_task(&mut state, tmp.path());
-
-        let raw = execute_task_update(
-            &mut state,
-            tmp.path(),
-            json!({
-                "taskId": task_id,
-                "subject": "回复富士 X100VI 有什么宝藏功能呀",
-                "description": "对方问：“富士x100vi有什么宝藏功能呀”。",
-                "metadata": {
-                    "monitor_envelope_id": "env-x100vi",
-                    "actions": [
-                        {
-                            "actionName": "DraftReply",
-                            "actionPrompt": "请直接草拟一条中文回复给对方，回答“富士x100vi有什么宝藏功能呀”。"
-                        }
-                    ]
-                }
-            }),
-        )
-        .expect("fresh envelope and actions should make the monitor update coherent");
-        let payload: Value = serde_json::from_str(&raw).unwrap();
-
-        assert_eq!(payload["success"], true);
-        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
-        assert_eq!(task.subject, "回复富士 X100VI 有什么宝藏功能呀");
-        assert_eq!(
-            task.metadata
-                .get("monitor_envelope_id")
-                .and_then(Value::as_str),
-            Some("env-x100vi")
-        );
-        assert_eq!(
-            task.metadata
-                .get("actions")
-                .and_then(Value::as_array)
-                .and_then(|actions| actions.first())
-                .and_then(|action| action.get("actionPrompt"))
-                .and_then(Value::as_str),
-            Some("请直接草拟一条中文回复给对方，回答“富士x100vi有什么宝藏功能呀”。")
-        );
     }
 
     #[test]

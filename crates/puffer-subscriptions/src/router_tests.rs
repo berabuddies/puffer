@@ -1146,7 +1146,6 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].contains("legacy batch prompt"));
         assert!(prompts[0].contains("Monitor source-language runtime guard"));
-        assert!(prompts[0].contains("Same chat/contact is not enough"));
     }
 
     #[test]

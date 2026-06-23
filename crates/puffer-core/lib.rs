@@ -117,6 +117,18 @@ use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, SessionSummary};
 use std::path::Path;
 
+/// Applies an interactive Canvas state patch for a live daemon bridge.
+pub fn apply_canvas_state_patch(
+    cwd: &Path,
+    session_id: &str,
+    canvas_id: &str,
+    patch: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    runtime::claude_tools::workflow::canvas::apply_canvas_state_patch(
+        cwd, session_id, canvas_id, patch,
+    )
+}
+
 /// Executes a standalone LSP query against the configured workspace language servers.
 pub fn execute_lsp_query(
     resources: &LoadedResources,

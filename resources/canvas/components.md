@@ -66,6 +66,36 @@ density and evidence over decoration.
 - use_when: a small matrix where relative intensity matters more than exact value.
 - props: `columns:[..]`, `rows:[{label, cells:[0..4]}]` (0 none → 4 critical).
 
+## Input
+Interactive nodes collect typed user choices that the agent can later read with
+`CanvasState`. Every interactive node MUST have a stable `id`; that id becomes
+the key in `CanvasState.values`.
+
+### toggle `{id,label,value?,help?}`
+- purpose: a binary yes/no or enabled/disabled choice.
+- use_when: the user should include/exclude one behavior.
+
+### singleSelect `{id,label,options:[{id,label}],value?,help?}`
+- purpose: one choice from a short option set.
+- use_when: the options are mutually exclusive.
+
+### multiSelect `{id,label,options:[{id,label}],value?:string[],help?}`
+- purpose: several independent choices from a short option set.
+- use_when: the user may select more than one area, file, filter, or action.
+
+### barSelect `{id,label,options:[{id,label}],value?,help?}`
+- purpose: one choice that benefits from being displayed near comparative bars.
+- use_when: the user is choosing a ranked category rather than entering data.
+
+### slider `{id,label,min?,max?,step?,value?,help?}`
+- purpose: a numeric preference or threshold.
+- use_when: the exact number can be approximate and adjusted visually.
+
+### textInput `{id,label,placeholder?,value?,help?}`
+- purpose: a short free-form value.
+- avoid_when: collecting secrets or long text; use dedicated secret/user input
+  tools instead.
+
 ## Evidence + rich (carry the proof)
 ### finding
 - purpose: one issue/observation that the reader may need to act on. The core

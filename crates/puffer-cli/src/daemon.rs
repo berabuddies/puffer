@@ -1441,6 +1441,7 @@ async fn dispatch_request(
         "browser_agent" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_agent(&s, &p)
         })),
+        "canvas_state_update" => respond!(detached!(|s, p| handle_canvas_state_update(&s, &p))),
         "local_model_status" => {
             respond!(detached!(|s, p| handle_local_model_status(&s, &p)))
         }
@@ -1628,6 +1629,31 @@ async fn dispatch_request(
 // ---------------------------------------------------------------------------
 // RPC handlers — blocking work runs in a tokio::task::spawn_blocking closure.
 // ---------------------------------------------------------------------------
+
+fn handle_canvas_state_update(state: &DaemonState, params: &Value) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("canvas_state_update requires sessionId"))?;
+    let canvas_id = params
+        .get("canvasId")
+        .or_else(|| params.get("canvas_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("canvas_state_update requires canvasId"))?;
+    let patch = params
+        .get("patch")
+        .ok_or_else(|| anyhow::anyhow!("canvas_state_update requires patch"))?;
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    let cwd = desktop_api::load_session_cwd(&session_store, session_id)?;
+    let updated =
+        puffer_core::apply_canvas_state_patch(&cwd, session_id, canvas_id, patch)?;
+    Ok(json!({
+        "ok": true,
+        "canvasId": canvas_id,
+        "updatedAtMs": updated.get("updatedAtMs").cloned().unwrap_or(Value::Null)
+    }))
+}
 
 fn handle_list_grouped_sessions(state: &DaemonState) -> Result<Value> {
     let session_store = SessionStore::from_paths(&state.paths)?;

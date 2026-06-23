@@ -1774,6 +1774,17 @@ export async function recoverStaleAgentTurn(
   });
 }
 
+/** Persists an inline Canvas control update through the daemon so CanvasState
+ *  reads the same values as the generated browser page. */
+export async function updateCanvasState(
+  sessionId: string,
+  canvasId: string,
+  patch: Record<string, unknown>
+): Promise<{ ok?: boolean; canvasId?: string; updatedAtMs?: number }> {
+  const client = await ensureLocalDaemonClient();
+  return client.request("canvas_state_update", { sessionId, canvasId, patch });
+}
+
 /** Runs a slash command (e.g. `/connect <slug> <conn>`) through the
  *  deterministic command dispatcher. No provider/LLM is contacted. Streams
  *  `user-question-request`, `turn-complete`, and `turn-error` events on the

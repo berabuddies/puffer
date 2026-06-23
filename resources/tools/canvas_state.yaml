@@ -1,0 +1,33 @@
+id: CanvasState
+name: CanvasState
+description: |-
+  Read the current typed state of an interactive Canvas generated in this
+  session. Use this after the user has toggled, selected, slid, or typed values
+  in a Canvas and asks you to continue using those choices.
+
+  Input:
+  - canvasId: the id returned by Canvas, or "latest" to read the most recently
+    updated Canvas state in this workspace. Defaults to "latest".
+
+  Output contains canvasId, sessionId, title, values, events, createdAtMs, and
+  updatedAtMs. The `values` object is keyed by the stable `id` fields from
+  interactive Canvas nodes.
+handler: runtime:workflow:canvas_state
+approval_policy: auto
+sandbox_policy: workspace-read
+input_schema:
+  type: object
+  properties:
+    canvasId:
+      type: string
+      description: Canvas id returned by the Canvas tool, or "latest". Defaults to "latest".
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: true
+  may_write_files: false
+  may_access_network: false
+display:
+  group: interaction
+  title: CanvasState
+  show_in_status: true
