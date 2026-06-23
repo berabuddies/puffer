@@ -871,9 +871,9 @@ mod monitor_rule_tests {
         let feishu = bundled_schema("feishu-browser");
         // both brands declare the same fields
         assert_eq!(lark.fields, feishu.fields, "lark and feishu schemas must match");
-        // exactly the three declared filter fields, in order
+        // exactly the five declared filter fields, in order
         let paths: Vec<&str> = lark.fields.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, vec!["event_type", "sender", "chat_id"]);
+        assert_eq!(paths, vec!["event_type", "sender", "chat_id", "unread", "conversation_type"]);
         // event_type is an enum listing all six sources
         let et = lark.fields.iter().find(|f| f.path == "event_type").unwrap();
         assert_eq!(et.field_type, EventFieldType::Enum);
@@ -882,6 +882,14 @@ mod monitor_rule_tests {
             values,
             vec!["message", "calendar_event", "task", "approval", "doc_event", "mail"]
         );
+        // conversation_type is an enum with four values
+        let ct = lark.fields.iter().find(|f| f.path == "conversation_type").unwrap();
+        assert_eq!(ct.field_type, EventFieldType::Enum);
+        let ctv: Vec<&str> = ct.values.iter().filter_map(|v| v.value.as_str()).collect();
+        assert_eq!(ctv, vec!["person", "bot", "external", "official"]);
+        // unread is a boolean field
+        let unread = lark.fields.iter().find(|f| f.path == "unread").unwrap();
+        assert_eq!(unread.field_type, EventFieldType::Boolean);
         // schema validates and every declared field compiles into a filter rule
         validate_event_schema(&lark).unwrap();
         for field in &lark.fields {

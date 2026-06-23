@@ -30,6 +30,28 @@
       "label": "Chat id",
       "type": "string",
       "operators": ["equals"]
+    },
+    {
+      "path": "unread",
+      "label": "Unread",
+      "type": "boolean",
+      "operators": ["equals"],
+      "values": [
+        { "value": true, "label": "是" },
+        { "value": false, "label": "否" }
+      ]
+    },
+    {
+      "path": "conversation_type",
+      "label": "Conversation type",
+      "type": "enum",
+      "operators": ["equals"],
+      "values": [
+        { "value": "person", "label": "真人" },
+        { "value": "bot", "label": "机器人" },
+        { "value": "external", "label": "外部" },
+        { "value": "official", "label": "官方" }
+      ]
     }
   ]
 }
