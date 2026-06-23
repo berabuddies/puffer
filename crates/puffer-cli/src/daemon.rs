@@ -6710,10 +6710,10 @@ mod tests {
                 .as_millis() as u64;
             let cache = json!({
                 "entries": {
-                    "llama-cpp": {"models": [], "cached_at_ms": now_ms},
-                    "lmstudio": {"models": [], "cached_at_ms": now_ms},
-                    "ollama": {"models": [], "cached_at_ms": now_ms},
-                    "vllm": {"models": [], "cached_at_ms": now_ms}
+                    "llama-cpp": {"models": [], "cached_at_ms": now_ms, "capability_schema_version": 1},
+                    "lmstudio": {"models": [], "cached_at_ms": now_ms, "capability_schema_version": 1},
+                    "ollama": {"models": [], "cached_at_ms": now_ms, "capability_schema_version": 1},
+                    "vllm": {"models": [], "cached_at_ms": now_ms, "capability_schema_version": 1}
                 }
             });
             std::fs::write(&cache_path, cache.to_string()).expect("seed discovery cache");
@@ -9196,6 +9196,7 @@ models: []
                         }
                     ],
                     "cached_at_ms": now_ms,
+                    "capability_schema_version": 1,
                 }
             }
         });
