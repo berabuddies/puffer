@@ -84,9 +84,48 @@ pub fn is_op_reference(value: &str) -> bool {
     value.trim_start().starts_with(OP_REFERENCE_PREFIX)
 }
 
+/// Returns the first existing absolute path among `candidates`, else `fallback`.
+/// Used to pin privileged tool spawns to trusted install locations rather than
+/// resolving a bare program name through the daemon's inherited PATH (where an
+/// attacker-planted binary earlier on PATH could run in its place).
+fn resolve_tool(candidates: &[&str], fallback: &str) -> String {
+    candidates
+        .iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .map(|path| (*path).to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Resolves the `op` CLI to an absolute path in a trusted (non-user-writable)
+/// install location. `op` reads/lists every login and resolves `op://` references,
+/// so a binary named `op` planted earlier on PATH would directly harvest the
+/// plaintext secrets being imported — hence we never invoke it by bare name.
+/// Falls back to `op` only when no known install location exists.
+fn op_bin() -> String {
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &["/opt/homebrew/bin/op", "/usr/local/bin/op", "/usr/bin/op"];
+    #[cfg(target_os = "linux")]
+    let candidates: &[&str] = &["/usr/bin/op", "/usr/local/bin/op", "/snap/bin/op"];
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let candidates: &[&str] = &[];
+
+    #[cfg(target_os = "windows")]
+    {
+        // winget installs op under Program Files; prefer that over the
+        // user-writable WindowsApps execution-alias shim.
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let path = std::path::Path::new(&program_files).join("1Password CLI\\op.exe");
+            if path.exists() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+    }
+    resolve_tool(candidates, "op")
+}
+
 /// Reports whether the 1Password CLI (`op`) is available on this machine.
 pub fn op_cli_available() -> bool {
-    Command::new("op")
+    Command::new(op_bin())
         .arg("--version")
         .output()
         .map(|output| output.status.success())
@@ -99,7 +138,7 @@ pub fn op_cli_available() -> bool {
 /// authorized with Touch ID at the moment of sync — so the user never has to
 /// hunt for or paste a token.
 pub fn op_authorized() -> bool {
-    std::env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some() || op_has_connected_account("op")
+    std::env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some() || op_has_connected_account(&op_bin())
 }
 
 /// Returns `Ok(())` when 1Password access is set up, otherwise an actionable
@@ -156,7 +195,10 @@ fn install_op_cli() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     let mut cmd = {
-        let mut c = Command::new("brew");
+        // Pin brew to its standard prefix so a planted `brew` on PATH can't run as
+        // the user during auto-install.
+        let brew = resolve_tool(&["/opt/homebrew/bin/brew", "/usr/local/bin/brew"], "brew");
+        let mut c = Command::new(brew);
         // Run non-interactively (no tty): skip the slow auto-update and don't
         // fail on the user's pre-existing untrusted third-party taps.
         c.args(["install", "--cask", "1password-cli"])
@@ -168,7 +210,16 @@ fn install_op_cli() -> Result<()> {
     };
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = Command::new("winget");
+        // Resolve winget to the per-user WindowsApps alias by absolute path (only
+        // the same user can write there) instead of trusting PATH ordering.
+        let winget = std::env::var_os("LOCALAPPDATA")
+            .map(|local| {
+                std::path::Path::new(&local).join("Microsoft\\WindowsApps\\winget.exe")
+            })
+            .filter(|path| path.exists())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "winget".to_string());
+        let mut c = Command::new(winget);
         c.args([
             "install", "--id", "AgileBits.1Password.CLI", "-e", "--silent",
             "--accept-source-agreements", "--accept-package-agreements",
@@ -204,7 +255,8 @@ fn install_op_cli() -> Result<()> {
 pub fn launch_onepassword_app() -> bool {
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        // `open` is always at /usr/bin/open on macOS — use the absolute path.
+        Command::new("/usr/bin/open")
             .args(["-a", "1Password"])
             .status()
             .map(|status| status.success())
@@ -219,7 +271,8 @@ pub fn launch_onepassword_app() -> bool {
         if !onepassword_app_installed() {
             return false;
         }
-        Command::new("cmd")
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        Command::new(format!("{root}\\System32\\cmd.exe"))
             .args(["/C", "start", "", "onepassword://"])
             .status()
             .map(|status| status.success())
@@ -227,7 +280,11 @@ pub fn launch_onepassword_app() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("1password")
+        let onepassword = resolve_tool(
+            &["/opt/1Password/1password", "/usr/bin/1password"],
+            "1password",
+        );
+        Command::new(onepassword)
             .spawn()
             .map(|_| true)
             .unwrap_or(false)
@@ -286,7 +343,7 @@ fn op_has_connected_account(op_bin: &str) -> bool {
 
 /// Resolves a `op://vault/item/field` reference to its live value via `op read`.
 pub fn resolve_op_reference(reference: &str) -> Result<String> {
-    resolve_with("op", reference)
+    resolve_with(&op_bin(), reference)
 }
 
 /// Resolution core parameterized by the CLI binary, for testing with a fake `op`.
@@ -347,7 +404,7 @@ pub struct ResolvedLogin {
 /// and reported, NOT fatal — so one bad item can't discard the whole import.
 /// A failure to even *list* the items still aborts (nothing to import).
 pub fn import_resolved_logins() -> Result<(Vec<ResolvedLogin>, Vec<String>)> {
-    import_resolved_with("op")
+    import_resolved_with(&op_bin())
 }
 
 fn import_resolved_with(op_bin: &str) -> Result<(Vec<ResolvedLogin>, Vec<String>)> {

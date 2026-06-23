@@ -285,15 +285,21 @@ fn do_import(user: &str, token_pid: u32, vault_dir: &str) -> Result<String> {
     // ("Login Data For Account") — passwords saved to the Google account live in
     // the latter. Same schema + same os_crypt/ABE key; union the rows.
     let mut rows: Vec<(String, String, Vec<u8>)> = Vec::new();
-    for (i, name) in ["Default\\Login Data", "Default\\Login Data For Account"]
-        .iter()
-        .enumerate()
-    {
+    for name in ["Default\\Login Data", "Default\\Login Data For Account"] {
         let db = root.join(name);
         if !db.exists() {
             continue;
         }
-        let tmp = std::env::temp_dir().join(format!("puffer_logins_{i}.db"));
+        // Copy the locked SQLite store into a fresh, random, auto-cleaned temp
+        // directory (not a fixed shared-temp filename): the copy carries Chrome's
+        // encrypted credential rows, so it must not sit at a predictable path another
+        // process could read/squat, and it must be removed even on early return. The
+        // `conn` is dropped before `tmpdir` (reverse declaration order), so the file
+        // is closed before TempDir's Drop removes the directory.
+        let Ok(tmpdir) = tempfile::tempdir() else {
+            continue;
+        };
+        let tmp = tmpdir.path().join("logins.db");
         if std::fs::copy(&db, &tmp).is_err() {
             continue;
         }
@@ -306,7 +312,6 @@ fn do_import(user: &str, token_pid: u32, vault_dir: &str) -> Result<String> {
                 }
             }
         }
-        let _ = std::fs::remove_file(&tmp);
     }
 
     let path = SecretVault::default_path(std::path::Path::new(vault_dir));
@@ -346,10 +351,69 @@ fn do_import(user: &str, token_pid: u32, vault_dir: &str) -> Result<String> {
     ))
 }
 
-fn result_path(user: &str) -> PathBuf {
+/// Per-user, per-run temp file the SYSTEM stage writes its (counts-only) result to
+/// and the parent stages read up the internal elevation hops. The PID keeps
+/// concurrent imports independent and the name non-fixed; the daemon does NOT trust
+/// this file — it reads the helper's stdout (see daemon_secrets) — so this only
+/// carries the result across the SYSTEM->elevated->user boundary that cannot pipe.
+fn result_path(user: &str, pid: u32) -> PathBuf {
     PathBuf::from(format!(
-        "C:\\Users\\{user}\\AppData\\Local\\Temp\\puffer_chrome_import.txt"
+        "C:\\Users\\{user}\\AppData\\Local\\Temp\\puffer_chrome_import_{pid}.txt"
     ))
+}
+
+/// Absolute path to a System32 tool, so the elevation path never resolves a
+/// security-sensitive helper (schtasks / powershell) through PATH or the CWD.
+fn system32(tool: &str) -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    format!("{root}\\System32\\{tool}")
+}
+
+/// Rejects a value that cannot be SAFELY embedded in the elevated command lines
+/// (the `schtasks /tr` action and the PowerShell `-ArgumentList`) or in the
+/// SYSTEM-stage filesystem paths. Windows account names and paths cannot contain
+/// `"`, and we additionally forbid control chars / newlines that no quoting can
+/// neutralise and a trailing backslash that would escape our literal closing `\"`.
+/// Everything else (spaces, `'`, `&`, `(`, `)`, `%`, ...) is rendered inert by
+/// double-quoting (schtasks, where `"` is the only breakout) and single-quote
+/// doubling (PowerShell, where `'` is the only breakout), so we do NOT reject those
+/// — staying compatible with real usernames and paths. Validated at EVERY stage
+/// (user / elevated / system), because the hidden `__win-chrome-import` subcommand
+/// is directly invokable with arbitrary args.
+fn validate_elevation_arg(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 32_768 {
+        bail!("refusing to elevate: {kind} is empty or too long");
+    }
+    if value.contains('"') || value.chars().any(|c| c.is_control()) {
+        bail!("refusing to elevate: {kind} contains an unsupported character");
+    }
+    // A trailing backslash escapes the literal closing `\"` we wrap the value in,
+    // letting it swallow the next token when CommandLineToArgvW re-parses the line
+    // (the classic Windows trailing-backslash break). No legitimate account name
+    // or vault directory ends in a bare backslash.
+    if value.ends_with('\\') {
+        bail!("refusing to elevate: {kind} must not end with a backslash");
+    }
+    Ok(())
+}
+
+/// Stricter validation for a Windows account name, which is ALSO interpolated into
+/// the fixed `C:\Users\{user}\...` profile path the SYSTEM stage reads/writes.
+/// Beyond [`validate_elevation_arg`] it rejects path separators, a drive marker,
+/// and `.`/`..` segments so a crafted name cannot redirect the SYSTEM-stage file
+/// access outside the user's profile. Real logon names contain none of these.
+fn validate_account_name(user: &str) -> Result<()> {
+    validate_elevation_arg("account name", user)?;
+    if user.chars().any(|c| matches!(c, '\\' | '/' | ':')) || user == "." || user == ".." {
+        bail!("refusing to elevate: account name contains a path separator");
+    }
+    Ok(())
+}
+
+/// Escapes a value for embedding inside a PowerShell single-quoted string: there
+/// the only metacharacter is `'`, escaped by doubling it.
+fn ps_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 /// Entry point for the `puffer __win-chrome-import [args]` subcommand. `args` are
@@ -362,26 +426,39 @@ pub fn dispatch(args: &[String]) -> Result<()> {
             let user = args.get(1).cloned().unwrap_or_default();
             let vault = args.get(2).cloned().unwrap_or_default();
             let pid: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // This stage builds SYSTEM-context filesystem paths from these args, so
+            // validate them here too (the subcommand is directly invokable).
+            validate_account_name(&user)?;
+            validate_elevation_arg("vault directory", &vault)?;
             let result = do_import(&user, pid, &vault);
             let text = match &result {
                 Ok(s) => format!("CHROME_IMPORT_OK {s}"),
                 Err(e) => format!("CHROME_IMPORT_ERROR: {e:#}"),
             };
-            let _ = std::fs::write(result_path(&user), &text);
+            let _ = std::fs::write(result_path(&user, pid), &text);
             result.map(|_| ())
         }
         // ADMIN stage (post-UAC): import via a transient SYSTEM task.
         Some("--elevated") => {
             let user = args.get(1).cloned().unwrap_or_default();
             let vault = args.get(2).cloned().unwrap_or_default();
-            let pid = args.get(3).cloned().unwrap_or_default();
+            // Parse the PID as an integer so it can never carry a metacharacter into
+            // the unquoted tail of the `/tr` action; validate user/vault before
+            // building the SYSTEM task command — don't trust the prior stage's argv
+            // (the hidden subcommand is directly callable).
+            let pid: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            validate_account_name(&user)?;
+            validate_elevation_arg("vault directory", &vault)?;
             let tn = format!("PufferChromeImport_{pid}");
-            // Quote both {user} and {vault}: a username or vault path containing a
-            // space must stay a single argument in the SYSTEM-context task command.
+            // user/vault are double-quoted and, per validate_elevation_arg, cannot
+            // contain `"` (the only breakout of a double-quoted token); pid is a
+            // parsed integer; exe is our own absolute path. So no token can escape
+            // the task action string.
             let tr = format!("\"{exe}\" {SUBCOMMAND} --system \"{user}\" \"{vault}\" {pid}");
-            let out = result_path(&user);
+            let out = result_path(&user, pid);
             let _ = std::fs::remove_file(&out);
-            Command::new("schtasks")
+            let schtasks = system32("schtasks.exe");
+            Command::new(&schtasks)
                 .args([
                     "/create", "/tn", &tn, "/tr", &tr, "/sc", "once", "/st", "00:00", "/ru",
                     "SYSTEM", "/f",
@@ -389,7 +466,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
                 .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .context("schtasks /create")?;
-            Command::new("schtasks")
+            Command::new(&schtasks)
                 .args(["/run", "/tn", &tn])
                 .creation_flags(CREATE_NO_WINDOW)
                 .status()
@@ -401,7 +478,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let _ = Command::new("schtasks")
+            let _ = Command::new(&schtasks)
                 .args(["/delete", "/tn", &tn, "/f"])
                 .creation_flags(CREATE_NO_WINDOW)
                 .status();
@@ -421,18 +498,27 @@ pub fn dispatch(args: &[String]) -> Result<()> {
                 .cloned()
                 .or_else(|| std::env::var("PUFFER_VAULT_DIR").ok())
                 .unwrap_or_else(|| format!("C:\\Users\\{user}\\.puffer"));
+            validate_account_name(&user)?;
+            validate_elevation_arg("vault directory", &vault)?;
             let pid = std::process::id();
             // Clear any stale result from a previous run BEFORE elevating: if the
             // user declines UAC (or PowerShell fails), the elevated stage never runs
             // and never rewrites this file, so a leftover "OK" must not be read as a
             // fresh success.
-            let result = result_path(&user);
+            let result = result_path(&user, pid);
             let _ = std::fs::remove_file(&result);
+            // Each interpolated value goes inside a PowerShell single-quoted string
+            // with embedded `'` doubled, so a username like `O'Brien` or a path with
+            // an apostrophe is a literal argument and cannot inject PowerShell.
             let ps = format!(
                 "Start-Process -Verb RunAs -WindowStyle Hidden -Wait -FilePath '{exe}' \
-                 -ArgumentList '{SUBCOMMAND}','--elevated','{user}','{vault}','{pid}'"
+                 -ArgumentList '{SUBCOMMAND}','--elevated','{user}','{vault}','{pid}'",
+                exe = ps_single_quote(&exe),
+                user = ps_single_quote(&user),
+                vault = ps_single_quote(&vault),
             );
-            Command::new("powershell")
+            let powershell = system32("WindowsPowerShell\\v1.0\\powershell.exe");
+            Command::new(&powershell)
                 .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
                 .creation_flags(CREATE_NO_WINDOW)
                 .status()

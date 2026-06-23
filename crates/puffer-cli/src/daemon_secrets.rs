@@ -99,19 +99,21 @@ pub(crate) fn import_browser_secrets(
 #[cfg(target_os = "windows")]
 fn run_windows_v20_helper(paths: &ConfigPaths) -> Option<(usize, usize, usize)> {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = std::env::current_exe().ok()?;
     let vault_dir = paths.user_config_dir.to_string_lossy().to_string();
-    std::process::Command::new(exe)
+    // Read the helper's STDOUT (where the user stage prints the SYSTEM result line)
+    // rather than a predictable shared temp file: a same-user process can't feed the
+    // daemon a spoofed result, and piped stdio keeps the child off the daemon's
+    // handshake stdout pipe.
+    let output = std::process::Command::new(exe)
         .args(["__win-chrome-import", "--vault-dir", &vault_dir])
+        .stdin(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .status()
+        .output()
         .ok()?;
-    let user = std::env::var("USERNAME").ok()?;
-    let text = std::fs::read_to_string(format!(
-        "C:\\Users\\{user}\\AppData\\Local\\Temp\\puffer_chrome_import.txt"
-    ))
-    .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
     // The success line is "CHROME_IMPORT_OK imported=N skipped=N errors=N ...".
     // A declined/failed run leaves no fresh OK marker, so require it before
     // trusting any counts (otherwise the import is treated as not-run -> None).
