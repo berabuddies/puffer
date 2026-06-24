@@ -4,7 +4,10 @@
 mod gmail_browser_draft;
 
 use anyhow::{Context, Result};
-use gmail_browser_draft::{draft_rows_contain, gmail_reply_draft_script, gmail_save_draft_script};
+use gmail_browser_draft::{
+    draft_rows_contain, gmail_reply_draft_script, gmail_reply_draft_verify_script,
+    gmail_save_draft_script,
+};
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -212,14 +215,89 @@ fn gmail_thread_reply_draft(
                 .unwrap_or("unknown")
         );
     }
+    let verification = verify_gmail_reply_draft_in_thread(
+        env,
+        &account,
+        handshake_ref,
+        &fields,
+        &thread_id,
+        &url,
+    )?;
     Ok(json!({
         "action": action,
         "summary": format!("saved Gmail reply draft for {account}"),
         "account": account,
         "thread_id": thread_id,
         "url": url,
+        "verification_url": verification.url,
+        "verification": {
+            "matched": true,
+            "method": "thread_composer",
+            "status": verification.status,
+        },
         "save": save,
     }))
+}
+
+struct GmailDraftVerification {
+    url: String,
+    status: String,
+}
+
+fn verify_gmail_reply_draft_in_thread(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    fields: &GmailComposeFields,
+    thread_id: &str,
+    thread_url: &str,
+) -> Result<GmailDraftVerification> {
+    // Verify persistence, not just the in-memory composer we just populated.
+    let neutral_url = format!("{}#inbox", gmail_base_url(account));
+    open_gmail_url(env, account, handshake, &neutral_url)?;
+    wait_gmail_ready(env, account, handshake)?;
+    open_gmail_url(env, account, handshake, thread_url)?;
+    wait_gmail_thread_ready(env, account, handshake, thread_id)?;
+    let verification = evaluate_gmail_script(
+        env,
+        account,
+        handshake,
+        &gmail_reply_draft_verify_script(fields),
+    )?;
+    ensure_gmail_action_not_auth_blocked(account, &verification)?;
+    if !verification
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let status = verification
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let reason = verification
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let href = verification
+            .get("href")
+            .and_then(Value::as_str)
+            .unwrap_or(thread_url);
+        anyhow::bail!(
+            "Gmail reply draft was prepared but was not visible in the thread composer for thread `{thread_id}`; last URL `{href}`, status `{status}`, reason `{reason}`"
+        );
+    }
+    Ok(GmailDraftVerification {
+        url: verification
+            .get("href")
+            .and_then(Value::as_str)
+            .unwrap_or(thread_url)
+            .to_string(),
+        status: verification
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+    })
 }
 
 fn gmail_send_email(
@@ -422,7 +500,9 @@ fn gmail_collection_url(account: &str, input: &Value) -> String {
 }
 
 fn gmail_thread_url(account: &str, input: &Value, thread_id: &str) -> String {
-    if let Some(url) = string_input(input, "url") {
+    if let Some(url) =
+        string_input(input, "url").filter(|url| gmail_url_targets_thread(url, thread_id))
+    {
         return url;
     }
     let collection = string_input(input, "category")
@@ -443,6 +523,31 @@ fn gmail_thread_url(account: &str, input: &Value, thread_id: &str) -> String {
         url_fragment(&fragment),
         url_fragment(thread_id)
     )
+}
+
+fn gmail_url_targets_thread(url: &str, thread_id: &str) -> bool {
+    let normalized_url = url.to_ascii_lowercase();
+    let normalized_thread_id = thread_id.trim().to_ascii_lowercase();
+    if !normalized_thread_id.is_empty() && normalized_url.contains(&normalized_thread_id) {
+        return true;
+    }
+    let Some((_, hash)) = url.split_once('#') else {
+        return false;
+    };
+    let last_segment = hash
+        .trim_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if last_segment.is_empty() {
+        return false;
+    }
+    last_segment.starts_with("fmfc")
+        || last_segment.starts_with("thread-a:")
+        || last_segment.starts_with("thread-f:")
+        || (last_segment.len() >= 12 && last_segment.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn gmail_compose_url(account: &str, action: &str, input: &Value) -> String {
@@ -830,6 +935,37 @@ mod tests {
     }
 
     #[test]
+    fn thread_url_ignores_collection_only_source_url() {
+        assert_eq!(
+            gmail_thread_url(
+                "me@example.com",
+                &json!({
+                    "url": "https://mail.google.com/mail/u/0/#inbox",
+                    "thread_id": "19ef88112d77ab50"
+                }),
+                "19ef88112d77ab50",
+            ),
+            "https://mail.google.com/mail/?authuser=me%40example.com#inbox/19ef88112d77ab50"
+        );
+    }
+
+    #[test]
+    fn thread_url_allows_canonical_thread_source_url() {
+        let url = "https://mail.google.com/mail/u/0/#inbox/FMfcgzQgMVlhzDkrbWxFkbcDhlqsqsGW";
+        assert_eq!(
+            gmail_thread_url(
+                "me@example.com",
+                &json!({
+                    "url": url,
+                    "thread_id": "19ef88112d77ab50"
+                }),
+                "19ef88112d77ab50",
+            ),
+            url
+        );
+    }
+
+    #[test]
     fn compose_url_includes_cc_bcc_subject_and_body() {
         let url = gmail_compose_url(
             "me@example.com",
@@ -868,6 +1004,9 @@ mod tests {
         assert!(script.contains("draft_autosaved"));
         let reply_script = gmail_reply_draft_script(&fields);
         assert!(reply_script.contains("reply_opening"));
+        let verify_script = gmail_reply_draft_verify_script(&fields);
+        assert!(verify_script.contains("draft_body_not_visible"));
+        assert!(verify_script.contains("Gmail is still saving the reply draft"));
         assert!(draft_rows_contain(
             &fields,
             &json!({"rows":[{"subject":"Re: Plan","snippet":"Looks good"}]})

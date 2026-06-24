@@ -52,6 +52,81 @@ pub(super) fn gmail_reply_draft_script(fields: &GmailComposeFields) -> String {
     draft_script(fields, true)
 }
 
+/// Verifies that a reply draft is visible in the currently opened Gmail thread.
+pub(super) fn gmail_reply_draft_verify_script(fields: &GmailComposeFields) -> String {
+    let expected = draft_autosave_probe(fields);
+    format!(
+        r#"
+(() => {{
+  const expected = {expected};
+  const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const visible = (node) => {{
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  const label = (node) => [
+    node.getAttribute("aria-label") || "",
+    node.getAttribute("data-tooltip") || "",
+    node.getAttribute("title") || "",
+    node.textContent || ""
+  ].join(" ").trim();
+  const expectedBody = normalize(expected.body || "");
+  const expectedProbe = expectedBody.slice(0, 200);
+  const editables = Array.from(document.querySelectorAll('[contenteditable="true"], textarea, input'))
+    .filter(visible);
+  const bodyCandidates = editables.filter((node) => {{
+    const nodeLabel = label(node);
+    const isSearch = /search mail|search all conversations/i.test(nodeLabel) ||
+      node.getAttribute("name") === "q";
+    if (isSearch) return false;
+    return /message body|body/i.test(nodeLabel) ||
+      (node.getAttribute("g_editable") === "true" && node.getAttribute("role") === "textbox") ||
+      (node.getAttribute("contenteditable") === "true" &&
+        !!node.closest('[role="dialog"], .AD, .nH'));
+  }});
+  const matchingBody = bodyCandidates.find((node) => {{
+    const bodyText = normalize(node.innerText || node.textContent || node.value || "");
+    return expectedProbe ? bodyText.includes(expectedProbe) : bodyText.length > 0;
+  }});
+  if (!matchingBody) {{
+    return {{
+      ok: false,
+      status: "draft_body_not_visible",
+      reason: "reply draft body was not visible in the thread composer",
+      href: location.href,
+      editableCount: editables.length,
+      bodyCandidateCount: bodyCandidates.length
+    }};
+  }}
+  const composeRoot =
+    matchingBody.closest('[role="dialog"]') ||
+    matchingBody.closest('.AD') ||
+    matchingBody.closest('.nH') ||
+    document.body;
+  const bodyText = normalize(matchingBody.innerText || matchingBody.textContent || matchingBody.value || "");
+  const rootText = normalize(composeRoot.innerText || "");
+  if (/\bSaving\b|Saving draft/i.test(rootText) && !/saved|draft saved/i.test(rootText)) {{
+    return {{
+      ok: false,
+      status: "saving",
+      reason: "Gmail is still saving the reply draft",
+      href: location.href,
+      bodyLength: bodyText.length
+    }};
+  }}
+  return {{
+    ok: true,
+    status: /saved|draft saved/i.test(rootText) ? "draft_autosaved" : "draft_present",
+    href: location.href,
+    bodyLength: bodyText.length,
+    bodyCandidateCount: bodyCandidates.length
+  }};
+}})()
+"#
+    )
+}
+
 fn draft_autosave_probe(fields: &GmailComposeFields) -> Value {
     json!({
         "to": fields.to.clone(),
