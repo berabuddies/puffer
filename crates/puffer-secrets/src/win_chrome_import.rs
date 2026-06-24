@@ -241,6 +241,27 @@ fn gcm_decrypt(key: &[u8; 32], value: &[u8]) -> Result<String> {
     Ok(String::from_utf8_lossy(&pt).into_owned())
 }
 
+/// Refuses to proceed if the vault directory is itself a reparse point. The
+/// per-file writes use `write_file_no_follow` (which only guards the LEAF
+/// component), so a same-user process pre-planting `.puffer` as a junction could
+/// otherwise redirect every SYSTEM-context vault write out of the profile. This
+/// catches the persistent-junction case; it is not a complete TOCTOU fix (a racer
+/// could plant after this check — a handle-relative write would fully close it).
+/// A not-yet-created dir is allowed (normal first run); any other stat failure
+/// fails closed rather than silently skipping the check.
+fn ensure_vault_dir_not_reparse(vault_dir: &str) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    match std::fs::symlink_metadata(std::path::Path::new(vault_dir)) {
+        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+            bail!("refusing to import: vault directory is a reparse point");
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => bail!("refusing to import: cannot stat vault directory: {e}"),
+    }
+}
+
 /// The actual privileged import (SYSTEM context). Returns a human summary.
 fn do_import(user: &str, token_pid: u32, vault_dir: &str) -> Result<String> {
     let root = PathBuf::from(format!(
@@ -319,28 +340,8 @@ fn do_import(user: &str, token_pid: u32, vault_dir: &str) -> Result<String> {
     }
 
     // Defense-in-depth before this SYSTEM-context process writes inside the
-    // user-writable vault dir: refuse if the dir is itself a reparse point. The
-    // per-file writes use write_file_no_follow (which only guards the LEAF
-    // component), so a same-user process pre-planting `.puffer` as a junction could
-    // otherwise redirect every vault write out of the profile. This catches the
-    // persistent-junction case; it is not a complete TOCTOU fix (a racer could plant
-    // after this check — a handle-relative write would be needed to fully close it).
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        let dir = std::path::Path::new(vault_dir);
-        match std::fs::symlink_metadata(dir) {
-            Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
-                bail!("refusing to import: vault directory is a reparse point");
-            }
-            Ok(_) => {}
-            // Not created yet (normal first run): SecretVault::open creates it below.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            // Any other stat failure on our own profile dir is unexpected — fail
-            // closed rather than silently skipping the reparse check.
-            Err(e) => bail!("refusing to import: cannot stat vault directory: {e}"),
-        }
-    }
+    // user-writable vault dir: refuse if the dir is itself a reparse point.
+    ensure_vault_dir_not_reparse(vault_dir)?;
 
     let path = SecretVault::default_path(std::path::Path::new(vault_dir));
     let vault = SecretVault::open(&path)?;
@@ -549,5 +550,50 @@ pub fn dispatch(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #5: System32 is resolved from the kernel (GetSystemDirectoryW), so the path
+    // is real and ends at the requested tool — not derived from %SystemRoot% env.
+    #[test]
+    fn system32_resolves_a_real_kernel_path() {
+        let cmd = system32("cmd.exe");
+        let lower = cmd.to_ascii_lowercase();
+        assert!(lower.ends_with("\\system32\\cmd.exe"), "unexpected path: {cmd}");
+        assert!(std::path::Path::new(&cmd).exists(), "cmd.exe should exist at {cmd}");
+        // Poisoning %SystemRoot% must NOT change the kernel-resolved path.
+        std::env::set_var("SystemRoot", "Z:\\attacker");
+        assert_eq!(system32("cmd.exe"), cmd, "SystemRoot env must not influence system32()");
+        std::env::remove_var("SystemRoot");
+    }
+
+    // #2: a junction planted as the vault dir is detected and refused; a normal dir
+    // is allowed; a not-yet-created dir is allowed (first run).
+    #[test]
+    fn vault_dir_reparse_guard_detects_a_junction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let normal = real.to_string_lossy().to_string();
+        // A plain directory is accepted.
+        assert!(ensure_vault_dir_not_reparse(&normal).is_ok());
+        // A not-yet-created directory is accepted (SecretVault::open creates it).
+        let missing = tmp.path().join("does-not-exist").to_string_lossy().to_string();
+        assert!(ensure_vault_dir_not_reparse(&missing).is_ok());
+        // Plant a junction (no admin needed) and confirm it is refused.
+        let link = tmp.path().join("junction");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .expect("run mklink");
+        assert!(status.success(), "mklink /J should succeed without admin");
+        let junction = link.to_string_lossy().to_string();
+        let verdict = ensure_vault_dir_not_reparse(&junction);
+        assert!(verdict.is_err(), "a junction vault dir must be refused, got {verdict:?}");
     }
 }

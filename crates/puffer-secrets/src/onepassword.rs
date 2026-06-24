@@ -603,6 +603,21 @@ fn primary_url(item: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    // #6: op_bin must NOT trust the spoofable %ProgramFiles% env to locate op.exe.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn op_bin_ignores_program_files_env() {
+        std::env::set_var("ProgramFiles", "Z:\\attacker");
+        let resolved = op_bin();
+        // Result is the hardcoded Program Files path (if op is installed there) or
+        // the bare "op" PATH fallback — never anything under the poisoned env value.
+        assert!(
+            !resolved.to_ascii_lowercase().starts_with("z:\\attacker"),
+            "op_bin must not use %ProgramFiles%, got {resolved}"
+        );
+        std::env::remove_var("ProgramFiles");
+    }
+
     #[test]
     fn recognizes_op_references() {
         assert!(is_op_reference("op://Private/GitHub/credential"));
