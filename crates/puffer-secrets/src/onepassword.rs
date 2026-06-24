@@ -604,18 +604,28 @@ mod tests {
     use super::*;
 
     // #6: op_bin must NOT trust the spoofable %ProgramFiles% env to locate op.exe.
+    // Regression test: plant a real op.exe and point %ProgramFiles% at it. The
+    // PRE-FIX code read that env var and `.exists()`-checked it, so it WOULD return
+    // this attacker path; the fixed op_bin (hardcoded standard paths) must not.
     #[cfg(target_os = "windows")]
     #[test]
     fn op_bin_ignores_program_files_env() {
-        std::env::set_var("ProgramFiles", "Z:\\attacker");
+        let tmp = tempfile::tempdir().unwrap();
+        let planted = tmp.path().join("1Password CLI").join("op.exe");
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, b"fake op").unwrap();
+        std::env::set_var("ProgramFiles", tmp.path());
         let resolved = op_bin();
-        // Result is the hardcoded Program Files path (if op is installed there) or
-        // the bare "op" PATH fallback — never anything under the poisoned env value.
-        assert!(
-            !resolved.to_ascii_lowercase().starts_with("z:\\attacker"),
-            "op_bin must not use %ProgramFiles%, got {resolved}"
-        );
         std::env::remove_var("ProgramFiles");
+        assert_ne!(
+            resolved,
+            planted.to_string_lossy(),
+            "op_bin resolved op.exe from the poisoned %ProgramFiles% — env must be ignored"
+        );
+        assert!(
+            !resolved.starts_with(&*tmp.path().to_string_lossy()),
+            "op_bin used %ProgramFiles%, got {resolved}"
+        );
     }
 
     #[test]
