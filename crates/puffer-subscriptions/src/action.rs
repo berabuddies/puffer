@@ -39,6 +39,11 @@ pub fn installed_workflow_runner() -> Option<Arc<dyn WorkflowActionRunner>> {
     global_workflow_runner()
 }
 
+/// Returns the process-wide connector action executor, if one is installed.
+pub fn installed_connector_action_executor() -> Option<Arc<dyn ConnectorActionExecutor>> {
+    global_connector_action_executor()
+}
+
 /// Installs the process-wide connector action executor. Returns `Err(_)`
 /// if a different executor has already been installed.
 pub fn install_connector_action_executor(executor: Arc<dyn ConnectorActionExecutor>) -> Result<()> {

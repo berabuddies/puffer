@@ -43,8 +43,8 @@ mod telegram_e2e_tests;
 
 pub use action::{
     install_connector_action_executor, install_outbound, install_workflow_runner,
-    installed_workflow_runner, ActionDispatcher, ActionResult, ActionUsage,
-    BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, TriageDecision,
+    installed_connector_action_executor, installed_workflow_runner, ActionDispatcher, ActionResult,
+    ActionUsage, BuiltinActionDispatcher, ConnectorActionExecutor, Outbound, TriageDecision,
     TriageDecisionOutcome, WorkflowActionOutput, WorkflowActionRunner,
 };
 pub use catalog::{

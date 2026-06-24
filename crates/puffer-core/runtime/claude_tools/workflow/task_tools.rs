@@ -1693,11 +1693,85 @@ fn apply_stamped_monitor_contract(
     monitor.insert("source".to_string(), Value::Object(contract.source.clone()));
     monitor.insert("action".to_string(), Value::Object(contract.action.clone()));
     metadata.insert("monitor".to_string(), Value::Object(monitor));
+    stamp_legacy_monitor_scope_fields(metadata, &contract);
     normalize_monitor_task_metadata(metadata)?;
-    if matches!(contract.kind, MonitorTaskKind::CalendarRsvp) {
+    if matches!(&contract.kind, MonitorTaskKind::CalendarRsvp) {
         insert_calendar_pending_action(metadata)?;
     }
     Ok(())
+}
+
+fn stamp_legacy_monitor_scope_fields(
+    metadata: &mut Map<String, Value>,
+    contract: &MonitorContract,
+) {
+    stamp_source_string_as_metadata(
+        metadata,
+        &contract.source,
+        "monitor_connection",
+        &["connection_slug", "connectionSlug"],
+    );
+    stamp_source_string_as_metadata(
+        metadata,
+        &contract.source,
+        "monitor_connector",
+        &["connector_slug", "connectorSlug"],
+    );
+    for key in [
+        "chat_id",
+        "chat_kind",
+        "sender_id",
+        "sender_username",
+        "thread_id",
+        "account",
+        "account_id",
+        "calendar_id",
+        "event_id",
+    ] {
+        stamp_source_value_as_metadata(metadata, &contract.source, key, &[key]);
+    }
+    if !metadata.contains_key("from_email") {
+        if let Some(email) = contract
+            .source
+            .get("from")
+            .and_then(Value::as_object)
+            .and_then(|from| from.get("email"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+        {
+            metadata.insert("from_email".to_string(), Value::String(email.to_string()));
+        }
+    }
+}
+
+fn stamp_source_string_as_metadata(
+    metadata: &mut Map<String, Value>,
+    source: &Map<String, Value>,
+    metadata_key: &str,
+    source_keys: &[&str],
+) {
+    if let Some(value) = value_string_field(&Value::Object(source.clone()), source_keys) {
+        metadata.insert(metadata_key.to_string(), Value::String(value));
+    }
+}
+
+fn stamp_source_value_as_metadata(
+    metadata: &mut Map<String, Value>,
+    source: &Map<String, Value>,
+    metadata_key: &str,
+    source_keys: &[&str],
+) {
+    let Some(value) = source_keys.iter().find_map(|key| source.get(*key)) else {
+        return;
+    };
+    if value.is_null() {
+        return;
+    }
+    if value.as_str().is_some_and(|value| value.trim().is_empty()) {
+        return;
+    }
+    metadata.insert(metadata_key.to_string(), value.clone());
 }
 
 fn insert_calendar_pending_action(metadata: &mut Map<String, Value>) -> Result<()> {
@@ -3248,6 +3322,68 @@ mod tests {
         assert_eq!(
             metadata.pointer("/pending_action/monitor_hash"),
             metadata.pointer("/monitor/source_hash")
+        );
+    }
+
+    #[test]
+    fn task_create_stamps_telegram_legacy_scope_fields_from_current_source_envelope() {
+        let (mut state, tmp) = make_state();
+        state.set_monitor_source_stamp_contexts(vec![crate::MonitorSourceStampContext {
+            envelope_id: "env-6836".to_string(),
+            connection_slug: "telegram-user".to_string(),
+            connector_slug: Some("telegram-login".to_string()),
+            received_at_ms: None,
+            text: Some("What's the latest on WLF?".to_string()),
+            payload: json!({
+                "chat_id": 42,
+                "chat_kind": "user",
+                "message_id": 6836,
+                "sender_id": "8759047281",
+                "sender_username": "alice"
+            }),
+        }]);
+        configure_telegram_gate(
+            &mut state,
+            &tmp,
+            "env-6836",
+            activity_state(Vec::new(), None),
+        );
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Reply to Alice about WLF latest",
+                "description": "Alice asked for the latest WLF update.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "sourceEnvelopeId": "env-6836",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_memory_path": "/tmp/telegram-user.md"
+                }
+            }),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let task = load_monitor_task(tmp.path(), task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata);
+        assert_eq!(
+            metadata.pointer("/monitor_connection"),
+            Some(&json!("telegram-user"))
+        );
+        assert_eq!(
+            metadata.pointer("/monitor_connector"),
+            Some(&json!("telegram-login"))
+        );
+        assert_eq!(metadata.pointer("/chat_id"), Some(&json!(42)));
+        assert_eq!(metadata.pointer("/chat_kind"), Some(&json!("user")));
+        assert_eq!(metadata.pointer("/sender_id"), Some(&json!("8759047281")));
+        assert_eq!(
+            metadata.pointer("/monitor_task_gate/decision"),
+            Some(&json!("create_unknown"))
         );
     }
 

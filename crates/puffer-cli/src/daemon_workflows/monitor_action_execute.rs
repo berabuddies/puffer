@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
-use puffer_subscriber_runtime::{Event, EventEnvelope};
-use puffer_subscriptions::{ActionDispatcher, ActionSpec, BuiltinActionDispatcher};
+use puffer_subscriptions::installed_connector_action_executor;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -34,6 +33,7 @@ pub(crate) struct MonitorConnectorAction {
     pub connection_slug: String,
     pub action: String,
     pub input: Value,
+    pub idempotency_key: String,
 }
 
 pub(crate) trait MonitorActionExecutor: Send + Sync {
@@ -44,22 +44,17 @@ struct DispatcherMonitorActionExecutor;
 
 impl MonitorActionExecutor for DispatcherMonitorActionExecutor {
     fn execute_monitor_action(&self, action: &MonitorConnectorAction) -> Result<Value> {
-        let envelope = synthetic_envelope(&action.connection_slug, &action.input);
-        let dispatcher = BuiltinActionDispatcher::new();
-        let result = dispatcher.dispatch(
-            &ActionSpec::ConnectorAct {
-                connector_slug: action.connector_slug.clone(),
-                action: action.action.clone(),
-                input: action.input.clone(),
-            },
-            &envelope,
-        );
-        if !result.success {
-            bail!("{}", result.summary);
-        }
+        let executor = installed_connector_action_executor()
+            .context("connector action executor is not installed")?;
+        let summary = executor.run_connector_action(
+            &action.connector_slug,
+            &action.action,
+            action.input.clone(),
+            action_trigger_payload(action),
+        )?;
         Ok(json!({
             "success": true,
-            "summary": result.summary,
+            "summary": summary,
             "connector_slug": action.connector_slug,
             "connection_slug": action.connection_slug,
             "action": action.action,
@@ -95,12 +90,14 @@ pub(crate) fn handle_monitor_action_execute_with_executor(
     let _guard = action_lock.lock().unwrap();
     let mut store = read_monitor_store(&path)?;
     let task = find_task_mut(&mut store, &task_id)?;
-    if matches!(
-        task.get("status").and_then(Value::as_str),
-        Some("completed") | Some("cancelled")
-    ) {
-        bail!("terminal_monitor_task");
-    }
+    let terminal_status = task
+        .get("status")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let completed_via = task
+        .get("completed_via")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
     let metadata = task
         .get_mut("metadata")
         .and_then(Value::as_object_mut)
@@ -111,12 +108,80 @@ pub(crate) fn handle_monitor_action_execute_with_executor(
         .context("monitor task has no pending action")?;
     validate_pending_action_identity(pending_snapshot, &action_id, params.version)?;
     validate_pending_action_provenance(metadata, pending_snapshot)?;
-    let connector_action = connector_action_for_pending(metadata, pending_snapshot, &params)
-        .with_context(|| format!("monitor task `{task_id}` pending action cannot be executed"))?;
+    let connector_action =
+        connector_action_for_pending(metadata, pending_snapshot, &params, &task_id, &action_id)
+            .with_context(|| {
+                format!("monitor task `{task_id}` pending action cannot be executed")
+            })?;
+    let pending_status = pending_snapshot
+        .get("status")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    if matches!(terminal_status.as_deref(), Some("completed"))
+        && completed_action_matches(
+            completed_via.as_deref(),
+            pending_status.as_deref(),
+            &connector_action.action,
+        )
+    {
+        return snapshot_with_action_status(
+            paths,
+            already_status_for_action(&connector_action.action),
+        );
+    }
+    if matches!(
+        terminal_status.as_deref(),
+        Some("completed") | Some("cancelled")
+    ) {
+        bail!("terminal_monitor_task");
+    }
     let pending = metadata
         .get_mut("pending_action")
         .and_then(Value::as_object_mut)
         .context("monitor task has no pending action")?;
+    match pending.get("status").and_then(Value::as_str) {
+        Some(status) if status == success_status_for_action(&connector_action.action) => {
+            return snapshot_with_action_status(
+                paths,
+                already_status_for_action(&connector_action.action),
+            );
+        }
+        Some(status) if status == pending_status_for_action(&connector_action.action) => {
+            pending.insert(
+                "status".to_string(),
+                Value::String(uncertain_status_for_action(&connector_action.action).to_string()),
+            );
+            pending.insert(
+                "error".to_string(),
+                Value::String(
+                    "previous action attempt was interrupted before receipt confirmation"
+                        .to_string(),
+                ),
+            );
+            append_audit(
+                metadata,
+                "typed_action_uncertain",
+                json!({
+                    "task_id": task_id,
+                    "action_id": action_id,
+                    "version": params.version,
+                    "client_request_id": client_request_id,
+                    "connector_action": connector_action.action,
+                    "reason": "stale_in_flight_state",
+                }),
+            );
+            set_task_updated(task, now_ms());
+            fs::write(&path, serde_json::to_string_pretty(&store)?)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            bail!("duplicate_risk_ack_required");
+        }
+        Some(status) if status == uncertain_status_for_action(&connector_action.action) => {
+            bail!("duplicate_risk_ack_required");
+        }
+        Some(status) if executable_pending_status(&connector_action.action, status) => {}
+        Some(other) => bail!("action state `{other}` cannot be executed"),
+        None => bail!("pending action missing status"),
+    }
     let starting_status = pending_status_for_action(&connector_action.action);
     pending.insert(
         "status".to_string(),
@@ -233,6 +298,8 @@ fn connector_action_for_pending(
     metadata: &Map<String, Value>,
     pending: &Map<String, Value>,
     params: &MonitorActionExecuteParams,
+    task_id: &str,
+    action_id: &str,
 ) -> Result<MonitorConnectorAction> {
     let monitor = metadata
         .get("monitor")
@@ -278,6 +345,7 @@ fn connector_action_for_pending(
                     .to_string(),
                 action: "send_message".to_string(),
                 input,
+                idempotency_key: action_idempotency_key(task_id, action_id, params),
             })
         }
         "gmail.reply" => {
@@ -312,6 +380,7 @@ fn connector_action_for_pending(
                     "url": string_field(source, &["url"]),
                     "body": message,
                 }),
+                idempotency_key: action_idempotency_key(task_id, action_id, params),
             })
         }
         "calendar.rsvp" => {
@@ -340,6 +409,7 @@ fn connector_action_for_pending(
                     "url": string_field(source, &["html_link", "htmlLink", "url"]),
                     "title": string_field(source, &["summary", "title"]),
                 }),
+                idempotency_key: action_idempotency_key(task_id, action_id, params),
             })
         }
         other => bail!("typed monitor action execution does not support `{other}`"),
@@ -381,6 +451,36 @@ fn validate_pending_action_provenance(
     Ok(())
 }
 
+fn action_idempotency_key(
+    task_id: &str,
+    action_id: &str,
+    params: &MonitorActionExecuteParams,
+) -> String {
+    format!(
+        "monitor-action-execute:{task_id}:{action_id}:{}",
+        params.client_request_id
+    )
+}
+
+fn completed_action_matches(
+    completed_via: Option<&str>,
+    pending_status: Option<&str>,
+    action: &str,
+) -> bool {
+    let completed_via_matches = completed_via == Some(completed_via_for_action(action));
+    let pending_status_matches = pending_status == Some(success_status_for_action(action));
+    completed_via_matches || pending_status_matches
+}
+
+fn executable_pending_status(action: &str, status: &str) -> bool {
+    match action {
+        "send_message" => matches!(status, "draft_ready" | "send_failed"),
+        "draft_reply" => matches!(status, "draft_ready" | "draft_failed"),
+        "accept" | "deny" => matches!(status, "awaiting_confirmation" | "failed"),
+        _ => matches!(status, "draft_ready" | "failed"),
+    }
+}
+
 fn pending_status_for_action(action: &str) -> &'static str {
     match action {
         "draft_reply" => "creating_draft",
@@ -396,6 +496,24 @@ fn success_status_for_action(action: &str) -> &'static str {
         "send_message" => "sent",
         "accept" | "deny" => "completed",
         _ => "completed",
+    }
+}
+
+fn uncertain_status_for_action(action: &str) -> &'static str {
+    match action {
+        "draft_reply" => "draft_uncertain",
+        "send_message" => "send_uncertain",
+        "accept" | "deny" => "action_uncertain",
+        _ => "action_uncertain",
+    }
+}
+
+fn already_status_for_action(action: &str) -> &'static str {
+    match action {
+        "draft_reply" => "already_created",
+        "send_message" => "already_sent",
+        "accept" | "deny" => "already_completed",
+        _ => "already_completed",
     }
 }
 
@@ -442,7 +560,15 @@ fn execute_monitor_connector_action(
 
 fn telegram_reply_target_error(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_ascii_uppercase();
-    text.contains("MSG_ID") || text.contains("REPLY")
+    [
+        "MSG_ID_INVALID",
+        "MESSAGE_ID_INVALID",
+        "REPLY_MESSAGE_ID_INVALID",
+        "REPLY_TO_MSG_ID_INVALID",
+        "REPLY_TO_MESSAGE_ID_INVALID",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn monitor_action_lock(path: &Path, task_id: &str) -> Arc<Mutex<()>> {
@@ -508,23 +634,18 @@ fn snapshot_with_action_status(paths: &ConfigPaths, status: &str) -> Result<Valu
     Ok(snapshot)
 }
 
-fn synthetic_envelope(topic: &str, payload: &Value) -> EventEnvelope {
-    EventEnvelope {
-        envelope_id: format!(
-            "monitor-action-execute-{}",
-            OffsetDateTime::now_utc().unix_timestamp_nanos()
-        ),
-        subscriber_id: topic.to_string(),
-        received_at_ms: OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000,
-        event: Event {
-            topic: topic.to_string(),
-            kind: "connector_action".to_string(),
-            control: false,
-            dedup_key: None,
-            text: String::new(),
-            payload: payload.clone(),
-        },
-    }
+fn action_trigger_payload(action: &MonitorConnectorAction) -> Value {
+    json!({
+        "type": "monitor_action_execute",
+        "envelope_id": action.idempotency_key,
+        "connection_id": action.connection_slug,
+        "receivedAt": OffsetDateTime::now_utc().to_string(),
+        "topic": action.connection_slug,
+        "kind": "connector_action",
+        "dedup_key": action.idempotency_key,
+        "text": "",
+        "payload": action.input,
+    })
 }
 
 fn now_ms() -> u64 {
@@ -568,6 +689,7 @@ mod tests {
     use super::*;
     use puffer_config::ConfigPaths;
     use serde_json::json;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -582,10 +704,82 @@ mod tests {
         }
     }
 
+    struct SequenceExecutor {
+        actions: Arc<Mutex<Vec<MonitorConnectorAction>>>,
+        results: Mutex<VecDeque<Result<Value, String>>>,
+    }
+
+    impl SequenceExecutor {
+        fn new(results: Vec<Result<Value, String>>) -> Self {
+            Self {
+                actions: Arc::new(Mutex::new(Vec::new())),
+                results: Mutex::new(VecDeque::from(results)),
+            }
+        }
+    }
+
+    impl MonitorActionExecutor for SequenceExecutor {
+        fn execute_monitor_action(&self, action: &MonitorConnectorAction) -> Result<Value> {
+            self.actions.lock().unwrap().push(action.clone());
+            match self.results.lock().unwrap().pop_front() {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(error)) => bail!("{error}"),
+                None => Ok(json!({"ok": true, "action": action.action})),
+            }
+        }
+    }
+
     fn write_store(paths: &ConfigPaths, store: Value) {
         let path = monitor_tasks_path(paths);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
+    }
+
+    fn telegram_action_store(task_status: &str, pending_status: &str) -> Value {
+        telegram_action_store_with_hashes(task_status, pending_status, "sha256:test", "sha256:test")
+    }
+
+    fn telegram_action_store_with_hashes(
+        task_status: &str,
+        pending_status: &str,
+        monitor_hash: &str,
+        pending_hash: &str,
+    ) -> Value {
+        json!({
+            "tasks": [{
+                "task_id": "monitor-telegram",
+                "subject": "Reply",
+                "status": task_status,
+                "completed_via": if task_status == "completed" {
+                    json!("human_approved_telegram_reply")
+                } else {
+                    Value::Null
+                },
+                "metadata": {
+                    "_monitor": true,
+                    "monitor": {
+                        "schema_version": 2,
+                        "kind": "telegram.reply",
+                        "source_hash": monitor_hash,
+                        "source": {
+                            "connector_slug": "telegram-login",
+                            "connection_slug": "telegram-user",
+                            "chat_id": 42,
+                            "message_id": 6836
+                        },
+                        "action": {"type": "telegram_reply_draft"}
+                    },
+                    "pending_action": {
+                        "id": "telegram-action-1",
+                        "type": "telegram_reply_draft_intent",
+                        "status": pending_status,
+                        "version": 4,
+                        "agent_draft_text": "Draft from the agent.",
+                        "monitor_hash": pending_hash
+                    }
+                }
+            }]
+        })
     }
 
     #[test]
@@ -727,6 +921,166 @@ mod tests {
         assert_eq!(
             store["tasks"][0]["metadata"]["pending_action"]["status"],
             "sent"
+        );
+    }
+
+    #[test]
+    fn completed_sent_telegram_action_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        write_store(&paths, telegram_action_store("completed", "sent"));
+        let executor = RecordingExecutor::default();
+
+        let snapshot = handle_monitor_action_execute_with_executor(
+            &paths,
+            &json!({
+                "task_id": "monitor-telegram",
+                "action_id": "telegram-action-1",
+                "version": 4,
+                "approved_message": "Approved Telegram reply.",
+                "client_request_id": "client-1"
+            }),
+            &executor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot.pointer("/monitorActionExecute/status"),
+            Some(&json!("already_sent"))
+        );
+        assert!(executor.actions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_sending_telegram_action_marks_uncertain_without_resending() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        write_store(&paths, telegram_action_store("pending", "sending"));
+        let executor = RecordingExecutor::default();
+
+        let error = handle_monitor_action_execute_with_executor(
+            &paths,
+            &json!({
+                "task_id": "monitor-telegram",
+                "action_id": "telegram-action-1",
+                "version": 4,
+                "approved_message": "Approved Telegram reply.",
+                "client_request_id": "client-2"
+            }),
+            &executor,
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("duplicate_risk_ack_required"));
+        assert!(executor.actions.lock().unwrap().is_empty());
+        let store = read_monitor_store(&monitor_tasks_path(&paths)).unwrap();
+        assert_eq!(
+            store["tasks"][0]["metadata"]["pending_action"]["status"],
+            "send_uncertain"
+        );
+        assert_eq!(
+            store["tasks"][0]["metadata"]["monitor_action_events"][0]["event"],
+            "typed_action_uncertain"
+        );
+    }
+
+    #[test]
+    fn telegram_action_rejects_identity_and_provenance_mismatch_before_execute() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        write_store(&paths, telegram_action_store("pending", "draft_ready"));
+        let executor = RecordingExecutor::default();
+
+        let error = handle_monitor_action_execute_with_executor(
+            &paths,
+            &json!({
+                "task_id": "monitor-telegram",
+                "action_id": "wrong-action",
+                "version": 4,
+                "approved_message": "Approved Telegram reply.",
+                "client_request_id": "client-1"
+            }),
+            &executor,
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("action_id mismatch"));
+        assert!(executor.actions.lock().unwrap().is_empty());
+
+        write_store(
+            &paths,
+            telegram_action_store_with_hashes("pending", "draft_ready", "sha256:new", "sha256:old"),
+        );
+        let error = handle_monitor_action_execute_with_executor(
+            &paths,
+            &json!({
+                "task_id": "monitor-telegram",
+                "action_id": "telegram-action-1",
+                "version": 4,
+                "approved_message": "Approved Telegram reply.",
+                "client_request_id": "client-1"
+            }),
+            &executor,
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("monitor hash mismatch"));
+        assert!(executor.actions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn telegram_reply_target_fallback_only_retries_known_message_id_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        write_store(&paths, telegram_action_store("pending", "draft_ready"));
+        let executor = SequenceExecutor::new(vec![
+            Err("RPCError 400: MSG_ID_INVALID".to_string()),
+            Ok(json!({"ok": true})),
+        ]);
+
+        handle_monitor_action_execute_with_executor(
+            &paths,
+            &json!({
+                "task_id": "monitor-telegram",
+                "action_id": "telegram-action-1",
+                "version": 4,
+                "approved_message": "Approved Telegram reply.",
+                "client_request_id": "client-1"
+            }),
+            &executor,
+        )
+        .unwrap();
+
+        let actions = executor.actions.lock().unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].input["reply_to"], 6836);
+        assert!(actions[1].input.get("reply_to").is_none());
+        drop(actions);
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(temp.path());
+        write_store(&paths, telegram_action_store("pending", "draft_ready"));
+        let executor = SequenceExecutor::new(vec![Err("reply quota exceeded".to_string())]);
+
+        let error = handle_monitor_action_execute_with_executor(
+            &paths,
+            &json!({
+                "task_id": "monitor-telegram",
+                "action_id": "telegram-action-1",
+                "version": 4,
+                "approved_message": "Approved Telegram reply.",
+                "client_request_id": "client-1"
+            }),
+            &executor,
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("monitor_action_failed"));
+        assert_eq!(executor.actions.lock().unwrap().len(), 1);
+        let store = read_monitor_store(&monitor_tasks_path(&paths)).unwrap();
+        assert_eq!(
+            store["tasks"][0]["metadata"]["pending_action"]["status"],
+            "send_failed"
         );
     }
 
