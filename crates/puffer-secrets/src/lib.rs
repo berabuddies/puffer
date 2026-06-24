@@ -18,6 +18,11 @@ mod firefox;
 mod keychain;
 pub mod onepassword;
 pub mod onepassword_1pux;
+// Pure arg-validation for the Windows import self-elevation. Compiled on Windows
+// (its caller) and in test builds everywhere, so the security-critical logic is
+// unit-testable on any host.
+#[cfg(any(target_os = "windows", test))]
+mod win_chrome_args;
 #[cfg(target_os = "windows")]
 pub mod win_chrome_import;
 

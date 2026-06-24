@@ -15,6 +15,10 @@
 
 #![cfg(target_os = "windows")]
 
+use crate::win_chrome_args::{
+    normalize_vault_dir, parse_required_pid, ps_single_quote, validate_account_name,
+    validate_vault_dir,
+};
 use crate::{SecretUpsert, SecretVault};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -425,113 +429,6 @@ fn system32(tool: &str) -> String {
         "C:\\Windows\\System32".to_string()
     };
     format!("{dir}\\{tool}")
-}
-
-/// Rejects a value that cannot be SAFELY embedded in the elevated command lines
-/// (the `schtasks /tr` action and the PowerShell `-ArgumentList`) or in the
-/// SYSTEM-stage filesystem paths. Windows account names and paths cannot contain
-/// `"`, and we additionally forbid control chars / newlines that no quoting can
-/// neutralise and a trailing backslash that would escape our literal closing `\"`.
-/// Everything else (spaces, `'`, `&`, `(`, `)`, `%`, ...) is rendered inert by
-/// double-quoting (schtasks, where `"` is the only breakout) and single-quote
-/// doubling (PowerShell, where `'` is the only breakout), so we do NOT reject those
-/// — staying compatible with real usernames and paths. Validated at EVERY stage
-/// (user / elevated / system), because the hidden `__win-chrome-import` subcommand
-/// is directly invokable with arbitrary args.
-fn validate_elevation_arg(kind: &str, value: &str) -> Result<()> {
-    if value.is_empty() || value.len() > 32_768 {
-        bail!("refusing to elevate: {kind} is empty or too long");
-    }
-    // Reject the ASCII double quote AND the Unicode "smart" quote codepoints that
-    // PowerShell's tokenizer treats as equivalent to ASCII quotes (U+2018..U+201B
-    // single, U+201C..U+201E double): otherwise a curly single quote could close
-    // our single-quoted PowerShell argument and inject — the ASCII apostrophe is
-    // neutralised by ps_single_quote, but these are not. Also reject control chars.
-    const QUOTE_CLASS: &[char] = &[
-        '"', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}', '\u{201C}', '\u{201D}', '\u{201E}',
-    ];
-    if value.chars().any(|c| QUOTE_CLASS.contains(&c) || c.is_control()) {
-        bail!("refusing to elevate: {kind} contains an unsupported character");
-    }
-    // A trailing backslash escapes the literal closing `\"` we wrap the value in,
-    // letting it swallow the next token when CommandLineToArgvW re-parses the line
-    // (the classic Windows trailing-backslash break). No legitimate account name
-    // survives this; vault directories are normalised by normalize_vault_dir first.
-    if value.ends_with('\\') {
-        bail!("refusing to elevate: {kind} must not end with a backslash");
-    }
-    Ok(())
-}
-
-/// Trims trailing path separators from a vault directory so a user-supplied value
-/// like `D:\puffer\` is accepted (it is semantically identical) instead of tripping
-/// the trailing-backslash rejection. A bare drive root (`X:\` / `X:/`) keeps one
-/// separator so it stays drive-absolute rather than collapsing to a drive-relative
-/// `X:`; a bare value is left unchanged.
-fn normalize_vault_dir(vault: &str) -> String {
-    let trimmed = vault.trim_end_matches(|c| c == '\\' || c == '/');
-    let bytes = trimmed.as_bytes();
-    if trimmed.is_empty() {
-        vault.to_string()
-    } else if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        // `C:\` / `C:///` -> `C:\` (don't turn a drive root into drive-relative `C:`)
-        format!("{trimmed}\\")
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Validates the vault DIRECTORY, which (unlike the account name) legitimately
-/// contains backslashes. The SYSTEM stage opens/creates the vault here and writes
-/// the master key + encrypted store, so a crafted value must not redirect that
-/// write off the local machine or up the tree: require a local drive-letter
-/// absolute path (`X:\...`), reject UNC roots (`\\host\share`, `//host`), and reject
-/// any `..` segment. Pass the value through [`normalize_vault_dir`] first.
-fn validate_vault_dir(vault: &str) -> Result<()> {
-    validate_elevation_arg("vault directory", vault)?;
-    let bytes = vault.as_bytes();
-    let is_unc = vault.starts_with("\\\\") || vault.starts_with("//");
-    let is_drive_abs = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/');
-    if is_unc || !is_drive_abs {
-        bail!("refusing to elevate: vault directory must be a local drive-absolute path");
-    }
-    if vault.split(|c| c == '\\' || c == '/').any(|seg| seg == "..") {
-        bail!("refusing to elevate: vault directory must not contain a `..` segment");
-    }
-    Ok(())
-}
-
-/// Stricter validation for a Windows account name, which is ALSO interpolated into
-/// the fixed `C:\Users\{user}\...` profile path the SYSTEM stage reads/writes.
-/// Beyond [`validate_elevation_arg`] it rejects path separators, a drive marker,
-/// and `.`/`..` segments so a crafted name cannot redirect the SYSTEM-stage file
-/// access outside the user's profile. Real logon names contain none of these.
-fn validate_account_name(user: &str) -> Result<()> {
-    validate_elevation_arg("account name", user)?;
-    if user.chars().any(|c| matches!(c, '\\' | '/' | ':')) || user == "." || user == ".." {
-        bail!("refusing to elevate: account name contains a path separator");
-    }
-    Ok(())
-}
-
-/// Escapes a value for embedding inside a PowerShell single-quoted string: there
-/// the only metacharacter is `'`, escaped by doubling it.
-fn ps_single_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-/// Parses the cross-stage PID argument, rejecting a missing/invalid/zero value
-/// rather than defaulting to 0. A 0 would make the result filename
-/// (`..._0.txt`) and the transient task name (`PufferChromeImport_0`) fixed and
-/// predictable for direct invocations of the hidden subcommand, and is never a
-/// real process id — so fail closed.
-fn parse_required_pid(arg: Option<&String>) -> Result<u32> {
-    arg.and_then(|s| s.parse::<u32>().ok())
-        .filter(|&pid| pid != 0)
-        .context("missing or invalid PID argument for the import helper")
 }
 
 /// Entry point for the `puffer __win-chrome-import [args]` subcommand. `args` are
