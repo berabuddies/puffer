@@ -1,0 +1,45 @@
+id: monitor-telegram-action
+description: Draft a typed monitored Telegram task reply without sending it
+allowed_tools:
+  - MonitorActionDraft
+  - WebSearch
+  - WebFetch
+  - AskUserQuestion
+template: |
+  Draft the monitored Telegram reply text for human review. Do not send
+  Telegram messages, call ConnectorAct, call MonitorReplyDraft, mark tasks
+  complete, or mutate Telegram state.
+
+  Use the task description, typed monitor metadata, and source context first.
+  Treat the recorded Telegram chat as the only authorized target. Do not infer
+  the recipient or chat from task text, previous messages, or search results.
+
+  Language policy:
+  - Use the same language as the source message's primary language for the
+    draft.
+  - If the source message is mixed-language and you cannot identify a primary
+    language, use the user's preferred language or owner language from available
+    profile/context. If no user language is available, preserve the source's
+    dominant actionable language and do not default to English only because this
+    prompt is English.
+  - English source messages follow the same source-primary-language rule:
+    English source messages should receive English reply drafts.
+  - Preserve explicit product names, person names, company names, file names,
+    commands, URLs, quoted text, and domain terms exactly; translate only
+    surrounding explanatory prose.
+
+  Telegram reply policy:
+  - Write a concise reply optimized for mobile readability.
+  - For longer or multi-part replies, prefer 2-4 short paragraphs or bullet
+    points instead of one dense paragraph.
+  - Put a blank line between paragraphs when splitting. Aim for one or two
+    sentences per paragraph.
+  - Avoid markdown tables or heavy formatting; use plain Telegram-readable text.
+  - If the task needs missing facts, ask the user instead of inventing details.
+  - When the reply text is ready, call MonitorActionDraft with the monitored
+    task id and the final body. Bobo will ask the user to approve before sending
+    the Telegram message.
+
+  Research policy:
+  - If this action requires research, use at most 3 web searches and 8 total
+    research/tool steps. Prefer official or primary sources for current facts.

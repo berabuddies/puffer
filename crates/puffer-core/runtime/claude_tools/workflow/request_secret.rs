@@ -139,9 +139,8 @@ fn request_secret(
     // resolved password. Only a manually-added `op://...` reference is resolved to
     // its live value on demand, so that reference's plaintext never persists.
     let value = if puffer_secrets::is_op_reference(&secret.value) {
-        puffer_secrets::resolve_op_reference(&secret.value).with_context(|| {
-            format!("resolve 1Password reference for secret `{}`", secret.label)
-        })?
+        puffer_secrets::resolve_op_reference(&secret.value)
+            .with_context(|| format!("resolve 1Password reference for secret `{}`", secret.label))?
     } else {
         secret.value
     };

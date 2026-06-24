@@ -3,7 +3,7 @@ use puffer_config::{load_config, ConfigPaths, PufferConfig};
 use puffer_core::{
     execute_tool_action_once, execute_user_turn_streaming,
     execute_user_turn_streaming_excluding_tools, execute_user_turn_streaming_without_tools,
-    AppState, MonitorTaskCreateGateContext, TurnStreamEvent,
+    AppState, MonitorSourceStampContext, MonitorTaskCreateGateContext, TurnStreamEvent,
 };
 use puffer_provider_registry::{canonical_provider_id, AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
@@ -195,12 +195,14 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
             }
         };
         let gate_contexts = monitor_task_create_gate_contexts(&self.paths, &triggers);
+        let source_stamp_contexts = monitor_source_stamp_contexts(&triggers);
         let mut output = self.run_task_agent_prompt_for_session(
             prompt,
             model,
             &session_key,
             is_outgoing,
             gate_contexts,
+            source_stamp_contexts,
         )?;
         let task_decisions = match task_snapshot_before {
             Some(before) => match load_monitor_task_trace_values(&self.paths) {
@@ -319,6 +321,7 @@ impl ProcessWorkflowRunner {
         session_key: &str,
         is_outgoing: bool,
         gate_contexts: Vec<MonitorTaskCreateGateContext>,
+        source_stamp_contexts: Vec<MonitorSourceStampContext>,
     ) -> Result<WorkflowActionOutput> {
         let _guard = workflow_runner_lock(&self.lock);
         let cwd = self.paths.workspace_root.clone();
@@ -339,6 +342,7 @@ impl ProcessWorkflowRunner {
         // separate reply-send path.
         state.monitor_triage_turn = true;
         state.set_monitor_task_create_gate_contexts(gate_contexts);
+        state.set_monitor_source_stamp_contexts(source_stamp_contexts);
         let mut auth_store = snapshot.auth_store.clone();
         let mut usage = None;
         // Post-lock stamp: history's run window starts at router dispatch, so
@@ -1079,6 +1083,81 @@ fn triage_session_key(model: Option<&str>, triggers: &[serde_json::Value]) -> St
     format!("monitor-triage:{connection}:{model}")
 }
 
+fn monitor_source_stamp_contexts(triggers: &[serde_json::Value]) -> Vec<MonitorSourceStampContext> {
+    triggers
+        .iter()
+        .filter_map(monitor_source_stamp_context)
+        .collect()
+}
+
+fn monitor_source_stamp_context(trigger: &serde_json::Value) -> Option<MonitorSourceStampContext> {
+    let envelope_id = trigger
+        .get("envelope_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let connection_slug = trigger
+        .get("connection_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let payload = trigger.get("payload").cloned().unwrap_or_else(|| json!({}));
+    let connector_slug = connector_slug_for_trigger(trigger, &payload, connection_slug);
+    Some(MonitorSourceStampContext {
+        envelope_id: envelope_id.to_string(),
+        connection_slug: connection_slug.to_string(),
+        connector_slug,
+        received_at_ms: value_i64_field(trigger, "received_at_ms")
+            .or_else(|| value_i64_field(trigger, "receivedAtMs"))
+            .or_else(|| value_i64_field(&payload, "date_ms")),
+        text: trigger
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        payload,
+    })
+}
+
+fn connector_slug_for_trigger(
+    trigger: &Value,
+    payload: &Value,
+    connection_slug: &str,
+) -> Option<String> {
+    value_string(
+        trigger,
+        &[
+            "connector_id",
+            "connector_slug",
+            "connectorSlug",
+            "platform",
+        ],
+    )
+    .or_else(|| {
+        value_string(
+            payload,
+            &[
+                "connector_id",
+                "connector_slug",
+                "connectorSlug",
+                "platform",
+            ],
+        )
+    })
+    .or_else(|| {
+        if connection_slug.contains("telegram") {
+            Some("telegram-login".to_string())
+        } else if connection_slug.contains("gmail") {
+            Some("gmail-browser".to_string())
+        } else if connection_slug.contains("gcal") || connection_slug.contains("calendar") {
+            Some("gcal-browser".to_string())
+        } else {
+            None
+        }
+    })
+}
+
 fn monitor_task_create_gate_contexts(
     paths: &ConfigPaths,
     triggers: &[serde_json::Value],
@@ -1186,6 +1265,7 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
         .get("payload")
         .and_then(|payload| payload.get("conversation_context"))
         .cloned();
+    let derived_source_context = derive_monitor_source_context_from_trigger(trigger);
     let path = monitor_task_store_path(paths);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -1247,6 +1327,12 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
                 changed = true;
             }
         }
+        if metadata.get("source_context").is_none() {
+            if let Some(context) = derived_source_context.as_ref() {
+                metadata.insert("source_context".to_string(), context.clone());
+                changed = true;
+            }
+        }
         if let Some(context) = metadata
             .get_mut("source_context")
             .and_then(serde_json::Value::as_object_mut)
@@ -1303,6 +1389,115 @@ fn record_monitor_source_text(paths: &ConfigPaths, trigger: &serde_json::Value) 
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(())
+}
+
+fn derive_monitor_source_context_from_trigger(trigger: &Value) -> Option<Value> {
+    let payload = trigger.get("payload")?;
+    let connector_slug = value_string(trigger, &["connector_slug", "connectorSlug"])
+        .or_else(|| value_string(payload, &["connector_slug", "connectorSlug", "platform"]))?;
+    if connector_slug != "gmail-browser" {
+        return None;
+    }
+    let message = payload.get("message").unwrap_or(payload);
+    let sender_email = value_string(
+        message,
+        &[
+            "fromEmail",
+            "from_email",
+            "senderEmail",
+            "sender_email",
+            "email",
+        ],
+    )
+    .or_else(|| {
+        value_string(
+            payload,
+            &[
+                "fromEmail",
+                "from_email",
+                "senderEmail",
+                "sender_email",
+                "email",
+            ],
+        )
+    })?;
+    let sender_name = value_string(message, &["sender", "senderName", "fromName", "name"])
+        .or_else(|| value_string(payload, &["sender", "senderName", "fromName", "name"]));
+    let account = value_string(payload, &["account", "account_email", "accountEmail"]);
+    let subject = value_string(message, &["subject"]);
+    let thread_id = value_string(
+        message,
+        &[
+            "threadId",
+            "thread_id",
+            "legacyThreadId",
+            "legacy_thread_id",
+            "gmailThreadId",
+            "gmail_thread_id",
+        ],
+    );
+    let url = value_string(message, &["url", "href"]);
+    let connection_slug = value_string(
+        trigger,
+        &["connection_id", "connection_slug", "connectionSlug"],
+    )
+    .or_else(|| {
+        value_string(
+            payload,
+            &["connection_id", "connection_slug", "connectionSlug"],
+        )
+    });
+
+    let mut sender = serde_json::Map::new();
+    sender.insert("email".to_string(), Value::String(sender_email.clone()));
+    if let Some(name) = sender_name {
+        sender.insert("name".to_string(), Value::String(name));
+    }
+
+    let mut delivery_target = serde_json::Map::new();
+    delivery_target.insert(
+        "type".to_string(),
+        Value::String("gmail_message".to_string()),
+    );
+    if let Some(account) = account {
+        delivery_target.insert("account".to_string(), Value::String(account));
+    }
+    if let Some(thread_id) = thread_id {
+        delivery_target.insert("thread_id".to_string(), Value::String(thread_id));
+    }
+    if let Some(url) = url {
+        delivery_target.insert("url".to_string(), Value::String(url));
+    }
+
+    let mut context = serde_json::Map::new();
+    context.insert(
+        "kind".to_string(),
+        Value::String("gmail_message".to_string()),
+    );
+    context.insert(
+        "platform".to_string(),
+        Value::String(connector_slug.clone()),
+    );
+    context.insert("connector_slug".to_string(), Value::String(connector_slug));
+    if let Some(connection_slug) = connection_slug {
+        context.insert(
+            "connection_slug".to_string(),
+            Value::String(connection_slug),
+        );
+    }
+    context.insert(
+        "summary".to_string(),
+        Value::String(format!("Gmail message from {sender_email}")),
+    );
+    if let Some(subject) = subject {
+        context.insert("subject".to_string(), Value::String(subject));
+    }
+    context.insert("sender".to_string(), Value::Object(sender));
+    context.insert(
+        "delivery_target".to_string(),
+        Value::Object(delivery_target),
+    );
+    Some(Value::Object(context))
 }
 
 fn monitor_task_store_path(paths: &ConfigPaths) -> PathBuf {
@@ -2432,6 +2627,72 @@ NO_TASK_DECISIONS:
         assert_eq!(
             store["tasks"][0]["metadata"]["source_text"],
             "线上支付回调失败率刚升到 18%，请在 16:00 前给结论。"
+        );
+    }
+
+    #[test]
+    fn record_monitor_source_text_derives_gmail_sender_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = puffer_config::ConfigPaths::discover(temp.path());
+        let store_path = paths
+            .workspace_config_dir
+            .join("runtime")
+            .join("claude_workflow")
+            .join("monitor_tasks.json");
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &store_path,
+            serde_json::to_string_pretty(&json!({
+                "tasks": [
+                    {
+                        "task_id": "monitor-gmail",
+                        "subject": "Confirm meeting",
+                        "metadata": {
+                            "monitor_connection": "gmail-browser",
+                            "monitor_connector": "gmail-browser",
+                            "monitor_envelope_id": "env-gmail"
+                        }
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let trigger = json!({
+            "connection_id": "gmail-browser",
+            "connector_slug": "gmail-browser",
+            "envelope_id": "env-gmail",
+            "text": "Fu Xiangyu\nConfirm meeting\nWhat time works?",
+            "payload": {
+                "platform": "gmail-browser",
+                "account": "winterfell0614@gmail.com",
+                "message": {
+                    "sender": "Fu Xiangyu",
+                    "fromEmail": "fuxiangyu@example.com",
+                    "subject": "Confirm meeting",
+                    "threadId": "thread-123",
+                    "url": "https://mail.google.com/mail/u/0/#inbox/thread-123"
+                }
+            }
+        });
+
+        super::record_monitor_source_text(&paths, &trigger).unwrap();
+
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store_path).unwrap()).unwrap();
+        let context = &store["tasks"][0]["metadata"]["source_context"];
+        assert_eq!(context["kind"], "gmail_message");
+        assert_eq!(context["platform"], "gmail-browser");
+        assert_eq!(context["sender"]["name"], "Fu Xiangyu");
+        assert_eq!(context["sender"]["email"], "fuxiangyu@example.com");
+        assert_eq!(
+            context["delivery_target"]["account"],
+            "winterfell0614@gmail.com"
+        );
+        assert_eq!(context["delivery_target"]["thread_id"], "thread-123");
+        assert_eq!(
+            context["text"],
+            "Fu Xiangyu\nConfirm meeting\nWhat time works?"
         );
     }
 

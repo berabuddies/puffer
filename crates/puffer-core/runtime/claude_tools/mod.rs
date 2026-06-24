@@ -382,7 +382,7 @@ pub(crate) fn execute_parallel_tool(
     filesystem_policy: &FilesystemPermissionPolicy,
     session_id: &Uuid,
     input: Value,
-    resources: &LoadedResources,
+    _resources: &LoadedResources,
     registry: &ToolRegistry,
     provider_context: &ProviderToolContext<'_>,
     runner: &Arc<dyn ToolRunner>,
@@ -852,6 +852,9 @@ fn execute_workflow_tool_with_media_context(
         "McpToolCall" => workflow::mcp_tool_call::execute_mcp_tool_call(state, cwd, input),
         "McpStatus" => workflow::mcp_status::execute_mcp_status(state, cwd, input),
         "ModalAction" => workflow::modal_action::execute_modal_action(state, cwd, input),
+        "MonitorActionDraft" => {
+            workflow::monitor_action_draft::execute_monitor_action_draft(state, cwd, input)
+        }
         "MonitorReplyDraft" => {
             workflow::monitor_reply_draft::execute_monitor_reply_draft(state, cwd, input)
         }

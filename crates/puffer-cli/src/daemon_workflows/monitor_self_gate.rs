@@ -2,7 +2,6 @@ use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::Event;
 use puffer_subscriptions::SelfMessageGate;
 use serde_json::Value;
-use std::sync::Arc;
 
 use super::monitor_task_ignore::monitor_tasks_path;
 
@@ -119,9 +118,8 @@ mod tests {
     use puffer_config::ConfigPaths;
     use puffer_subscriber_runtime::EventEnvelope;
     use puffer_subscriptions::{
-        ActionDispatcher, ActionResult, ActionSpec, ClassifyDecision, Classifier,
-        WorkflowBindingSpec, WorkflowBindingStatus, WorkflowBindingStore,
-        process_envelope_result,
+        process_envelope_result, ActionDispatcher, ActionResult, ActionSpec, Classifier,
+        ClassifyDecision, WorkflowBindingSpec, WorkflowBindingStatus, WorkflowBindingStore,
     };
     use serde_json::json;
     use std::fs;
@@ -265,17 +263,17 @@ mod tests {
         );
 
         // thread_id match (email).
-        assert!(gate.should_dispatch_self_message(
-            &make_event(json!({ "thread_id": "abc-123", "is_outgoing": true }))
-        ));
+        assert!(gate.should_dispatch_self_message(&make_event(
+            json!({ "thread_id": "abc-123", "is_outgoing": true })
+        )));
         // bare `chat` key (WeChat); numeric on both sides.
-        assert!(gate.should_dispatch_self_message(
-            &make_event(json!({ "chat": 7788, "is_outgoing": true }))
-        ));
+        assert!(gate.should_dispatch_self_message(&make_event(
+            json!({ "chat": 7788, "is_outgoing": true })
+        )));
         // A different thread_id → drop.
-        assert!(!gate.should_dispatch_self_message(
-            &make_event(json!({ "thread_id": "other", "is_outgoing": true }))
-        ));
+        assert!(!gate.should_dispatch_self_message(&make_event(
+            json!({ "thread_id": "other", "is_outgoing": true })
+        )));
     }
 
     #[test]
@@ -293,13 +291,13 @@ mod tests {
             }),
         );
         // Event carries chat_id = 42 (a DIFFERENT key) → must NOT match.
-        assert!(!gate.should_dispatch_self_message(
-            &make_event(json!({ "chat_id": 42, "is_outgoing": true }))
-        ));
+        assert!(!gate.should_dispatch_self_message(&make_event(
+            json!({ "chat_id": 42, "is_outgoing": true })
+        )));
         // Same key (channel_id) → matches.
-        assert!(gate.should_dispatch_self_message(
-            &make_event(json!({ "channel_id": 42, "is_outgoing": true }))
-        ));
+        assert!(gate.should_dispatch_self_message(&make_event(
+            json!({ "channel_id": 42, "is_outgoing": true })
+        )));
     }
 
     // -------------------------------------------------------------------------
@@ -389,15 +387,14 @@ mod tests {
             }),
         );
 
-        let gate: Arc<dyn SelfMessageGate> =
-            Arc::new(MonitorSelfGate::new(paths.clone()));
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(MonitorSelfGate::new(paths.clone()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let dispatcher: Arc<dyn ActionDispatcher> =
-            Arc::new(CountingDispatcher { calls: calls.clone() });
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
         let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
 
-        let store =
-            WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
+        let store = WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
         store.create(monitor_binding_spec()).unwrap();
 
         let result = process_envelope_result(
@@ -440,15 +437,14 @@ mod tests {
             }),
         );
 
-        let gate: Arc<dyn SelfMessageGate> =
-            Arc::new(MonitorSelfGate::new(paths.clone()));
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(MonitorSelfGate::new(paths.clone()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let dispatcher: Arc<dyn ActionDispatcher> =
-            Arc::new(CountingDispatcher { calls: calls.clone() });
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
         let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
 
-        let store =
-            WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
+        let store = WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
         store.create(monitor_binding_spec()).unwrap();
 
         let result = process_envelope_result(
@@ -461,7 +457,10 @@ mod tests {
             &gate,
         );
 
-        assert!(!result.matched, "chat 99 has no open task — must not dispatch");
+        assert!(
+            !result.matched,
+            "chat 99 has no open task — must not dispatch"
+        );
         assert_eq!(result.acted, 0);
         assert_eq!(calls.load(Ordering::SeqCst), 0, "dispatcher must not run");
         // PanicClassifier did not panic → classifier was bypassed.
@@ -486,15 +485,14 @@ mod tests {
             }),
         );
 
-        let gate: Arc<dyn SelfMessageGate> =
-            Arc::new(MonitorSelfGate::new(paths.clone()));
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(MonitorSelfGate::new(paths.clone()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let dispatcher: Arc<dyn ActionDispatcher> =
-            Arc::new(CountingDispatcher { calls: calls.clone() });
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
         let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
 
-        let store =
-            WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
+        let store = WorkflowBindingStore::load(tempdir.path().join("bindings.json")).unwrap();
         store.create(monitor_binding_spec()).unwrap();
 
         // First pass: open task → dispatched.

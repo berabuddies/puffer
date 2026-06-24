@@ -12,6 +12,7 @@ use puffer_session_store::{
     StoredAttachment, TranscriptEvent, TranscriptRewrite,
 };
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -307,6 +308,10 @@ pub struct AppState {
     /// Pre-create monitor trigger facts trusted by the workflow runner. TaskCreate
     /// uses these to evaluate local connector state before writing monitor tasks.
     pub(crate) monitor_task_create_gate_contexts: Vec<MonitorTaskCreateGateContext>,
+    /// Server-owned source facts for the current monitor triage batch. Typed
+    /// monitor TaskCreate stamps delivery targets from these contexts instead
+    /// of trusting LLM-written metadata.
+    pub(crate) monitor_source_stamp_contexts: Vec<MonitorSourceStampContext>,
     /// Wall-clock timestamp of the most recent committed assistant message.
     /// Set by `push_message` when role == Assistant. Consumed by the
     /// microcompact time-based trigger to mirror Claude Code's "gap since
@@ -359,6 +364,16 @@ pub struct MonitorTaskCreateGateContext {
     pub source_date_ms: Option<i64>,
     pub activity_state_path: PathBuf,
     pub monitor_trace_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorSourceStampContext {
+    pub envelope_id: String,
+    pub connection_slug: String,
+    pub connector_slug: Option<String>,
+    pub received_at_ms: Option<i64>,
+    pub text: Option<String>,
+    pub payload: Value,
 }
 
 impl AppState {
@@ -443,6 +458,7 @@ impl AppState {
             monitor_reply_scope: None,
             monitor_triage_turn: false,
             monitor_task_create_gate_contexts: Vec::new(),
+            monitor_source_stamp_contexts: Vec::new(),
             last_assistant_at: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,
@@ -480,6 +496,10 @@ impl AppState {
         contexts: Vec<MonitorTaskCreateGateContext>,
     ) {
         self.monitor_task_create_gate_contexts = contexts;
+    }
+
+    pub fn set_monitor_source_stamp_contexts(&mut self, contexts: Vec<MonitorSourceStampContext>) {
+        self.monitor_source_stamp_contexts = contexts;
     }
 
     /// Replaces the active tool runner. Use this from tests or remote

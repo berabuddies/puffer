@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
+use puffer_core::monitor_contract::{display_source_context, parse_monitor_contract};
 use puffer_subscriptions::normalize_contact_id;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -205,8 +206,14 @@ fn task_json(task: TaskSnapshotRecord, source: &str, scope: &str, scope_label: &
             &["monitor_envelope_id", "monitorEnvelopeId"],
             &["envelope_id", "envelopeId"]
         ),
+        "monitor": metadata_value(&task.metadata, &["monitor"], &[]),
         "source_context": monitor_source_context(&task.metadata),
         "completion_policy": monitor_completion_policy(&task.metadata),
+        "pending_action": metadata_value(
+            &task.metadata,
+            &["pending_action", "pendingAction"],
+            &["pending_action", "pendingAction"]
+        ),
         "pending_reply": metadata_value(
             &task.metadata,
             &["pending_reply", "pendingReply"],
@@ -386,6 +393,9 @@ fn monitor_actions(metadata: &Map<String, Value>) -> Vec<Value> {
 }
 
 pub(super) fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
+    if let Some(contract) = parse_monitor_contract(metadata).ok().flatten() {
+        return with_verbatim_source_text(metadata, Some(display_source_context(&contract)));
+    }
     let context = metadata
         .get("source_context")
         .or_else(|| metadata.get("sourceContext"))

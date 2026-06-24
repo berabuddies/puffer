@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 const RESEARCH_ACTION_PROMPT_GUIDANCE: &str = "\n\nResearch action prompt guidance:\n- For any Research action, actionPrompt must define the specific research question, include source chat/contact context, cap web research to at most 3 web searches and 8 total research/tool steps, avoid repeated equivalent queries, prefer official or primary sources, and tell the action agent to stop once it has enough evidence for a concise reply.";
 const TASK_UPDATE_SOURCE_ISOLATION_POLICY: &str = "\n\nTaskUpdate source isolation policy:\n- Same chat/contact is not enough to call something a duplicate. If the current source event asks a new question, changes topic, or creates a separate request, create a new monitor task even when another task from the same sender is still pending.\n- Task source provenance is server-owned. Do not include monitor_envelope_id, monitor_envelope_ids, source_context, source_text, source_message_id, delivery_target, or other source/delivery metadata in TaskUpdate. Use TaskUpdate for status changes or ordinary non-source content updates only.";
-const MONITOR_SOURCE_PROVENANCE_POLICY: &str = "\n\nMonitor source provenance policy:\n- The current workflow trigger or current digest triggers are the only valid source events for TaskCreate.\n- Conversation context may explain short or referential messages, but never copy envelope_id or source identity from conversation_context into TaskCreate metadata.\n- For TaskCreate, metadata.monitor_envelope_id must be copied from a current workflow trigger. If one task depends on multiple current digest triggers, metadata.monitor_envelope_ids must contain only those current contributing trigger envelope_id values.\n- If TaskCreate returns skipped=true with reason duplicate_source, duplicate_monitor_task, or untrusted_monitor_source, do not retry by changing source metadata.";
+const MONITOR_SOURCE_PROVENANCE_POLICY: &str = "\n\nMonitor source provenance policy:\n- The current workflow trigger or current digest triggers are the only valid source events for TaskCreate.\n- Conversation context may explain short or referential messages, but never copy envelope_id or source identity from conversation_context into TaskCreate metadata.\n- For TaskCreate, pass `sourceEnvelopeId` copied from the relevant current workflow trigger's `envelope_id`. If one review-only task depends on several current digest triggers, pass `sourceEnvelopeIds` containing only current contributing trigger `envelope_id` values.\n- Do not write `metadata.monitor_envelope_id`, `metadata.monitor_envelope_ids`, `metadata.source_context`, `metadata.monitor`, `metadata.pending_action`, or source hash fields. The daemon stamps those fields after validating the source envelope selector.\n- If TaskCreate returns skipped=true with reason duplicate_source, duplicate_monitor_task, or untrusted_monitor_source, do not retry by changing source metadata.";
+const TYPED_MONITOR_CONTRACT_POLICY: &str = "\n\nTyped monitor task contract (daemon-stamped)\n- Every new monitor TaskCreate MUST provide `sourceEnvelopeId` unless there is exactly one current workflow trigger.\n- The daemon derives `metadata.monitor.schema_version=2`, `kind`, `source`, `action`, `source_context`, completion policy, and pending action state from the selected current trigger. Do not create or update those metadata fields.\n- The daemon chooses exactly one kind for each task: `telegram.reply` for Telegram reply tasks, `gmail.reply` for Gmail reply/draft tasks, `calendar.rsvp` for Google Calendar RSVP tasks, or `generic.review` when the item requires review but has no safe app-specific executable action.\n- Do not create one executable task from multiple unrelated sources. If several current envelope IDs are needed only as evidence for one review item, use one TaskCreate with `sourceEnvelopeIds`; the daemon will stamp it as `generic.review`.\n- Continue copying stable scalar source identity fields to top-level metadata for legacy duplicate and ignore matching (for example `chat_id`, `sender_id`, `thread_id`, `from_email`, `calendar_id`, `event_id`, `account_id`). Never infer these fields from unstructured text.";
 const TASK_FIELD_GUIDANCE: &str = "\n\nMonitor task field guidance\n- Write the subject as a next-step title for the user, not a neutral summary of the message. Prefer imperative verbs such as Reply, Review, Approve, Decide, Confirm, Schedule, Pay, Update, or Investigate.\n- The subject should answer \"what should I do next?\" without requiring the user to open the description. For example, use \"Reply with Friday availability\" instead of \"Friday availability question\".\n- Write the description to explain why this needs attention, who or what triggered it, any exact deadline/value that matters, and the concrete next step. Keep it concise, but include enough context for the user or action agent to act.\n- For awareness-only score-4 items, phrase the subject around the required user follow-up or decision. If there is no follow-up, decision, risk, deadline, or changed commitment, do not create a task.\n- Action names should be concrete user choices, and action prompts should carry the selected next step forward rather than merely summarize the source event.";
 
 #[derive(Debug, Deserialize)]
@@ -466,6 +467,7 @@ fn monitor_triage_prompt(
         contact_ids
     );
     prompt.push_str(MONITOR_SOURCE_PROVENANCE_POLICY);
+    prompt.push_str(TYPED_MONITOR_CONTRACT_POLICY);
     prompt.push_str(TASK_UPDATE_SOURCE_ISOLATION_POLICY);
     prompt.push_str(TASK_FIELD_GUIDANCE);
     prompt.push_str(RESEARCH_ACTION_PROMPT_GUIDANCE);
@@ -568,7 +570,7 @@ mod tests {
         assert!(prompt.contains("multiple same-conversation triggers"));
         assert!(prompt.contains("captures the user's actual intent across the burst"));
         assert!(prompt.contains("telegram@alice"));
-        assert!(prompt.contains("monitor_envelope_id"));
+        assert!(prompt.contains("sourceEnvelopeId"));
         assert!(prompt.contains("Never infer source identity"));
         assert!(prompt.contains("Do not add any metadata field named"));
         assert!(prompt.contains("Research action prompt guidance"));
@@ -580,6 +582,15 @@ mod tests {
         assert!(prompt.contains("Monitor source provenance policy"));
         assert!(prompt.contains("current workflow trigger or current digest triggers"));
         assert!(prompt.contains("Task source provenance is server-owned"));
+        assert!(prompt.contains("Typed monitor task contract"));
+        assert!(prompt.contains("daemon derives `metadata.monitor.schema_version=2`"));
+        assert!(prompt.contains("telegram.reply"));
+        assert!(prompt.contains("gmail.reply"));
+        assert!(prompt.contains("calendar.rsvp"));
+        assert!(prompt.contains("generic.review"));
+        assert!(prompt.contains("source_context"));
+        assert!(prompt.contains("pending_action"));
+        assert!(prompt.contains("daemon-stamped"));
         assert!(prompt.contains("do not retry by changing source metadata"));
         assert!(prompt.contains("avoid repeated equivalent queries"));
         assert!(prompt.contains("Use the same language as the source message's primary language"));

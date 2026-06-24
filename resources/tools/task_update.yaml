@@ -51,10 +51,10 @@ description: |-
 
   ## Monitor Tasks
 
-  Do not mark a human-gated monitor task completed with TaskUpdate when its
-  completionPolicy.mode is "draft_then_approve" or it has a Telegram delivery
-  target. For those tasks, save a draft with MonitorReplyDraft and let Bobo ask
-  the user to approve the final send.
+  Do not mark a human-gated or typed executable monitor task completed with
+  TaskUpdate. For typed Telegram and Gmail replies, save a pending draft action
+  with MonitorActionDraft. For legacy Telegram reply tasks, save a draft with
+  MonitorReplyDraft. Let Bobo ask the user to approve the final external action.
 
   ## Examples
 

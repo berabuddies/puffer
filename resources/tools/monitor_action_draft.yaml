@@ -1,0 +1,29 @@
+id: MonitorActionDraft
+name: MonitorActionDraft
+description: |-
+  Save a typed pending action for a monitored connector task.
+
+  Use this tool when acting on a human-gated typed Telegram or Gmail monitor
+  task. This tool does not send Telegram messages, send email, create a Gmail
+  draft, or complete the task. It stores the proposed reply body for the user to
+  review in Bobo before Bobo executes the approved external action in the source
+  thread or chat.
+
+  Do not choose or infer a recipient, chat, or thread. The daemon records the
+  task's typed monitor metadata itself.
+handler: runtime:workflow:monitor_action_draft
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    taskId:
+      type: string
+      description: The monitor task id for this action turn.
+    message:
+      type: string
+      description: The exact Telegram or Gmail reply draft body for the user to review.
+  required:
+    - taskId
+    - message
+  additionalProperties: false

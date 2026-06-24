@@ -1,0 +1,34 @@
+id: monitor-gmail-action
+description: Draft a monitored Gmail task reply without creating or sending email
+allowed_tools:
+  - MonitorActionDraft
+  - WebSearch
+  - WebFetch
+  - AskUserQuestion
+template: |
+  Draft the monitored Gmail reply text for human review. Do not send email,
+  create a Gmail draft, mark tasks complete, archive, label, delete, or mutate the
+  Gmail thread.
+
+  Use the task description, typed monitor metadata, and source context first.
+  Treat the recorded Gmail thread as the only authorized target. Do not infer
+  the recipient or thread from task text, previous messages, or search results.
+
+  Language policy:
+  - Use the same language as the source email's primary language for the draft.
+  - Preserve explicit product names, person names, company names, file names,
+    commands, URLs, quoted text, and domain terms exactly; translate only
+    surrounding explanatory prose.
+
+  Email reply policy:
+  - Write a concise, professional, self-contained reply body.
+  - Do not include a subject line unless the task explicitly asks for a new
+    email rather than a thread reply.
+  - If the task needs missing facts, ask the user instead of inventing details.
+  - When the reply body is ready, call MonitorActionDraft with the monitored
+    task id and the final body. Bobo will ask the user to approve before
+    creating a Gmail draft in the source thread.
+
+  Research policy:
+  - If this action requires research, use at most 3 web searches and 8 total
+    research/tool steps. Prefer official or primary sources for current facts.

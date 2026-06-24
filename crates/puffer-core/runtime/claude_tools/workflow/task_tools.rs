@@ -1,3 +1,7 @@
+use super::monitor_contract::{
+    display_source_context, monitor_contract_hash, parse_monitor_contract, MonitorContract,
+    MonitorTaskKind, MONITOR_SCHEMA_VERSION,
+};
 use super::store::{
     agents_path, append_agent_message, ensure_safe_identifier, load_store, monitor_tasks_path,
     next_monitor_task_id, next_task_id, now_ms, save_store, tasks_path, team_lead_agent_id,
@@ -9,7 +13,7 @@ use super::task_runtime::{
     runtime_agent_terminal_status, terminal_task_status, wait_for_runtime_agent_output,
     wait_for_stored_task,
 };
-use crate::{AppState, MonitorTaskCreateGateContext};
+use crate::{AppState, MonitorSourceStampContext, MonitorTaskCreateGateContext};
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_subscriptions::{MonitorTraceIdentity, MonitorTraceStage, MonitorTraceStore};
 use serde::Deserialize;
@@ -37,7 +41,7 @@ pub(super) fn execute_task_create(
             bail!("TaskCreate expiresAt must be after receivedAt");
         }
     }
-    let mut metadata = parsed.metadata.unwrap_or_default();
+    let mut metadata = parsed.metadata.clone().unwrap_or_default();
     if !parsed.actions.is_empty() {
         metadata.insert("actions".to_string(), json!(parsed.actions));
     }
@@ -55,11 +59,12 @@ pub(super) fn execute_task_create(
         bail!("monitor TaskCreate requires expiresAt in RFC3339 format");
     }
     if monitor_task {
+        stamp_monitor_task_metadata_from_current_sources(state, &parsed, &mut metadata)?;
         validate_monitor_task_metadata(&metadata)?;
         if let Some(skip) = monitor_task_source_scope_skip(state, &metadata) {
             return Ok(serde_json::to_string_pretty(&skip)?);
         }
-        normalize_monitor_task_metadata(&mut metadata);
+        normalize_monitor_task_metadata(&mut metadata)?;
         validate_monitor_task_metadata(&metadata)?;
     }
     if let Some(gate) = apply_monitor_task_create_gate(state, &mut metadata) {
@@ -291,14 +296,20 @@ pub(super) fn execute_task_update(
         None
     };
     if parsed.status.as_deref() == Some("completed")
-        && monitor_task_is_human_gated(task)
         && !metadata_marks_monitor_ignored(metadata_update.as_ref())
-        && !state.monitor_triage_turn
     {
-        bail!(
-            "monitor task `{}` must be completed through its monitor action after human approval",
-            parsed.task_id
-        );
+        if monitor_task_is_typed_executable(task) {
+            bail!(
+                "typed monitor task `{}` must be completed through its monitor action",
+                parsed.task_id
+            );
+        }
+        if monitor_task_is_human_gated(task) && !state.monitor_triage_turn {
+            bail!(
+                "monitor task `{}` must be completed through its monitor action after human approval",
+                parsed.task_id
+            );
+        }
     }
     let mut updated_fields = Vec::new();
     let mut status_change = None;
@@ -426,6 +437,13 @@ struct MonitorReplySendInput {
 
 #[derive(Debug, Deserialize)]
 struct MonitorReplyDraftInput {
+    #[serde(rename = "taskId")]
+    task_id: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MonitorActionDraftInput {
     #[serde(rename = "taskId")]
     task_id: String,
     message: String,
@@ -570,6 +588,12 @@ pub(super) fn execute_monitor_reply_draft(
             task.status
         );
     }
+    if parse_monitor_contract(&task.metadata)?.is_some() {
+        bail!(
+            "MonitorReplyDraft does not support typed monitor tasks; use MonitorActionDraft for `{}`",
+            parsed.task_id
+        );
+    }
     if !monitor_task_is_human_gated(task) {
         bail!(
             "MonitorReplyDraft expected a human-gated monitor task `{}`",
@@ -654,6 +678,172 @@ pub(super) fn execute_monitor_reply_draft(
         "taskId": parsed.task_id,
         "draft": {
             "id": draft_id,
+            "status": "draft_ready",
+            "version": version,
+        }
+    }))?)
+}
+
+/// Saves a typed pending action for a daemon-validated monitor action turn.
+pub(super) fn execute_monitor_action_draft(
+    state: &mut AppState,
+    _cwd: &Path,
+    input: Value,
+) -> Result<String> {
+    let parsed: MonitorActionDraftInput =
+        serde_json::from_value(input).context("invalid MonitorActionDraft input")?;
+    let message = parsed.message.trim();
+    if message.is_empty() {
+        bail!("MonitorActionDraft message cannot be empty");
+    }
+    let scope = state
+        .monitor_reply_scope
+        .clone()
+        .ok_or_else(|| anyhow!("MonitorActionDraft requires a monitor action scope"))?;
+    if parsed.task_id != scope.task_id {
+        bail!(
+            "MonitorActionDraft taskId `{}` does not match scoped monitor task `{}`",
+            parsed.task_id,
+            scope.task_id
+        );
+    }
+
+    let store_cwd = state.session.cwd.clone();
+    let path = monitor_tasks_path(store_cwd.as_path());
+    let mut store = load_store::<TaskStore>(&path)?;
+    let Some(task) = store
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == parsed.task_id)
+    else {
+        bail!("monitor task `{}` not found", parsed.task_id);
+    };
+    if monitor_reply_terminal_status(task.status.as_str()) {
+        bail!(
+            "MonitorActionDraft expected an open monitor task `{}`, got terminal status `{}`",
+            parsed.task_id,
+            task.status
+        );
+    }
+    let Some(contract) = parse_monitor_contract(&task.metadata)? else {
+        bail!(
+            "MonitorActionDraft supports typed telegram.reply and gmail.reply monitor tasks only"
+        );
+    };
+    let (action_prefix, pending_action_type) = match contract.kind {
+        MonitorTaskKind::TelegramReply => {
+            if string_field_from_map(&contract.source, &["chat_id", "chatId"]).is_none() {
+                bail!(
+                    "MonitorActionDraft expected monitor task `{}` to have a Telegram chat_id",
+                    parsed.task_id
+                );
+            }
+            ("telegram", "telegram_reply_draft_intent")
+        }
+        MonitorTaskKind::GmailReply => {
+            if string_field_from_map(&contract.source, &["thread_id", "threadId"]).is_none() {
+                bail!(
+                    "MonitorActionDraft expected monitor task `{}` to have a Gmail thread_id",
+                    parsed.task_id
+                );
+            }
+            ("gmail", "gmail_reply_draft_intent")
+        }
+        other => bail!(
+            "MonitorActionDraft supports typed telegram.reply and gmail.reply monitor tasks only, got `{}`",
+            other.as_str()
+        ),
+    };
+    let monitor_hash = contract
+        .source_hash
+        .clone()
+        .context("MonitorActionDraft requires monitor.source_hash")?;
+
+    let previous = task
+        .metadata
+        .get("pending_action")
+        .and_then(Value::as_object)
+        .cloned();
+    if let Some(previous_status) = previous
+        .as_ref()
+        .and_then(|draft| draft.get("status"))
+        .and_then(Value::as_str)
+    {
+        if matches!(
+            previous_status,
+            "creating_draft"
+                | "opening_thread"
+                | "draft_created"
+                | "completed"
+                | "executing"
+                | "sending"
+                | "sent"
+        ) {
+            bail!("cannot supersede monitor pending action in `{previous_status}` state");
+        }
+    }
+    let previous_version = previous
+        .as_ref()
+        .and_then(|draft| draft.get("version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let now = now_rfc3339()?;
+    let action_id = format!("action-{action_prefix}-{}-{}", parsed.task_id, now_ms());
+    let version = previous_version + 1;
+    if let Some(previous) = previous {
+        append_monitor_action_audit(
+            task,
+            "draft_superseded",
+            json!({"previousStatus": previous.get("status").cloned()}),
+        );
+    }
+    task.metadata.insert(
+        "pending_action".to_string(),
+        json!({
+            "id": action_id,
+            "type": pending_action_type,
+            "status": "draft_ready",
+            "version": version,
+            "agent_draft_text": message,
+            "created_by": "MonitorActionDraft",
+            "created_at": now,
+            "updated_at": now,
+            "session_id": scope.session_id,
+            "turn_id": scope.turn_id,
+            "monitor_snapshot": {
+                "schema_version": contract.schema_version,
+                "kind": contract.kind.as_str(),
+                "source": contract.source,
+                "action": contract.action,
+            },
+            "monitor_hash": monitor_hash,
+            "approved_message": Value::Null,
+            "approved_by": Value::Null,
+            "approved_at": Value::Null,
+            "client_request_id": Value::Null,
+            "receipt": Value::Null,
+            "error": Value::Null,
+        }),
+    );
+    task.updated_at_ms = Some(now_ms());
+    append_monitor_action_audit(
+        task,
+        "draft_created",
+        json!({
+            "action_id": action_id,
+            "version": version,
+            "session_id": scope.session_id,
+            "turn_id": scope.turn_id,
+            "monitor_hash": monitor_hash,
+        }),
+    );
+    save_store(&path, &store)?;
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "success": true,
+        "taskId": parsed.task_id,
+        "pendingAction": {
+            "id": action_id,
             "status": "draft_ready",
             "version": version,
         }
@@ -1369,7 +1559,542 @@ fn validate_monitor_task_metadata(metadata: &Map<String, Value>) -> Result<()> {
             bail!("monitor task metadata cannot include reserved field `{key}`");
         }
     }
+    parse_monitor_contract(metadata)?;
     Ok(())
+}
+
+fn stamp_monitor_task_metadata_from_current_sources(
+    state: &AppState,
+    parsed: &TaskCreateInput,
+    metadata: &mut Map<String, Value>,
+) -> Result<()> {
+    if state.monitor_source_stamp_contexts.is_empty() {
+        return Ok(());
+    }
+    reject_llm_written_typed_monitor_fields(metadata)?;
+    let selected = selected_monitor_source_stamps(state, parsed, metadata)?;
+    if selected.is_empty() {
+        bail!("monitor TaskCreate could not be bound to a current workflow trigger");
+    }
+    if selected.len() > 1 {
+        let contract = generic_review_contract_from_stamps(&selected);
+        apply_stamped_monitor_contract(metadata, contract)?;
+        metadata.insert(
+            "monitor_envelope_ids".to_string(),
+            Value::Array(
+                selected
+                    .iter()
+                    .map(|context| Value::String(context.envelope_id.clone()))
+                    .collect(),
+            ),
+        );
+        return Ok(());
+    }
+
+    let stamp = selected[0].clone();
+    let contract = typed_contract_from_stamp(&stamp);
+    metadata.insert(
+        "monitor_envelope_id".to_string(),
+        Value::String(stamp.envelope_id.clone()),
+    );
+    if let Some(text) = stamp.text.as_ref().filter(|value| !value.trim().is_empty()) {
+        metadata.insert("source_text".to_string(), Value::String(text.clone()));
+    }
+    if let Some(message_id) = source_message_id_from_stamp(&stamp) {
+        metadata.insert("source_message_id".to_string(), Value::from(message_id));
+    }
+    apply_stamped_monitor_contract(metadata, contract)?;
+    Ok(())
+}
+
+fn reject_llm_written_typed_monitor_fields(metadata: &Map<String, Value>) -> Result<()> {
+    for key in [
+        "monitor",
+        "source_context",
+        "sourceContext",
+        "pending_action",
+        "pendingAction",
+        "pending_reply",
+        "pendingReply",
+        "completion_policy",
+        "completionPolicy",
+        "delivery_target",
+        "deliveryTarget",
+        "source_context_hash",
+        "sourceContextHash",
+    ] {
+        if metadata.contains_key(key) {
+            bail!(
+                "monitor TaskCreate metadata field `{key}` is server-owned; use sourceEnvelopeId"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn selected_monitor_source_stamps(
+    state: &AppState,
+    parsed: &TaskCreateInput,
+    metadata: &Map<String, Value>,
+) -> Result<Vec<MonitorSourceStampContext>> {
+    let mut ids = parsed
+        .source_envelope_ids
+        .iter()
+        .filter_map(|id| non_empty_str(id).map(ToString::to_string))
+        .collect::<Vec<_>>();
+    if let Some(id) = parsed.source_envelope_id.as_deref().and_then(non_empty_str) {
+        ids.push(id.to_string());
+    }
+    // Transitional compatibility: older prompts wrote the selector under
+    // metadata.monitor_envelope_id. It is validated against the current batch
+    // and then overwritten as server-owned metadata.
+    if ids.is_empty() {
+        if let Some(id) = metadata_string(metadata, &["monitor_envelope_id", "monitorEnvelopeId"]) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() && state.monitor_source_stamp_contexts.len() == 1 {
+        ids.push(state.monitor_source_stamp_contexts[0].envelope_id.clone());
+    }
+    if ids.is_empty() {
+        bail!("monitor TaskCreate requires sourceEnvelopeId for multi-trigger batches");
+    }
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(context) = state
+            .monitor_source_stamp_contexts
+            .iter()
+            .find(|context| context.envelope_id == id)
+        else {
+            bail!("sourceEnvelopeId `{id}` is not in the current workflow trigger batch");
+        };
+        selected.push(context.clone());
+    }
+    Ok(selected)
+}
+
+fn apply_stamped_monitor_contract(
+    metadata: &mut Map<String, Value>,
+    contract: MonitorContract,
+) -> Result<()> {
+    let mut monitor = Map::new();
+    monitor.insert(
+        "schema_version".to_string(),
+        Value::from(MONITOR_SCHEMA_VERSION),
+    );
+    monitor.insert(
+        "kind".to_string(),
+        Value::String(contract.kind.as_str().to_string()),
+    );
+    monitor.insert("source".to_string(), Value::Object(contract.source.clone()));
+    monitor.insert("action".to_string(), Value::Object(contract.action.clone()));
+    metadata.insert("monitor".to_string(), Value::Object(monitor));
+    normalize_monitor_task_metadata(metadata)?;
+    if matches!(contract.kind, MonitorTaskKind::CalendarRsvp) {
+        insert_calendar_pending_action(metadata)?;
+    }
+    Ok(())
+}
+
+fn insert_calendar_pending_action(metadata: &mut Map<String, Value>) -> Result<()> {
+    let contract = parse_monitor_contract(metadata)?
+        .context("calendar pending action requires typed monitor contract")?;
+    let monitor_hash = monitor_contract_hash(&contract)?;
+    metadata.insert(
+        "pending_action".to_string(),
+        json!({
+            "id": format!("action-calendar-{}", now_ms()),
+            "type": "calendar_rsvp",
+            "status": "awaiting_confirmation",
+            "version": 1,
+            "proposed_response": Value::Null,
+            "created_by": "server",
+            "monitor_snapshot": {
+                "schema_version": contract.schema_version,
+                "kind": contract.kind.as_str(),
+                "source": contract.source,
+                "action": contract.action,
+            },
+            "monitor_hash": monitor_hash,
+            "approved_response": Value::Null,
+            "approved_by": Value::Null,
+            "approved_at": Value::Null,
+            "client_request_id": Value::Null,
+            "attempt_id": Value::Null,
+            "receipt": Value::Null,
+            "error": Value::Null,
+        }),
+    );
+    Ok(())
+}
+
+fn typed_contract_from_stamp(stamp: &MonitorSourceStampContext) -> MonitorContract {
+    let connector_slug = stamp.connector_slug.as_deref().unwrap_or_default();
+    if connector_slug.contains("telegram") || stamp.connection_slug.contains("telegram") {
+        return telegram_contract_from_stamp(stamp);
+    }
+    if connector_slug == "gmail-browser" || stamp.connection_slug.contains("gmail") {
+        return gmail_contract_from_stamp(stamp);
+    }
+    if connector_slug == "gcal-browser"
+        || connector_slug.contains("calendar")
+        || stamp.connection_slug.contains("gcal")
+        || stamp.connection_slug.contains("calendar")
+    {
+        return calendar_contract_from_stamp(stamp);
+    }
+    generic_review_contract_from_stamps(&[stamp.clone()])
+}
+
+fn telegram_contract_from_stamp(stamp: &MonitorSourceStampContext) -> MonitorContract {
+    let mut source = Map::new();
+    let connector_slug = stamp
+        .connector_slug
+        .clone()
+        .unwrap_or_else(|| "telegram-login".to_string());
+    source.insert("connector_slug".to_string(), Value::String(connector_slug));
+    source.insert(
+        "connection_slug".to_string(),
+        Value::String(stamp.connection_slug.clone()),
+    );
+    let payload = &stamp.payload;
+    copy_value_field(payload, &mut source, "chat_id", &["chat_id", "chatId"]);
+    copy_string_field(
+        payload,
+        &mut source,
+        "chat_kind",
+        &["chat_kind", "chatKind"],
+    );
+    copy_value_field(
+        payload,
+        &mut source,
+        "message_id",
+        &["message_id", "messageId"],
+    );
+    copy_value_field(
+        payload,
+        &mut source,
+        "sender_id",
+        &["sender_id", "senderId"],
+    );
+    copy_string_field(
+        payload,
+        &mut source,
+        "sender_username",
+        &["sender_username", "senderUsername", "username"],
+    );
+    copy_string_field(
+        payload,
+        &mut source,
+        "sender_name",
+        &["sender_name", "senderName", "sender"],
+    );
+    source.insert(
+        "envelope_id".to_string(),
+        Value::String(stamp.envelope_id.clone()),
+    );
+    if let Some(text) = stamp.text.as_ref() {
+        source.insert("text".to_string(), Value::String(text.clone()));
+    }
+    MonitorContract {
+        schema_version: MONITOR_SCHEMA_VERSION,
+        kind: MonitorTaskKind::TelegramReply,
+        source,
+        action: map_from_pairs(&[
+            ("type", "telegram_reply_draft"),
+            ("approval", "draft_then_send"),
+        ]),
+        source_hash: None,
+    }
+}
+
+fn gmail_contract_from_stamp(stamp: &MonitorSourceStampContext) -> MonitorContract {
+    let payload = &stamp.payload;
+    let message = payload.get("message").unwrap_or(payload);
+    let mut source = Map::new();
+    source.insert(
+        "connector_slug".to_string(),
+        Value::String(
+            stamp
+                .connector_slug
+                .clone()
+                .unwrap_or_else(|| "gmail-browser".to_string()),
+        ),
+    );
+    source.insert(
+        "connection_slug".to_string(),
+        Value::String(stamp.connection_slug.clone()),
+    );
+    copy_string_field(
+        payload,
+        &mut source,
+        "account",
+        &["account", "account_id", "accountId", "accountEmail"],
+    );
+    copy_string_field(
+        message,
+        &mut source,
+        "thread_id",
+        &["threadId", "thread_id", "thread_id_hex"],
+    );
+    copy_string_field(
+        message,
+        &mut source,
+        "message_id",
+        &["id", "message_id", "messageId"],
+    );
+    copy_string_field(message, &mut source, "subject", &["subject", "title"]);
+    copy_string_field(
+        message,
+        &mut source,
+        "url",
+        &["url", "html_link", "htmlLink"],
+    );
+    let mut from = Map::new();
+    if let Some(name) = value_string_field(message, &["sender", "senderName", "fromName", "name"])
+        .or_else(|| value_string_field(payload, &["sender", "senderName", "fromName", "name"]))
+    {
+        from.insert("name".to_string(), Value::String(name));
+    }
+    if let Some(email) = value_string_field(
+        message,
+        &[
+            "fromEmail",
+            "from_email",
+            "senderEmail",
+            "sender_email",
+            "email",
+        ],
+    )
+    .or_else(|| {
+        value_string_field(
+            payload,
+            &[
+                "fromEmail",
+                "from_email",
+                "senderEmail",
+                "sender_email",
+                "email",
+            ],
+        )
+    }) {
+        from.insert("email".to_string(), Value::String(email));
+    }
+    if !from.is_empty() {
+        source.insert("from".to_string(), Value::Object(from));
+    }
+    source.insert(
+        "envelope_id".to_string(),
+        Value::String(stamp.envelope_id.clone()),
+    );
+    if let Some(text) = stamp
+        .text
+        .as_ref()
+        .cloned()
+        .or_else(|| value_string_field(message, &["snippet", "text", "body"]))
+    {
+        source.insert("text".to_string(), Value::String(text));
+    }
+    let is_executable = required_gmail_source_present(&source);
+    let action = if is_executable {
+        map_from_pairs(&[
+            ("type", "gmail_reply_draft"),
+            ("approval", "draft_then_create_gmail_draft"),
+        ])
+    } else {
+        map_from_pairs(&[("type", "review_only")])
+    };
+    MonitorContract {
+        schema_version: MONITOR_SCHEMA_VERSION,
+        kind: if is_executable {
+            MonitorTaskKind::GmailReply
+        } else {
+            MonitorTaskKind::GenericReview
+        },
+        source,
+        action,
+        source_hash: None,
+    }
+}
+
+fn calendar_contract_from_stamp(stamp: &MonitorSourceStampContext) -> MonitorContract {
+    let payload = &stamp.payload;
+    let event = payload.get("event").unwrap_or(payload);
+    let mut source = Map::new();
+    source.insert(
+        "connector_slug".to_string(),
+        Value::String(
+            stamp
+                .connector_slug
+                .clone()
+                .unwrap_or_else(|| "gcal-browser".to_string()),
+        ),
+    );
+    source.insert(
+        "connection_slug".to_string(),
+        Value::String(stamp.connection_slug.clone()),
+    );
+    copy_string_field(
+        payload,
+        &mut source,
+        "account",
+        &["account", "account_id", "accountId", "accountEmail"],
+    );
+    copy_string_field(
+        event,
+        &mut source,
+        "calendar_id",
+        &["calendar_id", "calendarId", "calendar"],
+    );
+    copy_string_field(
+        event,
+        &mut source,
+        "event_id",
+        &["event_id", "eventId", "id"],
+    );
+    copy_string_field(
+        event,
+        &mut source,
+        "html_link",
+        &["html_link", "htmlLink", "url"],
+    );
+    copy_string_field(event, &mut source, "summary", &["summary", "title"]);
+    copy_string_field(
+        event,
+        &mut source,
+        "organizer_email",
+        &["organizer_email", "organizerEmail", "organizer"],
+    );
+    copy_string_field(
+        event,
+        &mut source,
+        "start",
+        &["start", "start_time", "startTime"],
+    );
+    copy_string_field(event, &mut source, "end", &["end", "end_time", "endTime"]);
+    source.insert(
+        "envelope_id".to_string(),
+        Value::String(stamp.envelope_id.clone()),
+    );
+    if let Some(text) = stamp.text.as_ref() {
+        source.insert("text".to_string(), Value::String(text.clone()));
+    }
+    let is_executable = string_field_from_map(&source, &["event_id", "eventId"]).is_some();
+    let mut action = if is_executable {
+        map_from_pairs(&[
+            ("type", "calendar_rsvp"),
+            ("approval", "confirm_then_execute"),
+        ])
+    } else {
+        map_from_pairs(&[("type", "review_only")])
+    };
+    if is_executable {
+        action.insert("allowed_responses".to_string(), json!(["accept", "deny"]));
+    }
+    MonitorContract {
+        schema_version: MONITOR_SCHEMA_VERSION,
+        kind: if is_executable {
+            MonitorTaskKind::CalendarRsvp
+        } else {
+            MonitorTaskKind::GenericReview
+        },
+        source,
+        action,
+        source_hash: None,
+    }
+}
+
+fn generic_review_contract_from_stamps(stamps: &[MonitorSourceStampContext]) -> MonitorContract {
+    let mut source = Map::new();
+    if let Some(first) = stamps.first() {
+        source.insert(
+            "connector_slug".to_string(),
+            Value::String(
+                first
+                    .connector_slug
+                    .clone()
+                    .unwrap_or_else(|| first.connection_slug.clone()),
+            ),
+        );
+        source.insert(
+            "connection_slug".to_string(),
+            Value::String(first.connection_slug.clone()),
+        );
+    }
+    source.insert(
+        "envelope_ids".to_string(),
+        Value::Array(
+            stamps
+                .iter()
+                .map(|stamp| Value::String(stamp.envelope_id.clone()))
+                .collect(),
+        ),
+    );
+    let text = stamps
+        .iter()
+        .filter_map(|stamp| stamp.text.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !text.trim().is_empty() {
+        source.insert("text".to_string(), Value::String(text));
+    }
+    source.insert(
+        "summary".to_string(),
+        Value::String("Monitor item".to_string()),
+    );
+    MonitorContract {
+        schema_version: MONITOR_SCHEMA_VERSION,
+        kind: MonitorTaskKind::GenericReview,
+        source,
+        action: map_from_pairs(&[("type", "review_only")]),
+        source_hash: None,
+    }
+}
+
+fn required_gmail_source_present(source: &Map<String, Value>) -> bool {
+    string_field_from_map(source, &["thread_id", "threadId"]).is_some()
+}
+
+fn source_message_id_from_stamp(stamp: &MonitorSourceStampContext) -> Option<i64> {
+    let payload = &stamp.payload;
+    value_i64_field(payload, &["message_id", "messageId"]).or_else(|| {
+        payload
+            .get("message")
+            .and_then(|message| value_i64_field(message, &["id", "message_id", "messageId"]))
+    })
+}
+
+fn copy_value_field(source: &Value, target: &mut Map<String, Value>, out_key: &str, keys: &[&str]) {
+    if let Some(value) = keys.iter().find_map(|key| source.get(*key)).cloned() {
+        target.insert(out_key.to_string(), value);
+    }
+}
+
+fn copy_string_field(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    out_key: &str,
+    keys: &[&str],
+) {
+    if let Some(value) = value_string_field(source, keys) {
+        target.insert(out_key.to_string(), Value::String(value));
+    }
+}
+
+fn map_from_pairs(pairs: &[(&str, &str)]) -> Map<String, Value> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), Value::String((*value).to_string())))
+        .collect()
+}
+
+fn non_empty_str(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 fn sanitize_monitor_task_metadata_update(
@@ -1404,6 +2129,7 @@ fn reserved_monitor_value_unchanged(
 fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> {
     match key {
         "source_context" | "sourceContext" => Some(&["source_context", "sourceContext"]),
+        "monitor" => Some(&["monitor"]),
         "completion_policy" | "completionPolicy" => {
             Some(&["completion_policy", "completionPolicy"])
         }
@@ -1425,6 +2151,7 @@ fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> 
         "sender_id" | "senderId" => Some(&["sender_id", "senderId"]),
         "sender_username" | "senderUsername" => Some(&["sender_username", "senderUsername"]),
         "pending_reply" | "pendingReply" => Some(&["pending_reply", "pendingReply"]),
+        "pending_action" | "pendingAction" => Some(&["pending_action", "pendingAction"]),
         "monitor_reply_events" | "monitorReplyEvents" => {
             Some(&["monitor_reply_events", "monitorReplyEvents"])
         }
@@ -1435,7 +2162,23 @@ fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> 
     }
 }
 
-fn normalize_monitor_task_metadata(metadata: &mut Map<String, Value>) {
+fn normalize_monitor_task_metadata(metadata: &mut Map<String, Value>) -> Result<()> {
+    if let Some(contract) = parse_monitor_contract(metadata)? {
+        let source_context = display_source_context(&contract);
+        let default_completion_policy =
+            default_monitor_completion_policy(metadata, Some(&source_context));
+        metadata.insert("source_context".to_string(), source_context);
+        if let Some(default_completion_policy) = default_completion_policy {
+            metadata
+                .entry("completion_policy".to_string())
+                .or_insert(default_completion_policy);
+        }
+        let source_hash = monitor_contract_hash(&contract)?;
+        if let Some(monitor) = metadata.get_mut("monitor").and_then(Value::as_object_mut) {
+            monitor.insert("source_hash".to_string(), Value::String(source_hash));
+        }
+        return Ok(());
+    }
     let source_context = derived_monitor_source_context(metadata);
     if let Some(source_context) = source_context {
         let default_completion_policy =
@@ -1449,9 +2192,13 @@ fn normalize_monitor_task_metadata(metadata: &mut Map<String, Value>) {
     } else {
         metadata.remove("source_context");
     }
+    Ok(())
 }
 
 fn monitor_source_context(metadata: &Map<String, Value>) -> Option<Value> {
+    if let Some(contract) = parse_monitor_contract(metadata).ok().flatten() {
+        return with_verbatim_source_text(metadata, Some(display_source_context(&contract)));
+    }
     let context = metadata
         .get("source_context")
         .or_else(|| metadata.get("sourceContext"))
@@ -1586,6 +2333,13 @@ fn monitor_task_is_human_gated(task: &StoredTask) -> bool {
         .as_ref()
         .is_some_and(completion_policy_requires_human_approval)
         || monitor_task_has_telegram_delivery_target(&task.metadata, source_context.as_ref())
+}
+
+fn monitor_task_is_typed_executable(task: &StoredTask) -> bool {
+    parse_monitor_contract(&task.metadata)
+        .ok()
+        .flatten()
+        .is_some_and(|contract| contract.kind.as_str() != "generic.review")
 }
 
 fn completion_policy_mode(policy: &Value) -> Option<&str> {
@@ -1772,6 +2526,23 @@ fn append_monitor_reply_audit(task: &mut StoredTask, event: &str, details: Value
         _ => {
             task.metadata.insert(
                 "monitor_reply_events".to_string(),
+                Value::Array(vec![entry]),
+            );
+        }
+    }
+}
+
+fn append_monitor_action_audit(task: &mut StoredTask, event: &str, details: Value) {
+    let entry = json!({
+        "event": event,
+        "at": now_rfc3339().unwrap_or_else(|_| OffsetDateTime::now_utc().to_string()),
+        "details": details,
+    });
+    match task.metadata.get_mut("monitor_action_events") {
+        Some(Value::Array(events)) => events.push(entry),
+        _ => {
+            task.metadata.insert(
+                "monitor_action_events".to_string(),
                 Value::Array(vec![entry]),
             );
         }
@@ -2205,6 +2976,332 @@ mod tests {
         (state, tmp)
     }
 
+    #[test]
+    fn task_create_stamps_typed_gmail_monitor_context_and_hash() {
+        let (mut state, tmp) = make_state();
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Confirm next week's meeting",
+                "description": "Reply to the Gmail thread with available times.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "actions": [{
+                    "actionName": "Draft email",
+                    "actionPrompt": "Draft a reply to the Gmail sender."
+                }],
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "gmail-browser",
+                    "monitor_connector": "gmail-browser",
+                    "monitor_memory_path": "/tmp/gmail-browser.md",
+                    "source_context": {
+                        "kind": "telegram_direct_message",
+                        "delivery_target": {
+                            "type": "telegram_chat",
+                            "chat_id": "999"
+                        }
+                    },
+                    "monitor": {
+                        "schema_version": 2,
+                        "kind": "gmail.reply",
+                        "source": {
+                            "connector_slug": "gmail-browser",
+                            "connection_slug": "gmail-browser",
+                            "account": "winterfell0614@gmail.com",
+                            "thread_id": "thread-123",
+                            "message_id": "message-123",
+                            "from": {
+                                "name": "Fu Xiangyu",
+                                "email": "fuxiangyu@example.com"
+                            }
+                        },
+                        "action": {
+                            "type": "gmail_reply_draft",
+                            "approval": "draft_then_create_gmail_draft"
+                        },
+                        "source_hash": "sha256:stale"
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let task = load_monitor_task(tmp.path(), task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata.clone());
+        assert_eq!(
+            metadata.pointer("/source_context/kind"),
+            Some(&json!("gmail_message"))
+        );
+        assert_eq!(
+            metadata.pointer("/source_context/delivery_target/type"),
+            Some(&json!("gmail_thread"))
+        );
+        assert_eq!(
+            metadata.pointer("/source_context/delivery_target/thread_id"),
+            Some(&json!("thread-123"))
+        );
+        assert_eq!(
+            metadata.pointer("/source_context/sender/email"),
+            Some(&json!("fuxiangyu@example.com"))
+        );
+        assert_eq!(
+            metadata.pointer("/monitor/source_hash"),
+            Some(&json!(
+                "sha256:b8e1bc99df97a47171b03fd10a708fb4c8220f8ae5cbe59e5c6ce4005cc847b2"
+            ))
+        );
+        assert_eq!(
+            metadata.pointer("/completion_policy/mode"),
+            Some(&json!("draft_then_approve"))
+        );
+    }
+
+    #[test]
+    fn task_create_stamps_gmail_monitor_from_current_source_envelope() {
+        let (mut state, tmp) = make_state();
+        state.set_monitor_source_stamp_contexts(vec![crate::MonitorSourceStampContext {
+            envelope_id: "env-gmail".to_string(),
+            connection_slug: "gmail-browser".to_string(),
+            connector_slug: Some("gmail-browser".to_string()),
+            received_at_ms: None,
+            text: Some("Fu Xiangyu\nConfirm meeting\nWhat time works?".to_string()),
+            payload: json!({
+                "account": "winterfell0614@gmail.com",
+                "message": {
+                    "id": "message-123",
+                    "threadId": "thread-123",
+                    "subject": "Confirm meeting",
+                    "sender": "Fu Xiangyu",
+                    "fromEmail": "fuxiangyu@example.com",
+                    "url": "https://mail.google.com/mail/u/0/#inbox/thread-123"
+                }
+            }),
+        }]);
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Reply with meeting availability",
+                "description": "The sender asks what time works.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "sourceEnvelopeId": "env-gmail",
+                "actions": [{
+                    "actionName": "Draft email",
+                    "actionPrompt": "Draft a reply to the sender."
+                }],
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "gmail-browser",
+                    "monitor_connector": "gmail-browser",
+                    "monitor_memory_path": "/tmp/gmail-browser.md",
+                    "thread_id": "thread-123",
+                    "from_email": "fuxiangyu@example.com"
+                }
+            }),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let task = load_monitor_task(tmp.path(), task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata);
+        assert_eq!(
+            metadata.pointer("/monitor/kind"),
+            Some(&json!("gmail.reply"))
+        );
+        assert_eq!(
+            metadata.pointer("/monitor/source/thread_id"),
+            Some(&json!("thread-123"))
+        );
+        assert_eq!(
+            metadata.pointer("/monitor/source/from/email"),
+            Some(&json!("fuxiangyu@example.com"))
+        );
+        assert_eq!(
+            metadata.pointer("/source_context/delivery_target/thread_id"),
+            Some(&json!("thread-123"))
+        );
+        assert_eq!(
+            metadata.pointer("/monitor_envelope_id"),
+            Some(&json!("env-gmail"))
+        );
+    }
+
+    #[test]
+    fn task_create_rejects_llm_written_typed_delivery_fields_when_source_stamped() {
+        let (mut state, tmp) = make_state();
+        state.set_monitor_source_stamp_contexts(vec![crate::MonitorSourceStampContext {
+            envelope_id: "env-gmail".to_string(),
+            connection_slug: "gmail-browser".to_string(),
+            connector_slug: Some("gmail-browser".to_string()),
+            received_at_ms: None,
+            text: Some("hello".to_string()),
+            payload: json!({
+                "account": "winterfell0614@gmail.com",
+                "message": {
+                    "id": "message-123",
+                    "threadId": "thread-123",
+                    "fromEmail": "fuxiangyu@example.com"
+                }
+            }),
+        }]);
+
+        let error = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Reply with meeting availability",
+                "description": "The sender asks what time works.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "sourceEnvelopeId": "env-gmail",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "gmail-browser",
+                    "monitor_connector": "gmail-browser",
+                    "monitor_memory_path": "/tmp/gmail-browser.md",
+                    "source_context": {
+                        "delivery_target": {
+                            "type": "telegram_chat",
+                            "chat_id": "999"
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("metadata field `source_context` is server-owned"));
+    }
+
+    #[test]
+    fn task_create_stamps_calendar_pending_action_from_current_source_envelope() {
+        let (mut state, tmp) = make_state();
+        state.set_monitor_source_stamp_contexts(vec![crate::MonitorSourceStampContext {
+            envelope_id: "env-calendar".to_string(),
+            connection_slug: "gcal-browser".to_string(),
+            connector_slug: Some("gcal-browser".to_string()),
+            received_at_ms: None,
+            text: Some("Project sync invitation".to_string()),
+            payload: json!({
+                "account": "winterfell0614@gmail.com",
+                "event": {
+                    "id": "event-123",
+                    "calendar_id": "primary",
+                    "summary": "Project sync",
+                    "organizer_email": "organizer@example.com",
+                    "start": "2026-06-25T10:00:00+08:00",
+                    "end": "2026-06-25T10:30:00+08:00",
+                    "htmlLink": "https://calendar.google.com/calendar/event?eid=event-123"
+                }
+            }),
+        }]);
+
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Review Project sync invitation",
+                "description": "Decide whether to accept the Project sync invitation.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "sourceEnvelopeId": "env-calendar",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "gcal-browser",
+                    "monitor_connector": "gcal-browser",
+                    "monitor_memory_path": "/tmp/gcal-browser.md"
+                }
+            }),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let task = load_monitor_task(tmp.path(), task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata);
+        assert_eq!(
+            metadata.pointer("/monitor/kind"),
+            Some(&json!("calendar.rsvp"))
+        );
+        assert_eq!(
+            metadata.pointer("/source_context/delivery_target/event_id"),
+            Some(&json!("event-123"))
+        );
+        assert_eq!(
+            metadata.pointer("/pending_action/type"),
+            Some(&json!("calendar_rsvp"))
+        );
+        assert_eq!(
+            metadata.pointer("/pending_action/status"),
+            Some(&json!("awaiting_confirmation"))
+        );
+        assert_eq!(
+            metadata.pointer("/pending_action/monitor_hash"),
+            metadata.pointer("/monitor/source_hash")
+        );
+    }
+
+    #[test]
+    fn task_update_cannot_directly_complete_typed_gmail_monitor_task() {
+        let (mut state, tmp) = make_state();
+        let raw = execute_task_create(
+            &mut state,
+            tmp.path(),
+            json!({
+                "subject": "Confirm next week's meeting",
+                "description": "Reply to the Gmail thread with available times.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "gmail-browser",
+                    "monitor_connector": "gmail-browser",
+                    "monitor_memory_path": "/tmp/gmail-browser.md",
+                    "monitor": {
+                        "schema_version": 2,
+                        "kind": "gmail.reply",
+                        "source": {
+                            "connector_slug": "gmail-browser",
+                            "connection_slug": "gmail-browser",
+                            "thread_id": "thread-123",
+                            "message_id": "message-123"
+                        },
+                        "action": {
+                            "type": "gmail_reply_draft"
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let task_id = payload.pointer("/task/id").and_then(Value::as_str).unwrap();
+
+        let error = execute_task_update(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "status": "completed"
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains(
+            "typed monitor task `monitor-1` must be completed through its monitor action"
+        ));
+    }
+
     fn create_telegram_monitor_task(state: &mut AppState, cwd: &Path) -> String {
         let raw = execute_task_create(
             state,
@@ -2258,6 +3355,103 @@ mod tests {
                     {
                         "actionName": "Add reminder",
                         "actionPrompt": "Create a reminder from the deadline."
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        serde_json::from_str::<Value>(&raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn create_typed_telegram_monitor_task(state: &mut AppState, cwd: &Path) -> String {
+        let raw = execute_task_create(
+            state,
+            cwd,
+            json!({
+                "subject": "Reply to Alice about WLF latest",
+                "description": "Alice asked for the latest WLF update.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "telegram-user",
+                    "monitor_connector": "telegram-login",
+                    "monitor_memory_path": "/tmp/telegram-user.md",
+                    "monitor": {
+                        "schema_version": 2,
+                        "kind": "telegram.reply",
+                        "source": {
+                            "connector_slug": "telegram-login",
+                            "connection_slug": "telegram-user",
+                            "chat_id": "8759047281",
+                            "chat_kind": "user",
+                            "message_id": 6836,
+                            "sender_id": "8759047281",
+                            "sender_username": "alice",
+                            "text": "What's the latest on WLF?"
+                        },
+                        "action": {
+                            "type": "telegram_reply_draft",
+                            "approval": "draft_then_send"
+                        }
+                    }
+                },
+                "actions": [
+                    {
+                        "actionName": "Draft reply",
+                        "actionPrompt": "Research the answer and draft a Telegram reply."
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        serde_json::from_str::<Value>(&raw).unwrap()["task"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn create_gmail_monitor_task(state: &mut AppState, cwd: &Path) -> String {
+        let raw = execute_task_create(
+            state,
+            cwd,
+            json!({
+                "subject": "Confirm next week's meeting",
+                "description": "Reply to the Gmail thread with available times.",
+                "receivedAt": "2026-06-10T13:00:00Z",
+                "expiresAt": "2026-06-11T13:00:00Z",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "gmail-browser",
+                    "monitor_connector": "gmail-browser",
+                    "monitor_memory_path": "/tmp/gmail-browser.md",
+                    "monitor": {
+                        "schema_version": 2,
+                        "kind": "gmail.reply",
+                        "source": {
+                            "connector_slug": "gmail-browser",
+                            "connection_slug": "gmail-browser",
+                            "account": "winterfell0614@gmail.com",
+                            "thread_id": "thread-123",
+                            "message_id": "message-123",
+                            "from": {
+                                "name": "Fu Xiangyu",
+                                "email": "fuxiangyu@example.com"
+                            }
+                        },
+                        "action": {
+                            "type": "gmail_reply_draft",
+                            "approval": "draft_then_create_gmail_draft"
+                        }
+                    }
+                },
+                "actions": [
+                    {
+                        "actionName": "Draft email",
+                        "actionPrompt": "Draft a reply to the Gmail sender."
                     }
                 ]
             }),
@@ -3148,6 +4342,151 @@ mod tests {
         .expect_err("terminal tasks must not accept drafts");
 
         assert!(error.to_string().contains("terminal status"));
+    }
+
+    #[test]
+    fn monitor_reply_draft_rejects_typed_monitor_tasks() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_typed_telegram_monitor_task(&mut state, tmp.path());
+        state.set_monitor_reply_scope_for_turn(
+            task_id.clone(),
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        );
+
+        let error = execute_monitor_reply_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "message": "Acknowledged."
+            }),
+        )
+        .expect_err("legacy reply draft tool must reject typed tasks");
+
+        assert!(error.to_string().contains("use MonitorActionDraft"));
+    }
+
+    #[test]
+    fn monitor_action_draft_requires_matching_monitor_action_scope() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_gmail_monitor_task(&mut state, tmp.path());
+
+        let error = execute_monitor_action_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "message": "Thanks, next Tuesday afternoon works for me."
+            }),
+        )
+        .expect_err("draft tool must be scoped to a typed monitor action turn");
+
+        assert!(error.to_string().contains("monitor action scope"));
+    }
+
+    #[test]
+    fn monitor_action_draft_saves_gmail_pending_action() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_gmail_monitor_task(&mut state, tmp.path());
+        state.set_monitor_reply_scope_for_turn(
+            task_id.clone(),
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        );
+
+        execute_monitor_action_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "message": "Thanks, next Tuesday afternoon works for me."
+            }),
+        )
+        .unwrap();
+
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata.clone());
+        let pending = task
+            .metadata
+            .get("pending_action")
+            .and_then(Value::as_object)
+            .expect("typed pending action should be stored");
+
+        assert_eq!(
+            pending.get("type").and_then(Value::as_str),
+            Some("gmail_reply_draft_intent")
+        );
+        assert_eq!(
+            pending.get("status").and_then(Value::as_str),
+            Some("draft_ready")
+        );
+        assert_eq!(
+            pending.get("agent_draft_text").and_then(Value::as_str),
+            Some("Thanks, next Tuesday afternoon works for me.")
+        );
+        assert_eq!(
+            pending.get("monitor_hash"),
+            metadata.pointer("/monitor/source_hash")
+        );
+        assert_eq!(
+            Value::Object(pending.clone())
+                .pointer("/monitor_snapshot/kind")
+                .and_then(Value::as_str),
+            Some("gmail.reply")
+        );
+    }
+
+    #[test]
+    fn monitor_action_draft_saves_typed_telegram_pending_action() {
+        let (mut state, tmp) = make_state();
+        let task_id = create_typed_telegram_monitor_task(&mut state, tmp.path());
+        state.set_monitor_reply_scope_for_turn(
+            task_id.clone(),
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        );
+
+        execute_monitor_action_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "taskId": task_id,
+                "message": "WLF is emphasizing USD1 adoption and regulatory positioning."
+            }),
+        )
+        .unwrap();
+
+        let task = load_monitor_task(tmp.path(), &task_id).unwrap().unwrap();
+        let metadata = Value::Object(task.metadata.clone());
+        let pending = task
+            .metadata
+            .get("pending_action")
+            .and_then(Value::as_object)
+            .expect("typed pending action should be stored");
+
+        assert_eq!(
+            pending.get("type").and_then(Value::as_str),
+            Some("telegram_reply_draft_intent")
+        );
+        assert_eq!(
+            pending.get("status").and_then(Value::as_str),
+            Some("draft_ready")
+        );
+        assert_eq!(
+            pending.get("agent_draft_text").and_then(Value::as_str),
+            Some("WLF is emphasizing USD1 adoption and regulatory positioning.")
+        );
+        assert_eq!(
+            pending.get("monitor_hash"),
+            metadata.pointer("/monitor/source_hash")
+        );
+        assert_eq!(
+            Value::Object(pending.clone())
+                .pointer("/monitor_snapshot/kind")
+                .and_then(Value::as_str),
+            Some("telegram.reply")
+        );
     }
 
     #[test]

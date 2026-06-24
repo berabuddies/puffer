@@ -1595,6 +1595,9 @@ async fn dispatch_request(
         "monitor_reply_send" | "task_monitor_reply_send" => respond!(
             crate::daemon_workflows::handle_monitor_reply_send(&state.paths, &params)
         ),
+        "monitor_action_execute" | "task_monitor_action_execute" => respond!(
+            crate::daemon_workflows::handle_monitor_action_execute(&state.paths, &params)
+        ),
         "monitor_memory_save" | "task_monitor_memory_save" => respond!(
             crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
         ),
@@ -1767,8 +1770,7 @@ fn handle_canvas_state_update(state: &DaemonState, params: &Value) -> Result<Val
         .ok_or_else(|| anyhow::anyhow!("canvas_state_update requires patch"))?;
     let session_store = SessionStore::from_paths(&state.paths)?;
     let cwd = desktop_api::load_session_cwd(&session_store, session_id)?;
-    let updated =
-        puffer_core::apply_canvas_state_patch(&cwd, session_id, canvas_id, patch)?;
+    let updated = puffer_core::apply_canvas_state_patch(&cwd, session_id, canvas_id, patch)?;
     Ok(json!({
         "ok": true,
         "canvasId": canvas_id,
@@ -4677,6 +4679,8 @@ fn turn_browser_tab_context(
 }
 
 const MONITOR_REPLY_ACTION_PROMPT_SCOPE: &str = "monitor-reply-action";
+const MONITOR_GMAIL_ACTION_PROMPT_SCOPE: &str = "monitor-gmail-action";
+const MONITOR_TELEGRAM_ACTION_PROMPT_SCOPE: &str = "monitor-telegram-action";
 const MONITOR_ACTION_PROMPT_PREFIX: &str = "Act on monitored task ";
 
 #[derive(Clone, Debug)]
@@ -4698,6 +4702,9 @@ fn resolve_monitor_reply_turn_scope(
         if monitor_action_task_id_param(params).is_some() {
             anyhow::bail!("monitorActionTaskId requires a monitor action prompt");
         }
+        if monitor_action_kind_param(params).is_some() {
+            anyhow::bail!("monitorActionKind requires a monitor action prompt");
+        }
         return resolve_existing_monitor_reply_session_scope(state, session_id, turn_id);
     };
     let Some(explicit_task_id) = monitor_action_task_id_param(params) else {
@@ -4710,12 +4717,53 @@ fn resolve_monitor_reply_turn_scope(
     }
 
     let task = load_monitor_task_for_scope(&state.paths, &prompt_task_id)?;
-    if !monitor_task_is_human_gated(&task) {
-        return Ok(None);
+    let stored_kind = monitor_task_kind(&task);
+    if stored_kind.is_some() && monitor_action_kind_param(params).is_none() {
+        anyhow::bail!("typed monitor action prompt requires matching monitorActionKind");
     }
-    if !monitor_task_has_delivery_target(&task) {
-        anyhow::bail!("monitor task `{prompt_task_id}` is missing a source delivery target");
+    if let (Some(explicit_kind), Some(stored_kind)) =
+        (monitor_action_kind_param(params), stored_kind.as_deref())
+    {
+        if explicit_kind != stored_kind {
+            anyhow::bail!(
+                "monitorActionKind `{explicit_kind}` does not match monitor task kind `{stored_kind}`"
+            );
+        }
     }
+    let prompt_tool_scope = match stored_kind.as_deref() {
+        Some("gmail.reply") => {
+            if monitor_task_is_terminal(&task) {
+                return Ok(None);
+            }
+            if !monitor_task_has_gmail_thread_target(&task) {
+                anyhow::bail!("monitor task `{prompt_task_id}` is missing a Gmail thread target");
+            }
+            MONITOR_GMAIL_ACTION_PROMPT_SCOPE
+        }
+        Some("telegram.reply") => {
+            if monitor_task_is_terminal(&task) {
+                return Ok(None);
+            }
+            if !monitor_task_has_delivery_target(&task) {
+                anyhow::bail!(
+                    "monitor task `{prompt_task_id}` is missing a source delivery target"
+                );
+            }
+            MONITOR_TELEGRAM_ACTION_PROMPT_SCOPE
+        }
+        Some(kind) if kind != "telegram.reply" => return Ok(None),
+        _ => {
+            if !monitor_task_is_human_gated(&task) {
+                return Ok(None);
+            }
+            if !monitor_task_has_delivery_target(&task) {
+                anyhow::bail!(
+                    "monitor task `{prompt_task_id}` is missing a source delivery target"
+                );
+            }
+            MONITOR_REPLY_ACTION_PROMPT_SCOPE
+        }
+    };
     state
         .monitor_reply_sessions
         .lock()
@@ -4726,7 +4774,7 @@ fn resolve_monitor_reply_turn_scope(
         task_id: prompt_task_id,
         session_id: session_id.to_string(),
         turn_id: turn_id.to_string(),
-        prompt_tool_scope: MONITOR_REPLY_ACTION_PROMPT_SCOPE,
+        prompt_tool_scope,
     }))
 }
 
@@ -4766,7 +4814,7 @@ fn resolve_existing_monitor_reply_session_scope(
             return Ok(None);
         }
     };
-    if monitor_task_is_terminal(&task) || !monitor_task_is_human_gated(&task) {
+    if monitor_task_is_terminal(&task) {
         state
             .monitor_reply_sessions
             .lock()
@@ -4774,15 +4822,48 @@ fn resolve_existing_monitor_reply_session_scope(
             .remove(session_id);
         return Ok(None);
     }
-    if !monitor_task_has_delivery_target(&task) {
-        anyhow::bail!("monitor task `{task_id}` is missing a source delivery target");
-    }
+    let prompt_tool_scope = match monitor_task_kind(&task).as_deref() {
+        Some("gmail.reply") => {
+            if !monitor_task_has_gmail_thread_target(&task) {
+                anyhow::bail!("monitor task `{task_id}` is missing a Gmail thread target");
+            }
+            MONITOR_GMAIL_ACTION_PROMPT_SCOPE
+        }
+        Some("telegram.reply") => {
+            if !monitor_task_has_delivery_target(&task) {
+                anyhow::bail!("monitor task `{task_id}` is missing a source delivery target");
+            }
+            MONITOR_TELEGRAM_ACTION_PROMPT_SCOPE
+        }
+        Some(kind) if kind != "telegram.reply" => {
+            state
+                .monitor_reply_sessions
+                .lock()
+                .unwrap()
+                .remove(session_id);
+            return Ok(None);
+        }
+        _ => {
+            if !monitor_task_is_human_gated(&task) {
+                state
+                    .monitor_reply_sessions
+                    .lock()
+                    .unwrap()
+                    .remove(session_id);
+                return Ok(None);
+            }
+            if !monitor_task_has_delivery_target(&task) {
+                anyhow::bail!("monitor task `{task_id}` is missing a source delivery target");
+            }
+            MONITOR_REPLY_ACTION_PROMPT_SCOPE
+        }
+    };
 
     Ok(Some(MonitorReplyTurnScope {
         task_id,
         session_id: session_id.to_string(),
         turn_id: turn_id.to_string(),
-        prompt_tool_scope: MONITOR_REPLY_ACTION_PROMPT_SCOPE,
+        prompt_tool_scope,
     }))
 }
 
@@ -4822,6 +4903,35 @@ fn monitor_action_task_id_param(params: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .and_then(non_empty_str)
         .map(ToString::to_string)
+}
+
+fn monitor_action_kind_param(params: &Value) -> Option<String> {
+    params
+        .get("monitorActionKind")
+        .or_else(|| params.get("monitor_action_kind"))
+        .and_then(Value::as_str)
+        .and_then(non_empty_str)
+        .map(ToString::to_string)
+}
+
+fn monitor_task_kind(task: &Value) -> Option<String> {
+    task.get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("monitor"))
+        .and_then(Value::as_object)
+        .and_then(|monitor| {
+            let schema_version = monitor
+                .get("schema_version")
+                .or_else(|| monitor.get("schemaVersion"))
+                .and_then(Value::as_u64)?;
+            (schema_version == 2).then(|| {
+                monitor
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .and_then(non_empty_str)
+                    .map(ToString::to_string)
+            })?
+        })
 }
 
 fn load_monitor_task_for_scope(paths: &ConfigPaths, task_id: &str) -> Result<Value> {
@@ -4880,6 +4990,8 @@ fn monitor_task_has_delivery_target(task: &Value) -> bool {
         .or_else(|| task.pointer("/metadata/sourceContext/deliveryTarget/chatId"))
         .or_else(|| task.pointer("/metadata/sourceContext/deliveryTarget/chat_id"))
         .or_else(|| task.pointer("/metadata/source_context/deliveryTarget/chatId"))
+        .or_else(|| task.pointer("/metadata/monitor/source/chat_id"))
+        .or_else(|| task.pointer("/metadata/monitor/source/chatId"))
         .and_then(value_to_non_empty_string)
         .is_some()
         || task
@@ -4892,6 +5004,15 @@ fn monitor_task_has_delivery_target(task: &Value) -> bool {
                 .or_else(|| task.pointer("/metadata/chatId"))
                 .and_then(value_to_non_empty_string)
                 .is_some()
+}
+
+fn monitor_task_has_gmail_thread_target(task: &Value) -> bool {
+    monitor_task_kind(task).as_deref() == Some("gmail.reply")
+        && task
+            .pointer("/metadata/monitor/source/thread_id")
+            .or_else(|| task.pointer("/metadata/monitor/source/threadId"))
+            .and_then(value_to_non_empty_string)
+            .is_some()
 }
 
 fn monitor_task_is_terminal(task: &Value) -> bool {

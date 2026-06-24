@@ -267,6 +267,10 @@ pub(super) struct TaskCreateInput {
     pub(super) expires_at: Option<String>,
     #[serde(default)]
     pub(super) actions: Vec<TaskCreateActionInput>,
+    #[serde(default, rename = "sourceEnvelopeId", alias = "source_envelope_id")]
+    pub(super) source_envelope_id: Option<String>,
+    #[serde(default, rename = "sourceEnvelopeIds", alias = "source_envelope_ids")]
+    pub(super) source_envelope_ids: Vec<String>,
     #[serde(
         default,
         rename = "possibleIgnoreReasons",
