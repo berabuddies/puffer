@@ -11,12 +11,7 @@
       "type": "enum",
       "operators": ["equals"],
       "values": [
-        { "value": "message", "label": "消息" },
-        { "value": "calendar_event", "label": "日历" },
-        { "value": "task", "label": "任务" },
-        { "value": "approval", "label": "审批" },
-        { "value": "doc_event", "label": "文档" },
-        { "value": "mail", "label": "邮件" }
+        { "value": "message", "label": "消息" }
       ]
     },
     {
@@ -48,9 +43,7 @@
       "operators": ["equals"],
       "values": [
         { "value": "person", "label": "真人" },
-        { "value": "bot", "label": "机器人" },
-        { "value": "external", "label": "外部" },
-        { "value": "official", "label": "官方" }
+        { "value": "bot", "label": "机器人" }
       ]
     }
   ]

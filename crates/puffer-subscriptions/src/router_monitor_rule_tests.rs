@@ -325,13 +325,13 @@ mod monitor_rule_tests {
                 "lark-browser",
                 "lark-browser",
                 bundled_schema("lark-browser"),
-                19,
+                12,
             ),
             (
                 "feishu-browser",
                 "feishu-browser",
                 bundled_schema("feishu-browser"),
-                19,
+                12,
             ),
         ]
     }
@@ -761,9 +761,9 @@ mod monitor_rule_tests {
         assert_eq!(per_connector["telegram-bot"], 7);
         assert_eq!(per_connector["lark-login"], 15);
         assert_eq!(per_connector["lark-bot"], 15);
-        assert_eq!(per_connector["lark-browser"], 19);
-        assert_eq!(per_connector["feishu-browser"], 19);
-        assert_eq!(cases.len(), 144);
+        assert_eq!(per_connector["lark-browser"], 12);
+        assert_eq!(per_connector["feishu-browser"], 12);
+        assert_eq!(cases.len(), 130);
 
         let mut mode_template_count = 0;
         let mut expected_actions = 0;
@@ -841,8 +841,8 @@ mod monitor_rule_tests {
             }
         }
 
-        assert_eq!(mode_template_count, 288);
-        assert_eq!(expected_actions, 284);
+        assert_eq!(mode_template_count, 260);
+        assert_eq!(expected_actions, 256);
         assert_eq!(recording.topics.lock().unwrap().len(), expected_actions);
     }
 
@@ -888,19 +888,19 @@ mod monitor_rule_tests {
         // exactly the five declared filter fields, in order
         let paths: Vec<&str> = lark.fields.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["event_type", "sender", "chat_id", "unread", "conversation_type"]);
-        // event_type is an enum listing all six sources
+        // event_type only declares the one source the connector actually emits
+        // (the sub-app sources — calendar/task/approval/doc/mail — aren't built,
+        // so listing them would offer filter values that never match)
         let et = lark.fields.iter().find(|f| f.path == "event_type").unwrap();
         assert_eq!(et.field_type, EventFieldType::Enum);
         let values: Vec<&str> = et.values.iter().filter_map(|v| v.value.as_str()).collect();
-        assert_eq!(
-            values,
-            vec!["message", "calendar_event", "task", "approval", "doc_event", "mail"]
-        );
-        // conversation_type is an enum with four values
+        assert_eq!(values, vec!["message"]);
+        // conversation_type only lists the values the feed capture can produce;
+        // external/official were dropped (the card text never renders those tags)
         let ct = lark.fields.iter().find(|f| f.path == "conversation_type").unwrap();
         assert_eq!(ct.field_type, EventFieldType::Enum);
         let ctv: Vec<&str> = ct.values.iter().filter_map(|v| v.value.as_str()).collect();
-        assert_eq!(ctv, vec!["person", "bot", "external", "official"]);
+        assert_eq!(ctv, vec!["person", "bot"]);
         // unread is a boolean field
         let unread = lark.fields.iter().find(|f| f.path == "unread").unwrap();
         assert_eq!(unread.field_type, EventFieldType::Boolean);
