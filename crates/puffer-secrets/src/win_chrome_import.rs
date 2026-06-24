@@ -325,10 +325,16 @@ fn do_import(user: &str, token_pid: u32, vault_dir: &str) -> Result<String> {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
         let dir = std::path::Path::new(vault_dir);
-        if let Ok(meta) = std::fs::symlink_metadata(dir) {
-            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
                 bail!("refusing to import: vault directory is a reparse point");
             }
+            Ok(_) => {}
+            // Not created yet (normal first run): SecretVault::open creates it below.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Any other stat failure on our own profile dir is unexpected — fail
+            // closed rather than silently skipping the reparse check.
+            Err(e) => bail!("refusing to import: cannot stat vault directory: {e}"),
         }
     }
 
@@ -459,11 +465,17 @@ fn validate_elevation_arg(kind: &str, value: &str) -> Result<()> {
 
 /// Trims trailing path separators from a vault directory so a user-supplied value
 /// like `D:\puffer\` is accepted (it is semantically identical) instead of tripping
-/// the trailing-backslash rejection. Leaves a bare value unchanged.
+/// the trailing-backslash rejection. A bare drive root (`X:\` / `X:/`) keeps one
+/// separator so it stays drive-absolute rather than collapsing to a drive-relative
+/// `X:`; a bare value is left unchanged.
 fn normalize_vault_dir(vault: &str) -> String {
     let trimmed = vault.trim_end_matches(|c| c == '\\' || c == '/');
+    let bytes = trimmed.as_bytes();
     if trimmed.is_empty() {
         vault.to_string()
+    } else if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        // `C:\` / `C:///` -> `C:\` (don't turn a drive root into drive-relative `C:`)
+        format!("{trimmed}\\")
     } else {
         trimmed.to_string()
     }
@@ -511,6 +523,17 @@ fn ps_single_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+/// Parses the cross-stage PID argument, rejecting a missing/invalid/zero value
+/// rather than defaulting to 0. A 0 would make the result filename
+/// (`..._0.txt`) and the transient task name (`PufferChromeImport_0`) fixed and
+/// predictable for direct invocations of the hidden subcommand, and is never a
+/// real process id — so fail closed.
+fn parse_required_pid(arg: Option<&String>) -> Result<u32> {
+    arg.and_then(|s| s.parse::<u32>().ok())
+        .filter(|&pid| pid != 0)
+        .context("missing or invalid PID argument for the import helper")
+}
+
 /// Entry point for the `puffer __win-chrome-import [args]` subcommand. `args` are
 /// the tokens AFTER the subcommand name.
 pub fn dispatch(args: &[String]) -> Result<()> {
@@ -520,7 +543,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         Some("--system") => {
             let user = args.get(1).cloned().unwrap_or_default();
             let vault = normalize_vault_dir(&args.get(2).cloned().unwrap_or_default());
-            let pid: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let pid = parse_required_pid(args.get(3))?;
             // This stage builds SYSTEM-context filesystem paths from these args, so
             // validate them here too (the subcommand is directly invokable).
             validate_account_name(&user)?;
@@ -537,11 +560,12 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         Some("--elevated") => {
             let user = args.get(1).cloned().unwrap_or_default();
             let vault = normalize_vault_dir(&args.get(2).cloned().unwrap_or_default());
-            // Parse the PID as an integer so it can never carry a metacharacter into
-            // the unquoted tail of the `/tr` action; validate user/vault before
-            // building the SYSTEM task command — don't trust the prior stage's argv
-            // (the hidden subcommand is directly callable).
-            let pid: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // Require a real PID (rejecting missing/invalid/0) so it can never carry
+            // a metacharacter into the unquoted tail of the `/tr` action nor make the
+            // task name / result file predictable; validate user/vault before building
+            // the SYSTEM task command — don't trust the prior stage's argv (the hidden
+            // subcommand is directly callable).
+            let pid = parse_required_pid(args.get(3))?;
             validate_account_name(&user)?;
             validate_vault_dir(&vault)?;
             let tn = format!("PufferChromeImport_{pid}");

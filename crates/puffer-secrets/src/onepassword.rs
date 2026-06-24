@@ -111,12 +111,16 @@ fn op_bin() -> String {
 
     #[cfg(target_os = "windows")]
     {
-        // winget installs op under Program Files; prefer that over the
-        // user-writable WindowsApps execution-alias shim.
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            let path = std::path::Path::new(&program_files).join("1Password CLI\\op.exe");
-            if path.exists() {
-                return path.to_string_lossy().into_owned();
+        // winget installs op under Program Files. Check the standard locations
+        // DIRECTLY rather than trusting the spoofable %ProgramFiles% env var (a
+        // same-user caller could point it at an attacker-controlled op.exe). A
+        // non-standard install drive just falls through to the bare-name PATH lookup.
+        for path in [
+            "C:\\Program Files\\1Password CLI\\op.exe",
+            "C:\\Program Files (x86)\\1Password CLI\\op.exe",
+        ] {
+            if std::path::Path::new(path).exists() {
+                return path.to_string();
             }
         }
     }
@@ -271,8 +275,21 @@ pub fn launch_onepassword_app() -> bool {
         if !onepassword_app_installed() {
             return false;
         }
-        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-        Command::new(format!("{root}\\System32\\cmd.exe"))
+        // Resolve System32 from the kernel (GetSystemDirectoryW), not the
+        // %SystemRoot% env var, so a same-user caller cannot redirect cmd.exe by
+        // poisoning the environment (consistent with the Chrome elevation hardening).
+        let cmd_exe = {
+            use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+            let mut buf = [0u16; 260]; // MAX_PATH
+            let len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+            let dir = if len > 0 && len <= buf.len() {
+                String::from_utf16_lossy(&buf[..len])
+            } else {
+                "C:\\Windows\\System32".to_string()
+            };
+            format!("{dir}\\cmd.exe")
+        };
+        Command::new(cmd_exe)
             .args(["/C", "start", "", "onepassword://"])
             .status()
             .map(|status| status.success())
