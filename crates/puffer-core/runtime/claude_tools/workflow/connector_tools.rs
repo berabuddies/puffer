@@ -239,6 +239,16 @@ pub fn execute_connector_delete(
 
 /// Executes `ConnectorAct`.
 pub fn execute_connector_act(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
+    let dispatcher = BuiltinActionDispatcher::new();
+    execute_connector_act_with_dispatcher(state, cwd, input, &dispatcher)
+}
+
+fn execute_connector_act_with_dispatcher(
+    state: &mut AppState,
+    cwd: &Path,
+    input: Value,
+    dispatcher: &dyn ActionDispatcher,
+) -> Result<String> {
     let parsed: ConnectorActInput =
         serde_json::from_value(input).context("invalid ConnectorAct input")?;
     let manager = subscription_manager()?;
@@ -318,7 +328,6 @@ pub fn execute_connector_act(state: &mut AppState, cwd: &Path, input: Value) -> 
         }))?);
     }
     let envelope = synthetic_envelope(&connection, &action_input);
-    let dispatcher = BuiltinActionDispatcher::new();
     let result = dispatcher.dispatch(
         &ActionSpec::ConnectorAct {
             connector_slug: parsed.connector_slug.clone(),
@@ -835,7 +844,10 @@ mod tests {
     use super::*;
     use puffer_config::{ensure_workspace_dirs, PufferConfig};
     use puffer_session_store::SessionStore;
-    use puffer_subscriptions::ConnectorPermissionDefinition;
+    use puffer_subscriptions::{
+        ActionResult, ConnectorPermissionDefinition, SubscriptionManagerBuilder,
+    };
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     fn make_state() -> (AppState, TempDir) {
@@ -846,6 +858,37 @@ mod tests {
         let session = store.create_session(tmp.path().to_path_buf()).unwrap();
         let state = AppState::new(PufferConfig::default(), tmp.path().to_path_buf(), session);
         (state, tmp)
+    }
+
+    fn ensure_test_subscription_manager() {
+        if subscription_manager().is_ok() {
+            return;
+        }
+        let temp = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        ));
+        let manager = Arc::new(
+            SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+                .build(runtime.handle().clone())
+                .unwrap(),
+        );
+        let _ = crate::install_subscription_manager(manager);
+    }
+
+    #[derive(Default)]
+    struct RecordingDispatcher {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl ActionDispatcher for RecordingDispatcher {
+        fn dispatch(&self, action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+            self.calls.lock().unwrap().push(format!("{action:?}"));
+            ActionResult::success("dispatched")
+        }
     }
 
     #[test]
@@ -941,6 +984,35 @@ mod tests {
         assert!(
             connector_action_requires_human_review_for_input(action, &agent_input),
             "server-owned registry category must win over agent-supplied category spoof"
+        );
+    }
+
+    #[test]
+    fn interactive_connector_act_telegram_send_rejects_before_dispatch() {
+        ensure_test_subscription_manager();
+        let (mut state, tmp) = make_state();
+        let dispatcher = RecordingDispatcher::default();
+
+        let err = execute_connector_act_with_dispatcher(
+            &mut state,
+            tmp.path(),
+            json!({
+                "connector_slug": "telegram-login",
+                "connection_slug": "telegram-user",
+                "action": "send_message",
+                "input": {
+                    "chat_id": 123456789,
+                    "message": "this must not be sent directly"
+                }
+            }),
+            &dispatcher,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("requires human draft review"));
+        assert!(
+            dispatcher.calls.lock().unwrap().is_empty(),
+            "direct ConnectorAct send must reject before deepest dispatch exit"
         );
     }
 
