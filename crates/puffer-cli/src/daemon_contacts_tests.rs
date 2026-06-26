@@ -914,6 +914,102 @@ fn contacts_refresh_forces_telegram_peer_cache_hydration_when_cache_is_non_empty
 }
 
 #[test]
+fn contacts_list_returns_cursor_pagination_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                telegram_peer_cache_user(1, "Alice", 1_700_000_001_000_i64),
+                telegram_peer_cache_user(2, "Bob", 1_700_000_002_000_i64),
+                telegram_peer_cache_user(3, "Cara", 1_700_000_003_000_i64)
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let first = handle_contacts_list(&paths, &json!({ "limit": 2 })).unwrap();
+    let first_candidates = first["candidates"].as_array().unwrap();
+
+    assert_eq!(first["limit"], 2);
+    assert_eq!(first["returned_count"], 2);
+    assert_eq!(first["candidate_count"], 3);
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    assert!(!cursor.is_empty());
+
+    let second = handle_contacts_list(&paths, &json!({ "limit": 2, "cursor": cursor })).unwrap();
+    let second_candidates = second["candidates"].as_array().unwrap();
+
+    assert_eq!(second["returned_count"], 1);
+    assert_eq!(second["candidate_count"], 3);
+    assert_eq!(second["has_more"], false);
+    assert!(second["next_cursor"].is_null());
+    assert!(first_candidates
+        .iter()
+        .all(|candidate| candidate["id"] != second_candidates[0]["id"]));
+}
+
+#[test]
+fn contacts_cursor_pagination_survives_new_candidate_ahead_of_cursor() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                telegram_peer_cache_user(2, "Bob", 1_700_000_002_000_i64),
+                telegram_peer_cache_user(3, "Cara", 1_700_000_003_000_i64),
+                telegram_peer_cache_user(4, "Dina", 1_700_000_004_000_i64)
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let first = handle_contacts_list(&paths, &json!({ "limit": 2 })).unwrap();
+    let first_candidates = first["candidates"].as_array().unwrap();
+    assert_eq!(first_candidates[0]["id"], "telegram-user-id@2");
+    assert_eq!(first_candidates[1]["id"], "telegram-user-id@3");
+    let cursor = first["next_cursor"].as_str().unwrap();
+
+    std::fs::write(
+        account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "peers": [
+                telegram_peer_cache_user(1, "New Contact", 1_700_000_001_000_i64),
+                telegram_peer_cache_user(2, "Bob", 1_700_000_002_000_i64),
+                telegram_peer_cache_user(3, "Cara", 1_700_000_003_000_i64),
+                telegram_peer_cache_user(4, "Dina", 1_700_000_004_000_i64)
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let second = handle_contacts_list(&paths, &json!({ "limit": 2, "cursor": cursor })).unwrap();
+    let second_candidates = second["candidates"].as_array().unwrap();
+
+    assert_eq!(second_candidates.len(), 1);
+    assert_eq!(second_candidates[0]["id"], "telegram-user-id@4");
+}
+
+#[test]
 fn telegram_peer_cache_skips_malformed_entries() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_config_paths(temp.path());

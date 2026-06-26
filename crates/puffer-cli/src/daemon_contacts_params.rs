@@ -7,6 +7,8 @@ pub(super) struct ContactListParams {
     #[serde(default)]
     pub(super) limit: Option<usize>,
     #[serde(default)]
+    pub(super) cursor: Option<String>,
+    #[serde(default)]
     pub(super) query: Option<String>,
     #[serde(default)]
     pub(super) connector: Option<String>,

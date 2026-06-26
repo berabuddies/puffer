@@ -4,11 +4,12 @@ use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
-    connector_slug_accepts_contact_id, contact_display_name_from_payload, contact_id_prefix,
-    contact_ids_from_payload, normalize_contact_id, normalize_contact_ids, ConnectorContact,
-    ContactContext, SavedContact,
+    ConnectorContact, ContactContext, SavedContact, connector_slug_accepts_contact_id,
+    contact_display_name_from_payload, contact_id_prefix, contact_ids_from_payload,
+    normalize_contact_id, normalize_contact_ids,
 };
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,6 +69,27 @@ struct Candidate {
     score: f64,
     last_message_at_ms: Option<i128>,
     context: Vec<ContactContext>,
+}
+
+#[derive(Debug, Clone)]
+struct CandidatePage {
+    candidates: Vec<ConnectorContact>,
+    candidate_count: usize,
+    has_more: bool,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ContactCursor {
+    Score {
+        score_bits: u64,
+        id: String,
+    },
+    Recent {
+        last_message_at_ms: Option<i128>,
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,25 +163,31 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
     let proposals = load_proposals(paths)?;
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
-    let (candidates, ready) = if is_recent_telegram_request(&params) {
+    let (page, ready) = if is_recent_telegram_request(&params) {
         let mut snapshot = recent_telegram_contacts(paths, limit)?;
         reject_bot_candidates(&mut snapshot.candidates);
         (
-            snapshot
-                .candidates
-                .into_iter()
-                .map(Candidate::into_preview_contact)
-                .collect(),
+            paginate_recent_candidates(snapshot.candidates, limit, params.cursor.as_deref())?,
             snapshot.ready,
         )
     } else {
-        (filtered_candidates(paths, limit, query)?, true)
+        (
+            filtered_candidates(paths, limit, params.cursor.as_deref(), query)?,
+            true,
+        )
     };
+    let returned_count = page.candidates.len();
+    let candidates = page.candidates;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
         "proposals": proposals,
         "ready": ready,
+        "limit": limit,
+        "returned_count": returned_count,
+        "candidate_count": page.candidate_count,
+        "has_more": page.has_more,
+        "next_cursor": page.next_cursor,
     }))
 }
 
@@ -177,11 +205,19 @@ pub(crate) fn handle_contacts_search(paths: &ConfigPaths, params: &Value) -> Res
     let proposals = load_proposals(paths)?;
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
-    let candidates = searched_candidates(paths, limit, query)?;
+    let page = searched_candidates(paths, limit, params.cursor.as_deref(), query)?;
+    let returned_count = page.candidates.len();
+    let candidates = page.candidates;
     Ok(json!({
         "contacts": saved,
         "candidates": candidates,
         "proposals": proposals,
+        "ready": true,
+        "limit": limit,
+        "returned_count": returned_count,
+        "candidate_count": page.candidate_count,
+        "has_more": page.has_more,
+        "next_cursor": page.next_cursor,
     }))
 }
 
@@ -381,8 +417,9 @@ pub(crate) fn handle_contacts_infer(state: &DaemonState, params: &Value) -> Resu
 fn filtered_candidates(
     paths: &ConfigPaths,
     limit: usize,
+    cursor: Option<&str>,
     query: Option<&str>,
-) -> Result<Vec<ConnectorContact>> {
+) -> Result<CandidatePage> {
     let mut candidates = ranked_candidates(paths, CandidateContextOptions::none())?;
     if let Some(query) = query {
         let query = query.to_ascii_lowercase();
@@ -396,20 +433,17 @@ fn filtered_candidates(
                     .contains(&query)
         });
     }
-    candidates.truncate(limit);
-    Ok(candidates
-        .into_iter()
-        .map(Candidate::into_preview_contact)
-        .collect())
+    paginate_score_candidates(candidates, limit, cursor)
 }
 
 fn searched_candidates(
     paths: &ConfigPaths,
     limit: usize,
+    cursor: Option<&str>,
     query: Option<&str>,
-) -> Result<Vec<ConnectorContact>> {
+) -> Result<CandidatePage> {
     let Some(query) = query else {
-        return filtered_candidates(paths, limit, None);
+        return filtered_candidates(paths, limit, cursor, None);
     };
     let mut by_id: HashMap<String, Candidate> = HashMap::new();
     let context_options = CandidateContextOptions::none();
@@ -436,11 +470,135 @@ fn searched_candidates(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.id.cmp(&right.id))
     });
-    candidates.truncate(limit);
-    Ok(candidates
+    paginate_score_candidates(candidates, limit, cursor)
+}
+
+fn paginate_score_candidates(
+    candidates: Vec<Candidate>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<CandidatePage> {
+    let cursor = parse_contact_cursor(cursor)?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| !matches!(cursor, ContactCursor::Score { .. }))
+    {
+        anyhow::bail!("contact cursor does not match score-sorted contacts");
+    }
+    paginate_candidates(
+        candidates,
+        limit,
+        cursor.as_ref(),
+        score_candidate_after_cursor,
+        |candidate| ContactCursor::Score {
+            score_bits: candidate.score.to_bits(),
+            id: candidate.id.clone(),
+        },
+    )
+}
+
+fn paginate_recent_candidates(
+    candidates: Vec<Candidate>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<CandidatePage> {
+    let cursor = parse_contact_cursor(cursor)?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| !matches!(cursor, ContactCursor::Recent { .. }))
+    {
+        anyhow::bail!("contact cursor does not match recent Telegram contacts");
+    }
+    paginate_candidates(
+        candidates,
+        limit,
+        cursor.as_ref(),
+        recent_candidate_after_cursor,
+        |candidate| ContactCursor::Recent {
+            last_message_at_ms: candidate.last_message_at_ms,
+            id: candidate.id.clone(),
+        },
+    )
+}
+
+fn paginate_candidates<F, G>(
+    candidates: Vec<Candidate>,
+    limit: usize,
+    cursor: Option<&ContactCursor>,
+    after_cursor: F,
+    cursor_for: G,
+) -> Result<CandidatePage>
+where
+    F: Fn(&Candidate, &ContactCursor) -> bool,
+    G: Fn(&Candidate) -> ContactCursor,
+{
+    let candidate_count = candidates.len();
+    let mut page_candidates = candidates
         .into_iter()
-        .map(Candidate::into_preview_contact)
-        .collect())
+        .filter(|candidate| cursor.map_or(true, |cursor| after_cursor(candidate, cursor)))
+        .take(limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let has_more = page_candidates.len() > limit;
+    if has_more {
+        page_candidates.truncate(limit);
+    }
+    let next_cursor = if has_more {
+        page_candidates
+            .last()
+            .map(cursor_for)
+            .map(|cursor| serde_json::to_string(&cursor))
+            .transpose()
+            .context("serialize contact cursor")?
+    } else {
+        None
+    };
+    Ok(CandidatePage {
+        candidates: page_candidates
+            .into_iter()
+            .map(Candidate::into_preview_contact)
+            .collect(),
+        candidate_count,
+        has_more,
+        next_cursor,
+    })
+}
+
+fn parse_contact_cursor(cursor: Option<&str>) -> Result<Option<ContactCursor>> {
+    let Some(cursor) = cursor.map(str::trim).filter(|cursor| !cursor.is_empty()) else {
+        return Ok(None);
+    };
+    serde_json::from_str(cursor).context("invalid contact cursor")
+}
+
+fn score_candidate_after_cursor(candidate: &Candidate, cursor: &ContactCursor) -> bool {
+    let ContactCursor::Score { score_bits, id } = cursor else {
+        return false;
+    };
+    let cursor_score = f64::from_bits(*score_bits);
+    match candidate
+        .score
+        .partial_cmp(&cursor_score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+    {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Equal => candidate.id.as_str() > id.as_str(),
+        std::cmp::Ordering::Greater => false,
+    }
+}
+
+fn recent_candidate_after_cursor(candidate: &Candidate, cursor: &ContactCursor) -> bool {
+    let ContactCursor::Recent {
+        last_message_at_ms,
+        id,
+    } = cursor
+    else {
+        return false;
+    };
+    match candidate.last_message_at_ms.cmp(last_message_at_ms) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Equal => candidate.id.as_str() > id.as_str(),
+        std::cmp::Ordering::Greater => false,
+    }
 }
 
 fn filtered_saved_contacts(

@@ -1,16 +1,16 @@
 //! Telegram diagnostics-backed contact ranking.
 
 use super::{
-    days_since, entropy_score, merge_candidate_last_message_at_ms, push_context, Candidate,
-    CandidateContextOptions, TELEGRAM_CONTEXT_LIMIT, TELEGRAM_INTERACTION_CONTEXT_LIMIT,
-    TELEGRAM_RECENT_CONTEXT_LIMIT,
+    Candidate, CandidateContextOptions, TELEGRAM_CONTEXT_LIMIT, TELEGRAM_INTERACTION_CONTEXT_LIMIT,
+    TELEGRAM_RECENT_CONTEXT_LIMIT, days_since, entropy_score, merge_candidate_last_message_at_ms,
+    push_context,
 };
 use anyhow::{Context, Result};
 use grammers_session::Session;
 use puffer_config::ConfigPaths;
-use puffer_subscriptions::{normalize_contact_id, ContactContext};
+use puffer_subscriptions::{ContactContext, normalize_contact_id};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -19,11 +19,10 @@ use std::path::Path;
 #[path = "daemon_contacts_telegram_peer_cache.rs"]
 mod daemon_contacts_telegram_peer_cache;
 use daemon_contacts_telegram_peer_cache::{
-    collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache,
-    hydrate_telegram_peer_cache_if_needed, hydrate_telegram_recent_peer_cache,
-    hydrate_telegram_recent_peer_cache_if_needed,
+    TelegramPeerCacheHydrationMode, collect_telegram_peer_cache_candidates,
+    hydrate_telegram_peer_cache, hydrate_telegram_peer_cache_if_needed,
+    hydrate_telegram_recent_peer_cache, hydrate_telegram_recent_peer_cache_if_needed,
     telegram_recent_dialog_cache_claims_target_satisfied, telegram_recent_dialog_cache_ready,
-    TelegramPeerCacheHydrationMode,
 };
 
 #[cfg(test)]
@@ -221,7 +220,6 @@ pub(super) fn recent_telegram_contacts(
             .cmp(&left.last_message_at_ms)
             .then_with(|| left.id.cmp(&right.id))
     });
-    candidates.truncate(limit);
     Ok(TelegramRecentContacts { ready, candidates })
 }
 
