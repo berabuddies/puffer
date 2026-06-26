@@ -4,7 +4,6 @@
 //! the email subscriber, persists them to its state directory, and starts the
 //! polling loop.
 
-use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use puffer_subscriber_runtime::{Manifest, SubscriberCommand};
 use serde::Deserialize;
@@ -42,17 +41,21 @@ struct ConfigureInput {
 }
 
 /// Executes the consolidated internal `Email` workflow action.
-pub fn execute_email(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
+///
+/// State-free: reaches the subscriber runtime through the process-global
+/// `subscription_globals::manager()`, so this is safe to call from a
+/// parallel-batch worker thread that holds no `&mut AppState`.
+pub fn execute_email(cwd: &Path, input: Value) -> Result<String> {
     let parsed: EmailInput =
         serde_json::from_value(input.clone()).context("invalid Email input")?;
     match parsed.action {
-        EmailAction::Configure => execute_email_configure(state, cwd, input),
+        EmailAction::Configure => execute_email_configure(cwd, input),
     }
 }
 
 /// Executes `EmailConfigure`. Ensures the subscriber is running, then
 /// sends an [`SubscriberCommand::EmailConfigure`] over its stdin.
-pub fn execute_email_configure(_state: &mut AppState, _cwd: &Path, input: Value) -> Result<String> {
+pub fn execute_email_configure(_cwd: &Path, input: Value) -> Result<String> {
     let parsed: ConfigureInput =
         serde_json::from_value(input).context("invalid EmailConfigure input")?;
     ensure_subscriber_running()?;

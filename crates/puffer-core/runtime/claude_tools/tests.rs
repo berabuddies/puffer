@@ -271,7 +271,9 @@ fn null_optional_read_fields_are_treated_as_absent() {
 
 #[test]
 fn parallel_bash_media_broker_exposes_endpoint_to_child() {
-    use crate::runtime::internal_tool_permissions::{MediaCapabilityContext, MediaPermissionSnapshot};
+    use crate::runtime::internal_tool_permissions::{
+        MediaCapabilityContext, MediaPermissionSnapshot, SubscriberPermissionSnapshot,
+    };
     use crate::permissions::ToolPermissionBehavior;
     let dir = tempfile::tempdir().unwrap();
     let providers = puffer_provider_registry::ProviderRegistry::new();
@@ -279,6 +281,7 @@ fn parallel_bash_media_broker_exposes_endpoint_to_child() {
     let cache = puffer_media::ExactMediaDiscoveryCache::empty();
     let ctx = MediaCapabilityContext {
         permissions: MediaPermissionSnapshot { image: ToolPermissionBehavior::Allow, video: ToolPermissionBehavior::Allow, capabilities: ToolPermissionBehavior::Allow },
+        subscriber: SubscriberPermissionSnapshot { telegram: ToolPermissionBehavior::Deny, email: ToolPermissionBehavior::Deny },
         image_settings: None, video_settings: None,
         providers: &providers, auth_store: &auth_store, discovery_cache: &cache, process_store: None,
     };
@@ -300,7 +303,9 @@ fn parallel_bash_media_broker_exposes_endpoint_to_child() {
 
 #[test]
 fn parallel_bash_media_broker_supports_concurrent_workers() {
-    use crate::runtime::internal_tool_permissions::{MediaCapabilityContext, MediaPermissionSnapshot};
+    use crate::runtime::internal_tool_permissions::{
+        MediaCapabilityContext, MediaPermissionSnapshot, SubscriberPermissionSnapshot,
+    };
     use crate::permissions::ToolPermissionBehavior;
     let dir = tempfile::tempdir().unwrap();
     let providers = puffer_provider_registry::ProviderRegistry::new();
@@ -309,6 +314,7 @@ fn parallel_bash_media_broker_supports_concurrent_workers() {
     let def = puffer_tools::builtin_tool_definition(puffer_tools::ToolKind::Bash);
     let ctx = MediaCapabilityContext {
         permissions: MediaPermissionSnapshot { image: ToolPermissionBehavior::Allow, video: ToolPermissionBehavior::Allow, capabilities: ToolPermissionBehavior::Allow },
+        subscriber: SubscriberPermissionSnapshot { telegram: ToolPermissionBehavior::Deny, email: ToolPermissionBehavior::Deny },
         image_settings: None, video_settings: None,
         providers: &providers, auth_store: &auth_store, discovery_cache: &cache, process_store: None,
     };

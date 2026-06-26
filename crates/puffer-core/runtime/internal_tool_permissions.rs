@@ -51,9 +51,21 @@ impl MediaPermissionSnapshot {
     }
 }
 
-/// Shared-ref context for executing media tools from parallel workers (no &mut AppState).
+/// Snapshot of the subscriber-tool permission decisions resolved before parallel
+/// dispatch. Subscriber tools (telegram/email) execute via the process-global
+/// `subscription_globals::manager()`, so unlike media they need no borrowed
+/// `AppState` data captured into the context — only the pre-resolved gate.
+#[derive(Clone, Copy)]
+pub(crate) struct SubscriberPermissionSnapshot {
+    pub telegram: ToolPermissionBehavior,
+    pub email: ToolPermissionBehavior,
+}
+
+/// Shared-ref context for executing media + subscriber tools from parallel
+/// workers (no &mut AppState).
 pub(crate) struct MediaCapabilityContext<'a> {
     pub permissions: MediaPermissionSnapshot,
+    pub subscriber: SubscriberPermissionSnapshot,
     pub image_settings: Option<&'a puffer_config::MediaGenerationConfig>,
     pub video_settings: Option<&'a puffer_config::MediaGenerationConfig>,
     pub providers: &'a ProviderRegistry,
@@ -69,6 +81,7 @@ pub(crate) struct MediaCapabilityContext<'a> {
 /// site with [`Self::context`]; the owned value must outlive the scope.
 pub(crate) struct MediaCapabilitySnapshot {
     permissions: MediaPermissionSnapshot,
+    subscriber: SubscriberPermissionSnapshot,
     image_settings: Option<puffer_config::MediaGenerationConfig>,
     video_settings: Option<puffer_config::MediaGenerationConfig>,
     discovery_cache: ExactMediaDiscoveryCache,
@@ -93,6 +106,7 @@ impl MediaCapabilitySnapshot {
         )?;
         Ok(Self {
             permissions: resolve_media_permission_snapshot(&perm_ctx, registry),
+            subscriber: resolve_subscriber_permission_snapshot(&perm_ctx, registry),
             image_settings: state.config.media.image.clone(),
             video_settings: state.config.media.video.clone(),
             discovery_cache: state
@@ -112,6 +126,7 @@ impl MediaCapabilitySnapshot {
     ) -> MediaCapabilityContext<'a> {
         MediaCapabilityContext {
             permissions: self.permissions,
+            subscriber: self.subscriber,
             image_settings: self.image_settings.as_ref(),
             video_settings: self.video_settings.as_ref(),
             providers,
@@ -243,10 +258,75 @@ pub(crate) fn execute_media_internal_tool(
                 request.input,
             )
         }),
+        // telegram/email reach the subscriber runtime through the process-global
+        // `subscription_globals::manager()`, so they can execute from a parallel
+        // worker too — gated on their pre-resolved snapshot.
+        _ => execute_subscriber_internal_tool(ctx.subscriber, cwd, request),
+    }
+}
+
+/// Resolves the subscriber tool permission decisions once, before parallel dispatch.
+/// Mirrors [`resolve_media_permission_snapshot`] and reuses the same `perm_ctx`, so
+/// it adds no extra permission-file read.
+pub(crate) fn resolve_subscriber_permission_snapshot(
+    perm_ctx: &crate::permissions::RuntimePermissionContext,
+    registry: &ToolRegistry,
+) -> SubscriberPermissionSnapshot {
+    let behavior = |tool_id: &str| {
+        registry
+            .internal_definition(tool_id)
+            .map(|def| {
+                perm_ctx
+                    .decision_for_tool_call(def, &serde_json::Value::Null)
+                    .behavior
+            })
+            .unwrap_or(ToolPermissionBehavior::Deny)
+    };
+    SubscriberPermissionSnapshot {
+        telegram: behavior("telegram"),
+        email: behavior("email"),
+    }
+}
+
+/// Executes a subscriber internal tool (telegram/email) with no `&mut AppState`, for
+/// use from parallel workers. Each reaches the subscriber runtime through the
+/// process-global `subscription_globals::manager()`, so only the pre-resolved
+/// permission gate is needed here. A tool not `Allow`ed for this batch fails with
+/// guidance to run it as a single command (where the serial path can prompt on
+/// `Ask`); a non-subscriber tool fails with the same parallel-batch guidance as media.
+pub(crate) fn execute_subscriber_internal_tool(
+    permissions: SubscriberPermissionSnapshot,
+    cwd: &std::path::Path,
+    request: InternalToolExecutionRequest,
+) -> InternalToolExecutionResponse {
+    use crate::runtime::claude_tools::workflow::{email_configure, telegram_login};
+    match canonical_tool_name(&request.tool_id).as_str() {
+        "telegram" => run_subscriber_tool(permissions.telegram, "Telegram", || {
+            telegram_login::execute_telegram(cwd, request.input)
+        }),
+        "email" => run_subscriber_tool(permissions.email, "Email", || {
+            email_configure::execute_email(cwd, request.input)
+        }),
         other => InternalToolExecutionResponse::failure(format!(
             "internal tool `{other}` is not available in a parallel batch; run it as a single command"
         )),
     }
+}
+
+/// Runs a subscriber tool only when its pre-resolved permission is `Allow`. When the
+/// tool was not approved for this batch, short-circuits with guidance to run it as a
+/// single command so the serial path can prompt (mirrors [`run_media_tool`]).
+fn run_subscriber_tool(
+    behavior: ToolPermissionBehavior,
+    label: &str,
+    run: impl FnOnce() -> anyhow::Result<String>,
+) -> InternalToolExecutionResponse {
+    if !matches!(behavior, ToolPermissionBehavior::Allow) {
+        return InternalToolExecutionResponse::failure(format!(
+            "{label} was not approved for this batch; run it as a single command"
+        ));
+    }
+    internal_tool_execution_response(run())
 }
 
 /// Runs a media tool only when its pre-resolved permission is `Allow`, mapping
@@ -738,6 +818,62 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn telegram_routes_to_handler_in_parallel_batch_when_allowed() {
+        // Regression for issue #723: the parallel-batch broker used to bail on every
+        // non-media internal tool. An Allowed telegram call must now route to its
+        // handler instead of returning the "not available in a parallel batch"
+        // guidance. With no subscription runtime in a unit test the handler then
+        // fails — but on the subscriber-manager path, proving it routed.
+        let dir = tempdir().unwrap();
+        let response = execute_subscriber_internal_tool(
+            SubscriberPermissionSnapshot {
+                telegram: ToolPermissionBehavior::Allow,
+                email: ToolPermissionBehavior::Deny,
+            },
+            dir.path(),
+            InternalToolExecutionRequest {
+                tool_id: "telegram".to_string(),
+                input: json!({ "action": "list_peers" }),
+            },
+        );
+        assert!(!response.success);
+        let reason = response.reason.unwrap_or_default();
+        assert!(
+            !reason.contains("not available in a parallel batch"),
+            "allowed telegram should route to its handler, got: {reason}"
+        );
+        assert!(
+            reason.contains("subscription runtime is not running"),
+            "expected the subscriber-manager error (proves it routed), got: {reason}"
+        );
+    }
+
+    #[test]
+    fn telegram_gated_in_parallel_batch_when_not_allowed() {
+        // A telegram call whose permission is `Ask`/`Deny` for this batch must not
+        // execute in parallel; it falls back with guidance to run it as a single
+        // command, where the serial path can prompt.
+        let dir = tempdir().unwrap();
+        let response = execute_subscriber_internal_tool(
+            SubscriberPermissionSnapshot {
+                telegram: ToolPermissionBehavior::Ask,
+                email: ToolPermissionBehavior::Deny,
+            },
+            dir.path(),
+            InternalToolExecutionRequest {
+                tool_id: "telegram".to_string(),
+                input: json!({ "action": "list_peers" }),
+            },
+        );
+        assert!(!response.success);
+        let reason = response.reason.unwrap_or_default();
+        assert!(
+            reason.contains("was not approved for this batch"),
+            "ask/deny telegram should be gated, got: {reason}"
+        );
+    }
+
+    #[test]
     fn image_internal_execution_receives_media_context() {
         let dir = tempdir().unwrap();
         let resources = media_internal_resources();
@@ -1040,6 +1176,10 @@ mod tests {
                 video: ToolPermissionBehavior::Allow,
                 capabilities: ToolPermissionBehavior::Allow,
             },
+            subscriber: SubscriberPermissionSnapshot {
+                telegram: ToolPermissionBehavior::Deny,
+                email: ToolPermissionBehavior::Deny,
+            },
             image_settings: Some(&image_cfg),
             video_settings: None,
             providers: &providers,
@@ -1069,6 +1209,10 @@ mod tests {
                 image: ToolPermissionBehavior::Ask,
                 video: ToolPermissionBehavior::Allow,
                 capabilities: ToolPermissionBehavior::Allow,
+            },
+            subscriber: SubscriberPermissionSnapshot {
+                telegram: ToolPermissionBehavior::Deny,
+                email: ToolPermissionBehavior::Deny,
             },
             image_settings: None,
             video_settings: None,
@@ -1101,6 +1245,10 @@ mod tests {
                 video: ToolPermissionBehavior::Allow,
                 capabilities: ToolPermissionBehavior::Allow,
             },
+            subscriber: SubscriberPermissionSnapshot {
+                telegram: ToolPermissionBehavior::Deny,
+                email: ToolPermissionBehavior::Deny,
+            },
             image_settings: None,
             video_settings: None,
             providers: &providers,
@@ -1112,13 +1260,13 @@ mod tests {
             &ctx,
             dir.path(),
             InternalToolExecutionRequest {
-                tool_id: "email".to_string(),
+                // A tool that is neither media nor a subscriber tool (telegram/email)
+                // still falls through to the catch-all guidance.
+                tool_id: "totally-unknown-internal-tool".to_string(),
                 input: serde_json::json!({}),
             },
         );
         assert!(!resp.success);
-        // Non-media internal tools genuinely aren't available in a parallel batch;
-        // this `other`-arm message is unchanged by the media failure-message fix.
         assert!(resp.reason.unwrap().contains("not available in a parallel batch"));
     }
 

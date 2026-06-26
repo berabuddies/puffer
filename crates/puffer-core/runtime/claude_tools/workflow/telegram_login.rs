@@ -10,7 +10,6 @@
 //! `login_awaiting_password`, `login_complete`, or `login_error`. Tools ensure
 //! the selected subscriber is running before sending commands.
 
-use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{Manifest, StateSpec, SubscriberCommand, TelegramPeerKind};
@@ -63,22 +62,26 @@ struct LoginStartInput {
 }
 
 /// Executes the consolidated internal `Telegram` workflow action.
-pub fn execute_telegram(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
+///
+/// State-free: every action reaches the subscriber runtime through the
+/// process-global `subscription_globals::manager()`, so this is safe to call
+/// from a parallel-batch worker thread that holds no `&mut AppState`.
+pub fn execute_telegram(cwd: &Path, input: Value) -> Result<String> {
     let parsed: TelegramInput =
         serde_json::from_value(input.clone()).context("invalid Telegram input")?;
     match parsed.action {
-        TelegramAction::ImportDesktop => execute_telegram_import_desktop(state, cwd, input),
-        TelegramAction::ListMessages => execute_telegram_list_messages(state, cwd, input),
-        TelegramAction::ListPeers => execute_telegram_list_peers(state, cwd, input, false),
-        TelegramAction::LoginQr => execute_telegram_login_qr(state, cwd, input),
-        TelegramAction::LoginQrWait => execute_telegram_login_qr_wait(state, cwd, input),
-        TelegramAction::LoginStart => execute_telegram_login_start(state, cwd, input),
-        TelegramAction::LoginSubmitCode => execute_telegram_login_submit_code(state, cwd, input),
+        TelegramAction::ImportDesktop => execute_telegram_import_desktop(cwd, input),
+        TelegramAction::ListMessages => execute_telegram_list_messages(cwd, input),
+        TelegramAction::ListPeers => execute_telegram_list_peers(cwd, input, false),
+        TelegramAction::LoginQr => execute_telegram_login_qr(cwd, input),
+        TelegramAction::LoginQrWait => execute_telegram_login_qr_wait(cwd, input),
+        TelegramAction::LoginStart => execute_telegram_login_start(cwd, input),
+        TelegramAction::LoginSubmitCode => execute_telegram_login_submit_code(cwd, input),
         TelegramAction::LoginSubmitPassword => {
-            execute_telegram_login_submit_password(state, cwd, input)
+            execute_telegram_login_submit_password(cwd, input)
         }
-        TelegramAction::SearchMessages => execute_telegram_search_messages(state, cwd, input),
-        TelegramAction::SearchPeers => execute_telegram_list_peers(state, cwd, input, true),
+        TelegramAction::SearchMessages => execute_telegram_search_messages(cwd, input),
+        TelegramAction::SearchPeers => execute_telegram_list_peers(cwd, input, true),
     }
 }
 
@@ -100,7 +103,6 @@ struct ImportDesktopInput {
 
 /// Imports Telegram Desktop `tdata` authentication into the subscriber.
 pub fn execute_telegram_import_desktop(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
@@ -156,7 +158,6 @@ struct ListPeersInput {
 }
 
 fn execute_telegram_list_peers(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
     require_query: bool,
@@ -219,7 +220,6 @@ struct SearchMessagesInput {
 }
 
 fn execute_telegram_search_messages(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
@@ -292,7 +292,6 @@ struct ListMessagesInput {
 }
 
 fn execute_telegram_list_messages(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
@@ -358,7 +357,6 @@ struct LoginQrInput {
 
 /// Starts Telegram QR login and returns a short-lived `tg://login` URL.
 pub fn execute_telegram_login_qr(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
@@ -414,7 +412,6 @@ struct LoginQrWaitInput {
 
 /// Waits for Telegram QR login approval and persists the authorized session.
 pub fn execute_telegram_login_qr_wait(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
@@ -478,7 +475,6 @@ pub fn execute_telegram_login_qr_wait(
 /// user's Telegram apps; the agent should then collect the code and run
 /// `telegram login-submit-code`.
 pub fn execute_telegram_login_start(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
@@ -543,7 +539,6 @@ struct SubmitCodeInput {
 /// `login_complete`; on `PASSWORD_REQUIRED` it emits `login_awaiting_password`
 /// and the agent should run `telegram login-submit-password`.
 pub fn execute_telegram_login_submit_code(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
@@ -596,7 +591,6 @@ struct SubmitPasswordInput {
 /// Submits the 2FA cloud password. On success the subscriber emits
 /// `login_complete`; on failure it emits `login_error`.
 pub fn execute_telegram_login_submit_password(
-    _state: &mut AppState,
     cwd: &Path,
     input: Value,
 ) -> Result<String> {

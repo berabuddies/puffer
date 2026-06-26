@@ -877,8 +877,8 @@ fn execute_workflow_tool_with_media_context(
         "CronCreate" => workflow::cron_create::execute_cron_create(state, cwd, input),
         "CronDelete" => workflow::cron_delete::execute_cron_delete(state, cwd, input),
         "CronList" => workflow::cron_list::execute_cron_list(state, cwd, input),
-        "Email" => workflow::email_configure::execute_email(state, cwd, input),
-        "EmailConfigure" => workflow::email_configure::execute_email_configure(state, cwd, input),
+        "Email" => workflow::email_configure::execute_email(cwd, input),
+        "EmailConfigure" => workflow::email_configure::execute_email_configure(cwd, input),
         "EnterPlanMode" => workflow::enter_plan_mode::execute_enter_plan_mode(state, cwd, input),
         "EnterWorktree" => workflow::enter_worktree::execute_enter_worktree(state, cwd, input),
         "ExitPlanMode" => workflow::exit_plan_mode::execute_exit_plan_mode(state, cwd, input),
@@ -976,22 +976,22 @@ fn execute_workflow_tool_with_media_context(
         "TaskUpdate" => workflow::task_update::execute_task_update(state, cwd, input),
         "TeamCreate" => workflow::team_create::execute_team_create(state, cwd, input),
         "TeamDelete" => workflow::team_delete::execute_team_delete(state, cwd, input),
-        "Telegram" => workflow::telegram_login::execute_telegram(state, cwd, input),
+        "Telegram" => workflow::telegram_login::execute_telegram(cwd, input),
         "TelegramImportDesktop" => {
-            workflow::telegram_login::execute_telegram_import_desktop(state, cwd, input)
+            workflow::telegram_login::execute_telegram_import_desktop(cwd, input)
         }
-        "TelegramLoginQr" => workflow::telegram_login::execute_telegram_login_qr(state, cwd, input),
+        "TelegramLoginQr" => workflow::telegram_login::execute_telegram_login_qr(cwd, input),
         "TelegramLoginQrWait" => {
-            workflow::telegram_login::execute_telegram_login_qr_wait(state, cwd, input)
+            workflow::telegram_login::execute_telegram_login_qr_wait(cwd, input)
         }
         "TelegramLoginStart" => {
-            workflow::telegram_login::execute_telegram_login_start(state, cwd, input)
+            workflow::telegram_login::execute_telegram_login_start(cwd, input)
         }
         "TelegramLoginSubmitCode" => {
-            workflow::telegram_login::execute_telegram_login_submit_code(state, cwd, input)
+            workflow::telegram_login::execute_telegram_login_submit_code(cwd, input)
         }
         "TelegramLoginSubmitPassword" => {
-            workflow::telegram_login::execute_telegram_login_submit_password(state, cwd, input)
+            workflow::telegram_login::execute_telegram_login_submit_password(cwd, input)
         }
         "LambdaInternal" => workflow::lambda_internal::execute_lambda_internal(state, cwd, input),
         "TodoWrite" => workflow::todo_write::execute_todo_write(state, cwd, input),
