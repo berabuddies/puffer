@@ -710,6 +710,7 @@ mod tests {
             id: "telegram@alice".to_string(),
             avatar: Some(avatar.clone()),
             name: Some("Alice".to_string()),
+            display: None,
             context: Vec::new(),
             score: 1.0,
             last_message_at_ms: None,
@@ -726,6 +727,7 @@ mod tests {
             id: "telegram@alice".to_string(),
             avatar: None,
             name: Some("Alice Example".to_string()),
+            display: None,
             context: vec![puffer_subscriptions::ContactContext {
                 kind: "message".to_string(),
                 text: "Alice asked for the launch checklist.".to_string(),

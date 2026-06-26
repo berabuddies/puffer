@@ -321,6 +321,7 @@ fn inference_sampling_keeps_top_contacts_per_prefix() {
         candidates.push(Candidate {
             id: format!("telegram@user{index}"),
             name: None,
+            public_username: None,
             avatar: None,
             score: 100.0 - index as f64,
             last_message_at_ms: None,
@@ -331,6 +332,7 @@ fn inference_sampling_keeps_top_contacts_per_prefix() {
         candidates.push(Candidate {
             id: format!("google@user{index}@example.com"),
             name: None,
+            public_username: None,
             avatar: None,
             score: 10.0 - index as f64,
             last_message_at_ms: None,
@@ -364,6 +366,7 @@ fn inference_sampling_excludes_bot_candidates() {
         Candidate {
             id: "telegram@alertbot".to_string(),
             name: Some("Alert Bot".to_string()),
+            public_username: None,
             avatar: None,
             score: 100.0,
             last_message_at_ms: None,
@@ -372,6 +375,7 @@ fn inference_sampling_excludes_bot_candidates() {
         Candidate {
             id: "google@support-bot@example.com".to_string(),
             name: Some("Support Bot".to_string()),
+            public_username: None,
             avatar: None,
             score: 90.0,
             last_message_at_ms: None,
@@ -380,6 +384,7 @@ fn inference_sampling_excludes_bot_candidates() {
         Candidate {
             id: "telegram@alice".to_string(),
             name: Some("Alice".to_string()),
+            public_username: None,
             avatar: None,
             score: 80.0,
             last_message_at_ms: None,
@@ -598,6 +603,14 @@ fn contacts_list_prefers_telegram_peer_cache_names() {
         .unwrap();
 
     assert_eq!(candidate["name"], "Rin Tohsaka");
+    assert_eq!(candidate["display"]["label"], "Rin Tohsaka");
+    assert_eq!(candidate["display"]["name"], "Rin Tohsaka");
+    assert_eq!(candidate["display"]["public_username"], "tohsakar_in");
+    assert_eq!(candidate["display"]["username_label"], "@tohsakar_in");
+    assert!(
+        !candidate["display"].to_string().contains("37253512"),
+        "{candidate:#}"
+    );
     assert!(candidate.get("avatar").is_none(), "{candidate:#}");
 
     let search = handle_contacts_search(&paths, &json!({ "query": "rin", "limit": 10 })).unwrap();
@@ -1244,6 +1257,7 @@ fn read_test_message(payload: Value) -> TelegramDiagMessage {
     TelegramDiagMessage {
         contact_id: telegram_contact_id(&payload, &chat_kind).unwrap(),
         name,
+        public_username: payload_string(&payload, "chat_username"),
         avatar: None,
         destination_name,
         destination_username: payload_string(&payload, "chat_username"),

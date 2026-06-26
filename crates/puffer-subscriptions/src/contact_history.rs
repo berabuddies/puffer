@@ -39,6 +39,7 @@ pub(crate) fn list_contacts(
             id,
             avatar: None,
             name: contact.name,
+            display: None,
             context: contact.context,
             score: contact.score,
             last_message_at_ms: None,

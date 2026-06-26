@@ -1,8 +1,9 @@
 //! Shared contact identity helpers for connector events.
 //!
-//! Contact ids are stable, user-visible routing keys. The prefix before the
-//! first `@` selects one connector family; the suffix is the connector-owned
-//! identity for a person on that service.
+//! Contact ids are stable routing keys. The prefix before the first `@` selects
+//! one connector family; the suffix is the connector-owned identity for a person
+//! on that service. User-facing labels should come from display fields instead
+//! of routing ids.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,6 +36,10 @@ pub struct ConnectorContact {
     /// Display name shown in contact pickers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// User-facing display identity. This is safe to render directly; stable
+    /// routing identifiers stay in `id` and connector action payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ContactDisplay>,
     /// Connector context snippets associated with this contact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<ContactContext>,
@@ -44,6 +49,25 @@ pub struct ConnectorContact {
     /// Connector-specific last interaction timestamp in milliseconds since UNIX epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message_at_ms: Option<i128>,
+}
+
+/// User-facing contact display identity.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContactDisplay {
+    /// Primary label to show to the user.
+    pub label: String,
+    /// Telegram/user display name when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Public username without a leading `@`, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_username: Option<String>,
+    /// Public username with a leading `@`, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username_label: Option<String>,
+    /// Why the display identity is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 /// One context item attached to a contact.
@@ -785,6 +809,7 @@ mod tests {
                     id: "Telegram@ALICE".into(),
                     avatar: None,
                     name: None,
+                    display: None,
                     context: Vec::new(),
                     score: 1.0,
                     last_message_at_ms: None,
@@ -793,6 +818,7 @@ mod tests {
                     id: "google@alice@example.com".into(),
                     avatar: None,
                     name: None,
+                    display: None,
                     context: Vec::new(),
                     score: 1.0,
                     last_message_at_ms: None,

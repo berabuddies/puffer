@@ -1,16 +1,16 @@
 //! Telegram diagnostics-backed contact ranking.
 
 use super::{
-    Candidate, CandidateContextOptions, TELEGRAM_CONTEXT_LIMIT, TELEGRAM_INTERACTION_CONTEXT_LIMIT,
-    TELEGRAM_RECENT_CONTEXT_LIMIT, days_since, entropy_score, merge_candidate_last_message_at_ms,
-    push_context,
+    days_since, entropy_score, merge_candidate_last_message_at_ms, merge_candidate_public_username,
+    public_username_from_contact_id, push_context, Candidate, CandidateContextOptions,
+    TELEGRAM_CONTEXT_LIMIT, TELEGRAM_INTERACTION_CONTEXT_LIMIT, TELEGRAM_RECENT_CONTEXT_LIMIT,
 };
 use anyhow::{Context, Result};
 use grammers_session::Session;
 use puffer_config::ConfigPaths;
-use puffer_subscriptions::{ContactContext, normalize_contact_id};
+use puffer_subscriptions::{normalize_contact_id, ContactContext};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -19,10 +19,11 @@ use std::path::Path;
 #[path = "daemon_contacts_telegram_peer_cache.rs"]
 mod daemon_contacts_telegram_peer_cache;
 use daemon_contacts_telegram_peer_cache::{
-    TelegramPeerCacheHydrationMode, collect_telegram_peer_cache_candidates,
-    hydrate_telegram_peer_cache, hydrate_telegram_peer_cache_if_needed,
-    hydrate_telegram_recent_peer_cache, hydrate_telegram_recent_peer_cache_if_needed,
+    collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache,
+    hydrate_telegram_peer_cache_if_needed, hydrate_telegram_recent_peer_cache,
+    hydrate_telegram_recent_peer_cache_if_needed,
     telegram_recent_dialog_cache_claims_target_satisfied, telegram_recent_dialog_cache_ready,
+    TelegramPeerCacheHydrationMode,
 };
 
 #[cfg(test)]
@@ -43,6 +44,8 @@ pub(super) struct TelegramDiagMessage {
     pub(super) contact_id: String,
     /// Best available display name from Telegram metadata.
     pub(super) name: Option<String>,
+    /// Public username without a leading `@`, when Telegram exposes one.
+    pub(super) public_username: Option<String>,
     /// Optional profile avatar as a URL or data URI.
     pub(super) avatar: Option<String>,
     /// Chat destination label, such as a group name or direct-message user.
@@ -110,6 +113,7 @@ struct TelegramPeerCacheEntry {
 #[derive(Debug, Clone, Default)]
 pub(super) struct TelegramPeerMetadata {
     name: Option<String>,
+    public_username: Option<String>,
     avatar: Option<String>,
     last_message_at_ms: Option<i128>,
 }
@@ -153,6 +157,10 @@ pub(super) fn collect_telegram_candidates(
                 .and_modify(|existing| {
                     existing.score += candidate.score;
                     merge_telegram_name(&mut existing.name, &candidate.name);
+                    merge_candidate_public_username(
+                        &mut existing.public_username,
+                        candidate.public_username.as_deref(),
+                    );
                     merge_candidate_last_message_at_ms(
                         &mut existing.last_message_at_ms,
                         candidate.last_message_at_ms,
@@ -233,8 +241,12 @@ fn collect_recent_telegram_account_candidates(account_dir: &Path) -> HashMap<Str
             continue;
         };
         let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
-            id,
+            id: id.clone(),
             name: metadata.name.clone(),
+            public_username: metadata
+                .public_username
+                .clone()
+                .or_else(|| public_username_from_contact_id(&id)),
             avatar: metadata.avatar.clone(),
             score: 0.01,
             last_message_at_ms: Some(last_message_at_ms),
@@ -243,6 +255,10 @@ fn collect_recent_telegram_account_candidates(account_dir: &Path) -> HashMap<Str
         entry.score = entry.score.max(0.01);
         merge_candidate_last_message_at_ms(&mut entry.last_message_at_ms, Some(last_message_at_ms));
         merge_telegram_name(&mut entry.name, &metadata.name);
+        merge_candidate_public_username(
+            &mut entry.public_username,
+            metadata.public_username.as_deref(),
+        );
         if entry.avatar.is_none() {
             entry.avatar = metadata.avatar;
         }
@@ -264,6 +280,10 @@ fn merge_recent_telegram_candidates(
                     candidate.last_message_at_ms,
                 );
                 merge_telegram_name(&mut existing.name, &candidate.name);
+                merge_candidate_public_username(
+                    &mut existing.public_username,
+                    candidate.public_username.as_deref(),
+                );
                 if existing.avatar.is_none() {
                     existing.avatar = candidate.avatar;
                 }
@@ -355,6 +375,11 @@ fn read_telegram_messages(
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let name = telegram_contact_display_name(&payload, &chat_kind, peer_metadata);
+        let public_username = telegram_contact_username(&payload, &chat_kind).or_else(|| {
+            peer_metadata
+                .get(&contact_id)
+                .and_then(|metadata| metadata.public_username.clone())
+        });
         let avatar = telegram_cached_contact_avatar(&payload, &chat_kind, peer_metadata);
         let destination_name = telegram_destination_name(&payload, &chat_kind, name.as_deref());
         let destination_username = payload
@@ -387,6 +412,7 @@ fn read_telegram_messages(
         messages.push(TelegramDiagMessage {
             contact_id,
             name,
+            public_username,
             avatar,
             destination_name,
             destination_username,
@@ -477,12 +503,20 @@ fn score_telegram_window_with_options(
             .or_insert_with(|| Candidate {
                 id: message.contact_id.clone(),
                 name: message.name.clone(),
+                public_username: message
+                    .public_username
+                    .clone()
+                    .or_else(|| public_username_from_contact_id(&message.contact_id)),
                 avatar: message.avatar.clone(),
                 score: 0.0,
                 last_message_at_ms: Some(message.date_ms),
                 context: Vec::new(),
             });
         merge_telegram_name(&mut entry.name, &message.name);
+        merge_candidate_public_username(
+            &mut entry.public_username,
+            message.public_username.as_deref(),
+        );
         merge_candidate_last_message_at_ms(&mut entry.last_message_at_ms, Some(message.date_ms));
         if entry.avatar.is_none() {
             entry.avatar = message.avatar.clone();
@@ -963,10 +997,12 @@ fn read_telegram_peer_metadata_from_account_with(
         }
         let peer_metadata = TelegramPeerMetadata {
             name: peer_cache_entry_name(&peer),
+            public_username: peer_cache_entry_public_username(&peer),
             avatar: peer_cache_entry_avatar(&peer),
             last_message_at_ms: peer.last_message_at_ms,
         };
         if peer_metadata.name.is_none()
+            && peer_metadata.public_username.is_none()
             && peer_metadata.avatar.is_none()
             && peer_metadata.last_message_at_ms.is_none()
         {
@@ -990,6 +1026,10 @@ fn merge_peer_metadata(
             entry.name = Some(name);
         }
     }
+    merge_candidate_public_username(
+        &mut entry.public_username,
+        candidate.public_username.as_deref(),
+    );
     if entry.avatar.is_none() {
         entry.avatar = candidate.avatar;
     }
@@ -1036,6 +1076,10 @@ fn peer_cache_entry_usernames(peer: &TelegramPeerCacheEntry) -> Vec<String> {
         .into_iter()
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+fn peer_cache_entry_public_username(peer: &TelegramPeerCacheEntry) -> Option<String> {
+    peer_cache_entry_usernames(peer).into_iter().next()
 }
 
 fn peer_cache_entry_contact_ids(

@@ -1,7 +1,8 @@
 //! Telegram peer-cache helpers for contact ranking.
 
 use super::{
-    merge_candidate_last_message_at_ms, merge_telegram_name, normalize_contact_id,
+    merge_candidate_last_message_at_ms, merge_candidate_public_username, merge_telegram_name,
+    normalize_contact_id, public_username_from_contact_id,
     read_telegram_primary_peer_metadata_from_account, Candidate,
 };
 use anyhow::{Context, Result};
@@ -41,8 +42,12 @@ pub(super) fn collect_telegram_peer_cache_candidates(
             continue;
         }
         let entry = by_id.entry(id.clone()).or_insert_with(|| Candidate {
-            id,
+            id: id.clone(),
             name: metadata.name.clone(),
+            public_username: metadata
+                .public_username
+                .clone()
+                .or_else(|| public_username_from_contact_id(&id)),
             avatar: metadata.avatar.clone(),
             score: 0.01,
             last_message_at_ms: metadata.last_message_at_ms,
@@ -54,6 +59,10 @@ pub(super) fn collect_telegram_peer_cache_candidates(
             metadata.last_message_at_ms,
         );
         merge_telegram_name(&mut entry.name, &metadata.name);
+        merge_candidate_public_username(
+            &mut entry.public_username,
+            metadata.public_username.as_deref(),
+        );
         if entry.avatar.is_none() {
             entry.avatar = metadata.avatar;
         }
