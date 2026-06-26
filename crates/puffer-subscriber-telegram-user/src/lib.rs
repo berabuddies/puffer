@@ -51,7 +51,9 @@ pub use crate::history_cache::{TelegramHistoryCache, TelegramHistoryContextMessa
 pub use crate::login::{
     submit_code as login_submit_code, submit_password as login_submit_password, CodeSubmitOutcome,
 };
-pub use crate::peer_cache::{hydrate_contact_book_cache, hydrate_recent_dialog_peer_cache};
+pub use crate::peer_cache::{
+    hydrate_contact_book_cache, hydrate_recent_dialog_peer_cache, RecentDialogPeerCacheHydration,
+};
 pub use crate::qr_login::{
     start as qr_login_start, wait as qr_login_wait, QrLoginOutcome, QrLoginState,
 };

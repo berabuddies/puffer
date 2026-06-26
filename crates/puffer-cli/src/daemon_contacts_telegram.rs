@@ -19,9 +19,10 @@ use std::path::Path;
 #[path = "daemon_contacts_telegram_peer_cache.rs"]
 mod daemon_contacts_telegram_peer_cache;
 use daemon_contacts_telegram_peer_cache::{
-    collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache,
-    hydrate_telegram_peer_cache_if_needed, hydrate_telegram_recent_peer_cache,
-    hydrate_telegram_recent_peer_cache_if_needed,
+    collect_telegram_peer_cache_candidates, hydrate_telegram_contact_picker_peer_cache_if_needed,
+    hydrate_telegram_peer_cache, hydrate_telegram_peer_cache_if_needed,
+    hydrate_telegram_recent_peer_cache, hydrate_telegram_recent_peer_cache_if_needed,
+    telegram_contact_picker_dialog_cache_claims_target_satisfied,
     telegram_recent_dialog_cache_claims_target_satisfied, TelegramPeerCacheHydrationMode,
 };
 
@@ -40,6 +41,19 @@ pub(super) fn write_test_recent_dialog_cache_marker(
     target: usize,
 ) -> Result<()> {
     daemon_contacts_telegram_peer_cache::write_recent_dialog_cache_marker(
+        account_dir,
+        direct_users_seen,
+        target,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn write_test_recent_dialog_cache_exhausted_marker(
+    account_dir: &Path,
+    direct_users_seen: usize,
+    target: usize,
+) -> Result<()> {
+    daemon_contacts_telegram_peer_cache::write_recent_dialog_cache_exhausted_marker(
         account_dir,
         direct_users_seen,
         target,
@@ -188,6 +202,26 @@ pub(super) fn collect_telegram_candidates(
         }
     }
     Ok(())
+}
+
+pub(super) fn telegram_contact_picker_ready(paths: &ConfigPaths, limit: usize) -> Result<bool> {
+    let root = paths.user_config_dir.join("telegram-accounts");
+    if !root.exists() {
+        return Ok(true);
+    }
+    let mut ready = true;
+    for entry in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
+        let Ok(entry) = entry else { continue };
+        let account_dir = entry.path();
+        if !account_dir.join("telegram.session").exists() {
+            continue;
+        }
+        hydrate_telegram_contact_picker_peer_cache_if_needed(paths, &account_dir, limit);
+        if !telegram_contact_picker_dialog_cache_claims_target_satisfied(&account_dir, limit) {
+            ready = false;
+        }
+    }
+    Ok(ready)
 }
 
 /// Forces a best-effort refresh of Telegram peer caches for contact pickers.

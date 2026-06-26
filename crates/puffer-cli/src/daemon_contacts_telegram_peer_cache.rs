@@ -22,6 +22,7 @@ use tracing::{info, warn};
 const RECENT_DIALOG_CACHE_FILE: &str = "recent-dialog-cache.json";
 const RECENT_DIALOG_TARGET_MIN: usize = 5;
 const RECENT_DIALOG_TARGET_MAX: usize = 50;
+const CONTACT_PICKER_DIALOG_TARGET_MAX: usize = 120;
 const RECENT_DIALOG_MAX_DIALOGS: usize = 500;
 
 const TELEGRAM_PEER_CACHE_HYDRATE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -114,13 +115,42 @@ pub(super) fn hydrate_telegram_recent_peer_cache_if_needed(
     hydrate_telegram_recent_peer_cache(paths, account_dir, limit);
 }
 
+pub(super) fn hydrate_telegram_contact_picker_peer_cache_if_needed(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    limit: usize,
+) {
+    if telegram_contact_picker_dialog_cache_claims_target_satisfied(account_dir, limit) {
+        return;
+    }
+    if !account_dir.join("telegram.session").exists() {
+        return;
+    }
+    let target = contact_picker_dialog_target(limit);
+    info!(
+        account = %account_dir.display(),
+        limit,
+        target,
+        "hydrating Telegram contact picker peer cache"
+    );
+    hydrate_telegram_recent_peer_cache_for_target(paths, account_dir, target);
+}
+
 pub(super) fn hydrate_telegram_recent_peer_cache(
     paths: &ConfigPaths,
     account_dir: &Path,
     limit: usize,
 ) {
+    hydrate_telegram_recent_peer_cache_for_target(paths, account_dir, recent_dialog_target(limit));
+}
+
+fn hydrate_telegram_recent_peer_cache_for_target(
+    paths: &ConfigPaths,
+    account_dir: &Path,
+    target: usize,
+) {
     if let Err(error) =
-        hydrate_telegram_recent_peer_cache_from_session_blocking(paths, account_dir, limit)
+        hydrate_telegram_recent_peer_cache_from_session_blocking(paths, account_dir, target)
     {
         warn!(
             account = %account_dir.display(),
@@ -134,9 +164,29 @@ pub(super) fn telegram_recent_dialog_cache_claims_target_satisfied(
     account_dir: &Path,
     limit: usize,
 ) -> bool {
-    let target = limit
+    recent_dialog_cache_claims_target_satisfied(account_dir, recent_dialog_target(limit))
+}
+
+pub(super) fn telegram_contact_picker_dialog_cache_claims_target_satisfied(
+    account_dir: &Path,
+    limit: usize,
+) -> bool {
+    recent_dialog_cache_claims_target_satisfied(account_dir, contact_picker_dialog_target(limit))
+}
+
+fn recent_dialog_target(limit: usize) -> usize {
+    limit
         .max(RECENT_DIALOG_TARGET_MIN)
-        .min(RECENT_DIALOG_TARGET_MAX);
+        .min(RECENT_DIALOG_TARGET_MAX)
+}
+
+fn contact_picker_dialog_target(limit: usize) -> usize {
+    limit
+        .max(RECENT_DIALOG_TARGET_MIN)
+        .min(CONTACT_PICKER_DIALOG_TARGET_MAX)
+}
+
+fn recent_dialog_cache_claims_target_satisfied(account_dir: &Path, target: usize) -> bool {
     let path = account_dir.join(RECENT_DIALOG_CACHE_FILE);
     let Ok(raw) = std::fs::read_to_string(path) else {
         return false;
@@ -153,7 +203,11 @@ pub(super) fn telegram_recent_dialog_cache_claims_target_satisfied(
     let Some(direct_users_seen) = marker.get("direct_users_seen").and_then(Value::as_u64) else {
         return false;
     };
-    marker_target as usize >= target && direct_users_seen as usize >= target
+    let dialogs_exhausted = marker
+        .get("dialogs_exhausted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    marker_target as usize >= target && (direct_users_seen as usize >= target || dialogs_exhausted)
 }
 
 fn telegram_peer_cache_needs_hydration(account_dir: &Path) -> bool {
@@ -264,7 +318,7 @@ async fn hydrate_telegram_peer_cache_from_session(
 fn hydrate_telegram_recent_peer_cache_from_session_blocking(
     paths: &ConfigPaths,
     account_dir: &Path,
-    limit: usize,
+    target: usize,
 ) -> Result<()> {
     #[cfg(test)]
     if let Some(result) = TEST_HYDRATOR.with(|cell| {
@@ -287,7 +341,7 @@ fn hydrate_telegram_recent_peer_cache_from_session_blocking(
                 runtime.block_on(hydrate_telegram_recent_peer_cache_from_session(
                     &paths,
                     &account_dir,
-                    limit,
+                    target,
                 ))
             });
         let _ = sender.send(result);
@@ -298,7 +352,7 @@ fn hydrate_telegram_recent_peer_cache_from_session_blocking(
 async fn hydrate_telegram_recent_peer_cache_from_session(
     paths: &ConfigPaths,
     account_dir: &Path,
-    limit: usize,
+    target: usize,
 ) -> Result<()> {
     let env = telegram_skill_env(paths, account_dir);
     if !env.session_path.exists() {
@@ -326,10 +380,7 @@ async fn hydrate_telegram_recent_peer_cache_from_session(
     {
         return Ok(());
     }
-    let target = limit
-        .max(RECENT_DIALOG_TARGET_MIN)
-        .min(RECENT_DIALOG_TARGET_MAX);
-    let direct_users_seen =
+    let hydration =
         hydrate_recent_dialog_peer_cache(&env, &client, target, RECENT_DIALOG_MAX_DIALOGS)
             .await
             .context("hydrate Telegram recent dialog peer cache")?;
@@ -337,11 +388,18 @@ async fn hydrate_telegram_recent_peer_cache_from_session(
         .session()
         .save_to_file(&env.session_path)
         .with_context(|| format!("save Telegram session {}", env.session_path.display()))?;
-    write_recent_dialog_cache_marker(account_dir, direct_users_seen, target)?;
+    write_recent_dialog_cache_marker_with_exhausted(
+        account_dir,
+        hydration.direct_users_seen,
+        target,
+        hydration.dialogs_exhausted,
+    )?;
     info!(
         account = %account_dir.display(),
-        direct_users_seen,
+        direct_users_seen = hydration.direct_users_seen,
         target,
+        dialogs_seen = hydration.dialogs_seen,
+        dialogs_exhausted = hydration.dialogs_exhausted,
         "Telegram recent dialog cache ready"
     );
     Ok(())
@@ -351,6 +409,23 @@ pub(super) fn write_recent_dialog_cache_marker(
     account_dir: &Path,
     direct_users_seen: usize,
     target: usize,
+) -> Result<()> {
+    write_recent_dialog_cache_marker_with_exhausted(account_dir, direct_users_seen, target, false)
+}
+
+pub(super) fn write_recent_dialog_cache_exhausted_marker(
+    account_dir: &Path,
+    direct_users_seen: usize,
+    target: usize,
+) -> Result<()> {
+    write_recent_dialog_cache_marker_with_exhausted(account_dir, direct_users_seen, target, true)
+}
+
+fn write_recent_dialog_cache_marker_with_exhausted(
+    account_dir: &Path,
+    direct_users_seen: usize,
+    target: usize,
+    dialogs_exhausted: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(account_dir)
         .with_context(|| format!("create Telegram account dir {}", account_dir.display()))?;
@@ -363,6 +438,7 @@ pub(super) fn write_recent_dialog_cache_marker(
             "hydrated_at_ms": now_unix_millis(),
             "direct_users_seen": direct_users_seen,
             "target": target,
+            "dialogs_exhausted": dialogs_exhausted,
         }))?,
     )
     .with_context(|| format!("write {}", tmp.display()))?;

@@ -4,15 +4,16 @@
 //! names observed while the subscriber is already connected, so the daemon can
 //! use richer Telegram names without making live connector calls.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use base64::Engine as _;
 use grammers_client::{
-    types::{Chat, User},
+    types::{Chat, ChatMap, User},
     Client,
 };
+use grammers_session::PackedChat;
 use grammers_tl_types as tl;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -22,6 +23,8 @@ use crate::state::SkillEnv;
 const CACHE_VERSION: u32 = 1;
 const AVATAR_MIME_TYPE: &str = "image/jpeg";
 const SAVED_CONTACT_SOURCE: &str = "saved_contact";
+const RECENT_DIALOG_SCAN_CURSOR_FILE: &str = "recent-dialog-scan-cursor.json";
+const TELEGRAM_DIALOG_PAGE_LIMIT_MAX: usize = 100;
 
 /// Durable cache of Telegram peer metadata for one subscriber account.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
@@ -299,6 +302,136 @@ pub(crate) async fn hydrate_chat_avatars_deferred(
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecentDialogPeerCacheHydration {
+    pub direct_users_seen: usize,
+    pub dialogs_seen: usize,
+    pub batch_dialogs_seen: usize,
+    pub target_direct_users: usize,
+    pub max_dialogs: usize,
+    pub dialogs_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
+struct RecentDialogScanCursor {
+    #[serde(default)]
+    dialogs_seen: usize,
+    #[serde(default)]
+    direct_users_seen: usize,
+    #[serde(default)]
+    offset_date: i32,
+    #[serde(default)]
+    offset_id: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offset_peer: Option<String>,
+}
+
+impl RecentDialogScanCursor {
+    fn has_offset(&self) -> bool {
+        self.offset_packed_peer().is_some()
+    }
+
+    fn offset_input_peer(&self) -> tl::enums::InputPeer {
+        self.offset_packed_peer()
+            .map(|peer| peer.to_input_peer())
+            .unwrap_or(tl::enums::InputPeer::Empty)
+    }
+
+    fn offset_packed_peer(&self) -> Option<PackedChat> {
+        self.offset_peer
+            .as_deref()
+            .and_then(|value| PackedChat::from_hex(value).ok())
+    }
+
+    fn sync_counts(&mut self, hydration: &RecentDialogPeerCacheHydration) {
+        self.dialogs_seen = hydration.dialogs_seen;
+        self.direct_users_seen = hydration.direct_users_seen;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecentDialogMessageAnchor {
+    offset_date: i32,
+    offset_id: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentDialogCursorAdvance {
+    direct_user_target: bool,
+    offset_peer: String,
+    last_message: Option<RecentDialogMessageAnchor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecentDialogHydrationStep {
+    Dialog { direct_user_target: bool },
+    Exhausted,
+    Failed,
+}
+
+fn recent_dialog_hydration_state_from_cursor(
+    target_direct_users: usize,
+    max_dialogs: usize,
+    cursor: &RecentDialogScanCursor,
+) -> RecentDialogPeerCacheHydration {
+    let target_direct_users = target_direct_users.max(1);
+    let max_dialogs = max_dialogs.max(1);
+    RecentDialogPeerCacheHydration {
+        direct_users_seen: cursor.direct_users_seen,
+        dialogs_seen: cursor.dialogs_seen,
+        batch_dialogs_seen: 0,
+        target_direct_users,
+        max_dialogs,
+        dialogs_exhausted: false,
+    }
+}
+
+fn recent_dialog_hydration_should_continue(hydration: &RecentDialogPeerCacheHydration) -> bool {
+    hydration.batch_dialogs_seen < hydration.max_dialogs
+        && hydration.direct_users_seen < hydration.target_direct_users
+}
+
+fn apply_recent_dialog_hydration_step(
+    hydration: &mut RecentDialogPeerCacheHydration,
+    step: RecentDialogHydrationStep,
+) -> bool {
+    match step {
+        RecentDialogHydrationStep::Dialog { direct_user_target } => {
+            hydration.dialogs_seen += 1;
+            hydration.batch_dialogs_seen += 1;
+            if direct_user_target {
+                hydration.direct_users_seen += 1;
+            }
+            true
+        }
+        RecentDialogHydrationStep::Exhausted => {
+            hydration.dialogs_exhausted = true;
+            false
+        }
+        RecentDialogHydrationStep::Failed => false,
+    }
+}
+
+fn apply_recent_dialog_cursor_advance(
+    hydration: &mut RecentDialogPeerCacheHydration,
+    cursor: &mut RecentDialogScanCursor,
+    advance: RecentDialogCursorAdvance,
+) -> bool {
+    let should_continue = apply_recent_dialog_hydration_step(
+        hydration,
+        RecentDialogHydrationStep::Dialog {
+            direct_user_target: advance.direct_user_target,
+        },
+    );
+    cursor.sync_counts(hydration);
+    if let Some(last_message) = advance.last_message {
+        cursor.offset_date = last_message.offset_date;
+        cursor.offset_id = last_message.offset_id;
+    }
+    cursor.offset_peer = Some(advance.offset_peer);
+    should_continue
+}
+
 /// Hydrates the peer cache from Telegram's contact book response.
 pub(crate) async fn hydrate_contact_book(
     client: &Client,
@@ -336,6 +469,227 @@ pub async fn hydrate_contact_book_cache(env: &SkillEnv, client: &Client) -> anyh
     Ok(changed)
 }
 
+#[derive(Debug, Clone)]
+struct RecentDialogBatch {
+    dialogs: Vec<RecentDialogBatchDialog>,
+    exhausted: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RecentDialogBatchDialog {
+    chat: Chat,
+    last_message_at_ms: Option<i64>,
+    cursor_advance: RecentDialogCursorAdvance,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum RecentDialogPeerKey {
+    User(i64),
+    Chat(i64),
+    Channel(i64),
+}
+
+impl RecentDialogPeerKey {
+    fn from_peer(peer: &tl::enums::Peer) -> Self {
+        match peer {
+            tl::enums::Peer::User(user) => Self::User(user.user_id),
+            tl::enums::Peer::Chat(chat) => Self::Chat(chat.chat_id),
+            tl::enums::Peer::Channel(channel) => Self::Channel(channel.channel_id),
+        }
+    }
+}
+
+async fn fetch_recent_dialog_batch(
+    client: &Client,
+    cursor: &RecentDialogScanCursor,
+    limit: usize,
+) -> anyhow::Result<RecentDialogBatch> {
+    let limit = limit.clamp(1, TELEGRAM_DIALOG_PAGE_LIMIT_MAX);
+    let request = tl::functions::messages::GetDialogs {
+        exclude_pinned: cursor.has_offset(),
+        folder_id: None,
+        offset_date: cursor.offset_date,
+        offset_id: cursor.offset_id,
+        offset_peer: cursor.offset_input_peer(),
+        limit: limit as i32,
+        hash: 0,
+    };
+    let response = client
+        .invoke(&request)
+        .await
+        .context("fetch Telegram recent dialogs")?;
+    match response {
+        tl::enums::messages::Dialogs::Dialogs(dialogs) => build_recent_dialog_batch(
+            dialogs.dialogs,
+            dialogs.messages,
+            dialogs.users,
+            dialogs.chats,
+            true,
+        ),
+        tl::enums::messages::Dialogs::Slice(dialogs) => {
+            let exhausted = dialogs.dialogs.len() < limit;
+            build_recent_dialog_batch(
+                dialogs.dialogs,
+                dialogs.messages,
+                dialogs.users,
+                dialogs.chats,
+                exhausted,
+            )
+        }
+        tl::enums::messages::Dialogs::NotModified(_) => Ok(RecentDialogBatch {
+            dialogs: Vec::new(),
+            exhausted: true,
+        }),
+    }
+}
+
+fn build_recent_dialog_batch(
+    dialogs: Vec<tl::enums::Dialog>,
+    messages: Vec<tl::enums::Message>,
+    users: Vec<tl::enums::User>,
+    chats: Vec<tl::enums::Chat>,
+    exhausted: bool,
+) -> anyhow::Result<RecentDialogBatch> {
+    let chats = ChatMap::new(users, chats);
+    let messages_by_peer = messages
+        .into_iter()
+        .filter_map(recent_dialog_message_anchor_from_raw)
+        .collect::<HashMap<_, _>>();
+    let mut batch_dialogs = Vec::with_capacity(dialogs.len());
+    for dialog in dialogs {
+        let peer = dialog.peer();
+        let peer_key = RecentDialogPeerKey::from_peer(&peer);
+        let Some(chat) = chats.get(&peer).cloned() else {
+            anyhow::bail!("Telegram recent dialog response referenced an unknown peer");
+        };
+        let last_message = messages_by_peer.get(&peer_key).copied();
+        let last_message_at_ms = last_message.map(|message| i64::from(message.offset_date) * 1000);
+        let direct_user_target = matches!(
+            &chat,
+            Chat::User(user)
+                if is_recent_dialog_target_user(
+                    user.id(),
+                    user.raw.bot,
+                    last_message_at_ms.is_some()
+                )
+        );
+        batch_dialogs.push(RecentDialogBatchDialog {
+            cursor_advance: RecentDialogCursorAdvance {
+                direct_user_target,
+                offset_peer: chat.pack().to_hex(),
+                last_message,
+            },
+            chat,
+            last_message_at_ms,
+        });
+    }
+    Ok(RecentDialogBatch {
+        dialogs: batch_dialogs,
+        exhausted,
+    })
+}
+
+fn recent_dialog_message_anchor_from_raw(
+    message: tl::enums::Message,
+) -> Option<(RecentDialogPeerKey, RecentDialogMessageAnchor)> {
+    match message {
+        tl::enums::Message::Message(message) => Some((
+            RecentDialogPeerKey::from_peer(&message.peer_id),
+            RecentDialogMessageAnchor {
+                offset_date: message.date,
+                offset_id: message.id,
+            },
+        )),
+        tl::enums::Message::Service(message) => Some((
+            RecentDialogPeerKey::from_peer(&message.peer_id),
+            RecentDialogMessageAnchor {
+                offset_date: message.date,
+                offset_id: message.id,
+            },
+        )),
+        tl::enums::Message::Empty(_) => None,
+    }
+}
+
+fn load_recent_dialog_scan_cursor(env: &SkillEnv) -> RecentDialogScanCursor {
+    let path = recent_dialog_scan_cursor_path(env);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return RecentDialogScanCursor::default()
+        }
+        Err(error) => {
+            warn!(
+                path = %path.display(),
+                %error,
+                "failed to read Telegram recent dialog scan cursor; restarting scan"
+            );
+            return RecentDialogScanCursor::default();
+        }
+    };
+    if raw.trim().is_empty() {
+        return RecentDialogScanCursor::default();
+    }
+    match serde_json::from_str(&raw) {
+        Ok(cursor) if recent_dialog_scan_cursor_is_valid(&cursor) => cursor,
+        Ok(_) => {
+            warn!(
+                path = %path.display(),
+                "Telegram recent dialog scan cursor is incomplete; restarting scan"
+            );
+            RecentDialogScanCursor::default()
+        }
+        Err(error) => {
+            warn!(
+                path = %path.display(),
+                %error,
+                "failed to parse Telegram recent dialog scan cursor; restarting scan"
+            );
+            RecentDialogScanCursor::default()
+        }
+    }
+}
+
+fn recent_dialog_scan_cursor_is_valid(cursor: &RecentDialogScanCursor) -> bool {
+    if cursor.dialogs_seen == 0 && cursor.direct_users_seen == 0 && cursor.offset_peer.is_none() {
+        return true;
+    }
+    cursor.has_offset()
+}
+
+fn save_recent_dialog_scan_cursor(
+    env: &SkillEnv,
+    cursor: &RecentDialogScanCursor,
+) -> anyhow::Result<()> {
+    let path = recent_dialog_scan_cursor_path(env);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create Telegram recent dialog cursor parent {}",
+                parent.display()
+            )
+        })?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(cursor)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+}
+
+fn remove_recent_dialog_scan_cursor(env: &SkillEnv) -> anyhow::Result<()> {
+    let path = recent_dialog_scan_cursor_path(env);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+fn recent_dialog_scan_cursor_path(env: &SkillEnv) -> std::path::PathBuf {
+    env.state_dir.join(RECENT_DIALOG_SCAN_CURSOR_FILE)
+}
+
 /// Hydrates recent direct-user dialog metadata without starting the subscriber.
 ///
 /// This is used by onboarding/contact pickers before a monitor exists. It
@@ -346,55 +700,81 @@ pub async fn hydrate_recent_dialog_peer_cache(
     client: &Client,
     target_direct_users: usize,
     max_dialogs: usize,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<RecentDialogPeerCacheHydration> {
     let original = TelegramPeerCache::load(env).unwrap_or_default();
     let mut cache = original.clone();
-    let target_direct_users = target_direct_users.max(1);
-    let max_dialogs = max_dialogs.max(target_direct_users);
-    let mut dialogs_seen = 0usize;
-    let mut direct_users_seen = 0usize;
-    let mut iter = client.iter_dialogs();
-    while dialogs_seen < max_dialogs && direct_users_seen < target_direct_users {
-        let dialog = match iter.next().await {
-            Ok(Some(dialog)) => dialog,
-            Ok(None) => break,
+    let mut cursor = load_recent_dialog_scan_cursor(env);
+    if original.peers.is_empty() && cursor != RecentDialogScanCursor::default() {
+        cursor = RecentDialogScanCursor::default();
+        if let Err(error) = remove_recent_dialog_scan_cursor(env) {
+            warn!(%error, "failed to remove stale Telegram recent dialog scan cursor");
+        }
+    }
+    let mut hydration =
+        recent_dialog_hydration_state_from_cursor(target_direct_users, max_dialogs, &cursor);
+    while recent_dialog_hydration_should_continue(&hydration) {
+        let remaining_batch_dialogs = hydration.max_dialogs - hydration.batch_dialogs_seen;
+        let batch = match fetch_recent_dialog_batch(client, &cursor, remaining_batch_dialogs).await
+        {
+            Ok(batch) => batch,
             Err(error) => {
                 warn!(
                     error = %error,
-                    dialogs_seen,
-                    "iter_dialogs failed during Telegram recent dialog cache hydration; saving partial state"
+                    dialogs_seen = hydration.dialogs_seen,
+                    "fetching recent dialogs failed during Telegram cache hydration; saving partial state"
+                );
+                apply_recent_dialog_hydration_step(
+                    &mut hydration,
+                    RecentDialogHydrationStep::Failed,
                 );
                 break;
             }
         };
-        dialogs_seen += 1;
-        let chat = dialog.chat();
-        let last_message_at_ms = dialog
-            .last_message
-            .as_ref()
-            .map(|message| message.date().timestamp_millis());
-        cache.observe_chat_with_last_message_at_ms(chat, "recent_dialog", last_message_at_ms);
-        if matches!(
-            chat,
-            Chat::User(user)
-                if is_recent_dialog_target_user(
-                    user.id(),
-                    user.raw.bot,
-                    last_message_at_ms.is_some()
-                )
-        ) {
-            direct_users_seen += 1;
+        if batch.dialogs.is_empty() {
+            apply_recent_dialog_hydration_step(
+                &mut hydration,
+                RecentDialogHydrationStep::Exhausted,
+            );
+            cursor.sync_counts(&hydration);
+            break;
+        }
+        for dialog in batch.dialogs {
+            cache.observe_chat_with_last_message_at_ms(
+                &dialog.chat,
+                "recent_dialog",
+                dialog.last_message_at_ms,
+            );
+            apply_recent_dialog_cursor_advance(&mut hydration, &mut cursor, dialog.cursor_advance);
+        }
+        if batch.exhausted {
+            apply_recent_dialog_hydration_step(
+                &mut hydration,
+                RecentDialogHydrationStep::Exhausted,
+            );
+            cursor.sync_counts(&hydration);
+            break;
         }
     }
     cache.save_if_changed(env, &original)?;
+    if hydration.dialogs_exhausted {
+        if let Err(error) = remove_recent_dialog_scan_cursor(env) {
+            warn!(%error, "failed to remove exhausted Telegram recent dialog scan cursor");
+        }
+    } else if cursor.has_offset() {
+        if let Err(error) = save_recent_dialog_scan_cursor(env, &cursor) {
+            warn!(%error, "failed to save Telegram recent dialog scan cursor");
+        }
+    }
     info!(
-        dialogs_seen,
-        direct_users_seen,
-        target_direct_users,
-        max_dialogs,
+        dialogs_seen = hydration.dialogs_seen,
+        batch_dialogs_seen = hydration.batch_dialogs_seen,
+        direct_users_seen = hydration.direct_users_seen,
+        target_direct_users = hydration.target_direct_users,
+        max_dialogs = hydration.max_dialogs,
+        dialogs_exhausted = hydration.dialogs_exhausted,
         "hydrated Telegram recent dialog peer cache"
     );
-    Ok(direct_users_seen)
+    Ok(hydration)
 }
 
 /// Resolves saved `telegram@username` contact ids into cached Telegram peers.
@@ -697,11 +1077,15 @@ fn now_unix_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_recent_dialog_target_user, joined_name, merge_optional_name, phone_key,
-        saved_contact_usernames, telegram_username_from_contact_id, TelegramPeerCache,
-        TelegramPeerRecord, CACHE_VERSION,
+        apply_recent_dialog_hydration_step, is_recent_dialog_target_user, joined_name,
+        merge_optional_name, phone_key, recent_dialog_hydration_should_continue,
+        recent_dialog_hydration_state_from_cursor, saved_contact_usernames,
+        telegram_username_from_contact_id, RecentDialogCursorAdvance, RecentDialogHydrationStep,
+        RecentDialogMessageAnchor, RecentDialogScanCursor, TelegramPeerCache, TelegramPeerRecord,
+        CACHE_VERSION,
     };
     use crate::state::SkillEnv;
+    use std::collections::BTreeSet;
 
     #[test]
     fn joined_name_skips_blank_parts() {
@@ -780,6 +1164,165 @@ mod tests {
     }
 
     #[test]
+    fn recent_dialog_hydration_marks_exhausted_only_after_stream_end() {
+        let mut cursor = RecentDialogScanCursor::default();
+        let mut hydration = recent_dialog_hydration_state_from_cursor(5, 10, &cursor);
+        for _ in 0..3 {
+            assert!(recent_dialog_hydration_should_continue(&hydration));
+            let next_dialog = hydration.dialogs_seen + 1;
+            assert!(apply_recent_dialog_cursor_advance_for_test(
+                &mut hydration,
+                &mut cursor,
+                RecentDialogCursorAdvance {
+                    direct_user_target: true,
+                    offset_peer: format!("peer-{next_dialog}"),
+                    last_message: Some(RecentDialogMessageAnchor {
+                        offset_date: 10,
+                        offset_id: next_dialog as i32,
+                    }),
+                },
+            ));
+        }
+
+        assert!(recent_dialog_hydration_should_continue(&hydration));
+        assert!(!apply_recent_dialog_hydration_step(
+            &mut hydration,
+            RecentDialogHydrationStep::Exhausted,
+        ));
+
+        assert_eq!(hydration.dialogs_seen, 3);
+        assert_eq!(hydration.batch_dialogs_seen, 3);
+        assert_eq!(hydration.direct_users_seen, 3);
+        assert!(hydration.dialogs_exhausted);
+    }
+
+    #[test]
+    fn recent_dialog_hydration_does_not_mark_exhausted_at_batch_cap() {
+        let mut cursor = RecentDialogScanCursor::default();
+        let mut hydration = recent_dialog_hydration_state_from_cursor(120, 3, &cursor);
+        for _ in 0..3 {
+            assert!(recent_dialog_hydration_should_continue(&hydration));
+            let next_dialog = hydration.dialogs_seen + 1;
+            assert!(apply_recent_dialog_cursor_advance_for_test(
+                &mut hydration,
+                &mut cursor,
+                RecentDialogCursorAdvance {
+                    direct_user_target: false,
+                    offset_peer: format!("peer-{next_dialog}"),
+                    last_message: Some(RecentDialogMessageAnchor {
+                        offset_date: 10,
+                        offset_id: next_dialog as i32,
+                    }),
+                },
+            ));
+        }
+
+        assert!(!recent_dialog_hydration_should_continue(&hydration));
+        assert_eq!(hydration.dialogs_seen, 3);
+        assert_eq!(hydration.batch_dialogs_seen, 3);
+        assert_eq!(hydration.direct_users_seen, 0);
+        assert_eq!(cursor.dialogs_seen, 3);
+        assert_eq!(cursor.offset_id, 3);
+        assert!(!hydration.dialogs_exhausted);
+    }
+
+    #[test]
+    fn recent_dialog_hydration_does_not_mark_exhausted_when_target_is_met() {
+        let cursor = RecentDialogScanCursor::default();
+        let mut hydration = recent_dialog_hydration_state_from_cursor(2, 10, &cursor);
+        for _ in 0..2 {
+            assert!(apply_recent_dialog_hydration_step(
+                &mut hydration,
+                RecentDialogHydrationStep::Dialog {
+                    direct_user_target: true,
+                },
+            ));
+        }
+
+        assert!(!recent_dialog_hydration_should_continue(&hydration));
+        assert_eq!(hydration.dialogs_seen, 2);
+        assert_eq!(hydration.direct_users_seen, 2);
+        assert!(!hydration.dialogs_exhausted);
+    }
+
+    #[test]
+    fn recent_dialog_cursor_resumes_after_batch_boundary_without_gaps_or_duplicates() {
+        let total_dialogs = 620usize;
+        let batch_cap = 100usize;
+        let target = 120usize;
+        let mut expected_direct_dialogs = BTreeSet::from([100usize, 101, 500, 501]);
+        for index in 1..=total_dialogs {
+            if expected_direct_dialogs.len() == 117 {
+                break;
+            }
+            if index % 5 == 0 || index % 7 == 0 {
+                expected_direct_dialogs.insert(index);
+            }
+        }
+        assert_eq!(expected_direct_dialogs.len(), 117);
+
+        let mut cursor = RecentDialogScanCursor::default();
+        let mut processed_dialogs = Vec::new();
+        let mut direct_dialogs_seen = BTreeSet::new();
+        let mut previous_cursor_offset = 0;
+        let mut exhausted = false;
+
+        while !exhausted {
+            let mut hydration =
+                recent_dialog_hydration_state_from_cursor(target, batch_cap, &cursor);
+            let first_dialog = cursor.offset_id as usize + 1;
+            let last_dialog = (first_dialog + batch_cap - 1).min(total_dialogs);
+            for dialog_index in first_dialog..=last_dialog {
+                assert!(recent_dialog_hydration_should_continue(&hydration));
+                let direct_user_target = expected_direct_dialogs.contains(&dialog_index);
+                assert!(apply_recent_dialog_cursor_advance_for_test(
+                    &mut hydration,
+                    &mut cursor,
+                    RecentDialogCursorAdvance {
+                        direct_user_target,
+                        offset_peer: format!("peer-{dialog_index}"),
+                        last_message: Some(RecentDialogMessageAnchor {
+                            offset_date: 100_000 - dialog_index as i32,
+                            offset_id: dialog_index as i32,
+                        }),
+                    },
+                ));
+                processed_dialogs.push(dialog_index);
+                if direct_user_target {
+                    direct_dialogs_seen.insert(dialog_index);
+                }
+            }
+
+            assert!(
+                cursor.offset_id > previous_cursor_offset,
+                "cursor must advance monotonically across batches"
+            );
+            previous_cursor_offset = cursor.offset_id;
+
+            if last_dialog == total_dialogs {
+                assert!(!apply_recent_dialog_hydration_step(
+                    &mut hydration,
+                    RecentDialogHydrationStep::Exhausted,
+                ));
+                exhausted = hydration.dialogs_exhausted;
+            }
+        }
+
+        assert_eq!(processed_dialogs.len(), total_dialogs);
+        assert_eq!(
+            processed_dialogs,
+            (1..=total_dialogs).collect::<Vec<_>>(),
+            "dialog cursor must not duplicate or skip batch-boundary rows"
+        );
+        assert!(direct_dialogs_seen.contains(&100));
+        assert!(direct_dialogs_seen.contains(&101));
+        assert_eq!(direct_dialogs_seen, expected_direct_dialogs);
+        assert!(exhausted);
+        assert_eq!(cursor.dialogs_seen, total_dialogs);
+        assert_eq!(cursor.direct_users_seen, 117);
+    }
+
+    #[test]
     fn saved_contact_usernames_reads_workspace_contacts() {
         let temp = tempfile::tempdir().unwrap();
         let workspace_config_dir = temp.path().join(".puffer");
@@ -806,5 +1349,13 @@ mod tests {
             saved_contact_usernames(&env).unwrap(),
             vec!["alice_42".to_string(), "bob_user".to_string()]
         );
+    }
+
+    fn apply_recent_dialog_cursor_advance_for_test(
+        hydration: &mut super::RecentDialogPeerCacheHydration,
+        cursor: &mut RecentDialogScanCursor,
+        advance: RecentDialogCursorAdvance,
+    ) -> bool {
+        super::apply_recent_dialog_cursor_advance(hydration, cursor, advance)
     }
 }

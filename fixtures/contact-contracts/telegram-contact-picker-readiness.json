@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "description": "Contacts picker readiness contract for the generic contacts_list path used by Bobo Task Settings. The picker is ready when the Telegram first page target is satisfied or the dialog stream is truly exhausted.",
+  "request": {
+    "method": "contacts_list",
+    "params": {
+      "limit": 120
+    }
+  },
+  "target": 120,
+  "cases": [
+    {
+      "name": "partial_active_account",
+      "has_session": true,
+      "marker": {
+        "ready": true,
+        "direct_users_seen": 18,
+        "target": 120,
+        "dialogs_exhausted": false
+      },
+      "candidate_count": 18,
+      "expected": {
+        "ready": false,
+        "candidate_count": 18,
+        "has_more": false
+      }
+    },
+    {
+      "name": "partial_progress_active_account",
+      "has_session": true,
+      "marker": {
+        "ready": true,
+        "direct_users_seen": 60,
+        "target": 120,
+        "dialogs_exhausted": false
+      },
+      "candidate_count": 60,
+      "expected": {
+        "ready": false,
+        "candidate_count": 60,
+        "has_more": false
+      }
+    },
+    {
+      "name": "first_page_target_satisfied",
+      "has_session": true,
+      "marker": {
+        "ready": true,
+        "direct_users_seen": 120,
+        "target": 120,
+        "dialogs_exhausted": false
+      },
+      "candidate_count": 130,
+      "expected": {
+        "ready": true,
+        "candidate_count": 130,
+        "has_more": true
+      }
+    },
+    {
+      "name": "dialogs_exhausted_below_target",
+      "has_session": true,
+      "marker": {
+        "ready": true,
+        "direct_users_seen": 117,
+        "target": 120,
+        "dialogs_exhausted": true
+      },
+      "candidate_count": 117,
+      "expected": {
+        "ready": true,
+        "candidate_count": 117,
+        "has_more": false
+      }
+    },
+    {
+      "name": "stale_account_without_session",
+      "has_session": false,
+      "marker": {
+        "ready": true,
+        "direct_users_seen": 18,
+        "target": 120,
+        "dialogs_exhausted": false
+      },
+      "candidate_count": 0,
+      "expected": {
+        "ready": true,
+        "candidate_count": 0,
+        "has_more": false
+      }
+    }
+  ]
+}

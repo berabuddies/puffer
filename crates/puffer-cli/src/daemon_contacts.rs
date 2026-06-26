@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::info;
 use uuid::Uuid;
 
 #[path = "daemon_contacts_infer.rs"]
@@ -35,7 +36,7 @@ use daemon_contacts_store::{
 };
 use daemon_contacts_telegram::{
     collect_telegram_candidates, read_telegram_peer_avatars, read_telegram_peer_names,
-    recent_telegram_contacts, refresh_telegram_peer_caches,
+    recent_telegram_contacts, refresh_telegram_peer_caches, telegram_contact_picker_ready,
 };
 use daemon_contacts_trace::ContactInferTrace;
 
@@ -164,7 +165,8 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
     let proposals = load_proposals(paths)?;
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
-    let (page, ready) = if is_recent_telegram_request(&params) {
+    let recent_request = is_recent_telegram_request(&params);
+    let (page, ready) = if recent_request {
         let mut snapshot = recent_telegram_contacts(paths, limit)?;
         reject_bot_candidates(&mut snapshot.candidates);
         (
@@ -172,12 +174,39 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
             snapshot.ready,
         )
     } else {
+        let ready = if query.is_some() {
+            true
+        } else {
+            telegram_contact_picker_ready(paths, limit)?
+        };
         (
             filtered_candidates(paths, limit, params.cursor.as_deref(), query)?,
-            true,
+            ready,
         )
     };
     let returned_count = page.candidates.len();
+    info!(
+        path = if recent_request {
+            "telegram_recent"
+        } else if query.is_some() {
+            "generic_search"
+        } else {
+            "generic"
+        },
+        connector = params.connector.as_deref().unwrap_or(""),
+        sort = params.sort.as_deref().unwrap_or(""),
+        limit,
+        cursor_present = params
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| !cursor.trim().is_empty()),
+        query_present = query.is_some(),
+        ready,
+        returned_count,
+        candidate_count = page.candidate_count,
+        has_more = page.has_more,
+        "contacts_list snapshot"
+    );
     let candidates = page.candidates;
     Ok(json!({
         "contacts": saved,
