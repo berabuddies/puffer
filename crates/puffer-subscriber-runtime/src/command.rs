@@ -191,6 +191,11 @@ pub enum SubscriberCommand {
     /// Telegram driver) handle this; subscribers that don't should ignore
     /// the command and emit a `send_unsupported` event.
     SendMessage {
+        /// Server-minted authorization proving this send was approved or
+        /// came from a daemon-owned automation path. The sender runtime keeps
+        /// this on the typed command so new send exits cannot be constructed
+        /// without making an explicit authorization decision.
+        authorization: SendAuthorization,
         /// Subscriber-defined peer reference: a `@username`, a numeric
         /// chat id as a string, or a phone number — semantics are owned
         /// by the subscriber.
@@ -216,6 +221,29 @@ pub enum SubscriberCommand {
         #[serde(default)]
         args: Value,
     },
+}
+
+/// Server-owned proof that a [`SubscriberCommand::SendMessage`] was created
+/// by an approved draft/monitor execution path rather than an ordinary agent
+/// tool call.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SendAuthorization {
+    /// Stable authorization source. This is for audit/routing only; callers
+    /// still validate the bound recipient/content fields before sending.
+    pub source: String,
+    /// Draft or action id that produced the authorization.
+    pub draft_id: String,
+    /// Approved draft/action version.
+    pub version: u64,
+    /// Connector action being authorized, for example `send_message`.
+    pub action: String,
+    /// Server-resolved recipient identity. For Telegram this is the resolved
+    /// chat id string, not a display name supplied by the agent.
+    pub recipient_stable_id: String,
+    /// `sha256:<hex>` hash over the approved external message content.
+    pub content_hash: String,
+    /// Idempotency key supplied by the approving client/daemon operation.
+    pub client_request_id: String,
 }
 
 /// Telegram dialog kind used when listing or searching peers.

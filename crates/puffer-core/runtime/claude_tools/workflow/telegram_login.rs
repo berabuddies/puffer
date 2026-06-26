@@ -134,7 +134,7 @@ pub fn execute_telegram_import_desktop(
             "connection": connection,
             "imported": true,
             "payload": event.event.payload,
-            "next": "Use this connection_slug in WorkflowCreate or ConnectorAct."
+            "next": "Use this connection_slug in WorkflowCreate or ConnectorActionDraft for sends; use ConnectorAct only for non-send actions."
         })
         .to_string());
     }

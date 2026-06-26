@@ -20,7 +20,7 @@ use puffer_config::ConfigPaths;
 use puffer_core::install_subscription_manager;
 use puffer_provider_registry::{AuthStore, StoredCredential};
 use puffer_subscriber_runtime::{
-    EnvEntry, Manifest, SendMediaAttachment, SendMediaKind, SubscriberCommand,
+    EnvEntry, Manifest, SendAuthorization, SendMediaAttachment, SendMediaKind, SubscriberCommand,
 };
 use puffer_subscriptions::{
     connection_subscriber_manifest, direct_subscriber_manifest, find_subscriber_manifest,
@@ -51,6 +51,7 @@ use self::telegram_connector_actions::{
 };
 #[cfg(test)]
 use self::telegram_connector_actions::{telegram_subscriber_id, validate_telegram_connection_slug};
+use sha2::{Digest, Sha256};
 
 const SUBSCRIBER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const SEND_MESSAGE_RECIPIENT_KEYS: &[&str] = &[
@@ -134,9 +135,9 @@ pub(crate) fn install(
     builder = builder.with_connection_auth_checker(Arc::new(BuiltinConnectionAuthChecker {
         paths: paths.clone(),
     }));
-    builder = builder.with_self_gate(Arc::new(
-        crate::daemon_workflows::MonitorSelfGate::new(paths.clone()),
-    ));
+    builder = builder.with_self_gate(Arc::new(crate::daemon_workflows::MonitorSelfGate::new(
+        paths.clone(),
+    )));
     let manager = Arc::new(
         builder
             .build(handle)
@@ -349,7 +350,18 @@ impl Outbound for ManagerOutbound {
             .manager
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("subscription manager is no longer running"))?;
+        let authorization = send_authorization_for_payload(
+            "workflow-forward-message",
+            "workflow-forward-message",
+            1,
+            "forward_message",
+            target,
+            text,
+            &[],
+            "workflow-forward-message",
+        );
         let command = SubscriberCommand::SendMessage {
+            authorization,
             peer: target.to_string(),
             text: text.to_string(),
             reply_to: None,
@@ -475,12 +487,14 @@ impl ConnectorActionExecutor for ManagerConnectorActionExecutor {
             ));
         }
         if action == "send_message" {
+            let authorization = send_authorization_from_trigger(&trigger)?;
             let summary = send_message_via_subscriber(
                 &manager,
                 &self.paths,
                 connector_slug,
                 &connection,
                 &input,
+                authorization,
             )?;
             return Ok(format!(
                 "{} [{}]",
@@ -539,6 +553,7 @@ fn send_message_via_subscriber(
     connector_slug: &str,
     connection_slug: &str,
     input: &serde_json::Value,
+    authorization: SendAuthorization,
 ) -> Result<String> {
     let target = send_message_target(input).unwrap_or_default();
     let text = send_message_text(input).unwrap_or_default();
@@ -548,12 +563,14 @@ fn send_message_via_subscriber(
             "send_message requires a recipient (`to`, `target`, `channel`, `chat_id`, `open_id`, `user`, or `receive_id`) and message body (`message`, `text`, `caption`, `media`, `file`, `files`, `attachments`, or `path`)"
         );
     }
+    validate_send_authorization(&authorization, "send_message", &target, &text, &media)?;
     let reply_to = parse_reply_to(input)?;
     let subscriber_id = subscriber_for_action(manager, paths, connector_slug, connection_slug)?
         .ok_or_else(|| {
             anyhow::anyhow!("no subscriber is configured for connector `{connector_slug}`")
         })?;
     let command = SubscriberCommand::SendMessage {
+        authorization,
         peer: target.to_string(),
         text: text.to_string(),
         reply_to,
@@ -574,6 +591,139 @@ fn send_message_via_subscriber(
         text.len(),
         media.len(),
     )
+}
+
+fn send_authorization_from_trigger(trigger: &serde_json::Value) -> Result<SendAuthorization> {
+    let value = trigger
+        .get("send_authorization")
+        .or_else(|| trigger.get("sendAuthorization"))
+        .or_else(|| trigger.pointer("/payload/_send_authorization"))
+        .or_else(|| trigger.pointer("/payload/_sendAuthorization"))
+        .context("send authorization missing for external message send")?;
+    serde_json::from_value(value.clone()).context("invalid send authorization")
+}
+
+#[cfg(test)]
+pub(crate) fn send_authorization_for_message(
+    draft_id: &str,
+    version: u64,
+    action: &str,
+    recipient_stable_id: &str,
+    text: &str,
+    client_request_id: &str,
+) -> SendAuthorization {
+    send_authorization_for_message_with_source(
+        "connector-action-draft",
+        draft_id,
+        version,
+        action,
+        recipient_stable_id,
+        text,
+        client_request_id,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn send_authorization_for_message_with_source(
+    source: &str,
+    draft_id: &str,
+    version: u64,
+    action: &str,
+    recipient_stable_id: &str,
+    text: &str,
+    client_request_id: &str,
+) -> SendAuthorization {
+    send_authorization_for_payload(
+        source,
+        draft_id,
+        version,
+        action,
+        recipient_stable_id,
+        text,
+        &[],
+        client_request_id,
+    )
+}
+
+pub(crate) fn send_authorization_for_send_message_input_with_source(
+    source: &str,
+    draft_id: &str,
+    version: u64,
+    action: &str,
+    input: &serde_json::Value,
+    text: &str,
+    client_request_id: &str,
+) -> Result<SendAuthorization> {
+    let recipient_stable_id =
+        send_message_target(input).context("send authorization recipient missing")?;
+    let media = parse_media_attachments(input)?;
+    Ok(send_authorization_for_payload(
+        source,
+        draft_id,
+        version,
+        action,
+        &recipient_stable_id,
+        text,
+        &media,
+        client_request_id,
+    ))
+}
+
+fn send_authorization_for_payload(
+    source: &str,
+    draft_id: &str,
+    version: u64,
+    action: &str,
+    recipient_stable_id: &str,
+    text: &str,
+    media: &[SendMediaAttachment],
+    client_request_id: &str,
+) -> SendAuthorization {
+    SendAuthorization {
+        source: source.to_string(),
+        draft_id: draft_id.to_string(),
+        version,
+        action: action.to_string(),
+        recipient_stable_id: recipient_stable_id.to_string(),
+        content_hash: send_authorization_content_hash(recipient_stable_id, text, media),
+        client_request_id: client_request_id.to_string(),
+    }
+}
+
+fn validate_send_authorization(
+    authorization: &SendAuthorization,
+    action: &str,
+    recipient_stable_id: &str,
+    text: &str,
+    media: &[SendMediaAttachment],
+) -> Result<()> {
+    if authorization.action != action {
+        anyhow::bail!("send authorization action mismatch");
+    }
+    if authorization.recipient_stable_id != recipient_stable_id {
+        anyhow::bail!("send authorization recipient mismatch");
+    }
+    let expected = send_authorization_content_hash(recipient_stable_id, text, media);
+    if authorization.content_hash != expected {
+        anyhow::bail!("send authorization content mismatch");
+    }
+    Ok(())
+}
+
+fn send_authorization_content_hash(
+    recipient_stable_id: &str,
+    text: &str,
+    media: &[SendMediaAttachment],
+) -> String {
+    let canonical = serde_json::json!({
+        "recipient_stable_id": recipient_stable_id,
+        "text": text,
+        "media": media,
+    });
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn send_message_target(input: &serde_json::Value) -> Option<String> {

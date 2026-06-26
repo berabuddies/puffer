@@ -43,8 +43,9 @@ slack --connection work-login search-users "Tony"
 ```
 
 After `/connect` auth completes, the auth tool automatically registers the
-connection with either `connector_slug="slack-app"` or
-`connector_slug="slack-login"`. Use the same connection slug in `ConnectorAct`.
+connection with either `connector_slug="slack-app"` or `connector_slug="slack-login"`. Use the same
+connection slug in `ConnectorActionDraft` for sends and `ConnectorAct` for
+non-send actions.
 
 Lookup workflow:
 
@@ -75,11 +76,12 @@ slack --connection work-login search-messages "karen in:deploys" --limit 20
 
 Connector action workflow:
 
-Use `ConnectorAct` for outbound Slack side effects. For messages, pass `to`
-or `channel`, plus `message` or `caption`. To reply in a thread, pass
-`thread_ts` or `reply_to` with the Slack timestamp. To send files, include
-`media`, `file`, `files`, or `path` with local file paths. Captions are sent
-as Slack upload comments.
+Use `ConnectorActionDraft` for outbound Slack messages so the human can review
+the exact recipient and content before sending. Pass `to` or `channel`, plus
+`message` or `caption`. To reply in a thread, pass `thread_ts` or `reply_to`
+with the Slack timestamp. To send files, include `media`, `file`, `files`, or
+`path` with local file paths. Captions are sent as Slack upload comments. Use
+`ConnectorAct` only for non-send side effects such as reactions.
 
 ```json
 {"connector_slug":"slack-login","connection_slug":"work-login","action":"send_message","input":{"to":"U123","message":"gm"}}

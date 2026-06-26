@@ -1,0 +1,37 @@
+id: ConnectorActionDraft
+name: ConnectorActionDraft
+description: |-
+  Save a draft for an external connector message send in an ordinary agent
+  session.
+
+  Use this instead of ConnectorAct whenever the action would send, reply,
+  forward, post, or otherwise deliver an external message. This tool is
+  side-effect free: it stores the proposed action and message for Bobo to show
+  as a review card. Bobo must call connector_action_execute after the human
+  approves the exact recipient and message.
+
+  Do not use this for read/list/search actions. Do not call ConnectorAct
+  directly for external message sends.
+handler: runtime:workflow:connector_action_draft
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    connector_slug:
+      type: string
+      description: Connector slug, for example telegram-login.
+    connection_slug:
+      type: string
+      description: Authenticated account/connection slug, for example telegram-user.
+    action:
+      type: string
+      description: External send action slug, usually send_message.
+    input:
+      type: object
+      description: Connector action input containing the resolved recipient and exact message draft.
+  required:
+    - connector_slug
+    - action
+    - input
+  additionalProperties: false

@@ -174,6 +174,7 @@ fn build_using_tools_section(enabled_tools: &BTreeSet<String>) -> String {
         preferred_tool_name(enabled_tools, &["Bash", "bash", "PowerShell"]).unwrap_or("Bash");
     let task_tool = preferred_tool_name(enabled_tools, &["TaskCreate", "TodoWrite"]);
     let connector_act = preferred_tool_name(enabled_tools, &["ConnectorAct"]);
+    let connector_action_draft = preferred_tool_name(enabled_tools, &["ConnectorActionDraft"]);
     let connector_list = preferred_tool_name(enabled_tools, &["ConnectorList", "ConnectionList"]);
 
     let mut provided_tool_subitems = Vec::new();
@@ -218,7 +219,13 @@ fn build_using_tools_section(enabled_tools: &BTreeSet<String>) -> String {
             "Do NOT use the {task_tool} tool when the task is trivial, single-step, purely conversational, or can be completed in fewer than 3 steps. In those cases, just do the work directly without creating a task."
         ));
     }
-    if let (Some(connector_act), Some(list)) = (connector_act, connector_list) {
+    if let (Some(connector_act), Some(draft), Some(list)) =
+        (connector_act, connector_action_draft, connector_list)
+    {
+        items.push(format!(
+            "When the user's request EXPLICITLY names an external messaging, chat, or email app or account (e.g. \"send a WeChat message in the xx group\", \"reply on Telegram\", \"post in Slack\", \"email ...\"), FIRST call {list} to find the matching connector connection. For external message sends, replies, forwards, posts, or emails, create a human-reviewable draft with {draft}; do not use {connector_act} to send directly. Use {connector_act} only for non-send connector actions. Do NOT drive a local desktop app, AppleScript/osascript, or shell automation for this; use the connector. Only fall back to other means if no matching connector connection exists. If the request does NOT name such an app, do NOT route it through a connector or go looking for one."
+        ));
+    } else if let (Some(connector_act), Some(list)) = (connector_act, connector_list) {
         items.push(format!(
             "When the user's request EXPLICITLY names an external messaging, chat, or email app or account (e.g. \"send a WeChat message in the xx group\", \"reply on Telegram\", \"post in Slack\", \"email ...\"), FIRST call {list} to find the matching connector connection, then perform the action with {connector_act}. Do NOT drive a local desktop app, AppleScript/osascript, or shell automation for this — use the connector. Only fall back to other means if no matching connector connection exists. If the request does NOT name such an app, do NOT route it through a connector or go looking for one."
         ));

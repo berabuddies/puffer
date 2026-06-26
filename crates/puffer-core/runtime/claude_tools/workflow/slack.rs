@@ -248,7 +248,7 @@ fn persist_authenticated_credential(
         "user_id": credential.user_id,
         "user_name": credential.user_name,
         "auth_ok": auth_test.ok,
-        "next": "Use this connection_slug in ConnectorAct. Use slack search-conversations or slack search-users before sending to a human name."
+        "next": "Use this connection_slug in ConnectorActionDraft for sends; use ConnectorAct only for non-send actions. Use slack search-conversations or slack search-users before sending to a human name."
     })
     .to_string())
 }
@@ -268,7 +268,7 @@ fn execute_list_conversations(cwd: &Path, input: Value) -> Result<String> {
         "status": "complete",
         "connection_slug": connection_slug,
         "payload": payload,
-        "next": "Use conversation `id` as the Slack channel target for ConnectorAct."
+        "next": "Use conversation `id` as the Slack channel target for ConnectorActionDraft sends or ConnectorAct non-send actions."
     })
     .to_string())
 }
@@ -285,7 +285,7 @@ fn execute_search_conversations(cwd: &Path, input: Value) -> Result<String> {
         "connection_slug": connection_slug,
         "count": matches.len(),
         "conversations": matches,
-        "next": "Use the returned `id` as `to` or `channel` in ConnectorAct."
+        "next": "Use the returned `id` as `to` or `channel` in ConnectorActionDraft sends or ConnectorAct non-send actions."
     })
     .to_string())
 }
@@ -302,7 +302,7 @@ fn execute_search_users(cwd: &Path, input: Value) -> Result<String> {
         "connection_slug": connection_slug,
         "count": matches.len(),
         "users": matches,
-        "next": "Use a returned user `id` as `to` in ConnectorAct; Puffer will open the Slack DM before sending."
+        "next": "Use a returned user `id` as `to` in ConnectorActionDraft; Puffer will open the Slack DM after human approval."
     })
     .to_string())
 }
@@ -354,7 +354,7 @@ fn execute_search_messages(cwd: &Path, input: Value) -> Result<String> {
         "status": "complete",
         "connection_slug": connection_slug,
         "payload": payload,
-        "next": "Use match channel/id and ts for ConnectorAct targets, replies, or reactions."
+        "next": "Use match channel/id and ts for ConnectorActionDraft replies or ConnectorAct reactions."
     })
     .to_string())
 }

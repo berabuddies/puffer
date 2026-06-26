@@ -862,6 +862,9 @@ fn execute_workflow_tool_with_media_context(
         }
         "ConnectionList" => workflow::connector_tools::execute_connection_list(state, cwd, input),
         "ConnectorAct" => workflow::connector_tools::execute_connector_act(state, cwd, input),
+        "ConnectorActionDraft" => {
+            workflow::connector_tools::execute_connector_action_draft(state, cwd, input)
+        }
         "ConnectorCreation" => {
             workflow::connector_tools::execute_connector_creation(state, cwd, input)
         }

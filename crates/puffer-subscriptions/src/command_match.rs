@@ -105,7 +105,7 @@ fn telegram_peer_kind_label(kind: puffer_subscriber_runtime::TelegramPeerKind) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_subscriber_runtime::{Event, TelegramPeerKind};
+    use puffer_subscriber_runtime::{Event, SendAuthorization, TelegramPeerKind};
     use serde_json::json;
 
     fn envelope(kind: &str, payload: Value) -> EventEnvelope {
@@ -127,6 +127,7 @@ mod tests {
     #[test]
     fn send_message_terminal_events_match_peer() {
         let command = SubscriberCommand::SendMessage {
+            authorization: test_send_authorization("@alice", "hi"),
             peer: "@alice".into(),
             text: "hi".into(),
             reply_to: None,
@@ -141,6 +142,18 @@ mod tests {
             &command,
             &envelope("send_complete", json!({"peer":"@bob"}))
         ));
+    }
+
+    fn test_send_authorization(peer: &str, text: &str) -> SendAuthorization {
+        SendAuthorization {
+            source: "test".into(),
+            draft_id: "draft-test".into(),
+            version: 1,
+            action: "send_message".into(),
+            recipient_stable_id: peer.into(),
+            content_hash: format!("test:{text}"),
+            client_request_id: "request-test".into(),
+        }
     }
 
     #[test]

@@ -22,8 +22,11 @@ Configuration command:
 /connect gmail-browser <connection>
 ```
 
-Use `ConnectorAct` for configured Gmail Browser connections instead of opening
-a separate browser session. Gmail Browser uses email-style action names:
+Use connector tools for configured Gmail Browser connections instead of opening
+a separate browser session. Use `ConnectorActionDraft` for `send_email` so the
+human can review the exact outbound email before sending; use `ConnectorAct`
+for reads, drafts, and other non-send actions. Gmail Browser uses email-style
+action names:
 
 - `list_emails` for recent messages with optional `mailbox`, `category`,
   `label`, `query`, `from`, `subject`, `keywords`, `unread`, and `limit`.

@@ -1086,6 +1086,7 @@ async fn handle_runtime_command(
             text,
             reply_to,
             media,
+            ..
         } => {
             handle_send_message(env, client, peer, text, reply_to, media).await?;
         }

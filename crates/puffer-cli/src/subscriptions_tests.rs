@@ -111,6 +111,14 @@ fn send_message_via_subscriber_accepts_schema_recipient_aliases() {
     let runtime = test_subscription_runtime();
     let temp = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(temp.path());
+    let authorization = send_authorization_for_message(
+        "draft-test",
+        1,
+        "send_message",
+        "123456789",
+        "deployment is finished",
+        "request-1",
+    );
     let error = send_message_via_subscriber(
         &runtime.manager,
         &paths,
@@ -120,6 +128,7 @@ fn send_message_via_subscriber_accepts_schema_recipient_aliases() {
             "chat_id": 123456789,
             "text": "deployment is finished"
         }),
+        authorization,
     )
     .expect_err("missing subscriber should fail after input aliases are accepted");
 
@@ -127,6 +136,38 @@ fn send_message_via_subscriber_accepts_schema_recipient_aliases() {
     assert!(
         error.contains("subscriber") && !error.contains("requires"),
         "unexpected validation error: {error}"
+    );
+}
+
+#[test]
+fn send_message_via_subscriber_rejects_mismatched_send_authorization() {
+    let runtime = test_subscription_runtime();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(temp.path());
+    let authorization = send_authorization_for_message(
+        "draft-test",
+        1,
+        "send_message",
+        "123456789",
+        "different body",
+        "request-1",
+    );
+    let error = send_message_via_subscriber(
+        &runtime.manager,
+        &paths,
+        "telegram-login",
+        "telegram-user",
+        &serde_json::json!({
+            "chat_id": 123456789,
+            "text": "deployment is finished"
+        }),
+        authorization,
+    )
+    .expect_err("changed content must not be sent with another draft's authorization");
+
+    assert!(
+        error.to_string().contains("send authorization"),
+        "unexpected validation error: {error:#}"
     );
 }
 

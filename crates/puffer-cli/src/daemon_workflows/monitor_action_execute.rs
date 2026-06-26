@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 
 use super::handle_workflow_list;
 use super::monitor_task_ignore::{monitor_tasks_path, task_id_matches};
+use crate::subscriptions::send_authorization_for_send_message_input_with_source;
 
 #[derive(Debug, Deserialize)]
 struct MonitorActionExecuteParams {
@@ -34,6 +35,7 @@ pub(crate) struct MonitorConnectorAction {
     pub action: String,
     pub input: Value,
     pub idempotency_key: String,
+    pub version: u64,
 }
 
 pub(crate) trait MonitorActionExecutor: Send + Sync {
@@ -50,7 +52,7 @@ impl MonitorActionExecutor for DispatcherMonitorActionExecutor {
             &action.connector_slug,
             &action.action,
             action.input.clone(),
-            action_trigger_payload(action),
+            action_trigger_payload(action)?,
         )?;
         Ok(json!({
             "success": true,
@@ -346,6 +348,7 @@ fn connector_action_for_pending(
                 action: "send_message".to_string(),
                 input,
                 idempotency_key: action_idempotency_key(task_id, action_id, params),
+                version: params.version,
             })
         }
         "gmail.reply" => {
@@ -381,6 +384,7 @@ fn connector_action_for_pending(
                     "body": message,
                 }),
                 idempotency_key: action_idempotency_key(task_id, action_id, params),
+                version: params.version,
             })
         }
         "calendar.rsvp" => {
@@ -410,6 +414,7 @@ fn connector_action_for_pending(
                     "title": string_field(source, &["summary", "title"]),
                 }),
                 idempotency_key: action_idempotency_key(task_id, action_id, params),
+                version: params.version,
             })
         }
         other => bail!("typed monitor action execution does not support `{other}`"),
@@ -634,8 +639,8 @@ fn snapshot_with_action_status(paths: &ConfigPaths, status: &str) -> Result<Valu
     Ok(snapshot)
 }
 
-fn action_trigger_payload(action: &MonitorConnectorAction) -> Value {
-    json!({
+fn action_trigger_payload(action: &MonitorConnectorAction) -> Result<Value> {
+    let mut trigger = json!({
         "type": "monitor_action_execute",
         "envelope_id": action.idempotency_key,
         "connection_id": action.connection_slug,
@@ -645,7 +650,26 @@ fn action_trigger_payload(action: &MonitorConnectorAction) -> Value {
         "dedup_key": action.idempotency_key,
         "text": "",
         "payload": action.input,
-    })
+    });
+    if action.action == "send_message" {
+        let input = action
+            .input
+            .as_object()
+            .context("send_message monitor action input must be an object")?;
+        let message = string_field(input, &["message", "text"])
+            .context("send_message monitor action requires message")?;
+        trigger["send_authorization"] =
+            json!(send_authorization_for_send_message_input_with_source(
+                "monitor-action",
+                &action.idempotency_key,
+                action.version,
+                "send_message",
+                &action.input,
+                message,
+                &action.idempotency_key,
+            )?);
+    }
+    Ok(trigger)
 }
 
 fn now_ms() -> u64 {

@@ -35,7 +35,7 @@ telegram --connection tg-alt search-peers "C & Jason" --kind group
 
 After `/connect` login or import completes, the auth tool registers that
 connection automatically with `connector_slug="telegram-login"`. Use the same
-connection slug in `WorkflowCreate` and `ConnectorAct`.
+connection slug in `WorkflowCreate`, `ConnectorActionDraft`, and `ConnectorAct`.
 
 Peer lookup workflow:
 
@@ -97,11 +97,13 @@ fetch it.
 
 Connector action workflow:
 
-Use the `send_message` connector action for outbound Telegram messages. Pass
-`reply_to` or `reply_to_message_id` with a Telegram message id to send the
-outbound message as a reply. To send files, images, or albums, include `media`
-as a path/URL string, an object, or an array. The message text is the caption
-for the first attachment unless an attachment object has its own `caption`.
+Use `ConnectorActionDraft` with the `send_message` connector action for
+outbound Telegram messages. This creates a human-reviewable draft and does not
+send directly. Pass `reply_to` or `reply_to_message_id` with a Telegram message
+id to send the outbound message as a reply after approval. To send files,
+images, or albums, include `media` as a path/URL string, an object, or an array.
+The message text is the caption for the first attachment unless an attachment
+object has its own `caption`.
 
 ```json
 {
@@ -118,8 +120,11 @@ for the first attachment unless an attachment object has its own `caption`.
 Use Telegram-specific connector actions for message edits/deletes/forwards,
 pinning, reactions, read state, poll votes, chat membership/admin operations,
 account profile updates, group metadata updates, avatars, and stories. These
-are `ConnectorAct` actions on `telegram-login`; do not invent a separate
-Telegram runtime command. Prefer numeric peer ids resolved by `search-peers`.
+are `ConnectorAct` actions on `telegram-login` when they do not send, forward,
+post, or otherwise publish an external message. Send-like actions require the
+human-review draft path and must not be called directly with `ConnectorAct`. Do
+not invent a separate Telegram runtime command. Prefer numeric peer ids resolved
+by `search-peers`.
 
 Use the `vote_poll` connector action to click a poll answer. Prefer answer
 indexes from `--succinct` output or `option_hex` from JSON output; exact answer

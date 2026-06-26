@@ -42,10 +42,11 @@ lark-cli auth status     # confirm a logged-in account
 
 ## Sending / reacting / replying (connector actions)
 
-Use `ConnectorAct` (or a workflow) on the connection. Actions: `send_message`,
-`react` / `send_reaction`, `remove_reaction`. Identity defaults to the
-connector's (`user` for lark-login, `bot` for lark-bot); override per call with
-`as: "bot"|"user"`.
+Use `ConnectorActionDraft` for `send_message` so the human can review the exact
+recipient and content before sending. Use `ConnectorAct` (or a workflow) only
+for non-send actions such as `react` / `send_reaction` and `remove_reaction`.
+Identity defaults to the connector's (`user` for lark-login, `bot` for
+lark-bot); override per call with `as: "bot"|"user"`.
 
 - `send_message`: recipient `chat_id` (`oc_...`→`--chat-id`) or
   `open_id`/`user_id`/`user` (→`--user-id`); a generic `to`/`target` is inferred

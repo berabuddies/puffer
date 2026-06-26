@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use super::handle_workflow_list;
 use super::monitor_task_ignore::{monitor_tasks_path, task_id_matches};
+use crate::subscriptions::send_authorization_for_send_message_input_with_source;
 
 #[derive(Debug, Deserialize)]
 struct MonitorReplySendParams {
@@ -33,6 +34,7 @@ pub(crate) struct ReplySendTarget {
     pub connector_slug: String,
     pub connection_slug: String,
     pub chat_id: String,
+    pub version: u64,
     /// Source message to thread the reply onto (Telegram `reply_to`).
     /// Stamped server-side from the trigger envelope; `None` for tasks that
     /// predate the stamping or when the reply fallback stripped it.
@@ -58,6 +60,20 @@ impl MonitorReplySender for DispatcherMonitorReplySender {
         if let Some(reply_to) = target.reply_to_message_id {
             input["reply_to"] = json!(reply_to);
         }
+        input["_send_authorization"] =
+            json!(send_authorization_for_send_message_input_with_source(
+                "monitor-reply",
+                &format!(
+                    "monitor-reply:{}:{}",
+                    target.chat_id,
+                    target.reply_to_message_id.unwrap_or_default()
+                ),
+                target.version,
+                "send_message",
+                &input,
+                message,
+                &format!("monitor-reply:{}", Uuid::new_v4()),
+            )?);
         let envelope = synthetic_envelope(&target.connection_slug, &input);
         let dispatcher = BuiltinActionDispatcher::new();
         let result = dispatcher.dispatch(
@@ -166,7 +182,7 @@ pub(crate) fn handle_monitor_reply_send_with_sender(
         Some(other) => bail!("draft state `{other}` cannot be sent"),
         None => bail!("pending reply draft missing status"),
     }
-    let target = reply_target_from_pending(pending)?;
+    let target = reply_target_from_pending(pending, params.version)?;
     let attempt_id = Uuid::new_v4().to_string();
     let now = now_ms();
     pending.insert("status".to_string(), Value::String("sending".to_string()));
@@ -473,7 +489,10 @@ fn source_context_hash(source_context: &Value) -> Result<String> {
     Ok(format!("{digest:x}"))
 }
 
-fn reply_target_from_pending(pending: &Map<String, Value>) -> Result<ReplySendTarget> {
+fn reply_target_from_pending(
+    pending: &Map<String, Value>,
+    version: u64,
+) -> Result<ReplySendTarget> {
     let source = pending
         .get("source_context_snapshot")
         .or_else(|| pending.get("sourceContextSnapshot"))
@@ -511,6 +530,7 @@ fn reply_target_from_pending(pending: &Map<String, Value>) -> Result<ReplySendTa
         connector_slug,
         connection_slug,
         chat_id,
+        version,
         reply_to_message_id,
     })
 }
