@@ -18,7 +18,7 @@ use grammers_client::{
 };
 use grammers_tl_types as tl;
 use serde_json::json;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{timeout, timeout_at, Instant};
 use tracing::{info, warn};
 
 use crate::events::emit_control;
@@ -29,6 +29,20 @@ use crate::state::{
 
 const DEFAULT_QR_WAIT_SECONDS: u64 = 120;
 const DEFAULT_DC_ID: i32 = 2;
+
+/// Per-call bound on the MTProto network round-trips that mint the QR login
+/// token (DC connect + `auth.exportLoginToken`). Without it, an unreachable
+/// Telegram blocks these `.await`s indefinitely and the caller never emits a
+/// `login_qr` event — surfacing in the desktop client as an endless "Sending…"
+/// spinner with no error (agentenv/monorepo#705). On timeout we emit
+/// `login_error` so the UI shows an actionable message instead of hanging.
+const QR_NETWORK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// User-facing error emitted when a QR-login network call times out. The
+/// desktop client renders `payload.error` verbatim, so keep it friendly and
+/// free of internal detail.
+const QR_UNREACHABLE_MESSAGE: &str =
+    "Couldn't reach Telegram. Check your internet connection and try again.";
 const MAX_QR_MIGRATIONS: usize = 4;
 const MAX_QR_IMPORT_TOKEN_REFRESHES: usize = 2;
 
@@ -82,6 +96,9 @@ pub async fn start(
         }
     };
 
+    // `connect_qr_client` / `export_login_token` bound their own MTProto
+    // round-trips (see `QR_NETWORK_TIMEOUT`), so an unreachable Telegram surfaces
+    // here as a normal `Err` carrying the friendly message rather than hanging.
     let client = match connect_qr_client(api_id, api_hash.clone(), None).await {
         Ok(client) => client,
         Err(error) => {
@@ -240,12 +257,30 @@ async fn handle_login_token(
                         return Ok(QrLoginOutcome::Pending);
                     }
                 };
-                token = match client
-                    .invoke(&tl::functions::auth::ImportLoginToken {
+                let import_result = match timeout(
+                    QR_NETWORK_TIMEOUT,
+                    client.invoke(&tl::functions::auth::ImportLoginToken {
                         token: migration.token,
-                    })
-                    .await
+                    }),
+                )
+                .await
                 {
+                    Ok(result) => result,
+                    Err(_elapsed) => {
+                        warn!(
+                            timeout_secs = QR_NETWORK_TIMEOUT.as_secs(),
+                            dc_id = migration.dc_id,
+                            "telegram qr import login token timed out"
+                        );
+                        emit_control(
+                            &env.topic,
+                            "login_error",
+                            json!({ "error": QR_UNREACHABLE_MESSAGE, "phase": "qr_migrate_timeout" }),
+                        )?;
+                        return Ok(QrLoginOutcome::Pending);
+                    }
+                };
+                token = match import_result {
                     Ok(token) => token,
                     Err(error) => {
                         match classify_qr_import_invocation_error(
@@ -480,14 +515,26 @@ async fn connect_qr_client(
     if let Some(dc_id) = force_dc_id {
         session.set_user(0, dc_id, false);
     }
-    Client::connect(Config {
-        session,
-        api_id,
-        api_hash,
-        params: default_init_params(),
-    })
+    match timeout(
+        QR_NETWORK_TIMEOUT,
+        Client::connect(Config {
+            session,
+            api_id,
+            api_hash,
+            params: default_init_params(),
+        }),
+    )
     .await
-    .context("connect Telegram QR login client")
+    {
+        Ok(result) => result.context("connect Telegram QR login client"),
+        Err(_elapsed) => {
+            warn!(
+                timeout_secs = QR_NETWORK_TIMEOUT.as_secs(),
+                "telegram qr connect timed out"
+            );
+            anyhow::bail!("{QR_UNREACHABLE_MESSAGE}")
+        }
+    }
 }
 
 async fn reconnect_authorized_client(
@@ -520,14 +567,25 @@ async fn export_login_token(
     api_id: i32,
     api_hash: &str,
 ) -> anyhow::Result<tl::enums::auth::LoginToken> {
-    client
-        .invoke(&tl::functions::auth::ExportLoginToken {
+    match timeout(
+        QR_NETWORK_TIMEOUT,
+        client.invoke(&tl::functions::auth::ExportLoginToken {
             api_id,
             api_hash: api_hash.to_string(),
             except_ids: Vec::new(),
-        })
-        .await
-        .context("export Telegram QR login token")
+        }),
+    )
+    .await
+    {
+        Ok(result) => result.context("export Telegram QR login token"),
+        Err(_elapsed) => {
+            warn!(
+                timeout_secs = QR_NETWORK_TIMEOUT.as_secs(),
+                "telegram qr export token timed out"
+            );
+            anyhow::bail!("{QR_UNREACHABLE_MESSAGE}")
+        }
+    }
 }
 
 fn emit_qr_token(
