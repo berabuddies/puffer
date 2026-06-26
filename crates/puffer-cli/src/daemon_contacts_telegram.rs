@@ -22,8 +22,7 @@ use daemon_contacts_telegram_peer_cache::{
     collect_telegram_peer_cache_candidates, hydrate_telegram_peer_cache,
     hydrate_telegram_peer_cache_if_needed, hydrate_telegram_recent_peer_cache,
     hydrate_telegram_recent_peer_cache_if_needed,
-    telegram_recent_dialog_cache_claims_target_satisfied, telegram_recent_dialog_cache_ready,
-    TelegramPeerCacheHydrationMode,
+    telegram_recent_dialog_cache_claims_target_satisfied, TelegramPeerCacheHydrationMode,
 };
 
 #[cfg(test)]
@@ -32,6 +31,19 @@ where
     F: Fn(&ConfigPaths, &Path) -> Result<()> + 'static,
 {
     daemon_contacts_telegram_peer_cache::install_test_telegram_peer_cache_hydrator(hydrator)
+}
+
+#[cfg(test)]
+pub(super) fn write_test_recent_dialog_cache_marker(
+    account_dir: &Path,
+    direct_users_seen: usize,
+    target: usize,
+) -> Result<()> {
+    daemon_contacts_telegram_peer_cache::write_recent_dialog_cache_marker(
+        account_dir,
+        direct_users_seen,
+        target,
+    )
 }
 
 const DEFAULT_LIMIT: usize = 30;
@@ -208,12 +220,13 @@ pub(super) fn recent_telegram_contacts(
         let Ok(entry) = entry else { continue };
         let account_dir = entry.path();
         hydrate_telegram_recent_peer_cache_if_needed(paths, &account_dir, limit);
-        if !telegram_recent_contacts_ready(&account_dir) {
+        let account_ready = telegram_recent_contacts_ready(&account_dir, limit);
+        if !account_ready {
             ready = false;
-            continue;
         }
         let mut account_candidates = collect_recent_telegram_account_candidates(&account_dir);
-        if account_candidates.len() < limit
+        if account_ready
+            && account_candidates.len() < limit
             && telegram_recent_dialog_cache_claims_target_satisfied(&account_dir, limit)
         {
             hydrate_telegram_recent_peer_cache(paths, &account_dir, limit);
@@ -295,19 +308,8 @@ fn merge_recent_telegram_candidates(
     }
 }
 
-fn telegram_dialog_hydration_ready(account_dir: &Path) -> bool {
-    let path = account_dir.join("delivery-cursor.json");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    serde_json::from_str::<Value>(&raw)
-        .ok()
-        .and_then(|cursor| cursor.get("initialized").and_then(Value::as_bool))
-        .unwrap_or(false)
-}
-
-fn telegram_recent_contacts_ready(account_dir: &Path) -> bool {
-    telegram_dialog_hydration_ready(account_dir) || telegram_recent_dialog_cache_ready(account_dir)
+fn telegram_recent_contacts_ready(account_dir: &Path, limit: usize) -> bool {
+    telegram_recent_dialog_cache_claims_target_satisfied(account_dir, limit)
 }
 
 fn read_telegram_messages(

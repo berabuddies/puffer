@@ -105,7 +105,7 @@ pub(super) fn hydrate_telegram_recent_peer_cache_if_needed(
     account_dir: &Path,
     limit: usize,
 ) {
-    if telegram_recent_dialog_cache_ready(account_dir) {
+    if telegram_recent_dialog_cache_claims_target_satisfied(account_dir, limit) {
         return;
     }
     if !account_dir.join("telegram.session").exists() {
@@ -128,17 +128,6 @@ pub(super) fn hydrate_telegram_recent_peer_cache(
             "failed to hydrate Telegram recent dialog cache for contacts list"
         );
     }
-}
-
-pub(super) fn telegram_recent_dialog_cache_ready(account_dir: &Path) -> bool {
-    let path = account_dir.join(RECENT_DIALOG_CACHE_FILE);
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    serde_json::from_str::<Value>(&raw)
-        .ok()
-        .and_then(|marker| marker.get("ready").and_then(Value::as_bool))
-        .unwrap_or(false)
 }
 
 pub(super) fn telegram_recent_dialog_cache_claims_target_satisfied(
@@ -358,7 +347,7 @@ async fn hydrate_telegram_recent_peer_cache_from_session(
     Ok(())
 }
 
-fn write_recent_dialog_cache_marker(
+pub(super) fn write_recent_dialog_cache_marker(
     account_dir: &Path,
     direct_users_seen: usize,
     target: usize,
