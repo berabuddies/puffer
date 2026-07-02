@@ -188,12 +188,6 @@ impl ModelDiscoveryClient {
         // returns `model_not_supported` at chat time. Narrow it to this
         // account's usable set via metadata only — see copilot_filter_selectable.
         if provider.id == "github-copilot" {
-            if std::env::var_os("PUFFER_COPILOT_DUMP").is_some() {
-                let _ = std::fs::write(
-                    "/tmp/copilot-models-raw.json",
-                    serde_json::to_string_pretty(&payload).unwrap_or_default(),
-                );
-            }
             if let Some((token, api_url)) = copilot_ctx {
                 self.copilot_filter_selectable(&mut payload, &api_url, &token, &provider.headers);
             }
@@ -305,12 +299,6 @@ impl ModelDiscoveryClient {
             return None;
         }
         let value: Value = response.json().ok()?;
-        if std::env::var_os("PUFFER_COPILOT_DUMP").is_some() {
-            let _ = std::fs::write(
-                "/tmp/copilot-session-raw.json",
-                serde_json::to_string_pretty(&value).unwrap_or_default(),
-            );
-        }
         let models = value
             .get("available_models")?
             .as_array()?
