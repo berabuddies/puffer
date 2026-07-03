@@ -96,6 +96,19 @@ fn copilot_model_is_default_or_fallback(entry: &Value) -> bool {
     flag("is_chat_default") || flag("is_chat_fallback")
 }
 
+/// True for Copilot's internal / experimental models — routing helpers,
+/// compaction, IDE-internal — which are never user-selectable chat models even
+/// though some carry chat capabilities or default/fallback flags (e.g.
+/// `oswe-vscode-prime`, `mai-code-*`). Excluded from every displayed tier.
+fn copilot_model_is_internal(entry: &Value) -> bool {
+    let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    let vendor = entry.get("vendor").and_then(|v| v.as_str()).unwrap_or_default();
+    vendor.eq_ignore_ascii_case("experimental")
+        || id.starts_with("mai-code")
+        || id == "oswe-vscode-prime"
+        || id == "trajectory-compaction"
+}
+
 const OPENAI_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_CODEX_COMPAT_VERSION: &str = "0.125.0";
@@ -238,6 +251,7 @@ impl ModelDiscoveryClient {
         let strict = |entry: &Value| {
             copilot_model_is_chat(entry)
                 && copilot_policy_ok(entry)
+                && !copilot_model_is_internal(entry)
                 && (copilot_model_picker_enabled(entry)
                     || entry.get("id").and_then(|v| v.as_str()) == Some("gpt-4o-mini"))
         };
@@ -253,6 +267,7 @@ impl ModelDiscoveryClient {
             if !available.is_empty() {
                 data.retain(|entry| {
                     copilot_model_is_chat(entry)
+                        && !copilot_model_is_internal(entry)
                         && entry
                             .get("id")
                             .and_then(|v| v.as_str())
@@ -266,10 +281,12 @@ impl ModelDiscoveryClient {
         }
 
         // 3. Last resort (session endpoint unreachable): the server-marked
-        //    default/fallback chat models — still queried per-account.
+        //    default/fallback chat models — still queried per-account. Internal
+        //    routing models can also carry these flags, so exclude them here too.
         data.retain(|entry| {
             copilot_model_is_chat(entry)
                 && copilot_policy_ok(entry)
+                && !copilot_model_is_internal(entry)
                 && copilot_model_is_default_or_fallback(entry)
         });
     }
