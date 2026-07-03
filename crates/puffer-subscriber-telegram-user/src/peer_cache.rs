@@ -183,11 +183,6 @@ impl TelegramPeerCache {
         self.contact_book.last_error = Some(error);
     }
 
-    /// True only when the contact book has completed a full hydration.
-    pub(crate) fn contact_book_ready(&self) -> bool {
-        self.contact_book.state == ContactBookState::Ready
-    }
-
     fn observe_user(&mut self, user: &User, saved_name: Option<String>, source: &str) {
         let record = record_from_user(user, saved_name, source);
         self.merge(record);
@@ -1243,7 +1238,6 @@ mod tests {
         let raw = r#"{"version":1,"peers":[]}"#;
         let cache: TelegramPeerCache = serde_json::from_str(raw).unwrap();
         assert_eq!(cache.contact_book.state, ContactBookState::Pending);
-        assert!(!cache.contact_book_ready());
     }
 
     #[test]
@@ -1254,7 +1248,7 @@ mod tests {
         let back: TelegramPeerCache = serde_json::from_str(&json).unwrap();
         assert_eq!(back.contact_book.state, ContactBookState::Hydrating);
         cache.mark_ready(1730000000000);
-        assert!(cache.contact_book_ready());
+        assert_eq!(cache.contact_book.state, ContactBookState::Ready);
         cache.mark_failed("net down".into(), 1730000000001);
         assert_eq!(cache.contact_book.last_error.as_deref(), Some("net down"));
     }

@@ -121,26 +121,6 @@ fn telegram_session_user_contact_id(account_dir: &Path) -> Option<String> {
     normalize_contact_id(&format!("telegram-user-id@{}", user.id))
 }
 
-// Retained reader: peer-cache emptiness is no longer part of the trigger path
-// (hydration is keyed on `contact_book` state), but the check stays available.
-#[allow(dead_code)]
-pub(super) fn telegram_peer_cache_needs_hydration(account_dir: &Path) -> bool {
-    if !account_dir.join("telegram.session").exists() {
-        return false;
-    }
-    let path = account_dir.join("peer-cache.json");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return true;
-    };
-    let Ok(cache) = serde_json::from_str::<Value>(&raw) else {
-        return true;
-    };
-    cache
-        .get("peers")
-        .and_then(Value::as_array)
-        .map_or(true, Vec::is_empty)
-}
-
 pub(super) fn telegram_recent_dialog_cache_claims_target_satisfied(
     account_dir: &Path,
     limit: usize,
