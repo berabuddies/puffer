@@ -16,14 +16,21 @@ use grammers_client::{
 use grammers_session::PackedChat;
 use grammers_tl_types as tl;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tracing::{info, warn};
 
+use crate::events::emit_control;
 use crate::state::SkillEnv;
 
 const CACHE_VERSION: u32 = 2;
 const AVATAR_MIME_TYPE: &str = "image/jpeg";
 const SAVED_CONTACT_SOURCE: &str = "saved_contact";
 const RECENT_DIALOG_SCAN_CURSOR_FILE: &str = "recent-dialog-scan-cursor.json";
+/// Readiness marker the daemon's contact readers poll to learn recent-dialog
+/// hydration reached its target. Written ONLY by the subscriber (this crate).
+const RECENT_DIALOG_CACHE_FILE: &str = "recent-dialog-cache.json";
+/// Upper bound on dialogs scanned during one recent-dialog hydration pass.
+const RECENT_DIALOG_MAX_DIALOGS: usize = 500;
 const TELEGRAM_DIALOG_PAGE_LIMIT_MAX: usize = 100;
 
 /// Readiness of the durable contact book for one subscriber account.
@@ -524,6 +531,93 @@ pub async fn hydrate_contact_book_cache(env: &SkillEnv, client: &Client) -> anyh
     let changed = cache != original;
     cache.save_if_changed(env, &original)?;
     Ok(changed)
+}
+
+/// Runs one full contact hydration on the subscriber's live client: the
+/// contact book plus a recent-dialog scan toward `target`. Readiness metadata
+/// is written at the start (`hydrating`) and end (`ready`/`failed`), the
+/// recent-dialog marker is refreshed on success, and a `contacts_hydrated`
+/// control event is emitted for the daemon to forward to the UI bus.
+///
+/// Fire-and-forget: this owns all durable writes for one account's contact
+/// caches, so the daemon never dials Telegram for contacts itself.
+pub(crate) async fn run_contact_hydration(env: SkillEnv, client: Client, target: usize) {
+    // Publish "hydrating" immediately so a concurrent contacts read sees the
+    // in-flight state instead of a stale "ready"/"pending".
+    let original = TelegramPeerCache::load(&env).unwrap_or_default();
+    let mut cache = original.clone();
+    cache.mark_hydrating();
+    if let Err(error) = cache.save_if_changed(&env, &original) {
+        warn!(%error, "failed to persist hydrating contact-book state");
+    }
+
+    let result = async {
+        hydrate_contact_book_cache(&env, &client).await?;
+        let hydration =
+            hydrate_recent_dialog_peer_cache(&env, &client, target, RECENT_DIALOG_MAX_DIALOGS)
+                .await?;
+        write_recent_dialog_marker(
+            &env,
+            hydration.direct_users_seen,
+            target,
+            hydration.dialogs_exhausted,
+        )?;
+        anyhow::Ok(())
+    }
+    .await;
+
+    // Stamp the terminal state on a freshly-loaded cache (the sub-hydrations
+    // saved their own peer merges in between) and emit the outcome.
+    let original = TelegramPeerCache::load(&env).unwrap_or_default();
+    let mut cache = original.clone();
+    let payload = match result {
+        Ok(()) => {
+            cache.mark_ready(now_unix_millis());
+            let peer_count = cache.peers.len();
+            json!({ "ok": true, "state": "ready", "peer_count": peer_count })
+        }
+        Err(error) => {
+            let detail = format!("{error:#}");
+            cache.mark_failed(detail.clone(), now_unix_millis());
+            json!({ "ok": false, "state": "failed", "error": detail })
+        }
+    };
+    if let Err(error) = cache.save_if_changed(&env, &original) {
+        warn!(%error, "failed to persist terminal contact-book state");
+    }
+    if let Err(error) = emit_control(&env.topic, "contacts_hydrated", payload) {
+        warn!(%error, "failed to emit contacts_hydrated control event");
+    }
+}
+
+/// Writes the recent-dialog readiness marker the daemon polls. Mirrors the
+/// shape the daemon previously wrote (`ready`/`target`/`direct_users_seen`/
+/// `dialogs_exhausted`); ownership moved here so only the subscriber writes it.
+fn write_recent_dialog_marker(
+    env: &SkillEnv,
+    direct_users_seen: usize,
+    target: usize,
+    dialogs_exhausted: bool,
+) -> anyhow::Result<()> {
+    let path = env.state_dir.join(RECENT_DIALOG_CACHE_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create recent-dialog marker parent {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(&json!({
+            "ready": true,
+            "hydrated_at_ms": now_unix_millis(),
+            "direct_users_seen": direct_users_seen,
+            "target": target,
+            "dialogs_exhausted": dialogs_exhausted,
+        }))?,
+    )
+    .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
 }
 
 #[derive(Debug, Clone)]

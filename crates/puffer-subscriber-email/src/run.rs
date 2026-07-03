@@ -146,6 +146,7 @@ pub async fn run() -> anyhow::Result<()> {
             | SubscriberCommand::TelegramImportTdata { .. }
             | SubscriberCommand::TelegramAuthOk
             | SubscriberCommand::TelegramListPeers { .. }
+            | SubscriberCommand::TelegramHydrateContacts { .. }
             | SubscriberCommand::TelegramSearchMessages { .. }
             | SubscriberCommand::TelegramListMessages { .. } => {
                 emit_control(
@@ -345,6 +346,7 @@ async fn handle_command(
         | SubscriberCommand::TelegramImportTdata { .. }
         | SubscriberCommand::TelegramAuthOk
         | SubscriberCommand::TelegramListPeers { .. }
+        | SubscriberCommand::TelegramHydrateContacts { .. }
         | SubscriberCommand::TelegramSearchMessages { .. }
         | SubscriberCommand::TelegramListMessages { .. } => {
             emit_control(

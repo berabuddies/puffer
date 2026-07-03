@@ -110,6 +110,16 @@ pub enum SubscriberCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    /// Hydrate the durable contact book and recent-dialog cache on the
+    /// subscriber's live client. Fire-and-forget: readiness is reported via the
+    /// `contacts_hydrated` control event and the peer-cache `contact_book`
+    /// metadata, never a direct reply. The daemon dispatches this instead of
+    /// dialing Telegram itself.
+    TelegramHydrateContacts {
+        /// Number of direct-user dialogs to scan toward.
+        #[serde(default = "default_hydrate_target")]
+        target: usize,
+    },
     /// Search message text within one Telegram peer and optionally return
     /// previous messages so callers can inspect the match safely before acting.
     TelegramSearchMessages {
@@ -221,6 +231,11 @@ pub enum SubscriberCommand {
         #[serde(default)]
         args: Value,
     },
+}
+
+/// Default direct-user scan target for [`SubscriberCommand::TelegramHydrateContacts`].
+fn default_hydrate_target() -> usize {
+    120
 }
 
 /// Server-owned proof that a [`SubscriberCommand::SendMessage`] was created

@@ -41,6 +41,44 @@ enum RuntimeCommandOutcome {
     ClientReplaced,
 }
 
+/// Single-flight guard for the fire-and-forget contact hydration task. A second
+/// `TelegramHydrateContacts` command is refused while one hydration is still
+/// running; the slot frees automatically once the spawned task finishes.
+#[derive(Default)]
+pub(crate) struct HydrationSlot {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    running: bool,
+}
+
+impl HydrationSlot {
+    /// Reserves the slot for a new hydration, returning `false` when one is
+    /// already in flight. A finished handle counts as free.
+    fn try_begin(&mut self) -> bool {
+        let in_flight = self.running
+            && self
+                .handle
+                .as_ref()
+                .map_or(true, |handle| !handle.is_finished());
+        if in_flight {
+            return false;
+        }
+        self.running = true;
+        self.handle = None;
+        true
+    }
+
+    /// Stores the spawned task handle so its completion frees the slot.
+    fn attach(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.handle = Some(handle);
+    }
+
+    /// Frees the slot. Used after a synchronous completion and in tests.
+    fn finish(&mut self) {
+        self.running = false;
+        self.handle = None;
+    }
+}
+
 enum OfflineResumeAttempt {
     Resumed {
         client: Client,
@@ -275,6 +313,13 @@ pub async fn run() -> anyhow::Result<()> {
                     }),
                 )?;
             }
+            SubscriberCommand::TelegramHydrateContacts { .. } => {
+                emit_control(
+                    &env.topic,
+                    "contacts_hydrated",
+                    json!({ "ok": false, "state": "auth_required" }),
+                )?;
+            }
             SubscriberCommand::TelegramSearchMessages { peer, query, .. } => {
                 emit_control(
                     &env.topic,
@@ -384,6 +429,13 @@ pub async fn run() -> anyhow::Result<()> {
                         "error": "complete login before listing Telegram peers",
                         "query": query,
                     }),
+                )?;
+            }
+            SubscriberCommand::TelegramHydrateContacts { .. } => {
+                emit_control(
+                    &env.topic,
+                    "contacts_hydrated",
+                    json!({ "ok": false, "state": "auth_required" }),
                 )?;
             }
             SubscriberCommand::TelegramSearchMessages { peer, query, .. } => {
@@ -995,6 +1047,23 @@ async fn handle_runtime_command(
             let client = runtime_client(session)?;
             handle_list_peers(env, &client, query, peer_kind, limit).await?;
         }
+        SubscriberCommand::TelegramHydrateContacts { target } => {
+            if session.hydration.try_begin() {
+                let client = runtime_client(session)?;
+                let handle = tokio::spawn(crate::peer_cache::run_contact_hydration(
+                    env.clone(),
+                    client,
+                    target,
+                ));
+                session.hydration.attach(handle);
+            } else {
+                emit_control(
+                    &env.topic,
+                    "contacts_hydrated",
+                    json!({ "ok": false, "state": "hydrating" }),
+                )?;
+            }
+        }
         SubscriberCommand::TelegramSearchMessages {
             peer,
             query,
@@ -1354,10 +1423,19 @@ fn import_payload(outcome: &TdataImportOutcome) -> serde_json::Value {
 mod tests {
     use super::{
         next_offline_retry_delay, runtime_login_outcome, session_file_changed_since,
-        startup_monitoring_boundary, verify_failure_login_error, LoginCommandKind,
+        startup_monitoring_boundary, verify_failure_login_error, HydrationSlot, LoginCommandKind,
         RuntimeCommandOutcome, VerifyFailure, OFFLINE_RESUME_RETRY_INITIAL_DELAY,
         OFFLINE_RESUME_RETRY_MAX_DELAY,
     };
+
+    #[test]
+    fn hydrate_request_is_single_flight() {
+        let mut slot = HydrationSlot::default();
+        assert!(slot.try_begin()); // first request wins
+        assert!(!slot.try_begin()); // second request refused while running
+        slot.finish();
+        assert!(slot.try_begin()); // after completion a new request may start
+    }
     use crate::login::LoginSession;
     use crate::login_flow::LoginPhase;
     use crate::state::SkillEnv;

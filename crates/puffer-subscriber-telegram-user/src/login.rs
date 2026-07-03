@@ -16,6 +16,7 @@ use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
+use crate::client::HydrationSlot;
 use crate::events::emit_control;
 use crate::login_flow::{
     self, AuthorizedUser, Decision, ErrClass, LoginPhase, PasswordStep, StartFailOp, StartStep,
@@ -118,6 +119,8 @@ pub struct LoginSession {
     pub(crate) api_id: Option<i32>,
     pub(crate) api_hash: Option<String>,
     pub(crate) phone: Option<String>,
+    /// Single-flight guard for the fire-and-forget contact hydration task.
+    pub(crate) hydration: HydrationSlot,
 }
 
 impl LoginSession {
@@ -129,6 +132,7 @@ impl LoginSession {
             api_id: None,
             api_hash: None,
             phone: None,
+            hydration: HydrationSlot::default(),
         }
     }
 
