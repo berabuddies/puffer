@@ -333,6 +333,73 @@ fn manager_test_event_with_payload(envelope_id: &str, text: &str, payload: Value
     }
 }
 
+fn control_health_envelope(kind: &str, payload: Value) -> EventEnvelope {
+    EventEnvelope {
+        envelope_id: kind.into(),
+        subscriber_id: "telegram-user".into(),
+        received_at_ms: 1_700_000_000_000,
+        event: Event {
+            topic: "telegram-user".into(),
+            kind: kind.into(),
+            control: true,
+            dedup_key: None,
+            text: String::new(),
+            payload,
+        },
+    }
+}
+
+#[test]
+fn resume_failed_auth_maps_to_auth_required() {
+    let envelope = control_health_envelope(
+        "resume_failed",
+        json!({ "class": "auth", "reason": "session_expired", "detail": "bad key" }),
+    );
+    let health = health_from_control_event(&envelope).expect("auth resume_failed maps to health");
+    assert_eq!(health.status, ConnectionHealthStatus::AuthRequired);
+    assert_eq!(health.detail.as_deref(), Some("bad key"));
+}
+
+#[test]
+fn resume_failed_network_maps_to_retrying() {
+    let envelope = control_health_envelope(
+        "resume_failed",
+        json!({ "class": "network", "detail": "connect timeout" }),
+    );
+    let health =
+        health_from_control_event(&envelope).expect("network resume_failed maps to health");
+    assert_eq!(health.status, ConnectionHealthStatus::Retrying);
+}
+
+#[test]
+fn resume_failed_benign_is_ignored() {
+    let envelope = control_health_envelope("resume_failed", json!({ "class": "none" }));
+    assert!(health_from_control_event(&envelope).is_none());
+}
+
+#[test]
+fn update_loop_error_auth_maps_to_auth_required() {
+    let envelope = control_health_envelope(
+        "update_loop_error",
+        json!({ "class": "auth", "error": "AUTH_KEY_UNREGISTERED" }),
+    );
+    let health =
+        health_from_control_event(&envelope).expect("auth update_loop_error maps to health");
+    assert_eq!(health.status, ConnectionHealthStatus::AuthRequired);
+    assert_eq!(health.detail.as_deref(), Some("AUTH_KEY_UNREGISTERED"));
+}
+
+#[test]
+fn update_loop_error_other_maps_to_retrying() {
+    let envelope = control_health_envelope(
+        "update_loop_error",
+        json!({ "class": "other", "error": "weird stream stop" }),
+    );
+    let health =
+        health_from_control_event(&envelope).expect("other update_loop_error maps to health");
+    assert_eq!(health.status, ConnectionHealthStatus::Retrying);
+}
+
 #[test]
 fn start_subscriber_allows_immediate_control_command() {
     let temp = tempdir().unwrap();

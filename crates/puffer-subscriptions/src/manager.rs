@@ -1048,6 +1048,46 @@ fn health_from_control_event(envelope: &EventEnvelope) -> Option<ConnectionHealt
             updated_at_ms: envelope.received_at_ms,
             next_retry_at_ms: None,
         }),
+        // #604: a session resume that failed for auth/network reasons must
+        // degrade the connection immediately instead of waiting for a probe.
+        // Scoped to auth/network only: benign first-login classes (none/config)
+        // are covered by the `login_required` path and must not false-degrade.
+        "resume_failed" => match payload.get("class").and_then(serde_json::Value::as_str) {
+            Some("auth") => Some(ConnectionHealth {
+                status: ConnectionHealthStatus::AuthRequired,
+                reason: string_payload(payload, "reason").or_else(|| Some("resume_failed".into())),
+                detail: string_payload(payload, "detail"),
+                updated_at_ms: envelope.received_at_ms,
+                next_retry_at_ms: None,
+            }),
+            Some("network") => Some(ConnectionHealth {
+                status: ConnectionHealthStatus::Retrying,
+                reason: Some("resume_failed".into()),
+                detail: string_payload(payload, "detail"),
+                updated_at_ms: envelope.received_at_ms,
+                next_retry_at_ms: None,
+            }),
+            _ => None,
+        },
+        // #604: the live update stream terminating is an instant degrade —
+        // auth-class needs re-login, anything else is a retrying network drop.
+        "update_loop_error" => match payload.get("class").and_then(serde_json::Value::as_str) {
+            Some("auth") => Some(ConnectionHealth {
+                status: ConnectionHealthStatus::AuthRequired,
+                reason: Some("update_loop_error".into()),
+                detail: string_payload(payload, "error"),
+                updated_at_ms: envelope.received_at_ms,
+                next_retry_at_ms: None,
+            }),
+            Some(_) => Some(ConnectionHealth {
+                status: ConnectionHealthStatus::Retrying,
+                reason: Some("update_loop_error".into()),
+                detail: string_payload(payload, "error"),
+                updated_at_ms: envelope.received_at_ms,
+                next_retry_at_ms: None,
+            }),
+            None => None,
+        },
         _ => None,
     }
 }
