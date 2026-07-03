@@ -1072,10 +1072,17 @@ export type ContactProposal = {
   contact_ids: string[];
 };
 
+export type ContactsSyncState = {
+  state: "ready" | "hydrating" | "failed" | "auth_required";
+  updated_at_ms: number | null;
+  error: string | null;
+};
+
 export type ContactsSnapshot = {
   contacts: SavedContact[];
   candidates: ConnectorContact[];
   proposals: ContactProposal[];
+  sync?: ContactsSyncState;
 };
 
 export type WorkflowBindingCreateRequest = {

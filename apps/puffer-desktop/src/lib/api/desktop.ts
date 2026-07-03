@@ -1242,6 +1242,18 @@ export async function subscribeWorkflowRunFinished(
   });
 }
 
+/** Subscribe to `contacts:updated` — emitted when a subscriber finishes (or
+ *  attempts) hydrating a connector's contacts, so the contacts screen can
+ *  refetch without polling. Returns an unsubscribe function. */
+export async function subscribeContactsUpdated(
+  handler: (event: { connection: string; ok: boolean }) => void
+): Promise<() => void> {
+  const client = await ensureLocalDaemonClient();
+  return client.on("contacts:updated", (payload) => {
+    handler(payload as { connection: string; ok: boolean });
+  });
+}
+
 /** Rank the top-5 Telegram contacts by recent chat frequency and analyze each
  *  relationship. Progress streams over the `telegram:relationships` event channel
  *  (see subscribeTelegramRelationships).

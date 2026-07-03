@@ -8,6 +8,7 @@
     loadContacts,
     saveContact,
     subscribeContactInferEvents,
+    subscribeContactsUpdated,
     type ContactInferTracePayload
   } from "../api/desktop";
   import MessageBody from "../components/MessageBody.svelte";
@@ -41,6 +42,8 @@
   let inferTraceCollapsed = $state(true);
   let inferTraceItems = $state<ContactInferTraceItem[]>([]);
   let inferTraceUnsubscribe: (() => void) | null = null;
+  let contactsUpdatedUnsubscribe: (() => void) | null = null;
+  let destroyed = false;
   let selectedContactId = $state<string | null>(null);
   let showContactDialog = $state(false);
   let showInferDialog = $state(false);
@@ -68,11 +71,27 @@
 
   onMount(() => {
     void refresh();
+    // Refetch when the subscriber finishes hydrating an account (#604) so the
+    // list fills in without the user hitting Refresh.
+    void (async () => {
+      const unsubscribe = await subscribeContactsUpdated(() => {
+        void refresh();
+      });
+      // The component may have been destroyed while the subscribe awaited.
+      if (destroyed) {
+        unsubscribe();
+      } else {
+        contactsUpdatedUnsubscribe = unsubscribe;
+      }
+    })();
   });
 
   onDestroy(() => {
+    destroyed = true;
     inferTraceUnsubscribe?.();
     inferTraceUnsubscribe = null;
+    contactsUpdatedUnsubscribe?.();
+    contactsUpdatedUnsubscribe = null;
   });
 
   $effect(() => {
@@ -134,7 +153,8 @@
     snapshot = {
       contacts: next.contacts ?? snapshot.contacts,
       candidates: next.candidates ?? snapshot.candidates,
-      proposals: next.proposals ?? []
+      proposals: next.proposals ?? [],
+      sync: next.sync ?? snapshot.sync
     };
     proposals = snapshot.proposals;
   }
@@ -505,6 +525,13 @@
         <Icon name="refresh" size={12} />{loading ? "Refreshing" : "Refresh"}
       </button>
     </div>
+    {#if snapshot.sync?.state === "hydrating"}
+      <div class="pf-contacts-sync" data-state="hydrating">同步中…</div>
+    {:else if snapshot.sync?.state === "failed"}
+      <div class="pf-contacts-sync" data-state="failed">
+        {snapshot.sync.error ?? "同步失败，点击 Refresh 重试"}
+      </div>
+    {/if}
   </div>
 
   <div class="pf-tasks-summary" aria-label="Contact summary">
@@ -1226,5 +1253,18 @@
       align-items: stretch;
       flex-direction: column;
     }
+  }
+
+  .pf-contacts-sync {
+    font-size: 12px;
+    padding: 2px 0;
+  }
+
+  .pf-contacts-sync[data-state="hydrating"] {
+    color: var(--pf-text-muted, #8a8a8a);
+  }
+
+  .pf-contacts-sync[data-state="failed"] {
+    color: var(--pf-danger, #d05a5a);
   }
 </style>
