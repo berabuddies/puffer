@@ -17,7 +17,6 @@ use std::path::Path;
 
 const RECENT_DIALOG_CACHE_FILE: &str = "recent-dialog-cache.json";
 const RECENT_DIALOG_TARGET_MIN: usize = 5;
-const RECENT_DIALOG_TARGET_MAX: usize = 50;
 const CONTACT_PICKER_DIALOG_TARGET_MAX: usize = 120;
 
 /// Read-only mirror of the peer-cache `contact_book` metadata written by the
@@ -121,24 +120,11 @@ fn telegram_session_user_contact_id(account_dir: &Path) -> Option<String> {
     normalize_contact_id(&format!("telegram-user-id@{}", user.id))
 }
 
-pub(super) fn telegram_recent_dialog_cache_claims_target_satisfied(
-    account_dir: &Path,
-    limit: usize,
-) -> bool {
-    recent_dialog_cache_claims_target_satisfied(account_dir, recent_dialog_target(limit))
-}
-
 pub(super) fn telegram_contact_picker_dialog_cache_claims_target_satisfied(
     account_dir: &Path,
     limit: usize,
 ) -> bool {
     recent_dialog_cache_claims_target_satisfied(account_dir, contact_picker_dialog_target(limit))
-}
-
-fn recent_dialog_target(limit: usize) -> usize {
-    limit
-        .max(RECENT_DIALOG_TARGET_MIN)
-        .min(RECENT_DIALOG_TARGET_MAX)
 }
 
 fn contact_picker_dialog_target(limit: usize) -> usize {

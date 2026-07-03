@@ -44,44 +44,26 @@ enum RuntimeCommandOutcome {
     ClientReplaced,
 }
 
-/// Single-flight guard for the fire-and-forget contact hydration task. A second
-/// `TelegramHydrateContacts` command is refused while one hydration is still
-/// running; the slot frees automatically once the spawned task finishes.
+/// Single-flight guard for the fire-and-forget contact hydration task. A
+/// second `TelegramHydrateContacts` command is refused while one hydration is
+/// still running; a finished (or absent) handle means the slot is free, so it
+/// releases automatically when the spawned task completes.
 #[derive(Default)]
 pub(crate) struct HydrationSlot {
     handle: Option<tokio::task::JoinHandle<()>>,
-    running: bool,
 }
 
 impl HydrationSlot {
-    /// Reserves the slot for a new hydration, returning `false` when one is
-    /// already in flight. A finished handle counts as free.
-    fn try_begin(&mut self) -> bool {
-        let in_flight = self.running
-            && self
-                .handle
-                .as_ref()
-                .map_or(true, |handle| !handle.is_finished());
-        if in_flight {
-            return false;
-        }
-        self.running = true;
-        self.handle = None;
-        true
+    /// True when no hydration task is currently running.
+    fn is_idle(&self) -> bool {
+        self.handle
+            .as_ref()
+            .map_or(true, tokio::task::JoinHandle::is_finished)
     }
 
-    /// Stores the spawned task handle so its completion frees the slot.
+    /// Stores the spawned task handle; its completion frees the slot.
     fn attach(&mut self, handle: tokio::task::JoinHandle<()>) {
         self.handle = Some(handle);
-    }
-
-    /// Frees the slot synchronously. Real code relies on `try_begin` observing
-    /// a finished handle to auto-free, so this is only needed by tests that
-    /// simulate completion without a runtime.
-    #[cfg(test)]
-    fn finish(&mut self) {
-        self.running = false;
-        self.handle = None;
     }
 }
 
@@ -272,11 +254,7 @@ async fn login_phase(
                 )?;
             }
             SubscriberCommand::TelegramHydrateContacts { .. } => {
-                emit_control(
-                    &env.topic,
-                    "contacts_hydrated",
-                    json!({ "ok": false, "state": "auth_required" }),
-                )?;
+                emit_contacts_auth_required(env)?;
             }
             SubscriberCommand::TelegramSearchMessages { peer, query, .. } => {
                 emit_control(
@@ -499,11 +477,7 @@ pub async fn run() -> anyhow::Result<()> {
                 )?;
             }
             SubscriberCommand::TelegramHydrateContacts { .. } => {
-                emit_control(
-                    &env.topic,
-                    "contacts_hydrated",
-                    json!({ "ok": false, "state": "auth_required" }),
-                )?;
+                emit_contacts_auth_required(&env)?;
             }
             SubscriberCommand::TelegramSearchMessages { peer, query, .. } => {
                 emit_control(
@@ -839,6 +813,16 @@ async fn attempt_offline_resume(
     }
 }
 
+/// Answers a `TelegramHydrateContacts` request received while not authorized:
+/// hydration needs a live client, so the caller must complete login first.
+fn emit_contacts_auth_required(env: &SkillEnv) -> anyhow::Result<()> {
+    emit_control(
+        &env.topic,
+        "contacts_hydrated",
+        json!({ "ok": false, "state": "auth_required" }),
+    )
+}
+
 fn emit_resume_offline(env: &SkillEnv, state: &OfflineResumeState) -> anyhow::Result<()> {
     emit_control(
         &env.topic,
@@ -1101,7 +1085,9 @@ async fn handle_runtime_command(
             handle_list_peers(env, &client, query, peer_kind, limit).await?;
         }
         SubscriberCommand::TelegramHydrateContacts { target } => {
-            if session.hydration.try_begin() {
+            if session.hydration.is_idle() {
+                // Acquire the client BEFORE spawning so a failure here leaves
+                // the slot untouched (nothing was attached — still idle).
                 let client = runtime_client(session)?;
                 let handle = tokio::spawn(crate::peer_cache::run_contact_hydration(
                     env.clone(),
@@ -1481,13 +1467,22 @@ mod tests {
         OFFLINE_RESUME_RETRY_MAX_DELAY,
     };
 
-    #[test]
-    fn hydrate_request_is_single_flight() {
+    #[tokio::test]
+    async fn hydrate_request_is_single_flight() {
         let mut slot = HydrationSlot::default();
-        assert!(slot.try_begin()); // first request wins
-        assert!(!slot.try_begin()); // second request refused while running
-        slot.finish();
-        assert!(slot.try_begin()); // after completion a new request may start
+        assert!(slot.is_idle()); // an empty slot accepts the first request
+
+        slot.attach(tokio::spawn(std::future::pending::<()>()));
+        assert!(!slot.is_idle()); // refused while the task is running
+
+        slot.handle.as_ref().expect("handle attached").abort();
+        for _ in 0..200 {
+            if slot.is_idle() {
+                return; // task completion frees the slot automatically
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("hydration slot never freed after task completion");
     }
     use crate::login::LoginSession;
     use crate::login_flow::LoginPhase;

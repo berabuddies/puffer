@@ -44,13 +44,14 @@ use self::gcal_connector_actions::{
 use self::slack_connector_actions::{
     is_slack_action, is_slack_connector, run_slack_action, SlackConnectionAuthChecker,
 };
+pub(crate) use self::telegram_connector_actions::telegram_subscriber_id;
+#[cfg(test)]
+use self::telegram_connector_actions::validate_telegram_connection_slug;
 use self::telegram_connector_actions::{
     is_telegram_action, is_telegram_connector, telegram_action_via_subscriber,
     telegram_subscriber_for_action, telegram_subscriber_for_platform,
     TelegramConnectionAuthChecker,
 };
-#[cfg(test)]
-use self::telegram_connector_actions::{telegram_subscriber_id, validate_telegram_connection_slug};
 use sha2::{Digest, Sha256};
 
 const SUBSCRIBER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);

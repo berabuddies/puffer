@@ -852,6 +852,15 @@ fn contacts_updated_from_envelope(
     if !envelope.event.control || envelope.event.kind != "contacts_hydrated" {
         return None;
     }
+    // Forward only terminal outcomes of an actual hydration run. Non-terminal
+    // emissions (the single-flight refusal `hydrating` and the login-phase
+    // `auth_required`) must NOT reach the UI: the desktop refetches on
+    // contacts:updated and a refetch re-dispatches hydration, so forwarding
+    // them would close an unbounded refetch⇄dispatch feedback loop.
+    let state = envelope.event.payload.get("state").and_then(Value::as_str);
+    if !matches!(state, Some("ready") | Some("failed")) {
+        return None;
+    }
     let connection = if envelope.event.topic.is_empty() {
         envelope.subscriber_id.as_str()
     } else {
@@ -7269,6 +7278,58 @@ mod tests {
             },
         };
         assert!(super::contacts_updated_from_envelope(&envelope).is_none());
+    }
+
+    #[test]
+    fn non_terminal_contacts_hydrated_is_not_forwarded() {
+        use puffer_subscriber_runtime::{Event, EventEnvelope};
+        // Refusal (`hydrating`) and login-phase (`auth_required`) emissions
+        // must not trigger a UI refetch — forwarding them would close a
+        // refetch⇄dispatch feedback loop.
+        for state in ["hydrating", "auth_required"] {
+            let envelope = EventEnvelope {
+                envelope_id: "e1".into(),
+                subscriber_id: "telegram-user".into(),
+                received_at_ms: 0,
+                event: Event {
+                    topic: "telegram-user".into(),
+                    kind: "contacts_hydrated".into(),
+                    control: true,
+                    dedup_key: None,
+                    text: String::new(),
+                    payload: serde_json::json!({ "ok": false, "state": state }),
+                },
+            };
+            assert!(
+                super::contacts_updated_from_envelope(&envelope).is_none(),
+                "state {state} must not be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_contacts_hydrated_is_forwarded() {
+        use puffer_subscriber_runtime::{Event, EventEnvelope};
+        let envelope = EventEnvelope {
+            envelope_id: "e1".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "contacts_hydrated".into(),
+                control: true,
+                dedup_key: None,
+                text: String::new(),
+                payload: serde_json::json!({ "ok": false, "state": "failed", "error": "net down" }),
+            },
+        };
+        match super::contacts_updated_from_envelope(&envelope) {
+            Some(super::ServerEnvelope::Event { event, payload }) => {
+                assert_eq!(event, "contacts:updated");
+                assert_eq!(payload["ok"], false);
+            }
+            _ => panic!("failed hydration must be forwarded so the banner updates"),
+        }
     }
 
     use super::{

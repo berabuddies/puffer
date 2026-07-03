@@ -787,6 +787,9 @@ fn telegram_peer_cache_user(id: i64, title: &str, last_message_at_ms: i64) -> Va
 
 fn write_peer_cache_with_contact_book(account_dir: &Path, state: &str, peers: Vec<Value>) {
     std::fs::create_dir_all(account_dir).unwrap();
+    // Sync participation requires a session: session-less dirs are leftovers
+    // that can never hydrate and must not pin the aggregate state.
+    std::fs::write(account_dir.join("telegram.session"), b"").unwrap();
     std::fs::write(
         account_dir.join("peer-cache.json"),
         serde_json::to_vec_pretty(&json!({
@@ -801,6 +804,54 @@ fn write_peer_cache_with_contact_book(account_dir: &Path, state: &str, peers: Ve
         .unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+fn contacts_list_ignores_sessionless_account_with_leftover_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_config_paths(temp.path());
+    let account_dir = paths
+        .user_config_dir
+        .join("telegram-accounts")
+        .join("telegram-user");
+    write_peer_cache_with_contact_book(
+        &account_dir,
+        "hydrating",
+        vec![telegram_peer_cache_user(1, "Alice", 1_700_000_001_000_i64)],
+    );
+    // The session disappears (logout / removal) while the cache lingers: the
+    // account can never hydrate again, so it must not report a permanent
+    // `hydrating` that nothing can resolve.
+    std::fs::remove_file(account_dir.join("telegram.session")).unwrap();
+
+    let result = handle_contacts_list(&paths, &json!({ "limit": 10 })).unwrap();
+
+    assert_eq!(result["sync"]["state"], "ready");
+    // Cached names remain visible even though the account no longer syncs.
+    assert!(result["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["id"] == "telegram-user-id@1"));
+}
+
+#[test]
+fn hydration_dispatch_policy_matches_sync_state() {
+    use super::{should_dispatch_hydration, SyncStateKind};
+    // Pending/stale/in-flight hydrating: always nudge (single-flight dedups).
+    assert!(should_dispatch_hydration(SyncStateKind::Hydrating, false));
+    assert!(should_dispatch_hydration(SyncStateKind::Hydrating, true));
+    // Ready continues a partial recent-dialog scan until the marker is
+    // satisfied, then stops dispatching entirely.
+    assert!(should_dispatch_hydration(SyncStateKind::Ready, false));
+    assert!(!should_dispatch_hydration(SyncStateKind::Ready, true));
+    // Failed/auth are never auto-retried — Refresh is the retry affordance;
+    // auto-retry would re-dial Telegram unboundedly on persistent failures.
+    assert!(!should_dispatch_hydration(SyncStateKind::Failed, false));
+    assert!(!should_dispatch_hydration(
+        SyncStateKind::AuthRequired,
+        false
+    ));
 }
 
 #[test]

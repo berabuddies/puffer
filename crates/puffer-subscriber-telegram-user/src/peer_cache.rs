@@ -262,17 +262,7 @@ impl TelegramPeerCache {
     }
 
     fn save(&self, env: &SkillEnv) -> anyhow::Result<()> {
-        let path = peer_cache_path(env);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("create Telegram peer cache parent {}", parent.display())
-            })?;
-        }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+        write_json_atomic(&peer_cache_path(env), self)
     }
 }
 
@@ -361,7 +351,7 @@ pub(crate) async fn hydrate_chat_avatars_deferred(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecentDialogPeerCacheHydration {
+pub(crate) struct RecentDialogPeerCacheHydration {
     pub direct_users_seen: usize,
     pub dialogs_seen: usize,
     pub batch_dialogs_seen: usize,
@@ -513,16 +503,19 @@ pub(crate) async fn hydrate_contact_book(
     Ok(())
 }
 
-/// Hydrates and saves the durable peer cache from Telegram's contact book.
+/// Hydrates and saves the peer merges from Telegram's contact book.
 ///
-/// This is intentionally narrower than subscriber startup hydration: callers
-/// that only need contact-pickers can populate direct-user metadata without
-/// starting the live update subscriber or monitor pipeline.
-pub async fn hydrate_contact_book_cache(env: &SkillEnv, client: &Client) -> anyhow::Result<bool> {
+/// Deliberately does NOT touch the `contact_book` readiness metadata: the
+/// hydrating/ready/failed transitions are owned exclusively by
+/// [`run_contact_hydration`], so a reader polling mid-hydration never sees a
+/// premature `ready` before the recent-dialog scan has run.
+pub(crate) async fn hydrate_contact_book_cache(
+    env: &SkillEnv,
+    client: &Client,
+) -> anyhow::Result<bool> {
     let original = TelegramPeerCache::load(env).unwrap_or_default();
     let mut cache = original.clone();
     hydrate_contact_book(client, &mut cache).await?;
-    cache.mark_ready(now_unix_millis());
     let changed = cache != original;
     cache.save_if_changed(env, &original)?;
     Ok(changed)
@@ -594,25 +587,16 @@ fn write_recent_dialog_marker(
     target: usize,
     dialogs_exhausted: bool,
 ) -> anyhow::Result<()> {
-    let path = env.state_dir.join(RECENT_DIALOG_CACHE_FILE);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create recent-dialog marker parent {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(&json!({
+    write_json_atomic(
+        &env.state_dir.join(RECENT_DIALOG_CACHE_FILE),
+        &json!({
             "ready": true,
             "hydrated_at_ms": now_unix_millis(),
             "direct_users_seen": direct_users_seen,
             "target": target,
             "dialogs_exhausted": dialogs_exhausted,
-        }))?,
+        }),
     )
-    .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
 }
 
 #[derive(Debug, Clone)]
@@ -807,20 +791,7 @@ fn save_recent_dialog_scan_cursor(
     env: &SkillEnv,
     cursor: &RecentDialogScanCursor,
 ) -> anyhow::Result<()> {
-    let path = recent_dialog_scan_cursor_path(env);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "create Telegram recent dialog cursor parent {}",
-                parent.display()
-            )
-        })?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(cursor)?)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+    write_json_atomic(&recent_dialog_scan_cursor_path(env), cursor)
 }
 
 fn remove_recent_dialog_scan_cursor(env: &SkillEnv) -> anyhow::Result<()> {
@@ -841,7 +812,7 @@ fn recent_dialog_scan_cursor_path(env: &SkillEnv) -> std::path::PathBuf {
 /// This is used by onboarding/contact pickers before a monitor exists. It
 /// records dialog names and last-message timestamps only; it does not mutate
 /// the delivery cursor and does not emit connector events.
-pub async fn hydrate_recent_dialog_peer_cache(
+pub(crate) async fn hydrate_recent_dialog_peer_cache(
     env: &SkillEnv,
     client: &Client,
     target_direct_users: usize,
@@ -1120,6 +1091,22 @@ async fn fetch_chat_avatar_data_uri(
     }
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(Some(format!("data:{AVATAR_MIME_TYPE};base64,{encoded}")))
+}
+
+/// Serializes `value` as pretty JSON and writes it to `path` atomically
+/// (temp file + rename), creating parent directories on demand. Shared by the
+/// peer cache, the recent-dialog scan cursor, and the recent-dialog marker so
+/// durability fixes land in one place.
+fn write_json_atomic(path: &std::path::Path, value: &impl Serialize) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create parent dir {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
 }
 
 fn peer_cache_path(env: &SkillEnv) -> std::path::PathBuf {

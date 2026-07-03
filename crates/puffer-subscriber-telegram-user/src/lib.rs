@@ -50,9 +50,6 @@ pub use crate::history_cache::{TelegramHistoryCache, TelegramHistoryContextMessa
 /// `login` and `state` modules stay private so unrelated helpers
 /// (`PersistedCredentials`, `default_init_params`, …) don't leak.
 pub use crate::login::LoginSession;
-pub use crate::peer_cache::{
-    hydrate_contact_book_cache, hydrate_recent_dialog_peer_cache, RecentDialogPeerCacheHydration,
-};
 pub use crate::qr_login::{start as qr_start, wait as qr_wait};
 pub use crate::state::{
     default_init_params, resolve_api_credentials, PersistedCredentials, SkillEnv,
