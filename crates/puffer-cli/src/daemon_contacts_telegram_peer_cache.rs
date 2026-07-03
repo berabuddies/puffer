@@ -45,25 +45,24 @@ impl ContactBookView {
 /// Reads the `contact_book` object from an account's peer-cache.json without
 /// dialing Telegram.
 pub(crate) fn account_contact_book_view(account_dir: &Path) -> ContactBookView {
-    let path = account_dir.join("peer-cache.json");
+    // The subscriber owns `contact-book.json` as the single readiness source
+    // (kept out of peer-cache.json so peer-cache writers cannot clobber it).
+    let path = account_dir.join("contact-book.json");
     let Ok(raw) = std::fs::read_to_string(path) else {
         return ContactBookView::pending();
     };
-    let Ok(cache) = serde_json::from_str::<Value>(&raw) else {
+    let Ok(book) = serde_json::from_str::<Value>(&raw) else {
         return ContactBookView::pending();
     };
-    let Some(contact_book) = cache.get("contact_book") else {
-        return ContactBookView::pending();
-    };
-    let state = contact_book
+    let state = book
         .get("state")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("pending")
         .to_string();
-    let updated_at_ms = contact_book.get("hydrated_at_ms").and_then(Value::as_i64);
-    let error = contact_book
+    let updated_at_ms = book.get("hydrated_at_ms").and_then(Value::as_i64);
+    let error = book
         .get("last_error")
         .and_then(Value::as_str)
         .map(str::trim)

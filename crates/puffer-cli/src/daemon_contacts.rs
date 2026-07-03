@@ -198,15 +198,21 @@ fn scan_telegram_sync(
 /// - `Ready` with an unsatisfied recent-dialog marker: dispatch — continues a
 ///   partial multi-pass dialog scan (accounts needing >500 dialogs) until the
 ///   direct-user target is met or dialogs are exhausted.
-/// - `Failed` / `AuthRequired`: never auto-dispatch. Re-dialing on every read
-///   would hammer Telegram unboundedly on persistent failures; the desktop's
-///   Refresh button (`contacts_refresh` dispatches unconditionally) is the
-///   explicit retry affordance, and auth breakage needs a re-login anyway.
+/// - `AuthRequired`: dispatch — this only ensures the subscriber is running and
+///   (single-flight) asks it to hydrate. When the subscriber is unauthorized it
+///   answers `auth_required` WITHOUT dialing Telegram (no storm), and if the
+///   degraded state was stale, starting the subscriber lets it resume the still
+///   -valid session and clear the state. Without this, an `auth_required`
+///   connection can never self-heal through the contacts path.
+/// - `Failed`: never auto-dispatch. The subscriber was authorized, so a re-run
+///   re-dials Telegram (contact book + up to 500 dialogs) on every read — an
+///   unbounded storm on persistent failures. The desktop's Refresh button
+///   (`contacts_refresh` dispatches unconditionally) is the explicit retry.
 fn should_dispatch_hydration(kind: SyncStateKind, recent_dialogs_satisfied: bool) -> bool {
     match kind {
-        SyncStateKind::Hydrating => true,
+        SyncStateKind::Hydrating | SyncStateKind::AuthRequired => true,
         SyncStateKind::Ready => !recent_dialogs_satisfied,
-        SyncStateKind::Failed | SyncStateKind::AuthRequired => false,
+        SyncStateKind::Failed => false,
     }
 }
 

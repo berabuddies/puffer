@@ -166,4 +166,14 @@ mod tests {
         assert!(recoverable_live_update_error("connection reset by peer"));
         assert!(recoverable_live_update_error("request timed out"));
     }
+
+    #[test]
+    fn peer_closed_stream_is_recoverable_not_reauth() {
+        // The exact grammers string seen when a flaky proxy drops the live
+        // stream: it must park+backoff (#604), not reauth a valid session.
+        assert!(recoverable_live_update_error(
+            "request error: read error, IO failed: read 0 bytes"
+        ));
+        assert!(recoverable_live_update_error("write error: broken pipe"));
+    }
 }

@@ -29,6 +29,8 @@ const RECENT_DIALOG_SCAN_CURSOR_FILE: &str = "recent-dialog-scan-cursor.json";
 /// Readiness marker the daemon's contact readers poll to learn recent-dialog
 /// hydration reached its target. Written ONLY by the subscriber (this crate).
 const RECENT_DIALOG_CACHE_FILE: &str = "recent-dialog-cache.json";
+/// Single-owner readiness file for the contact book (see [`ContactBookMeta`]).
+const CONTACT_BOOK_FILE: &str = "contact-book.json";
 /// Upper bound on dialogs scanned during one recent-dialog hydration pass.
 const RECENT_DIALOG_MAX_DIALOGS: usize = 500;
 const TELEGRAM_DIALOG_PAGE_LIMIT_MAX: usize = 100;
@@ -50,6 +52,13 @@ pub(crate) enum ContactBookState {
 }
 
 /// Readiness metadata for the durable contact book.
+///
+/// Persisted in its OWN file (`contact-book.json`), written solely by
+/// [`run_contact_hydration`]. It deliberately does NOT live inside
+/// [`TelegramPeerCache`]: that struct has many whole-struct persisters
+/// (startup hydration, deferred avatar hydration, live-update observation),
+/// and any one saving a stale snapshot would clobber the readiness state back
+/// to `pending` after a successful hydration.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct ContactBookMeta {
     #[serde(default)]
@@ -60,6 +69,43 @@ pub(crate) struct ContactBookMeta {
     pub(crate) last_error: Option<String>,
 }
 
+impl ContactBookMeta {
+    /// Loads the contact-book readiness metadata for one account. A missing
+    /// file reads as the default `pending` (never hydrated).
+    pub(crate) fn load(env: &SkillEnv) -> Self {
+        let path = contact_book_path(env);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    /// Atomically persists the contact-book readiness metadata.
+    pub(crate) fn save(&self, env: &SkillEnv) -> anyhow::Result<()> {
+        write_json_atomic(&contact_book_path(env), self)
+    }
+
+    /// Marks the contact book as actively hydrating (clears any prior error).
+    pub(crate) fn mark_hydrating(&mut self) {
+        self.state = ContactBookState::Hydrating;
+        self.last_error = None;
+    }
+
+    /// Marks the contact book as fully hydrated at `now_ms`.
+    pub(crate) fn mark_ready(&mut self, now_ms: i64) {
+        self.state = ContactBookState::Ready;
+        self.hydrated_at_ms = Some(now_ms);
+        self.last_error = None;
+    }
+
+    /// Marks the contact book as failed with `error` at `now_ms`.
+    pub(crate) fn mark_failed(&mut self, error: String, now_ms: i64) {
+        self.state = ContactBookState::Failed;
+        self.hydrated_at_ms = Some(now_ms);
+        self.last_error = Some(error);
+    }
+}
+
 /// Durable cache of Telegram peer metadata for one subscriber account.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TelegramPeerCache {
@@ -67,8 +113,6 @@ pub(crate) struct TelegramPeerCache {
     version: u32,
     #[serde(default)]
     peers: Vec<TelegramPeerRecord>,
-    #[serde(default)]
-    pub(crate) contact_book: ContactBookMeta,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
@@ -108,7 +152,6 @@ impl TelegramPeerCache {
             return Ok(Self {
                 version: CACHE_VERSION,
                 peers: Vec::new(),
-                contact_book: ContactBookMeta::default(),
             });
         }
         let raw = std::fs::read_to_string(&path)
@@ -117,7 +160,6 @@ impl TelegramPeerCache {
             return Ok(Self {
                 version: CACHE_VERSION,
                 peers: Vec::new(),
-                contact_book: ContactBookMeta::default(),
             });
         }
         let mut cache: Self = serde_json::from_str(&raw)
@@ -161,26 +203,6 @@ impl TelegramPeerCache {
             return Ok(());
         }
         self.save(env)
-    }
-
-    /// Marks the contact book as actively hydrating (clears any prior error).
-    pub(crate) fn mark_hydrating(&mut self) {
-        self.contact_book.state = ContactBookState::Hydrating;
-        self.contact_book.last_error = None;
-    }
-
-    /// Marks the contact book as fully hydrated at `now_ms`.
-    pub(crate) fn mark_ready(&mut self, now_ms: i64) {
-        self.contact_book.state = ContactBookState::Ready;
-        self.contact_book.hydrated_at_ms = Some(now_ms);
-        self.contact_book.last_error = None;
-    }
-
-    /// Marks the contact book as failed with `error` at `now_ms`.
-    pub(crate) fn mark_failed(&mut self, error: String, now_ms: i64) {
-        self.contact_book.state = ContactBookState::Failed;
-        self.contact_book.hydrated_at_ms = Some(now_ms);
-        self.contact_book.last_error = Some(error);
     }
 
     fn observe_user(&mut self, user: &User, saved_name: Option<String>, source: &str) {
@@ -531,11 +553,11 @@ pub(crate) async fn hydrate_contact_book_cache(
 /// caches, so the daemon never dials Telegram for contacts itself.
 pub(crate) async fn run_contact_hydration(env: SkillEnv, client: Client, target: usize) {
     // Publish "hydrating" immediately so a concurrent contacts read sees the
-    // in-flight state instead of a stale "ready"/"pending".
-    let original = TelegramPeerCache::load(&env).unwrap_or_default();
-    let mut cache = original.clone();
-    cache.mark_hydrating();
-    if let Err(error) = cache.save_if_changed(&env, &original) {
+    // in-flight state. The contact book lives in its own file, so this write
+    // cannot be clobbered by the peer-cache saves the sub-hydrations perform.
+    let mut book = ContactBookMeta::load(&env);
+    book.mark_hydrating();
+    if let Err(error) = book.save(&env) {
         warn!(%error, "failed to persist hydrating contact-book state");
     }
 
@@ -554,23 +576,21 @@ pub(crate) async fn run_contact_hydration(env: SkillEnv, client: Client, target:
     }
     .await;
 
-    // Stamp the terminal state on a freshly-loaded cache (the sub-hydrations
-    // saved their own peer merges in between) and emit the outcome.
-    let original = TelegramPeerCache::load(&env).unwrap_or_default();
-    let mut cache = original.clone();
     let payload = match result {
         Ok(()) => {
-            cache.mark_ready(now_unix_millis());
-            let peer_count = cache.peers.len();
+            book.mark_ready(now_unix_millis());
+            let peer_count = TelegramPeerCache::load(&env)
+                .map(|cache| cache.peers.len())
+                .unwrap_or(0);
             json!({ "ok": true, "state": "ready", "peer_count": peer_count })
         }
         Err(error) => {
             let detail = format!("{error:#}");
-            cache.mark_failed(detail.clone(), now_unix_millis());
+            book.mark_failed(detail.clone(), now_unix_millis());
             json!({ "ok": false, "state": "failed", "error": detail })
         }
     };
-    if let Err(error) = cache.save_if_changed(&env, &original) {
+    if let Err(error) = book.save(&env) {
         warn!(%error, "failed to persist terminal contact-book state");
     }
     if let Err(error) = emit_control(&env.topic, "contacts_hydrated", payload) {
@@ -1113,6 +1133,10 @@ fn peer_cache_path(env: &SkillEnv) -> std::path::PathBuf {
     env.state_dir.join("peer-cache.json")
 }
 
+fn contact_book_path(env: &SkillEnv) -> std::path::PathBuf {
+    env.state_dir.join(CONTACT_BOOK_FILE)
+}
+
 fn peer_kind_label(chat: &Chat) -> &'static str {
     match chat {
         Chat::User(_) => "user",
@@ -1220,24 +1244,72 @@ mod tests {
     use crate::state::SkillEnv;
     use std::collections::BTreeSet;
 
-    #[test]
-    fn legacy_cache_without_contact_book_is_not_ready() {
-        let raw = r#"{"version":1,"peers":[]}"#;
-        let cache: TelegramPeerCache = serde_json::from_str(raw).unwrap();
-        assert_eq!(cache.contact_book.state, ContactBookState::Pending);
+    fn test_env(dir: &std::path::Path) -> SkillEnv {
+        SkillEnv {
+            state_dir: dir.to_path_buf(),
+            session_path: dir.join("telegram.session"),
+            topic: "telegram-user".to_string(),
+            workspace_config_dir: None,
+            live_session_path: None,
+        }
     }
 
     #[test]
-    fn contact_book_meta_roundtrips() {
-        let mut cache = TelegramPeerCache::default();
-        cache.mark_hydrating();
-        let json = serde_json::to_string(&cache).unwrap();
-        let back: TelegramPeerCache = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.contact_book.state, ContactBookState::Hydrating);
-        cache.mark_ready(1730000000000);
-        assert_eq!(cache.contact_book.state, ContactBookState::Ready);
-        cache.mark_failed("net down".into(), 1730000000001);
-        assert_eq!(cache.contact_book.last_error.as_deref(), Some("net down"));
+    fn missing_contact_book_file_reads_as_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let book = ContactBookMeta::load(&test_env(temp.path()));
+        assert_eq!(book.state, ContactBookState::Pending);
+    }
+
+    #[test]
+    fn contact_book_meta_roundtrips_through_its_own_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+
+        let mut book = ContactBookMeta::load(&env);
+        book.mark_hydrating();
+        book.save(&env).unwrap();
+        assert_eq!(
+            ContactBookMeta::load(&env).state,
+            ContactBookState::Hydrating
+        );
+
+        book.mark_ready(1730000000000);
+        book.save(&env).unwrap();
+        let ready = ContactBookMeta::load(&env);
+        assert_eq!(ready.state, ContactBookState::Ready);
+        assert_eq!(ready.hydrated_at_ms, Some(1730000000000));
+
+        book.mark_failed("net down".into(), 1730000000001);
+        book.save(&env).unwrap();
+        assert_eq!(
+            ContactBookMeta::load(&env).last_error.as_deref(),
+            Some("net down")
+        );
+    }
+
+    #[test]
+    fn peer_cache_save_does_not_touch_contact_book_file() {
+        // A whole-cache writer (peer merges) must never clobber the separately
+        // owned readiness metadata — the regression that reverted `ready` to
+        // `pending` after a successful hydration.
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let mut ready = ContactBookMeta::default();
+        ready.mark_ready(1730000000000);
+        ready.save(&env).unwrap();
+
+        let original = TelegramPeerCache::load(&env).unwrap();
+        let mut cache = original.clone();
+        cache.merge(TelegramPeerRecord {
+            id: "5".to_string(),
+            numeric_id: 5,
+            kind: "user".to_string(),
+            ..Default::default()
+        });
+        cache.save_if_changed(&env, &original).unwrap();
+
+        assert_eq!(ContactBookMeta::load(&env).state, ContactBookState::Ready);
     }
 
     #[test]
@@ -1279,7 +1351,6 @@ mod tests {
                 updated_at_ms: 1,
                 last_message_at_ms: None,
             }],
-            contact_book: ContactBookMeta::default(),
         };
 
         assert_eq!(

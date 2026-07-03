@@ -792,14 +792,17 @@ fn write_peer_cache_with_contact_book(account_dir: &Path, state: &str, peers: Ve
     std::fs::write(account_dir.join("telegram.session"), b"").unwrap();
     std::fs::write(
         account_dir.join("peer-cache.json"),
+        serde_json::to_vec_pretty(&json!({ "version": 2, "peers": peers })).unwrap(),
+    )
+    .unwrap();
+    // Readiness now lives in its own single-owner file, separate from the
+    // peer cache so peer-cache writers cannot clobber it.
+    std::fs::write(
+        account_dir.join("contact-book.json"),
         serde_json::to_vec_pretty(&json!({
-            "version": 1,
-            "contact_book": {
-                "state": state,
-                "hydrated_at_ms": 1_700_000_000_000_i64,
-                "last_error": Value::Null,
-            },
-            "peers": peers,
+            "state": state,
+            "hydrated_at_ms": 1_700_000_000_000_i64,
+            "last_error": Value::Null,
         }))
         .unwrap(),
     )
@@ -845,13 +848,16 @@ fn hydration_dispatch_policy_matches_sync_state() {
     // satisfied, then stops dispatching entirely.
     assert!(should_dispatch_hydration(SyncStateKind::Ready, false));
     assert!(!should_dispatch_hydration(SyncStateKind::Ready, true));
-    // Failed/auth are never auto-retried — Refresh is the retry affordance;
-    // auto-retry would re-dial Telegram unboundedly on persistent failures.
-    assert!(!should_dispatch_hydration(SyncStateKind::Failed, false));
-    assert!(!should_dispatch_hydration(
+    // AuthRequired dispatches to ensure the subscriber runs and can self-heal a
+    // stale degrade (the unauthorized arm answers without dialing — no storm).
+    assert!(should_dispatch_hydration(
         SyncStateKind::AuthRequired,
         false
     ));
+    assert!(should_dispatch_hydration(SyncStateKind::AuthRequired, true));
+    // Failed is never auto-retried — the subscriber was authorized, so a re-run
+    // re-dials Telegram; Refresh is the explicit retry affordance.
+    assert!(!should_dispatch_hydration(SyncStateKind::Failed, false));
 }
 
 #[test]

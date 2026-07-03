@@ -47,7 +47,7 @@ pub(crate) fn classify_error(error: &str) -> &'static str {
         "user_deactivated",
         "deauthor",
     ];
-    const NETWORK: [&str; 9] = [
+    const NETWORK: [&str; 15] = [
         "connect",
         "network",
         "timed out",
@@ -55,8 +55,18 @@ pub(crate) fn classify_error(error: &str) -> &'static str {
         "transport",
         "broken pipe",
         "connection reset",
+        "connection closed",
+        "connection aborted",
         "dns",
         "io error",
+        // grammers surfaces transport drops as `IO failed: read 0 bytes`
+        // (peer closed) and `read error` / `write error`; these are recoverable
+        // network losses, not auth failures — misclassifying them reauths a
+        // still-valid session (#604).
+        "io failed",
+        "read 0 bytes",
+        "read error",
+        "write error",
     ];
     if AUTH.iter().any(|needle| e.contains(needle)) {
         "auth"
@@ -153,6 +163,13 @@ mod tests {
         assert_eq!(classify_error("failed to connect: timed out"), "network");
         assert_eq!(classify_error("transport closed"), "network");
         assert_eq!(classify_error("connection reset by peer"), "network");
+        // grammers transport-drop strings must classify as network (not other),
+        // so the manager degrades to Retrying rather than AuthRequired (#604).
+        assert_eq!(
+            classify_error("request error: read error, IO failed: read 0 bytes"),
+            "network"
+        );
+        assert_eq!(classify_error("write error: connection closed"), "network");
     }
 
     #[test]
