@@ -5,13 +5,15 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
     connector_slug_accepts_contact_id, contact_display_name_from_payload, contact_id_prefix,
-    contact_ids_from_payload, normalize_contact_id, normalize_contact_ids, ConnectorContact,
-    ContactContext, ContactDisplay, SavedContact,
+    contact_ids_from_payload, normalize_contact_id, normalize_contact_ids, ConnectionHealthStatus,
+    ConnectionState, ConnectorContact, ContactContext, ContactDisplay, SavedContact,
+    SubscriptionManager,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 use uuid::Uuid;
@@ -35,8 +37,9 @@ use daemon_contacts_store::{
     load_proposals, load_store, prune_proposals_for_contact_ids, save_proposals, save_store,
 };
 use daemon_contacts_telegram::{
-    collect_telegram_candidates, read_telegram_peer_avatars, read_telegram_peer_names,
-    recent_telegram_contacts, refresh_telegram_peer_caches, telegram_contact_picker_ready,
+    account_contact_book_view, collect_telegram_candidates, read_telegram_peer_avatars,
+    read_telegram_peer_names, recent_telegram_contacts, refresh_telegram_peer_caches,
+    request_hydration, telegram_contact_picker_ready,
 };
 use daemon_contacts_trace::ContactInferTrace;
 
@@ -51,6 +54,154 @@ const INFERENCE_CONTEXT_LIMIT: usize =
     TELEGRAM_RECENT_CONTEXT_LIMIT + (TELEGRAM_INTERACTION_CONTEXT_LIMIT * 2);
 const HISTORY_CANDIDATE_LIMIT: usize = 1_000;
 const DAY_MS: i128 = 86_400_000;
+/// Direct-user scan target dispatched with on-demand contact-book hydration.
+const CONTACTS_HYDRATE_TARGET: usize = 120;
+
+/// Coarse contact-sync state surfaced to the desktop `sync` contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncStateKind {
+    Ready,
+    Hydrating,
+    Failed,
+    AuthRequired,
+}
+
+impl SyncStateKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SyncStateKind::Ready => "ready",
+            SyncStateKind::Hydrating => "hydrating",
+            SyncStateKind::Failed => "failed",
+            SyncStateKind::AuthRequired => "auth_required",
+        }
+    }
+
+    /// Aggregation weight, worst-first: hydrating > failed > auth_required > ready.
+    fn severity(self) -> u8 {
+        match self {
+            SyncStateKind::Hydrating => 3,
+            SyncStateKind::Failed => 2,
+            SyncStateKind::AuthRequired => 1,
+            SyncStateKind::Ready => 0,
+        }
+    }
+}
+
+/// The `sync` object returned by contacts RPCs. Exact shape:
+/// `{ "state": "ready"|"hydrating"|"failed"|"auth_required",
+///    "updated_at_ms": i64|null, "error": string|null }`.
+#[derive(Debug, Clone)]
+struct SyncState {
+    kind: SyncStateKind,
+    updated_at_ms: Option<i64>,
+    error: Option<String>,
+}
+
+impl SyncState {
+    fn ready() -> Self {
+        Self {
+            kind: SyncStateKind::Ready,
+            updated_at_ms: None,
+            error: None,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "state": self.kind.as_str(),
+            "updated_at_ms": self.updated_at_ms,
+            "error": self.error,
+        })
+    }
+}
+
+/// Whether an account dir participates in the aggregate sync state. A dir with
+/// neither a session nor a peer cache is a stale leftover and is ignored.
+fn account_contributes_to_sync(account_dir: &Path) -> bool {
+    account_dir.join("telegram.session").exists() || account_dir.join("peer-cache.json").exists()
+}
+
+/// Derives one account's sync state from its peer-cache `contact_book` metadata.
+/// `auth_required` is reported only when the manager is reachable and the
+/// account's connection is `Degraded` with `AuthRequired` health; otherwise the
+/// file-derived state stands.
+fn account_sync_state(account_dir: &Path, manager: Option<&SubscriptionManager>) -> SyncState {
+    let view = account_contact_book_view(account_dir);
+    let mut kind = match view.state.as_str() {
+        "ready" => SyncStateKind::Ready,
+        "failed" => SyncStateKind::Failed,
+        _ => SyncStateKind::Hydrating,
+    };
+    if let Some(manager) = manager {
+        if account_connection_auth_required(manager, account_dir) {
+            kind = SyncStateKind::AuthRequired;
+        }
+    }
+    SyncState {
+        kind,
+        updated_at_ms: view.updated_at_ms,
+        error: view.error,
+    }
+}
+
+fn account_connection_auth_required(manager: &SubscriptionManager, account_dir: &Path) -> bool {
+    let Some(slug) = account_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(connection) = manager.connection_store().get(slug) else {
+        return false;
+    };
+    connection.state == ConnectionState::Degraded
+        && connection.health.map(|health| health.status)
+            == Some(ConnectionHealthStatus::AuthRequired)
+}
+
+/// Worst-first aggregate of per-account sync states. Empty (no telegram
+/// accounts) reports `ready`.
+fn aggregate_sync(states: Vec<SyncState>) -> SyncState {
+    states
+        .into_iter()
+        .max_by_key(|state| state.kind.severity())
+        .unwrap_or_else(SyncState::ready)
+}
+
+/// Reads the aggregate Telegram contact-sync state across all accounts. Pure
+/// file read plus optional manager-derived `auth_required`.
+fn telegram_sync_state(paths: &ConfigPaths, manager: Option<&SubscriptionManager>) -> SyncState {
+    let root = paths.user_config_dir.join("telegram-accounts");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return SyncState::ready();
+    };
+    let mut states = Vec::new();
+    for entry in entries.flatten() {
+        let account_dir = entry.path();
+        if account_contributes_to_sync(&account_dir) {
+            states.push(account_sync_state(&account_dir, manager));
+        }
+    }
+    aggregate_sync(states)
+}
+
+/// Fire-and-forget hydration nudge for every account whose sync state is not
+/// yet `ready`. No-op when the manager is unavailable (pure read).
+fn dispatch_telegram_hydration_for_stale_accounts(
+    paths: &ConfigPaths,
+    manager: Option<&SubscriptionManager>,
+) {
+    let root = paths.user_config_dir.join("telegram-accounts");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let account_dir = entry.path();
+        if !account_contributes_to_sync(&account_dir) {
+            continue;
+        }
+        if account_sync_state(&account_dir, manager).kind != SyncStateKind::Ready {
+            request_hydration(paths, &account_dir, CONTACTS_HYDRATE_TARGET);
+        }
+    }
+}
 
 pub(crate) fn cached_telegram_peer_avatars(paths: &ConfigPaths) -> HashMap<String, String> {
     read_telegram_peer_avatars(paths)
@@ -166,6 +317,11 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
     let mut saved = filtered_saved_contacts(store.contacts, query);
     enrich_saved_contact_avatars(paths, &mut saved);
     let recent_request = is_recent_telegram_request(&params);
+    let manager = puffer_core::subscription_manager().ok();
+    let sync = telegram_sync_state(paths, manager.as_deref());
+    if query.is_none() {
+        dispatch_telegram_hydration_for_stale_accounts(paths, manager.as_deref());
+    }
     let (page, ready) = if recent_request {
         let mut snapshot = recent_telegram_contacts(paths, limit)?;
         reject_bot_candidates(&mut snapshot.candidates);
@@ -202,6 +358,7 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
             .is_some_and(|cursor| !cursor.trim().is_empty()),
         query_present = query.is_some(),
         ready,
+        sync_state = sync.kind.as_str(),
         returned_count,
         candidate_count = page.candidate_count,
         has_more = page.has_more,
@@ -212,7 +369,7 @@ pub(crate) fn handle_contacts_list(paths: &ConfigPaths, params: &Value) -> Resul
         "contacts": saved,
         "candidates": candidates,
         "proposals": proposals,
-        "ready": ready,
+        "sync": sync.to_json(),
         "limit": limit,
         "returned_count": returned_count,
         "candidate_count": page.candidate_count,
@@ -242,7 +399,7 @@ pub(crate) fn handle_contacts_search(paths: &ConfigPaths, params: &Value) -> Res
         "contacts": saved,
         "candidates": candidates,
         "proposals": proposals,
-        "ready": true,
+        "sync": SyncState::ready().to_json(),
         "limit": limit,
         "returned_count": returned_count,
         "candidate_count": page.candidate_count,

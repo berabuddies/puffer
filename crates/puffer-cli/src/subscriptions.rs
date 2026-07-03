@@ -1131,6 +1131,29 @@ fn connection_has_instantiated_subscriber(
     find_subscriber_manifest(&subscriber_manifest_roots(paths), &subscriber.manifest_slug).is_some()
 }
 
+/// Starts the subscriber backing a connection so the daemon can dispatch
+/// on-demand control commands (e.g. contact-book hydration). Unlike the auth
+/// monitor this does not gate on `has_consumer`: contacts are read on demand
+/// even when no workflow is currently consuming the stream. Idempotent — a
+/// no-op when the subscriber is already running or the connection lacks a
+/// subscriber template.
+pub(crate) fn ensure_subscriber_for_contacts(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    slug: &str,
+) -> Result<()> {
+    let Some(connection) = manager.connection_store().get(slug) else {
+        return Ok(());
+    };
+    let Some(template) = manager.connector_store().get(&connection.connector_slug) else {
+        return Ok(());
+    };
+    if template.subscriber.is_none() {
+        return Ok(());
+    }
+    start_connection_subscriber(manager, paths, &connection, &template)
+}
+
 fn start_connection_subscriber(
     manager: &SubscriptionManager,
     paths: &ConfigPaths,

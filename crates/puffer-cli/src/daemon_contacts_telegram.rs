@@ -8,6 +8,7 @@ use super::{
 use anyhow::{Context, Result};
 use grammers_session::Session;
 use puffer_config::ConfigPaths;
+use puffer_subscriber_runtime::SubscriberCommand;
 use puffer_subscriptions::{normalize_contact_id, ContactContext};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -18,46 +19,50 @@ use std::path::Path;
 
 #[path = "daemon_contacts_telegram_peer_cache.rs"]
 mod daemon_contacts_telegram_peer_cache;
+pub(super) use daemon_contacts_telegram_peer_cache::account_contact_book_view;
 use daemon_contacts_telegram_peer_cache::{
-    collect_telegram_peer_cache_candidates, hydrate_telegram_contact_picker_peer_cache_if_needed,
-    hydrate_telegram_peer_cache, hydrate_telegram_peer_cache_if_needed,
-    hydrate_telegram_recent_peer_cache, hydrate_telegram_recent_peer_cache_if_needed,
+    collect_telegram_peer_cache_candidates,
     telegram_contact_picker_dialog_cache_claims_target_satisfied,
-    telegram_recent_dialog_cache_claims_target_satisfied, TelegramPeerCacheHydrationMode,
+    telegram_recent_dialog_cache_claims_target_satisfied,
 };
 
-#[cfg(test)]
-pub(super) fn install_test_telegram_peer_cache_hydrator<F>(hydrator: F) -> impl Drop
-where
-    F: Fn(&ConfigPaths, &Path) -> Result<()> + 'static,
-{
-    daemon_contacts_telegram_peer_cache::install_test_telegram_peer_cache_hydrator(hydrator)
-}
+/// Number of direct-user dialogs the subscriber should scan toward when the
+/// daemon dispatches a contact-book hydration request. Mirrors the contact
+/// picker ceiling and the `TelegramHydrateContacts` command default.
+const HYDRATE_DIALOG_TARGET: usize = 120;
 
-#[cfg(test)]
-pub(super) fn write_test_recent_dialog_cache_marker(
-    account_dir: &Path,
-    direct_users_seen: usize,
-    target: usize,
-) -> Result<()> {
-    daemon_contacts_telegram_peer_cache::write_recent_dialog_cache_marker(
-        account_dir,
-        direct_users_seen,
-        target,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn write_test_recent_dialog_cache_exhausted_marker(
-    account_dir: &Path,
-    direct_users_seen: usize,
-    target: usize,
-) -> Result<()> {
-    daemon_contacts_telegram_peer_cache::write_recent_dialog_cache_exhausted_marker(
-        account_dir,
-        direct_users_seen,
-        target,
-    )
+/// Dispatches a fire-and-forget `TelegramHydrateContacts` command to the
+/// subscriber for one account, starting the subscriber on demand. This is a
+/// pure trigger: it never dials Telegram from the daemon and returns quietly
+/// when no manager is installed (contacts remain a pure file read).
+pub(super) fn request_hydration(paths: &ConfigPaths, account_dir: &Path, target: usize) {
+    if !account_dir.join("telegram.session").exists() {
+        return;
+    }
+    let Some(slug) = account_dir.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(manager) = puffer_core::subscription_manager() else {
+        return;
+    };
+    if let Err(error) = crate::subscriptions::ensure_subscriber_for_contacts(&manager, paths, slug)
+    {
+        tracing::warn!(
+            account = %account_dir.display(),
+            %error,
+            "failed to start Telegram subscriber for contact hydration"
+        );
+        return;
+    }
+    if let Err(error) =
+        manager.send_command(slug, &SubscriberCommand::TelegramHydrateContacts { target })
+    {
+        tracing::warn!(
+            account = %account_dir.display(),
+            %error,
+            "failed to dispatch Telegram contact hydration command"
+        );
+    }
 }
 
 const DEFAULT_LIMIT: usize = 30;
@@ -162,7 +167,6 @@ pub(super) fn collect_telegram_candidates(
     for entry in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
         let Ok(entry) = entry else { continue };
         let account_dir = entry.path();
-        hydrate_telegram_peer_cache_if_needed(paths, &account_dir);
         collect_telegram_peer_cache_candidates(&account_dir, by_id);
         let path = account_dir.join("message-diagnostics.ndjson");
         if !path.exists() {
@@ -216,7 +220,6 @@ pub(super) fn telegram_contact_picker_ready(paths: &ConfigPaths, limit: usize) -
         if !account_dir.join("telegram.session").exists() {
             continue;
         }
-        hydrate_telegram_contact_picker_peer_cache_if_needed(paths, &account_dir, limit);
         if !telegram_contact_picker_dialog_cache_claims_target_satisfied(&account_dir, limit) {
             ready = false;
         }
@@ -224,7 +227,9 @@ pub(super) fn telegram_contact_picker_ready(paths: &ConfigPaths, limit: usize) -
     Ok(ready)
 }
 
-/// Forces a best-effort refresh of Telegram peer caches for contact pickers.
+/// Dispatches a best-effort contact-book hydration request for every Telegram
+/// account. Fire-and-forget: the subscriber owns the actual dialing and marker
+/// writing; this only nudges it.
 pub(super) fn refresh_telegram_peer_caches(paths: &ConfigPaths) -> Result<()> {
     let root = paths.user_config_dir.join("telegram-accounts");
     if !root.exists() {
@@ -232,7 +237,7 @@ pub(super) fn refresh_telegram_peer_caches(paths: &ConfigPaths) -> Result<()> {
     }
     for entry in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
         let Ok(entry) = entry else { continue };
-        hydrate_telegram_peer_cache(paths, &entry.path(), TelegramPeerCacheHydrationMode::Force);
+        request_hydration(paths, &entry.path(), HYDRATE_DIALOG_TARGET);
     }
     Ok(())
 }
@@ -253,19 +258,10 @@ pub(super) fn recent_telegram_contacts(
     for entry in std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
         let Ok(entry) = entry else { continue };
         let account_dir = entry.path();
-        hydrate_telegram_recent_peer_cache_if_needed(paths, &account_dir, limit);
-        let account_ready = telegram_recent_contacts_ready(&account_dir, limit);
-        if !account_ready {
+        if !telegram_recent_contacts_ready(&account_dir, limit) {
             ready = false;
         }
-        let mut account_candidates = collect_recent_telegram_account_candidates(&account_dir);
-        if account_ready
-            && account_candidates.len() < limit
-            && telegram_recent_dialog_cache_claims_target_satisfied(&account_dir, limit)
-        {
-            hydrate_telegram_recent_peer_cache(paths, &account_dir, limit);
-            account_candidates = collect_recent_telegram_account_candidates(&account_dir);
-        }
+        let account_candidates = collect_recent_telegram_account_candidates(&account_dir);
         merge_recent_telegram_candidates(&mut by_id, account_candidates);
     }
     let mut candidates = by_id.into_values().collect::<Vec<_>>();
