@@ -29,7 +29,8 @@
 - **新增命令** `TelegramHydrateContacts { target: usize }`（定义于 `puffer-subscriber-runtime/src/command.rs`）。
 - 运行期处理：在已有 live client 上 `tokio::spawn` 执行 contact-book hydration（`contacts.GetContacts{hash:0}` + `contacts.GetSaved`）+ recent-dialog 扫描到 `target`。
 - **单飞**：进程内最多一个 in-flight hydration 任务（持有 `JoinHandle`）；任务在跑时重复命令直接 ack `contacts_hydrated { ok: false, state: "hydrating" }`，不排队不叠加。
-- 完成/失败：写 peer-cache v2（见 2.2）+ 发 control event `contacts_hydrated { ok, error?, peer_count }`。
+- **任务启动时即写** `contact_book.state = "hydrating"`（否则 daemon 在完成前只能读到 stale not-ready）；完成/失败时写终态 + 发 control event `contacts_hydrated { ok, error?, peer_count }`。
+- **recent-dialogs marker 文件的写方也移到 subscriber**：hydrate 命令同时执行 dialog 扫描并写 marker；daemon 的就绪计算读 peer-cache v2 + marker 两个文件，均为纯读。
 - 登录阶段收到该命令：回 `contacts_hydrated { ok: false, state: "auth_required" }`。
 
 ### 2.2 peer-cache.json v2
@@ -55,7 +56,9 @@
 
 - `contacts_list` / `contacts_search`：纯读缓存立即返回；发现账号 not-ready 时 fire-and-forget 发一次 hydrate 命令。
 - `contacts_refresh`：无条件发 force-hydrate 命令后立即返回当前快照。
-- **按需拉起 subscriber**：复用 `start_connection_subscriber`（放宽 `has_consumer` 前置条件），有 session 文件但 subscriber 未跑时先拉起再发命令。
+- **按需拉起 subscriber**：复用 `start_connection_subscriber`（放宽 `has_consumer` 前置条件），仅对**存在 session 文件**的账号，subscriber 未跑时先拉起再发命令。
+- **manager 获取**：contacts handler 经 `puffer_core::subscription_manager()` 全局 OnceLock 访问（`daemon_workflows.rs:112` 已有先例），**不改 RPC 签名**；manager 不可用时退化为纯读缓存（状态照常透出，只是不触发 hydration）。
+- **账号目录 ↔ connection 映射**：`telegram-accounts/<dir>` 目录名即 connection slug（connect.rs 现约定），实现第一步先以断言/测试固化该约定。
 - **响应契约（破坏性变更）**：`ready: bool` 替换为
 
   ```json
@@ -72,10 +75,11 @@
 | 事件 | class | ConnectionHealthStatus |
 |---|---|---|
 | `resume_failed` | `auth` | `AuthRequired`（→ 立即 `Degraded`） |
-| `resume_failed` | `network` / 其他 | `Retrying`（→ 立即 `Degraded`） |
+| `resume_failed` | `network` | `Retrying`（→ 立即 `Degraded`） |
 | `update_loop_error` | `auth` | `AuthRequired`（→ 立即 `Degraded`） |
-| `update_loop_error` | `network` / 其他 | `Retrying`（→ 立即 `Degraded`） |
+| `update_loop_error` | `network` / `other` | `Retrying`（→ 立即 `Degraded`） |
 
+- **`resume_failed` 仅映射 class ∈ {auth, network}**：`not_signed_in` 等良性首登路径（class 为 `none`/`config`）不映射，避免把正常首次登录标成 Degraded——该场景已由 `login_required` 事件覆盖。
 - subscriber 侧零改动。
 - 60s 轮询（`spawn_auth_monitor`）保留为兜底（覆盖进程静默死亡），不再是主检测路径。
 - 降级感知从最多 60s 降到秒级。
@@ -86,6 +90,7 @@
 
 - `UpdateLoopExit` 新增变体 `WentOffline(String)`。
 - update loop 遇 **network 类**流错误：删除现有"固定 1s + 单次 resume"分支，改为返回 `WentOffline(detail)` → `run()` 以 `OfflineResumeState::new(detail)` 重新进入登录循环的离线停靠分支。
+- **`run()` 控制流重组（本设计最大结构改动）**：现状"登录循环 → 主循环"是线性两段，`WentOffline` 无法回到停靠态。将离线停靠 + 登录循环提取为可重入函数（或将 `run()` 改为显式相位外层循环），使入口与运行期离线共用同一段代码。此重组以行为不变为约束（现有登录/停靠测试全部保持通过）。
 - **auth 类**错误：走现有 `ReauthStarted` 路径回登录阶段（`login_required` 已映射 `Degraded`）。
 - **进程不再因流错误退出**；fatal exit 只留给 stdin 断开等真正意外。
 - `next_offline_retry_delay` 补 **full jitter**：`delay/2 + rand(delay/2)`，用 `SystemTime` 纳秒做种子，不引入新依赖；封顶 60s 不变。
