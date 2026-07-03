@@ -84,6 +84,7 @@
     onLogout: (providerId: string) => void;
     copilotLogin?: { userCode: string; verificationUri: string } | null;
     onLoginCopilot?: (providerId: string) => void;
+    onCancelLogin?: () => void;
     onLoginOauth?: (providerId: string) => void;
     onApiKeyLogin?: (
       providerId: string,
@@ -1813,6 +1814,7 @@
           busyImportKey={props.busyImportKey ?? null}
           copilotLogin={props.copilotLogin ?? null}
           onLoginCopilot={props.onLoginCopilot ?? (() => {})}
+          onCancelLogin={props.onCancelLogin ?? (() => {})}
           onLoginOauth={props.onLoginOauth ?? (() => {})}
           onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
           onLogout={props.onLogout}

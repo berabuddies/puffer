@@ -35,6 +35,7 @@
     busyImportKey: string | null;
     copilotLogin: { userCode: string; verificationUri: string } | null;
     onLoginCopilot: (providerId: string) => void;
+    onCancelLogin: () => void;
     onLoginOauth: (providerId: string) => void;
     onLoginApiKey: (
       providerId: string,
@@ -314,6 +315,7 @@
               busyImportKey={props.busyImportKey}
               copilotLogin={props.copilotLogin}
               onLoginCopilot={props.onLoginCopilot}
+              onCancelLogin={props.onCancelLogin}
               onLoginOauth={props.onLoginOauth}
               onLoginApiKey={props.onLoginApiKey}
               onLogout={props.onLogout}
@@ -340,6 +342,7 @@
             busyImportKey={props.busyImportKey}
             copilotLogin={props.copilotLogin}
             onLoginCopilot={props.onLoginCopilot}
+            onCancelLogin={props.onCancelLogin}
             onLoginOauth={props.onLoginOauth}
             onLoginApiKey={props.onLoginApiKey}
             onLogout={props.onLogout}

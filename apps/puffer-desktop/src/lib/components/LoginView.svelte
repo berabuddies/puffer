@@ -79,6 +79,7 @@
   export let busyImportKey: string | null = null;
   export let onLoginOauth: (providerId: string) => void = () => {};
   export let onLoginCopilot: (providerId: string) => void = () => {};
+  export let onCancelLogin: () => void = () => {};
   export let copilotLogin: { userCode: string; verificationUri: string } | null = null;
   export let onLoginApiKey: (
     providerId: string,
@@ -204,6 +205,12 @@
   }
 
   function closeProviderModal() {
+    // Dismissing the modal during an in-flight login (PKCE OAuth like Anthropic,
+    // or the Copilot device flow) must cancel it — otherwise the app stays
+    // "busy" and blocks connecting other providers until the OAuth / device-code
+    // timeout fires (up to ~90s). API-key submits are fast and not cancelable
+    // here, so leave those alone.
+    if ((copilotLogin || busyProviderId) && !pendingApiKeyProvider) onCancelLogin();
     activeProviderId = null;
   }
 

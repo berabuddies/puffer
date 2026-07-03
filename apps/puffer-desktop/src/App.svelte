@@ -281,6 +281,10 @@
   let importBusyKey = $state<string | null>(null);
   // Active GitHub Copilot device-flow login (shown while the user authorizes).
   let copilotLogin = $state<{ userCode: string; verificationUri: string } | null>(null);
+  // Monotonic token for the in-flight auth attempt (PKCE OAuth or Copilot
+  // device flow). Canceling bumps it so a late result from an abandoned login
+  // is ignored — see cancelActiveLogin / handleOauthLogin.
+  let activeLoginGeneration = 0;
   let actionBusy = $state(false);
   let remoteOperation = $state<RemoteOperation | null>(null);
   let remoteBusy = $state(false);
@@ -1368,9 +1372,15 @@
     }
     authBusyProviderId = providerId;
     authError = null;
+    const generation = ++activeLoginGeneration;
     const wasOnboarding = onboarding;
     try {
-      settingsSnapshot = await loginWithOauth(providerId, remoteConnection);
+      const snapshot = await loginWithOauth(providerId, remoteConnection);
+      // The user may have dismissed the modal mid-flow (browser OAuth is a
+      // long, cancelable wait). If so, ignore the late result so a canceled
+      // login can't reconnect or clobber UI state.
+      if (generation !== activeLoginGeneration) return;
+      settingsSnapshot = snapshot;
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
       if (wasOnboarding && !onboarding) {
@@ -1379,10 +1389,13 @@
       statusMessage = `Connected to ${providerId}.`;
       await refreshGroups();
     } catch (error) {
+      if (generation !== activeLoginGeneration) return;
       authError = String(error);
       statusMessage = authError;
     } finally {
-      authBusyProviderId = null;
+      // Only clear the busy flag if we still own it; a cancel already cleared
+      // it and may have started a different attempt.
+      if (generation === activeLoginGeneration) authBusyProviderId = null;
     }
   }
 
@@ -1408,8 +1421,11 @@
       let intervalMs = Math.max(start.interval, 1) * 1000;
       while (Date.now() < deadlineMs) {
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
-        if (copilotLogin === null) return; // canceled elsewhere
+        if (copilotLogin === null) return; // canceled (see cancelActiveLogin)
         const poll = await copilotLoginPoll(start.deviceCode, remoteConnection);
+        // Re-check after the await: the user may have canceled mid-poll. Bail
+        // without applying results so a dismissed login can't reconnect.
+        if (copilotLogin === null) return;
         if (poll.status === "done" && poll.snapshot) {
           settingsSnapshot = poll.snapshot;
           onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
@@ -1437,6 +1453,24 @@
     } finally {
       authBusyProviderId = null;
     }
+  }
+
+  // Cancel an in-flight Copilot device-flow login (user dismissed the code
+  // card / closed the modal before authorizing). Clearing `copilotLogin` makes
+  // the poll loop bail at its next check, and clearing the busy flag frees the
+  // UI immediately so other providers can be connected without waiting out the
+  // device-code timeout.
+  // Cancel whatever login is in flight — a PKCE OAuth wait (anthropic/openai)
+  // or a Copilot device-flow poll — when the user dismisses its modal. Bumping
+  // the generation makes the pending handler ignore its late result; clearing
+  // the busy flag frees the UI immediately so another provider can be connected
+  // without waiting out the OAuth/device-code timeout.
+  function cancelActiveLogin() {
+    if (copilotLogin === null && authBusyProviderId === null) return;
+    activeLoginGeneration += 1;
+    copilotLogin = null;
+    authBusyProviderId = null;
+    statusMessage = "Login canceled.";
   }
 
   function normalizedProviderConnectionId(providerId: string): string {
@@ -4781,6 +4815,7 @@
             busyImportKey={importBusyKey}
             copilotLogin={copilotLogin}
             onLoginCopilot={(providerId) => void handleCopilotLogin(providerId)}
+            onCancelLogin={cancelActiveLogin}
             onLoginOauth={(providerId) => void handleOauthLogin(providerId)}
             onLoginApiKey={(providerId, apiKey, options) =>
               void handleApiKeyLogin(providerId, apiKey, options)}
@@ -4906,6 +4941,7 @@
               onLogout={(providerId) => void handleLogout(providerId)}
               copilotLogin={copilotLogin}
               onLoginCopilot={(providerId) => void handleCopilotLogin(providerId)}
+              onCancelLogin={cancelActiveLogin}
               onLoginOauth={(providerId) => void handleOauthLogin(providerId)}
               onApiKeyLogin={(providerId, apiKey, options) =>
                 void handleApiKeyLogin(providerId, apiKey, options)}
