@@ -26,13 +26,16 @@ use crate::session_resume::{recoverable_live_update_error, try_resume_session, S
 use crate::state::SkillEnv;
 use crate::updates::{handle_live_update, spawn_live_update_task, LiveUpdateEvent};
 
-const LIVE_UPDATE_RECOVERY_DELAY: Duration = Duration::from_secs(1);
 const OFFLINE_RESUME_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(5);
 const OFFLINE_RESUME_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
 enum UpdateLoopExit {
     StdinClosed,
     ReauthStarted,
+    /// The live update stream was lost for a recoverable (network-class)
+    /// reason. `run()` re-enters the shared offline-parking login phase with
+    /// the bounded, jittered retry timer armed instead of killing the process.
+    WentOffline(String),
 }
 
 enum RuntimeCommandOutcome {
@@ -72,7 +75,10 @@ impl HydrationSlot {
         self.handle = Some(handle);
     }
 
-    /// Frees the slot. Used after a synchronous completion and in tests.
+    /// Frees the slot synchronously. Real code relies on `try_begin` observing
+    /// a finished handle to auto-free, so this is only needed by tests that
+    /// simulate completion without a runtime.
+    #[cfg(test)]
     fn finish(&mut self) {
         self.running = false;
         self.handle = None;
@@ -128,76 +134,28 @@ impl OfflineResumeState {
 /// Result state handed back by the spawned startup hydration task.
 type StartupHydrationState = (DeliveryCursor, NotificationMuteCache);
 
-/// Runs the Telegram user subscriber until stdin closes or a fatal error
-/// occurs. The caller is expected to already be inside a Tokio runtime
-/// (the top-level `#[tokio::main]` in the puffer binary).
+/// What the login phase produced once an authorized client exists.
+struct LoginPhaseOutcome {
+    /// Server-time boundary of a recovered offline gap, threaded into the
+    /// update loop's monitoring boundary so post-gap messages still deliver.
+    recovered_offline_since_ms: Option<i64>,
+}
+
+/// Parks the subscriber (bounded jittered offline retries) and/or drives the
+/// login command flow until `session.client` is authorized, then returns.
 ///
-/// Behavior:
-/// * Reads `$PUFFER_SKILL_STATE_DIR` / `$PUFFER_SKILL_TOPIC` from the env.
-/// * Opens / creates the session file.
-/// * If the session is already authenticated, connects immediately and
-///   enters the update loop.
-/// * Otherwise, waits on stdin for a `TelegramLoginStart` command before
-///   requesting a login code.
-/// * In the update loop, processes stdin commands and telegram updates
-///   concurrently with `tokio::select!`.
-pub async fn run() -> anyhow::Result<()> {
-    let env = SkillEnv::from_env();
-    // Install tracing first so every log below is durably written to
-    // <state>/telegram.log. Held for the whole process: dropping the guard
-    // flushes and stops the non-blocking file writer.
-    let _log_guard = crate::logging::init(&env);
-    info!(
-        session = %env.session_path.display(),
-        topic = %env.topic,
-        log = %env.state_dir.join("telegram.log").display(),
-        "starting telegram-user subscriber"
-    );
-
-    if let Some(parent) = env.session_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("create session parent dir {}", parent.display()))?;
-        }
-    }
-
-    let mut commands = CommandStream::new();
-    let mut session = LoginSession::new(env.clone());
-
-    // Attempt to reuse a pre-authenticated session first. If the session file
-    // holds a valid auth key we can go straight to the update loop without
-    // prompting the agent for login credentials.
-    //
-    // `offline_state` parks the subscriber as "temporarily offline" when the
-    // resume failed for infrastructure reasons (network/DC unreachable) with
-    // the auth material intact. The same login-phase state machine owns both
-    // stdin commands and the automatic retry timer so the Telegram client and
-    // command stream still have a single owner.
-    let mut offline_state: Option<OfflineResumeState> = None;
+/// Shared by startup and by the update loop's `WentOffline` re-entry, so a
+/// network drop after months of uptime re-parks on the exact same state
+/// machine that a cold start uses. Returns `Ok(None)` when stdin closed before
+/// login completed (the caller should exit cleanly).
+async fn login_phase(
+    env: &SkillEnv,
+    commands: &mut CommandStream,
+    session: &mut LoginSession,
+    mut offline_state: Option<OfflineResumeState>,
+    login_required_since: &mut SystemTime,
+) -> anyhow::Result<Option<LoginPhaseOutcome>> {
     let mut recovered_offline_since_ms: Option<i64> = None;
-    // Watermark for detecting a session promoted by an external `puffer
-    // connect` login while we are parked in the login phase (#752).
-    let mut login_required_since = SystemTime::now();
-    match try_resume_session(&env).await? {
-        SessionResume::Resumed(c) => {
-            emit_control(&env.topic, "ready", json!({ "resumed": true }))?;
-            session.client = Some(c);
-            session.phase = LoginPhase::Authorized;
-        }
-        SessionResume::AuthRequired => {
-            emit_control(&env.topic, "login_required", json!({}))?;
-            login_required_since = SystemTime::now();
-        }
-        SessionResume::Transient(detail) => {
-            let state = OfflineResumeState::new(detail);
-            emit_resume_offline(&env, &state)?;
-            offline_state = Some(state);
-        }
-    }
-
-    // Login phase: if we don't have an authorized client yet, keep reading
-    // stdin commands until login completes or stdin closes.
     while session.client.is_none() {
         let cmd = if let Some(retry_at) = offline_state.as_ref().map(|state| state.next_retry_at) {
             tokio::select! {
@@ -206,7 +164,7 @@ pub async fn run() -> anyhow::Result<()> {
                     let state = offline_state
                         .take()
                         .expect("offline state exists for retry timer");
-                    match attempt_offline_resume(&env, state).await? {
+                    match attempt_offline_resume(env, state).await? {
                         OfflineResumeAttempt::Resumed {
                             client: recovered,
                             offline_since_ms,
@@ -218,7 +176,7 @@ pub async fn run() -> anyhow::Result<()> {
                         OfflineResumeAttempt::AuthRequired => {
                             // `login_required` was just emitted: restart the
                             // promoted-session watermark from this moment.
-                            login_required_since = SystemTime::now();
+                            *login_required_since = SystemTime::now();
                         }
                         OfflineResumeAttempt::StillOffline(next_state) => {
                             offline_state = Some(next_state);
@@ -232,7 +190,7 @@ pub async fn run() -> anyhow::Result<()> {
         };
         let Some(cmd) = cmd else {
             info!("stdin closed before login completed");
-            return Ok(());
+            return Ok(None);
         };
         // Business commands still trigger an immediate retry instead of
         // waiting for the next timer tick, then answer on their own channel if
@@ -241,7 +199,7 @@ pub async fn run() -> anyhow::Result<()> {
             let state = offline_state
                 .take()
                 .expect("offline state exists for retry command");
-            match attempt_offline_resume(&env, state).await? {
+            match attempt_offline_resume(env, state).await? {
                 OfflineResumeAttempt::Resumed {
                     client: resumed,
                     offline_since_ms,
@@ -249,18 +207,18 @@ pub async fn run() -> anyhow::Result<()> {
                     recovered_offline_since_ms = Some(offline_since_ms);
                     session.client = Some(resumed);
                     session.phase = LoginPhase::Authorized;
-                    let _ = handle_runtime_command(&env, &mut session, cmd).await?;
+                    let _ = handle_runtime_command(env, session, cmd).await?;
                     continue;
                 }
                 OfflineResumeAttempt::AuthRequired => {}
                 OfflineResumeAttempt::StillOffline(next_state) => {
-                    emit_offline_command_error(&env, &cmd, &next_state.detail)?;
+                    emit_offline_command_error(env, &cmd, &next_state.detail)?;
                     offline_state = Some(next_state);
                     continue;
                 }
             }
         }
-        let Some(cmd) = handle_login_command(&mut session, cmd).await? else {
+        let Some(cmd) = handle_login_command(session, cmd).await? else {
             continue;
         };
         match cmd {
@@ -276,12 +234,12 @@ pub async fn run() -> anyhow::Result<()> {
                 // of answering a stale ok:false forever.
                 if !offline {
                     if let Some(mtime) =
-                        session_file_changed_since(&env.session_path, login_required_since)
+                        session_file_changed_since(&env.session_path, *login_required_since)
                     {
                         // Advance the watermark first: if this resume fails
                         // (file invalid), don't re-dial on every probe tick.
-                        login_required_since = mtime;
-                        if let SessionResume::Resumed(resumed) = try_resume_session(&env).await? {
+                        *login_required_since = mtime;
+                        if let SessionResume::Resumed(resumed) = try_resume_session(env).await? {
                             emit_control(
                                 &env.topic,
                                 "auth_ok",
@@ -358,11 +316,97 @@ pub async fn run() -> anyhow::Result<()> {
                     json!({"error": "telegram-user does not handle email configuration"}),
                 )?;
             }
-            SubscriberCommand::Custom { op, args } => handle_login_custom(&env, op, args)?,
+            SubscriberCommand::Custom { op, args } => handle_login_custom(env, op, args)?,
             // Login commands were consumed by handle_login_command above.
             _ => {}
         }
     }
+    Ok(Some(LoginPhaseOutcome {
+        recovered_offline_since_ms,
+    }))
+}
+
+/// Runs the Telegram user subscriber until stdin closes or a fatal error
+/// occurs. The caller is expected to already be inside a Tokio runtime
+/// (the top-level `#[tokio::main]` in the puffer binary).
+///
+/// Behavior:
+/// * Reads `$PUFFER_SKILL_STATE_DIR` / `$PUFFER_SKILL_TOPIC` from the env.
+/// * Opens / creates the session file.
+/// * If the session is already authenticated, connects immediately and
+///   enters the update loop.
+/// * Otherwise, waits on stdin for a `TelegramLoginStart` command before
+///   requesting a login code.
+/// * In the update loop, processes stdin commands and telegram updates
+///   concurrently with `tokio::select!`.
+pub async fn run() -> anyhow::Result<()> {
+    let env = SkillEnv::from_env();
+    // Install tracing first so every log below is durably written to
+    // <state>/telegram.log. Held for the whole process: dropping the guard
+    // flushes and stops the non-blocking file writer.
+    let _log_guard = crate::logging::init(&env);
+    info!(
+        session = %env.session_path.display(),
+        topic = %env.topic,
+        log = %env.state_dir.join("telegram.log").display(),
+        "starting telegram-user subscriber"
+    );
+
+    if let Some(parent) = env.session_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create session parent dir {}", parent.display()))?;
+        }
+    }
+
+    let mut commands = CommandStream::new();
+    let mut session = LoginSession::new(env.clone());
+
+    // Attempt to reuse a pre-authenticated session first. If the session file
+    // holds a valid auth key we can go straight to the update loop without
+    // prompting the agent for login credentials.
+    //
+    // `offline_state` parks the subscriber as "temporarily offline" when the
+    // resume failed for infrastructure reasons (network/DC unreachable) with
+    // the auth material intact. The same login-phase state machine owns both
+    // stdin commands and the automatic retry timer so the Telegram client and
+    // command stream still have a single owner.
+    let mut offline_state: Option<OfflineResumeState> = None;
+    // Watermark for detecting a session promoted by an external `puffer
+    // connect` login while we are parked in the login phase (#752).
+    let mut login_required_since = SystemTime::now();
+    match try_resume_session(&env).await? {
+        SessionResume::Resumed(c) => {
+            emit_control(&env.topic, "ready", json!({ "resumed": true }))?;
+            session.client = Some(c);
+            session.phase = LoginPhase::Authorized;
+        }
+        SessionResume::AuthRequired => {
+            emit_control(&env.topic, "login_required", json!({}))?;
+            login_required_since = SystemTime::now();
+        }
+        SessionResume::Transient(detail) => {
+            let state = OfflineResumeState::new(detail);
+            emit_resume_offline(&env, &state)?;
+            offline_state = Some(state);
+        }
+    }
+
+    // Login phase: park offline / drive login until an authorized client
+    // exists, or stdin closes. Callable again after the update loop parks us.
+    let Some(outcome) = login_phase(
+        &env,
+        &mut commands,
+        &mut session,
+        offline_state,
+        &mut login_required_since,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let mut recovered_offline_since_ms = outcome.recovered_offline_since_ms;
 
     let mut delivery_cursor = DeliveryCursor::load(&env)?;
     let mut notification_mutes = NotificationMuteCache::default();
@@ -398,6 +442,29 @@ pub async fn run() -> anyhow::Result<()> {
                 UpdateLoopExit::StdinClosed => return Ok(()),
                 UpdateLoopExit::ReauthStarted => {
                     authorized = false;
+                    continue;
+                }
+                UpdateLoopExit::WentOffline(detail) => {
+                    // The live stream dropped for a network-class reason.
+                    // Clear the dead client so the shared login phase re-parks
+                    // on the bounded, jittered offline-resume timer instead of
+                    // killing the process.
+                    session.client = None;
+                    let state = OfflineResumeState::new(detail);
+                    emit_resume_offline(&env, &state)?;
+                    let Some(outcome) = login_phase(
+                        &env,
+                        &mut commands,
+                        &mut session,
+                        Some(state),
+                        &mut login_required_since,
+                    )
+                    .await?
+                    else {
+                        return Ok(());
+                    };
+                    recovered_offline_since_ms = outcome.recovered_offline_since_ms;
+                    authorized = session.is_authorized();
                     continue;
                 }
             }
@@ -543,44 +610,18 @@ async fn run_update_loop(
                     let recoverable = recoverable_live_update_error(&error);
                     crate::health::report_update_loop_error(env, &error, !recoverable);
                     if recoverable {
-                        warn!(%error, "recovering telegram live update stream");
-                        tokio::time::sleep(LIVE_UPDATE_RECOVERY_DELAY).await;
-                        if let SessionResume::Resumed(recovered) =
-                            try_resume_session(env).await?
-                        {
-                            session.client = Some(recovered.clone());
-                            client = recovered;
-                            reset_delivery_cursor_for_current_account(&client, delivery_cursor)
-                                .await?;
-                            if let Some(exit) = hydrate_startup_state_before_updates(
-                                env,
-                                commands,
-                                session,
-                                delivery_cursor,
-                                notification_mutes,
-                                live_since_ms,
-                            )
-                            .await?
-                            {
-                                return Ok(exit);
-                            }
-                            client = session
-                                .client
-                                .clone()
-                                .expect("update loop requires a client");
-                            persist_live_session_state(env, &client);
-                            emit_control(
-                                &env.topic,
-                                "ready",
-                                json!({ "resumed": true, "recovered": true }),
-                            )?;
-                            (live_updates, live_task) =
-                                spawn_live_update_task(env.clone(), client.clone());
-                            continue;
-                        }
+                        // #604: network-class loss. Park on the shared offline
+                        // state machine (bounded jittered retries) instead of a
+                        // single in-place resume that killed the process on
+                        // failure.
+                        warn!(%error, "telegram live update stream lost; parking offline");
+                        return Ok(UpdateLoopExit::WentOffline(error.to_string()));
                     }
-                    error!(%error, "next_update failed");
-                    return Err(anyhow::anyhow!("next_update: {error}"));
+                    // Auth-class loss: drop the dead client and fall back to the
+                    // login flow rather than terminating the subscriber.
+                    error!(%error, "telegram live update stream lost; reauthenticating");
+                    session.client = None;
+                    return Ok(UpdateLoopExit::ReauthStarted);
                 }
                 handle_live_update(
                     env,
@@ -873,10 +914,22 @@ fn startup_monitoring_boundary(
     recovered_offline_since_ms.unwrap_or(default_live_since_ms)
 }
 
+/// Next offline-resume backoff with full jitter: the delay doubles (capped at
+/// [`OFFLINE_RESUME_RETRY_MAX_DELAY`]) then lands uniformly in `[doubled/2,
+/// doubled]`, so many subscribers reconnecting after the same outage spread
+/// their retries instead of stampeding. Uses `SystemTime` subsec nanos as a
+/// cheap entropy source (no `rand` dependency).
 fn next_offline_retry_delay(current: Duration) -> Duration {
-    current
+    let doubled = current
         .saturating_mul(2)
-        .min(OFFLINE_RESUME_RETRY_MAX_DELAY)
+        .min(OFFLINE_RESUME_RETRY_MAX_DELAY);
+    let half = doubled / 2;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let span_ms = half.as_millis().max(1) as u64;
+    half + Duration::from_millis(nanos % (span_ms + 1))
 }
 
 /// Stops an in-flight hydration task and waits for it to wind down so a
@@ -1565,13 +1618,27 @@ mod tests {
 
     #[test]
     fn offline_retry_delay_backs_off_until_cap() {
-        assert_eq!(
-            next_offline_retry_delay(OFFLINE_RESUME_RETRY_INITIAL_DELAY),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            next_offline_retry_delay(OFFLINE_RESUME_RETRY_MAX_DELAY),
-            OFFLINE_RESUME_RETRY_MAX_DELAY
+        // 5s → doubled 10s, then full-jitter into [5s, 10s].
+        let from_initial = next_offline_retry_delay(OFFLINE_RESUME_RETRY_INITIAL_DELAY);
+        assert!(from_initial >= Duration::from_secs(5));
+        assert!(from_initial <= Duration::from_secs(10));
+        // At the cap the jitter stays within [30s, 60s] and never exceeds it.
+        let from_max = next_offline_retry_delay(OFFLINE_RESUME_RETRY_MAX_DELAY);
+        assert!(from_max >= OFFLINE_RESUME_RETRY_MAX_DELAY / 2);
+        assert!(from_max <= OFFLINE_RESUME_RETRY_MAX_DELAY);
+    }
+
+    #[test]
+    fn offline_retry_delay_jitter_stays_in_bounds() {
+        for _ in 0..100 {
+            let next = next_offline_retry_delay(Duration::from_secs(10));
+            assert!(next >= Duration::from_secs(10)); // doubled lower bound = 20/2
+            assert!(next <= Duration::from_secs(20));
+        }
+        // cap still enforced
+        assert!(
+            next_offline_retry_delay(OFFLINE_RESUME_RETRY_MAX_DELAY)
+                <= OFFLINE_RESUME_RETRY_MAX_DELAY
         );
     }
 }
