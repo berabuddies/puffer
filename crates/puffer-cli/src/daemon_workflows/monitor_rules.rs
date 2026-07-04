@@ -232,7 +232,7 @@ fn simplify_filters(mut filters: Vec<FilterSpec>) -> Option<FilterSpec> {
     }
 }
 
-fn push_unique_rule(filters: &mut Vec<FilterSpec>, rule: FilterSpec) {
+pub(super) fn push_unique_rule(filters: &mut Vec<FilterSpec>, rule: FilterSpec) {
     if !filters
         .iter()
         .any(|existing| filter_json_eq(existing, &rule))

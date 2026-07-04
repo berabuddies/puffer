@@ -201,8 +201,6 @@ fn rollback_monitor_binding(
     Ok(())
 }
 
-const GMAIL_BROWSER_CONNECTOR: &str = "gmail-browser";
-
 /// Deterministic sender-address ignore rules for gmail monitors. Jq path
 /// matching on the payload (not text regex) so a human mail that merely
 /// mentions "no-reply" in its body can never be swallowed (#592).
@@ -214,8 +212,13 @@ const GMAIL_SENDER_IGNORE_RULES: &[&str] = &[
 
 const GMAIL_MONITOR_CLASSIFY_PROMPT: &str = "Does this email require the recipient to take action or reply? Automated notifications (CI/PR/build/marketing/newsletter), cold self-introductions from strangers, and FYI-only mail are `no`.";
 
+/// Gmail-only by design: the jq paths reference gmail-browser's
+/// `message.fromEmail` payload shape, which the wider email-connector class
+/// (`connector_mutes_source_on_ignore`: email | gmail-browser | gcal-browser)
+/// does not emit. Widening requires per-connector payload paths, not just
+/// adding slugs here.
 fn default_monitor_ignore_filters(connector_slug: &str) -> Vec<FilterSpec> {
-    if connector_slug != GMAIL_BROWSER_CONNECTOR {
+    if connector_slug != crate::gmail_browser::CONNECTOR_SLUG {
         return Vec::new();
     }
     GMAIL_SENDER_IGNORE_RULES
@@ -228,8 +231,13 @@ fn default_monitor_ignore_filters(connector_slug: &str) -> Vec<FilterSpec> {
         .collect()
 }
 
+/// Best-effort gate: the classify prompt only runs when an Anthropic API-key
+/// classifier is available (`build_anthropic_classifier` falls back to a
+/// pass-through otherwise), so the sender ignore rules above remain the
+/// load-bearing notification defense.
 fn default_monitor_classify_prompt(connector_slug: &str) -> Option<String> {
-    (connector_slug == GMAIL_BROWSER_CONNECTOR).then(|| GMAIL_MONITOR_CLASSIFY_PROMPT.to_string())
+    (connector_slug == crate::gmail_browser::CONNECTOR_SLUG)
+        .then(|| GMAIL_MONITOR_CLASSIFY_PROMPT.to_string())
 }
 
 fn monitor_binding(
@@ -287,14 +295,7 @@ fn refresh_monitor_binding(
         &contact_ids,
     )?;
     for default_filter in default_monitor_ignore_filters(connector_slug) {
-        let default_json = serde_json::to_string(&default_filter).unwrap_or_default();
-        let exists = binding
-            .ignore_filters
-            .iter()
-            .any(|existing| serde_json::to_string(existing).unwrap_or_default() == default_json);
-        if !exists {
-            binding.ignore_filters.push(default_filter);
-        }
+        super::monitor_rules::push_unique_rule(&mut binding.ignore_filters, default_filter);
     }
     if binding.classify_prompt.is_none() {
         binding.classify_prompt = default_monitor_classify_prompt(connector_slug);
