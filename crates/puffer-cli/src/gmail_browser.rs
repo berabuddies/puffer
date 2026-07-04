@@ -58,7 +58,7 @@ impl GmailBrowserConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SeenState {
     #[serde(default)]
     initialized: bool,
@@ -68,9 +68,31 @@ struct SeenState {
     seen: Vec<String>,
 }
 
+/// Fresh installs start on the current key version so the initial-window
+/// top-row emit still fires; only stores persisted by older code (whose
+/// missing field deserializes to `0` via the serde field default) trigger
+/// the rebaseline migration (#594).
+impl Default for SeenState {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            key_version: SEEN_KEY_VERSION,
+            seen: Vec::new(),
+        }
+    }
+}
+
 impl SeenState {
+    // Linear scan is fine: `seen` is bounded by SEEN_MAX_KEYS and order
+    // carries the eviction recency, so a side index would buy nothing.
     fn contains(&self, key: &str) -> bool {
         self.seen.iter().any(|k| k == key)
+    }
+
+    /// True when this store was written with a different row-id derivation
+    /// and must rebaseline (observe, don't emit) before emitting again.
+    fn needs_rebaseline(&self) -> bool {
+        self.key_version != SEEN_KEY_VERSION
     }
 }
 
@@ -467,12 +489,9 @@ async fn poll_once(
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
     let seen_count_before = seen.seen.len();
     let initialized_before = seen.initialized;
-    let mut newly_seen = BTreeSet::new();
+    let mut newly_seen: Vec<String> = Vec::new();
     let mut successful_poll = false;
-    let rebaseline = seen.key_version != SEEN_KEY_VERSION;
-    if rebaseline {
-        diag::rebaseline_key_version(&env.topic, seen.key_version, SEEN_KEY_VERSION, 0);
-    }
+    let rebaseline = seen.needs_rebaseline();
     let mut observed_rows = 0usize;
     let mut emitted_rows = 0usize;
     for account in &config.accounts {
@@ -524,10 +543,19 @@ async fn poll_once(
                 continue;
             };
             let key = format!("{account}:{id}");
-            newly_seen.insert(key.clone());
+            if newly_seen.iter().any(|k| k == &key) {
+                // Two rows collapsed to one content-hash fallback id: emit at
+                // most once per poll (the persistent seen set only updates
+                // after the loop, so it cannot catch this).
+                diag::row_skipped(&env.topic, account, &key, "poll_duplicate");
+                continue;
+            }
+            newly_seen.push(key.clone());
             if rebaseline {
                 // Key format changed: observe silently, never flood (#594).
-            } else if let Some(reason) = row_skip_reason(seen, &key, &row) {
+                continue;
+            }
+            if let Some(reason) = row_skip_reason(seen, &key, &row) {
                 diag::row_skipped(&env.topic, account, &key, reason);
             } else {
                 emitted_rows += 1;
@@ -535,7 +563,15 @@ async fn poll_once(
             }
         }
     }
-    apply_poll_observation(seen, newly_seen.into_iter().collect(), successful_poll);
+    if rebaseline {
+        diag::rebaseline_key_version(
+            &env.topic,
+            seen.key_version,
+            SEEN_KEY_VERSION,
+            newly_seen.len(),
+        );
+    }
+    apply_poll_observation(seen, newly_seen, successful_poll);
     diag::poll_complete(
         &env.topic,
         successful_poll,
@@ -761,36 +797,39 @@ fn row_skip_reason(seen: &SeenState, key: &str, row: &Value) -> Option<&'static 
     None
 }
 
-/// Folds one successful poll's observed keys into the seen state.
-/// Returns 0 when this poll was a key-version rebaseline (nothing may emit).
+/// Folds one successful poll's observed keys into the seen state. On a
+/// key-version rebaseline the old-format keys are dropped and the store is
+/// re-stamped. Re-observed keys move to the back so still-visible rows are
+/// never the eviction victims (a pinned thread outliving SEEN_MAX_KEYS new
+/// mails must not be evicted and re-emit as new).
 fn apply_poll_observation(
     seen: &mut SeenState,
     newly_observed: Vec<String>,
     successful_poll: bool,
-) -> usize {
+) {
     if !successful_poll {
-        return 0;
+        return;
     }
-    let rebaseline = seen.key_version != SEEN_KEY_VERSION;
-    if rebaseline {
+    if seen.needs_rebaseline() {
         seen.seen.clear();
         seen.key_version = SEEN_KEY_VERSION;
     }
+    let batch_len = newly_observed.len();
     for key in newly_observed {
-        if !seen.contains(&key) {
-            seen.seen.push(key);
+        if let Some(position) = seen.seen.iter().position(|k| k == &key) {
+            seen.seen.remove(position);
         }
+        seen.seen.push(key);
     }
     if seen.seen.len() > SEEN_MAX_KEYS {
-        let keep_from = seen.seen.len() - SEEN_MAX_KEYS / 2;
+        // Never evict this poll's batch (contiguous at the tail after the
+        // recency refresh): those rows are still visible and would re-emit
+        // as new next poll if dropped (>1000 visible rows across accounts).
+        let keep_from =
+            (seen.seen.len() - SEEN_MAX_KEYS / 2).min(seen.seen.len().saturating_sub(batch_len));
         seen.seen.drain(..keep_from);
     }
     seen.initialized = true;
-    if rebaseline {
-        0
-    } else {
-        1
-    }
 }
 
 fn gmail_poll_result_ready(result: &Value) -> bool {
@@ -992,23 +1031,58 @@ mod tests {
     }
 
     #[test]
-    fn key_version_mismatch_rebaselines_without_emitting() {
-        // Old-format seen (version 0) + new code: first poll must observe
-        // all rows, emit nothing, and stamp the new version.
+    fn key_version_mismatch_rebaselines_and_restamps() {
+        // Old-format seen (version 0) + new code: the rebaseline poll drops
+        // every old-format key and stamps the new version. Emission
+        // suppression is poll_once's `rebaseline` branch, gated on the same
+        // `needs_rebaseline` predicate asserted here.
         let mut seen = SeenState {
             initialized: true,
             key_version: 0,
             seen: (0..75).map(|i| format!("acct:old-{i}")).collect(),
         };
-        let observed = ["acct:c1", "acct:c2"];
-        let emitted = apply_poll_observation(
-            &mut seen,
-            observed.iter().map(|k| k.to_string()).collect(),
-            true,
-        );
-        assert_eq!(emitted, 0, "rebaseline poll must not emit");
+        assert!(seen.needs_rebaseline(), "old store must rebaseline");
+        apply_poll_observation(&mut seen, vec!["acct:c1".into(), "acct:c2".into()], true);
         assert_eq!(seen.key_version, SEEN_KEY_VERSION);
-        assert!(seen.seen.iter().any(|k| k == "acct:c1"));
+        assert!(!seen.needs_rebaseline());
+        assert!(
+            seen.seen.iter().all(|k| !k.starts_with("acct:old-")),
+            "old-format keys dropped"
+        );
+        assert!(seen.contains("acct:c1"));
+    }
+
+    #[test]
+    fn fresh_install_is_not_a_rebaseline() {
+        // A brand-new store starts on the current key version, so the
+        // initial-window top-row emit still fires; only stores persisted by
+        // older code (serde field default key_version 0) migrate.
+        let fresh = SeenState::default();
+        assert!(!fresh.needs_rebaseline());
+        assert_eq!(
+            row_skip_reason(&fresh, "acct:c1", &json!({"index": 0})),
+            None
+        );
+        assert_eq!(
+            row_skip_reason(&fresh, "acct:c9", &json!({"index": 3})),
+            Some("initial_window_excluded")
+        );
+        // Pin the exact `< INITIAL_ROW_EMIT_LIMIT` boundary: index 1 must be
+        // excluded, or fresh installs double-notify.
+        assert_eq!(
+            row_skip_reason(&fresh, "acct:c9", &json!({"index": 1})),
+            Some("initial_window_excluded")
+        );
+    }
+
+    #[test]
+    fn key_version_downgrade_also_rebaselines() {
+        let seen = SeenState {
+            initialized: true,
+            key_version: SEEN_KEY_VERSION + 1,
+            seen: vec!["acct:x".into()],
+        };
+        assert!(seen.needs_rebaseline());
     }
 
     #[test]
@@ -1019,9 +1093,45 @@ mod tests {
             seen: (0..SEEN_MAX_KEYS).map(|i| format!("acct:k{i}")).collect(),
         };
         apply_poll_observation(&mut seen, vec!["acct:new".into()], true);
-        assert!(seen.seen.len() <= SEEN_MAX_KEYS / 2 + 1);
+        assert_eq!(seen.seen.len(), SEEN_MAX_KEYS / 2);
         assert_eq!(seen.seen.last().map(String::as_str), Some("acct:new"));
-        assert!(!seen.seen.iter().any(|k| k == "acct:k0"), "oldest evicted");
+        assert!(!seen.contains("acct:k0"), "oldest evicted");
+    }
+
+    #[test]
+    fn eviction_never_drops_current_poll_batch() {
+        // >1000 visible rows across many accounts: the cap must not evict
+        // keys observed this poll, or still-visible rows re-emit next poll.
+        let mut seen = SeenState {
+            initialized: true,
+            key_version: SEEN_KEY_VERSION,
+            seen: (0..SEEN_MAX_KEYS).map(|i| format!("acct:k{i}")).collect(),
+        };
+        let batch: Vec<String> = (0..1500).map(|i| format!("acct:n{i}")).collect();
+        apply_poll_observation(&mut seen, batch.clone(), true);
+        assert!(
+            batch.iter().all(|k| seen.contains(k)),
+            "every key observed this poll must survive the cap"
+        );
+        assert_eq!(seen.seen.len(), batch.len(), "only pre-batch keys evicted");
+    }
+
+    #[test]
+    fn reobserved_key_refreshes_recency_and_survives_eviction() {
+        // A long-lived visible row (e.g. a pinned thread) is re-observed on
+        // every poll; it must not be evicted by stale insertion order and
+        // then re-emit as new.
+        let mut seen = SeenState {
+            initialized: true,
+            key_version: SEEN_KEY_VERSION,
+            seen: (0..SEEN_MAX_KEYS).map(|i| format!("acct:k{i}")).collect(),
+        };
+        apply_poll_observation(&mut seen, vec!["acct:k0".into(), "acct:new".into()], true);
+        assert!(
+            seen.contains("acct:k0"),
+            "re-observed key survives eviction"
+        );
+        assert!(!seen.contains("acct:k1"), "unrefreshed oldest evicted");
     }
 
     #[test]

@@ -192,11 +192,14 @@ pub(crate) fn now_ms() -> u128 {
 }
 
 /// Logs one skipped inbox row with its filter-chain skip reason (#594).
+/// The dedup key embeds the account email, so it is fingerprinted like
+/// every other identifier in this module.
 pub(crate) fn row_skipped(topic: &str, account: &str, dedup_key: &str, reason: &str) {
     line(format!(
-        "row_skipped ts_ms={} topic={topic} account_hash={} dedup_key={dedup_key} reason={reason}",
+        "row_skipped ts_ms={} topic={topic} account_hash={} dedup_hash={} reason={reason}",
         now_ms(),
         account_hash(account),
+        value_hash(dedup_key),
     ));
 }
 
