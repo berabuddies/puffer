@@ -33,11 +33,34 @@
   ];
 
   // Google and GitHub Copilot are real providers with backend descriptors
-  // (`resources/providers/google.yaml` / `github-copilot.yaml`), so they are
-  // surfaced from the registry instead of as UI-only entries here. Google uses
-  // its OpenAI-compatible Gemini endpoint (api_key); Copilot uses a GitHub
+  // (`resources/providers/google.yaml` / `github-copilot.yaml`) and normally
+  // come from the registry. They are ALSO listed here as fallback entries so
+  // they remain offerable when the registry catalog is empty (daemon down or
+  // the first render before it responds) — providerSettingsCatalog dedupes by
+  // id, so the registry entry supersedes these whenever it is present. Google
+  // uses its OpenAI-compatible Gemini endpoint (api_key); Copilot uses a GitHub
   // device-flow login + Copilot token exchange (see the OAuth section below).
   const EXTRA_SETUP_PROVIDERS: ProviderSummary[] = [
+    {
+      id: "github-copilot",
+      displayName: "GitHub Copilot",
+      baseUrl: "https://api.githubcopilot.com",
+      defaultApi: "openai-completions",
+      modelCount: 0,
+      authModes: ["oauth"],
+      sourceKind: "ui-setup",
+      sourcePath: null
+    },
+    {
+      id: "google",
+      displayName: "Google",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      defaultApi: "openai-completions",
+      modelCount: 0,
+      authModes: ["api_key"],
+      sourceKind: "ui-setup",
+      sourcePath: null
+    },
     {
       id: "openrouter",
       displayName: "OpenRouter",
