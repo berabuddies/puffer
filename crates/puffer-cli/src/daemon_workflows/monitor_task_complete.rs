@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::monitor_task_ignore::{monitor_tasks_path, task_id_matches};
 
 const DEFAULT_COMPLETED_VIA: &str = "reply";
+const NO_REPLY_NEEDED_VIA: &str = "no_reply_needed";
 
 #[derive(Debug, Deserialize)]
 struct MonitorTaskCompleteParams {
@@ -15,6 +16,8 @@ struct MonitorTaskCompleteParams {
     task_id: String,
     #[serde(default, alias = "completedVia")]
     completed_via: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// Marks a monitor-created task completed (e.g. after the user replied to it
@@ -62,10 +65,18 @@ pub(crate) fn handle_monitor_task_complete(paths: &ConfigPaths, params: &Value) 
         .context("monitor task entry must be an object")?;
 
     if !is_terminal(task_object) {
-        if is_human_gated_reply_task(task_object) {
+        // agentenv/monorepo#676: "reviewed, no reply needed" IS the human
+        // decision this gate exists to collect — it passes with an audit
+        // entry instead of a send receipt. Every other completed_via still
+        // requires the reply flow for human-gated tasks.
+        let no_reply_needed = completed_via == NO_REPLY_NEEDED_VIA;
+        if !no_reply_needed && is_human_gated_reply_task(task_object) {
             anyhow::bail!(
                 "human-gated monitor reply tasks require human approval and a send receipt"
             );
+        }
+        if no_reply_needed {
+            append_no_reply_audit(task_object, params.reason.as_deref())?;
         }
         task_object.insert("status".to_string(), Value::String("completed".to_string()));
         task_object.insert("completed_via".to_string(), Value::String(completed_via));
@@ -110,6 +121,38 @@ fn is_human_gated_reply_task(task: &serde_json::Map<String, Value>) -> bool {
             })
             .unwrap_or(false)
         || monitor_source_has_delivery_target(metadata)
+}
+
+/// Records the human "reviewed, no reply needed" decision on the task so the
+/// completion is auditable and distinguishable from an Ignore (which suppresses
+/// the task and installs an ignore filter; this does neither).
+fn append_no_reply_audit(
+    task: &mut serde_json::Map<String, Value>,
+    reason: Option<&str>,
+) -> Result<()> {
+    let metadata = task
+        .entry("metadata".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let metadata = metadata
+        .as_object_mut()
+        .context("monitor task metadata must be an object")?;
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "kind".to_string(),
+        Value::String(NO_REPLY_NEEDED_VIA.to_string()),
+    );
+    entry.insert("at_ms".to_string(), Value::from(now_ms()));
+    if let Some(reason) = reason.and_then(non_empty) {
+        entry.insert("reason".to_string(), Value::String(reason.to_string()));
+    }
+    match metadata
+        .entry("monitor_completion_events".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+    {
+        Value::Array(events) => events.push(Value::Object(entry)),
+        _ => anyhow::bail!("monitor_completion_events must be an array"),
+    }
+    Ok(())
 }
 
 fn monitor_source_has_delivery_target(metadata: &serde_json::Map<String, Value>) -> bool {

@@ -265,3 +265,112 @@ fn complete_missing_task_id_errors() {
     let result = handle_monitor_task_complete(&paths, &json!({"task_id": "   "}));
     assert!(result.is_err());
 }
+
+#[test]
+fn no_reply_needed_completes_human_gated_task_with_audit() {
+    // agentenv/monorepo#676: the human "reviewed, no reply needed" decision is
+    // a sanctioned completion of a human-gated task — it records an audit
+    // entry and is NOT an ignore (no suppression, no ignore filter).
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-9",
+                "subject": "Telegram FYI: schedule moved",
+                "description": "",
+                "status": "pending",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": "telegram-user",
+                    "monitor_connector": "telegram-login",
+                    "chat_id": 8689648954i64
+                }
+            }]
+        }),
+    );
+
+    handle_monitor_task_complete(
+        &paths,
+        &json!({
+            "task_id": "monitor-9",
+            "completed_via": "no_reply_needed",
+            "reason": "FYI only, no action requested"
+        }),
+    )
+    .unwrap();
+
+    let stored = read_store(&paths);
+    assert_eq!(stored["tasks"][0]["status"], "completed");
+    assert_eq!(stored["tasks"][0]["completed_via"], "no_reply_needed");
+    let events = stored["tasks"][0]["metadata"]["monitor_completion_events"]
+        .as_array()
+        .expect("audit array present");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["kind"], "no_reply_needed");
+    assert_eq!(events[0]["reason"], "FYI only, no action requested");
+    assert!(events[0]["at_ms"].as_u64().is_some());
+    // Not an ignore.
+    assert_eq!(stored["tasks"][0]["metadata"]["ignored"], Value::Null);
+}
+
+#[test]
+fn plain_reply_writeback_still_refused_for_human_gated_task() {
+    // The gate stays intact for every other completed_via value.
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-9",
+                "subject": "s",
+                "description": "",
+                "status": "pending",
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connector": "telegram-login",
+                    "chat_id": 8689648954i64
+                }
+            }]
+        }),
+    );
+
+    let error = handle_monitor_task_complete(&paths, &json!({"task_id": "monitor-9"}))
+        .expect_err("human-gated task without receipt must still be refused");
+    assert!(error.to_string().contains("human approval"));
+}
+
+#[test]
+fn no_reply_needed_is_noop_on_terminal_task() {
+    // Idempotency: a duplicate no-reply writeback never mutates a completed task.
+    let tempdir = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    write_store(
+        &paths,
+        json!({
+            "tasks": [{
+                "task_id": "monitor-9",
+                "subject": "s",
+                "description": "",
+                "status": "completed",
+                "completed_via": "reply",
+                "metadata": {"_monitor": true}
+            }]
+        }),
+    );
+
+    handle_monitor_task_complete(
+        &paths,
+        &json!({"task_id": "monitor-9", "completed_via": "no_reply_needed"}),
+    )
+    .unwrap();
+
+    let stored = read_store(&paths);
+    assert_eq!(stored["tasks"][0]["completed_via"], "reply");
+    assert_eq!(
+        stored["tasks"][0]["metadata"]["monitor_completion_events"],
+        Value::Null
+    );
+}
