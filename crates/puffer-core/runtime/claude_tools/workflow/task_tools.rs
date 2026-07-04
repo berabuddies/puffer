@@ -1698,6 +1698,21 @@ fn uniform_stamp_i64(stamps: &[MonitorSourceStampContext], keys: &[&str]) -> Opt
     agreed
 }
 
+/// String counterpart of `uniform_stamp_i64`: Some(value) iff every stamp's
+/// payload carries a value for `keys` and they all agree.
+fn uniform_stamp_string(stamps: &[MonitorSourceStampContext], keys: &[&str]) -> Option<String> {
+    let mut agreed: Option<String> = None;
+    for stamp in stamps {
+        let value = value_string_field(&stamp.payload, keys)?;
+        match &agreed {
+            None => agreed = Some(value),
+            Some(existing) if *existing == value => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
 fn reject_llm_written_typed_monitor_fields(metadata: &Map<String, Value>) -> Result<()> {
     for key in [
         "monitor",
@@ -2188,6 +2203,28 @@ fn generic_review_contract_from_stamps(stamps: &[MonitorSourceStampContext]) -> 
         source.insert(
             "connection_slug".to_string(),
             Value::String(first.connection_slug.clone()),
+        );
+    }
+    // Uniform chat identity keeps a same-chat burst deliverable: the reply
+    // layer needs a chat-level target, and monitor_contract's string_field is
+    // strict string-only, so chat_id is stamped as a string
+    // (agentenv/monorepo#761, #722).
+    if let Some(chat_id) = uniform_stamp_i64(stamps, &["chat_id", "chatId"]) {
+        source.insert("chat_id".to_string(), Value::String(chat_id.to_string()));
+        if let Some(chat_kind) = uniform_stamp_string(stamps, &["chat_kind", "chatKind"]) {
+            source.insert("chat_kind".to_string(), Value::String(chat_kind));
+        }
+    }
+    let mut source_message_ids = stamps
+        .iter()
+        .filter_map(source_message_id_from_stamp)
+        .collect::<Vec<_>>();
+    source_message_ids.sort_unstable();
+    source_message_ids.dedup();
+    if !source_message_ids.is_empty() {
+        source.insert(
+            "source_message_ids".to_string(),
+            Value::Array(source_message_ids.into_iter().map(Value::from).collect()),
         );
     }
     source.insert(
@@ -4410,6 +4447,44 @@ mod tests {
         assert_eq!(metadata_i64(&meta, &["chat_id"]), None);
         assert_eq!(metadata_i64(&meta, &["sender_id"]), None);
         assert!(monitor_source_message_ids(&meta).contains(&6090));
+    }
+
+    #[test]
+    fn issue_761_generic_review_contract_carries_uniform_chat_identity() {
+        // A same-chat burst must keep its chat identity inside the contract
+        // source (as a STRING — monitor_contract's string_field is strict) so
+        // the source_context can render a delivery target (agentenv/monorepo#761).
+        let stamps = vec![
+            issue625_stamp("env-a", 8_689_648_954, 42, 6090),
+            issue625_stamp("env-b", 8_689_648_954, 42, 6091),
+        ];
+        let contract = generic_review_contract_from_stamps(&stamps);
+        assert_eq!(
+            contract.source.get("chat_id"),
+            Some(&json!("8689648954")),
+            "chat_id must be stamped as a JSON string"
+        );
+        assert_eq!(
+            contract.source.get("source_message_ids"),
+            Some(&json!([6090, 6091]))
+        );
+    }
+
+    #[test]
+    fn issue_761_cross_chat_contract_has_no_chat_identity() {
+        // Non-uniform chat_id -> no single chat to deliver to -> no identity
+        // stamped; the task stays review-only.
+        let stamps = vec![
+            issue625_stamp("env-a", 111, 42, 6090),
+            issue625_stamp("env-b", 222, 42, 6091),
+        ];
+        let contract = generic_review_contract_from_stamps(&stamps);
+        assert_eq!(contract.source.get("chat_id"), None);
+        assert_eq!(
+            contract.source.get("source_message_ids"),
+            Some(&json!([6090, 6091])),
+            "per-message ids are kept for dedup/audit even cross-chat"
+        );
     }
 
     #[test]
