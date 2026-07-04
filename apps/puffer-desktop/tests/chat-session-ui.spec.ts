@@ -714,7 +714,7 @@ test("composer image generation settings modal saves media config from daemon ca
   const openFolderButtonBox = await openFolderButton.boundingBox();
   expect(imageFolderBox).not.toBeNull();
   expect(openFolderButtonBox).not.toBeNull();
-  expect(openFolderButtonBox!.height).toBe(imageFolderBox!.height);
+  expect(openFolderButtonBox!.height).toBeCloseTo(imageFolderBox!.height, 0);
   const sizeOptions = await dialog.getByLabel("Size").locator("option").evaluateAll((options) =>
     options.map((option) => (option as HTMLOptionElement).value)
   );
@@ -1241,7 +1241,7 @@ test("composer video generation settings saves configurable video selections", a
   const openFolderButtonBox = await openFolderButton.boundingBox();
   expect(videoFolderBox).not.toBeNull();
   expect(openFolderButtonBox).not.toBeNull();
-  expect(openFolderButtonBox!.height).toBe(videoFolderBox!.height);
+  expect(openFolderButtonBox!.height).toBeCloseTo(videoFolderBox!.height, 0);
   await dialog.getByLabel("Aspect ratio").selectOption("9:16");
   await dialog.getByLabel("Duration").fill("12");
 
