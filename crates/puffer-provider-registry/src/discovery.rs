@@ -258,11 +258,14 @@ impl ModelDiscoveryClient {
                 && (copilot_model_picker_enabled(entry)
                     || entry.get("id").and_then(|v| v.as_str()) == Some("gpt-4o-mini"))
         };
-        // Only commit to the picker set if it actually yields models. Otherwise
-        // (every picker-enabled model is policy-disabled/unconfigured or
-        // internal) fall through to the session / default-fallback tiers instead
-        // of returning an empty list.
-        if data.iter().any(strict) {
+        // Tier 1 applies only to picker-capable (paid) plans: gate on a real
+        // model_picker_enabled entry, NOT on `strict` (which also matches the
+        // gpt-4o-mini safety net present in every catalog — that would make
+        // tier 1 always win and starve the tier-2 session lookup that Free/
+        // Student auto-only accounts depend on). Also require `strict` to yield
+        // something, so an all-gated picker plan falls through instead of
+        // returning an empty list.
+        if data.iter().any(copilot_model_picker_enabled) && data.iter().any(strict) {
             data.retain(strict);
             return;
         }

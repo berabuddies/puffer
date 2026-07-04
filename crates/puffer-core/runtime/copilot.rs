@@ -44,9 +44,12 @@ pub(crate) struct CopilotAuth {
     pub session: Option<CopilotSession>,
 }
 
-/// A minted `/models/session` auto-mode session: the JWT chat requests attach
-/// as `Copilot-Session-Token`. Its `available_models` are the plan's actually
-/// servable models (model discovery intersects the catalog with them).
+/// A minted `/models/session` auto-mode session token that chat requests attach
+/// as `Copilot-Session-Token`. Only the token is kept here — the plan's servable
+/// `available_models` list is obtained by a SEPARATE, independent
+/// `/models/session` mint in the discovery path
+/// (`discovery.rs::copilot_session_available_models`); the two mints are not
+/// shared.
 #[derive(Clone)]
 pub(crate) struct CopilotSession {
     pub token: String,
@@ -99,6 +102,12 @@ fn now_secs() -> u64 {
 
 /// Exchanges a stored GitHub token for a short-lived Copilot bearer token plus
 /// the account-specific API endpoint, caching until shortly before it expires.
+///
+/// Not singleflight: concurrent callers on a cold/expired cache each run their
+/// own exchange (+ session mint) before inserting. In practice turns within a
+/// session are sequential and the cache holds for ~25min, so the stampede is a
+/// small burst at first use / expiry; a shared in-flight map would add locking
+/// complexity for little gain, so we accept it.
 pub(crate) fn copilot_bearer_token(github_token: &str) -> Result<CopilotAuth> {
     let now = now_secs();
     if let Some(cached) = cache().lock().unwrap().get(github_token) {
