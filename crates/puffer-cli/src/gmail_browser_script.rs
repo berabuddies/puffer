@@ -40,6 +40,14 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
       return /attachment/i.test(label);
     });
   };
+  const fnv1a = (str) => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16);
+  };
   const candidateRows = Array.from(document.querySelectorAll('tr[role="row"]'));
   const visibleRows = candidateRows.filter(visible);
   const rows = visibleRows
@@ -78,7 +86,7 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
         row.querySelector(".zF") !== null ||
         aria.includes("unread");
       const hasAttachment = rowHasAttachment(row, aria);
-      const fallback = [sender, subject, snippet, index].join(":");
+      const fallback = "c" + fnv1a([sender, fromEmail, subject, snippet].join(" "));
       return {
         id: messageId || fallback,
         threadId,

@@ -930,6 +930,13 @@ mod tests {
         assert!(GMAIL_INBOX_SCRIPT.contains("attachment"));
     }
 
+    #[test]
+    fn inbox_script_fallback_id_is_position_independent() {
+        // #594: archive shifts row indexes; identity must not include index.
+        assert!(GMAIL_INBOX_SCRIPT.contains("fnv1a"));
+        assert!(!GMAIL_INBOX_SCRIPT.contains("snippet, index].join"));
+    }
+
     fn test_paths(temp: &tempfile::TempDir) -> ConfigPaths {
         let workspace_root = temp.path().join("workspace");
         ConfigPaths {
