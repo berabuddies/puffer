@@ -3,7 +3,7 @@ use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
     connection_workflow_trigger_supported, normalize_contact_id, ActionSpec, ConnectionRecord,
-    ConnectionState, WorkflowBindingSpec, WorkflowBindingStatus,
+    ConnectionState, FilterSpec, TaggedFilterSpec, WorkflowBindingSpec, WorkflowBindingStatus,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -201,6 +201,37 @@ fn rollback_monitor_binding(
     Ok(())
 }
 
+const GMAIL_BROWSER_CONNECTOR: &str = "gmail-browser";
+
+/// Deterministic sender-address ignore rules for gmail monitors. Jq path
+/// matching on the payload (not text regex) so a human mail that merely
+/// mentions "no-reply" in its body can never be swallowed (#592).
+const GMAIL_SENDER_IGNORE_RULES: &[&str] = &[
+    r#".message.fromEmail =~ "(?i)^(no-?reply|do-?not-?reply|donotreply)@""#,
+    r#".message.fromEmail =~ "(?i)^notifications?@""#,
+    r#".message.fromEmail =~ "(?i)@(notifications?|noreply|mailer)\\.""#,
+];
+
+const GMAIL_MONITOR_CLASSIFY_PROMPT: &str = "Does this email require the recipient to take action or reply? Automated notifications (CI/PR/build/marketing/newsletter), cold self-introductions from strangers, and FYI-only mail are `no`.";
+
+fn default_monitor_ignore_filters(connector_slug: &str) -> Vec<FilterSpec> {
+    if connector_slug != GMAIL_BROWSER_CONNECTOR {
+        return Vec::new();
+    }
+    GMAIL_SENDER_IGNORE_RULES
+        .iter()
+        .map(|expression| {
+            FilterSpec::Tagged(TaggedFilterSpec::Jq {
+                expression: (*expression).to_string(),
+            })
+        })
+        .collect()
+}
+
+fn default_monitor_classify_prompt(connector_slug: &str) -> Option<String> {
+    (connector_slug == GMAIL_BROWSER_CONNECTOR).then(|| GMAIL_MONITOR_CLASSIFY_PROMPT.to_string())
+}
+
 fn monitor_binding(
     connection_slug: &str,
     connector_slug: &str,
@@ -216,9 +247,9 @@ fn monitor_binding(
         connector_slug: Some(connector_slug.to_string()),
         status: super::workflow_status(true),
         filter: None,
-        ignore_filters: Vec::new(),
+        ignore_filters: default_monitor_ignore_filters(connector_slug),
         contact_ids: contact_ids.clone(),
-        classify_prompt: None,
+        classify_prompt: default_monitor_classify_prompt(connector_slug),
         classify_model: None,
         action: monitor_action(
             connection_slug,
@@ -255,6 +286,19 @@ fn refresh_monitor_binding(
         model.as_deref(),
         &contact_ids,
     )?;
+    for default_filter in default_monitor_ignore_filters(connector_slug) {
+        let default_json = serde_json::to_string(&default_filter).unwrap_or_default();
+        let exists = binding
+            .ignore_filters
+            .iter()
+            .any(|existing| serde_json::to_string(existing).unwrap_or_default() == default_json);
+        if !exists {
+            binding.ignore_filters.push(default_filter);
+        }
+    }
+    if binding.classify_prompt.is_none() {
+        binding.classify_prompt = default_monitor_classify_prompt(connector_slug);
+    }
     Ok(())
 }
 
@@ -521,6 +565,98 @@ mod tests {
         let error = handle_monitor_create(&paths, &json!({"connection_slug": "  "})).unwrap_err();
 
         assert!(error.to_string().contains("missing connection_slug"));
+    }
+
+    #[test]
+    fn gmail_monitor_defaults_install_two_gate_layers() {
+        let binding = monitor_binding(
+            "gmail-browser",
+            "gmail-browser",
+            "Gmail in the browser",
+            Path::new("/tmp/mem.md"),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(binding.ignore_filters.len(), 3);
+        assert!(binding
+            .classify_prompt
+            .as_deref()
+            .unwrap_or("")
+            .contains("Automated notifications"));
+        assert!(binding.classify_model.is_none());
+
+        // Telegram monitors stay untouched.
+        let tg = monitor_binding(
+            "telegram-user",
+            "telegram-login",
+            "Telegram",
+            Path::new("/tmp/mem.md"),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(tg.ignore_filters.is_empty());
+        assert!(tg.classify_prompt.is_none());
+    }
+
+    #[test]
+    fn default_ignore_rules_match_notification_senders_only() {
+        use puffer_subscriptions::filter_matches;
+        let filters = default_monitor_ignore_filters("gmail-browser");
+        let hits = |from: &str| {
+            let payload = json!({ "message": { "fromEmail": from } });
+            filters
+                .iter()
+                .any(|f| filter_matches(Some(f), "", &payload))
+        };
+        assert!(hits("notifications@github.com"));
+        assert!(hits("no-reply@accounts.google.com"));
+        assert!(hits("noreply@medium.com"));
+        assert!(hits("donotreply@bank.example"));
+        assert!(hits("info@mailer.example.com"));
+        // Humans must never match (over-tightening guard).
+        assert!(!hits("alice@gmail.com"));
+        assert!(!hits("bob.smith@company.com"));
+    }
+
+    #[test]
+    fn refresh_merges_missing_default_gates_without_duplicating() {
+        let mut binding = monitor_binding(
+            "gmail-browser",
+            "gmail-browser",
+            "Gmail in the browser",
+            Path::new("/tmp/mem.md"),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        // Simulate a pre-existing daemon-installed custom ignore filter.
+        binding
+            .ignore_filters
+            .push(puffer_subscriptions::FilterSpec::Tagged(
+                puffer_subscriptions::TaggedFilterSpec::Regex {
+                    pattern: "custom".into(),
+                    case_insensitive: true,
+                },
+            ));
+        binding.classify_prompt = None; // user cleared it somehow
+        refresh_monitor_binding(
+            &mut binding,
+            "gmail-browser",
+            "gmail-browser",
+            "Gmail in the browser",
+            Path::new("/tmp/mem.md"),
+            &MonitorModelUpdate::Preserve,
+            &MonitorContactUpdate::Preserve,
+        )
+        .unwrap();
+        assert_eq!(
+            binding.ignore_filters.len(),
+            4,
+            "3 defaults + 1 custom, no dupes"
+        );
+        assert!(binding.classify_prompt.is_some(), "default prompt restored");
     }
 
     #[test]
