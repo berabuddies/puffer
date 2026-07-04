@@ -1430,8 +1430,15 @@
         if (generation !== activeLoginGeneration) return; // canceled while waiting
         const poll = await copilotLoginPoll(start.deviceCode, remoteConnection);
         if (generation !== activeLoginGeneration) return; // canceled mid-poll
-        if (poll.status === "done" && poll.snapshot) {
-          settingsSnapshot = poll.snapshot;
+        if (poll.status === "done") {
+          if (poll.snapshot) {
+            settingsSnapshot = poll.snapshot;
+          } else {
+            // Daemon persisted the credential but couldn't build a snapshot;
+            // fetch it so the UI reflects the now-connected provider.
+            settingsSnapshot = await loadSettingsSnapshot(remoteConnection);
+            if (generation !== activeLoginGeneration) return;
+          }
           onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
           onboarding = shouldShowOnboarding(settingsSnapshot);
           if (wasOnboarding && !onboarding) {
@@ -1473,6 +1480,12 @@
     copilotLogin = null;
     authBusyProviderId = null;
     statusMessage = "Login canceled.";
+    // If the cancel raced a backend completion (the credential may already be
+    // persisted), reconcile so the UI reflects the true connected state rather
+    // than showing the provider as disconnected until a manual refresh. Safe
+    // for a plain cancel too — it just re-reads the current snapshot. Runs
+    // after clearing authBusyProviderId so refreshSettings' busy-guard passes.
+    void refreshSettings();
   }
 
   function normalizedProviderConnectionId(providerId: string): string {

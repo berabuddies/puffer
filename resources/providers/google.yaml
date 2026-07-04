@@ -12,13 +12,12 @@ chat_completions_path: /chat/completions
 default_api: openai-completions
 auth_modes:
   - api_key
-discovery:
-  path: /models
-  response: open_ai_models
-  api: openai-completions
-  context_window: 1048576
-  max_output_tokens: 65536
-  supports_reasoning: true
+# No live discovery: Google's OpenAI-compat `/v1beta/openai/models` returns ids
+# with a `models/` prefix (e.g. `models/gemini-2.5-flash`), no `name` field, and
+# includes embedding models with no chat filter. Merging that (discovery is
+# authoritative) would drop these curated entries in favor of prefixed,
+# low-metadata ones and surface embeddings as selectable chat models. Ship a
+# curated static list instead; add new Gemini models here as they ship.
 models:
   - id: gemini-2.5-flash
     display_name: Gemini 2.5 Flash

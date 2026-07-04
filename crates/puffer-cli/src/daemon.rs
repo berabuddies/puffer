@@ -2988,18 +2988,30 @@ fn handle_copilot_login_poll(state: &DaemonState, params: &Value) -> Result<Valu
                 &inputs.auth_store,
                 "github-copilot",
             );
-            reload_daemon_config(state)?;
-            let fresh = state.build_runtime_inputs()?;
-            let config = state.config.lock().unwrap().clone();
-            let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
-                &state.paths,
-                &config,
-                &fresh.resources,
-                &fresh.providers,
-                &fresh.auth_store,
-                &fresh.session_store,
-            )?;
-            Ok(json!({ "status": "done", "snapshot": snapshot }))
+            // The credential is now persisted, so the login HAS succeeded.
+            // Building the refreshed settings snapshot is best-effort: a
+            // transient failure here must not report a failed login (which would
+            // leave the token on disk while the UI says it failed). Return
+            // `done` regardless; the client reconciles via a settings refresh
+            // when the snapshot is absent.
+            let snapshot: Option<SettingsSnapshotDto> = (|| {
+                reload_daemon_config(state)?;
+                let fresh = state.build_runtime_inputs()?;
+                let config = state.config.lock().unwrap().clone();
+                desktop_api::load_settings_snapshot(
+                    &state.paths,
+                    &config,
+                    &fresh.resources,
+                    &fresh.providers,
+                    &fresh.auth_store,
+                    &fresh.session_store,
+                )
+            })()
+            .ok();
+            match snapshot {
+                Some(snapshot) => Ok(json!({ "status": "done", "snapshot": snapshot })),
+                None => Ok(json!({ "status": "done" })),
+            }
         }
     }
 }
