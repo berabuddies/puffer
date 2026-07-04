@@ -58,6 +58,13 @@ pub(crate) fn persist_cache_updates(updates: &HashMap<String, DiscoveryCacheEntr
 /// so without this the previous account's entitlement-filtered model list would
 /// keep being served until the TTL expires — and a lower-tier account would be
 /// offered models it can't use (model_not_supported at chat time).
+///
+/// NOTE: like `persist_cache_updates`, this is a non-atomic load/modify/save on
+/// the shared cache file (no lock), so a concurrent discovery write could
+/// briefly resurrect the removed entry. Both callers immediately follow with a
+/// re-discovery that re-narrows it, and any stale entry self-corrects at the
+/// next discovery or the TTL, so we accept this rather than add file locking to
+/// the whole cache path.
 pub(crate) fn invalidate_cached_provider(provider_id: &str) {
     let path = discovery_cache_path();
     let Some(mut cache) = load_discovery_cache(&path) else {

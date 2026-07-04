@@ -2978,6 +2978,16 @@ fn handle_copilot_login_poll(state: &DaemonState, params: &Value) -> Result<Valu
             // could add seconds of latency to the login-complete response.
             let mut inputs = state.build_runtime_inputs_without_discovery()?;
             let auth_path = state.paths.user_config_dir.join("auth.json");
+            // Reconnect (re-login without an explicit logout) issues a new
+            // GitHub token. Evict the OLD token's cached Copilot bearer so it
+            // isn't orphaned in the process cache (keyed by github token) with
+            // no future logout/401 to ever remove it.
+            if let Some(StoredCredential::OAuth(previous)) = inputs.auth_store.get("github-copilot") {
+                let previous_token = previous.access_token.clone();
+                if previous_token != token {
+                    puffer_core::invalidate_copilot_bearer(&previous_token);
+                }
+            }
             set_stored_credential(
                 &mut inputs.auth_store,
                 "github-copilot".to_string(),
