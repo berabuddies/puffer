@@ -629,15 +629,31 @@ fn poll_account_at_url(
     }
 }
 
+/// Builds the event text for one inbox row. The from-address leads because it
+/// is the strongest deterministic notification-class signal for the
+/// downstream classifier and ignore rules (#592).
+fn message_event_text(row: &Value) -> String {
+    let sender = row.get("sender").and_then(Value::as_str).unwrap_or("");
+    let from_email = row.get("fromEmail").and_then(Value::as_str).unwrap_or("");
+    let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+    let snippet = row.get("snippet").and_then(Value::as_str).unwrap_or("");
+    let from_line = if from_email.trim().is_empty() {
+        String::new()
+    } else {
+        format!("from: {from_email}")
+    };
+    [from_line.as_str(), sender, subject, snippet]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn emit_message(env: &SubscriberEnv, account: &str, dedup_key: &str, row: Value) -> Result<()> {
     let sender = row.get("sender").and_then(Value::as_str).unwrap_or("");
     let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
     let snippet = row.get("snippet").and_then(Value::as_str).unwrap_or("");
-    let text = [sender, subject, snippet]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = message_event_text(&row);
     diag::emit_message(
         &env.topic,
         account,
@@ -1006,6 +1022,25 @@ mod tests {
         assert!(seen.seen.len() <= SEEN_MAX_KEYS / 2 + 1);
         assert_eq!(seen.seen.last().map(String::as_str), Some("acct:new"));
         assert!(!seen.seen.iter().any(|k| k == "acct:k0"), "oldest evicted");
+    }
+
+    #[test]
+    fn event_text_leads_with_from_email() {
+        let row = json!({
+            "sender": "GitHub",
+            "fromEmail": "notifications@github.com",
+            "subject": "PR #1 review requested",
+            "snippet": "please review"
+        });
+        let text = message_event_text(&row);
+        assert!(text.starts_with("from: notifications@github.com\n"));
+        assert!(text.contains("PR #1 review requested"));
+    }
+
+    #[test]
+    fn event_text_omits_from_line_when_absent() {
+        let row = json!({ "sender": "Alice", "subject": "hi", "snippet": "hello" });
+        assert!(message_event_text(&row).starts_with("Alice\n"));
     }
 
     #[test]
