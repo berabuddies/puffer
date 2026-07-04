@@ -441,9 +441,18 @@ fn cancel_turn(
 
 /// Opens an external URL in the user's default browser. Used by flows like the
 /// GitHub Copilot device login where `window.open` is unreliable in the webview.
+///
+/// Only `http`/`https` are allowed: this command is reachable from any webview
+/// JS via `invoke`, and handing an arbitrary scheme to the OS opener would let
+/// injected page content open `file://` targets or trigger native protocol
+/// handlers. Reject everything else before touching the opener.
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    let parsed = url::Url::parse(&url).map_err(|error| error.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("refusing to open non-http(s) URL: {url}"));
+    }
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|error| error.to_string())

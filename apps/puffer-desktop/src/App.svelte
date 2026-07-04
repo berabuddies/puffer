@@ -1410,9 +1410,15 @@
     }
     authBusyProviderId = providerId;
     authError = null;
+    // Claim this attempt. Every await below re-checks the generation so a
+    // login the user canceled (which bumps the generation) can never re-arm
+    // the card, keep polling, apply a snapshot, or clobber a newer login's
+    // busy state — the same guard handleOauthLogin uses.
+    const generation = ++activeLoginGeneration;
     const wasOnboarding = onboarding;
     try {
       const start = await copilotLoginStart(remoteConnection);
+      if (generation !== activeLoginGeneration) return; // canceled during start
       copilotLogin = { userCode: start.userCode, verificationUri: start.verificationUri };
       // NOTE: auto window.open / clipboard don't work in the webview without a
       // user gesture — the device-code card exposes explicit Copy/Open buttons.
@@ -1421,11 +1427,9 @@
       let intervalMs = Math.max(start.interval, 1) * 1000;
       while (Date.now() < deadlineMs) {
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
-        if (copilotLogin === null) return; // canceled (see cancelActiveLogin)
+        if (generation !== activeLoginGeneration) return; // canceled while waiting
         const poll = await copilotLoginPoll(start.deviceCode, remoteConnection);
-        // Re-check after the await: the user may have canceled mid-poll. Bail
-        // without applying results so a dismissed login can't reconnect.
-        if (copilotLogin === null) return;
+        if (generation !== activeLoginGeneration) return; // canceled mid-poll
         if (poll.status === "done" && poll.snapshot) {
           settingsSnapshot = poll.snapshot;
           onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
@@ -1447,19 +1451,17 @@
       }
       throw new Error("GitHub Copilot login timed out. Please try again.");
     } catch (error) {
+      if (generation !== activeLoginGeneration) return; // canceled — ignore late error
       authError = String(error);
       statusMessage = authError;
       copilotLogin = null;
     } finally {
-      authBusyProviderId = null;
+      // Only release the busy flag if we still own the active attempt; a cancel
+      // (or a newer login) already cleared it.
+      if (generation === activeLoginGeneration) authBusyProviderId = null;
     }
   }
 
-  // Cancel an in-flight Copilot device-flow login (user dismissed the code
-  // card / closed the modal before authorizing). Clearing `copilotLogin` makes
-  // the poll loop bail at its next check, and clearing the busy flag frees the
-  // UI immediately so other providers can be connected without waiting out the
-  // device-code timeout.
   // Cancel whatever login is in flight — a PKCE OAuth wait (anthropic/openai)
   // or a Copilot device-flow poll — when the user dismisses its modal. Bumping
   // the generation makes the pending handler ignore its late result; clearing

@@ -131,9 +131,9 @@ pub(crate) fn copilot_bearer_token(github_token: &str) -> Result<CopilotAuth> {
 
     // Auto-only plans need a `/models/session` auto-mode session for chat to
     // work at all. Minting is unbilled and the session outlives the bearer's
-    // cache window (~1h vs ~25min), so mint alongside each exchange. Failure
-    // is tolerated: chat then runs without the header (direct mode).
-    let session = if copilot_sku_is_auto_only(&value) {
+    // cache window (~1h vs ~25min), so mint alongside each exchange.
+    let auto_only = copilot_sku_is_auto_only(&value);
+    let session = if auto_only {
         mint_auto_session(&client, &api_url, &token)
     } else {
         None
@@ -144,13 +144,21 @@ pub(crate) fn copilot_bearer_token(github_token: &str) -> Result<CopilotAuth> {
         api_url,
         session,
     };
-    cache().lock().unwrap().insert(
-        github_token.to_string(),
-        CachedToken {
-            auth: auth.clone(),
-            expires_at_secs: expires_at,
-        },
-    );
+    // Cache the exchange until shortly before the bearer expires — EXCEPT when
+    // an auto-only plan's session mint failed transiently (e.g. a flaky
+    // network). Caching `session: None` there would make every chat run
+    // without `Copilot-Session-Token` and fail with `model_not_supported` for
+    // the whole bearer window; skipping the cache retries the mint on the next
+    // request instead. (Paid plans legitimately have no session, so cache them.)
+    if !(auto_only && auth.session.is_none()) {
+        cache().lock().unwrap().insert(
+            github_token.to_string(),
+            CachedToken {
+                auth: auth.clone(),
+                expires_at_secs: expires_at,
+            },
+        );
+    }
     Ok(auth)
 }
 
