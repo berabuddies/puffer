@@ -28,6 +28,11 @@ pub(crate) const STATE_ROOT: &str = "gmail-browser-accounts";
 
 const CONFIG_FILE: &str = "config.toml";
 const SEEN_FILE: &str = "seen.json";
+/// Bump when the row-id derivation changes shape; mismatched stores
+/// rebaseline (observe, don't emit) instead of flooding (#594).
+const SEEN_KEY_VERSION: u32 = 2;
+/// Upper bound on remembered row keys; oldest half evicted on overflow.
+const SEEN_MAX_KEYS: usize = 2000;
 const AUTH_STATE_FILE: &str = "auth_state.json";
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const ERROR_BACKOFF: Duration = Duration::from_secs(10);
@@ -58,7 +63,15 @@ struct SeenState {
     #[serde(default)]
     initialized: bool,
     #[serde(default)]
-    seen: BTreeSet<String>,
+    key_version: u32,
+    #[serde(default)]
+    seen: Vec<String>,
+}
+
+impl SeenState {
+    fn contains(&self, key: &str) -> bool {
+        self.seen.iter().any(|k| k == key)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -456,6 +469,10 @@ async fn poll_once(
     let initialized_before = seen.initialized;
     let mut newly_seen = BTreeSet::new();
     let mut successful_poll = false;
+    let rebaseline = seen.key_version != SEEN_KEY_VERSION;
+    if rebaseline {
+        diag::rebaseline_key_version(&env.topic, seen.key_version, SEEN_KEY_VERSION, 0);
+    }
     let mut observed_rows = 0usize;
     let mut emitted_rows = 0usize;
     for account in &config.accounts {
@@ -508,16 +525,17 @@ async fn poll_once(
             };
             let key = format!("{account}:{id}");
             newly_seen.insert(key.clone());
-            if should_emit_row(seen, &key, &row) {
+            if rebaseline {
+                // Key format changed: observe silently, never flood (#594).
+            } else if let Some(reason) = row_skip_reason(seen, &key, &row) {
+                diag::row_skipped(&env.topic, account, &key, reason);
+            } else {
                 emitted_rows += 1;
                 emit_message(env, account, &key, row)?;
             }
         }
     }
-    if successful_poll {
-        seen.seen.extend(newly_seen);
-        seen.initialized = true;
-    }
+    apply_poll_observation(seen, newly_seen.into_iter().collect(), successful_poll);
     diag::poll_complete(
         &env.topic,
         successful_poll,
@@ -710,15 +728,53 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn should_emit_row(seen: &SeenState, key: &str, row: &Value) -> bool {
-    if seen.seen.contains(key) {
-        return false;
+/// Returns why a row must NOT emit, or `None` when it should emit.
+fn row_skip_reason(seen: &SeenState, key: &str, row: &Value) -> Option<&'static str> {
+    if seen.contains(key) {
+        return Some("seen_duplicate");
     }
     if !seen.initialized || seen.seen.is_empty() {
-        return row.get("index").and_then(Value::as_u64).unwrap_or(u64::MAX)
-            < INITIAL_ROW_EMIT_LIMIT;
+        let in_window =
+            row.get("index").and_then(Value::as_u64).unwrap_or(u64::MAX) < INITIAL_ROW_EMIT_LIMIT;
+        return if in_window {
+            None
+        } else {
+            Some("initial_window_excluded")
+        };
     }
-    true
+    None
+}
+
+/// Folds one successful poll's observed keys into the seen state.
+/// Returns 0 when this poll was a key-version rebaseline (nothing may emit).
+fn apply_poll_observation(
+    seen: &mut SeenState,
+    newly_observed: Vec<String>,
+    successful_poll: bool,
+) -> usize {
+    if !successful_poll {
+        return 0;
+    }
+    let rebaseline = seen.key_version != SEEN_KEY_VERSION;
+    if rebaseline {
+        seen.seen.clear();
+        seen.key_version = SEEN_KEY_VERSION;
+    }
+    for key in newly_observed {
+        if !seen.contains(&key) {
+            seen.seen.push(key);
+        }
+    }
+    if seen.seen.len() > SEEN_MAX_KEYS {
+        let keep_from = seen.seen.len() - SEEN_MAX_KEYS / 2;
+        seen.seen.drain(..keep_from);
+    }
+    seen.initialized = true;
+    if rebaseline {
+        0
+    } else {
+        1
+    }
 }
 
 fn gmail_poll_result_ready(result: &Value) -> bool {
@@ -862,45 +918,94 @@ mod tests {
         assert!(!dir.join(AUTH_STATE_FILE).exists());
     }
 
-    #[test]
-    fn first_snapshot_only_emits_the_top_row() {
-        let seen = SeenState::default();
-
-        assert!(should_emit_row(
-            &seen,
-            "me@example.com:1",
-            &json!({ "unread": false, "index": 0 })
-        ));
-        assert!(!should_emit_row(
-            &seen,
-            "me@example.com:2",
-            &json!({ "unread": true, "index": 1 })
-        ));
-        assert!(!should_emit_row(
-            &seen,
-            "me@example.com:3",
-            &json!({ "unread": false, "index": 2 })
-        ));
+    fn seen_v2(keys: &[&str]) -> SeenState {
+        SeenState {
+            initialized: true,
+            key_version: SEEN_KEY_VERSION,
+            seen: keys.iter().map(|k| k.to_string()).collect(),
+        }
     }
 
     #[test]
-    fn initialized_seen_cache_emits_new_rows() {
+    fn skip_reason_none_for_fresh_key() {
+        let seen = seen_v2(&["acct:c1"]);
+        assert_eq!(
+            row_skip_reason(&seen, "acct:c2", &json!({"index": 5})),
+            None
+        );
+    }
+
+    #[test]
+    fn skip_reason_seen_duplicate() {
+        let seen = seen_v2(&["acct:c1"]);
+        assert_eq!(
+            row_skip_reason(&seen, "acct:c1", &json!({"index": 0})),
+            Some("seen_duplicate")
+        );
+    }
+
+    #[test]
+    fn skip_reason_initial_window() {
+        // Fresh state: only index < INITIAL_ROW_EMIT_LIMIT emits.
+        let fresh = SeenState {
+            initialized: false,
+            key_version: SEEN_KEY_VERSION,
+            seen: Vec::new(),
+        };
+        assert_eq!(
+            row_skip_reason(&fresh, "acct:c9", &json!({"index": 0})),
+            None
+        );
+        assert_eq!(
+            row_skip_reason(&fresh, "acct:c9", &json!({"index": 3})),
+            Some("initial_window_excluded")
+        );
+    }
+
+    #[test]
+    fn index_shift_does_not_resurface_seen_rows() {
+        // #594 core regression: archive shifts every remaining row's index;
+        // content keys are index-free so nothing re-emits.
+        let seen = seen_v2(&["acct:cA", "acct:cB", "acct:cC"]);
+        for (key, shifted_index) in [("acct:cA", 0), ("acct:cB", 1), ("acct:cC", 2)] {
+            assert_eq!(
+                row_skip_reason(&seen, key, &json!({"index": shifted_index})),
+                Some("seen_duplicate")
+            );
+        }
+    }
+
+    #[test]
+    fn key_version_mismatch_rebaselines_without_emitting() {
+        // Old-format seen (version 0) + new code: first poll must observe
+        // all rows, emit nothing, and stamp the new version.
         let mut seen = SeenState {
             initialized: true,
-            seen: BTreeSet::new(),
+            key_version: 0,
+            seen: (0..75).map(|i| format!("acct:old-{i}")).collect(),
         };
-        seen.seen.insert("me@example.com:1".to_string());
+        let observed = ["acct:c1", "acct:c2"];
+        let emitted = apply_poll_observation(
+            &mut seen,
+            observed.iter().map(|k| k.to_string()).collect(),
+            true,
+        );
+        assert_eq!(emitted, 0, "rebaseline poll must not emit");
+        assert_eq!(seen.key_version, SEEN_KEY_VERSION);
+        assert!(seen.seen.iter().any(|k| k == "acct:c1"));
+    }
 
-        assert!(!should_emit_row(
-            &seen,
-            "me@example.com:1",
-            &json!({ "unread": true, "index": 0 })
-        ));
-        assert!(should_emit_row(
-            &seen,
-            "me@example.com:2",
-            &json!({ "unread": false, "index": 25 })
-        ));
+    #[test]
+    fn seen_capped_evicts_oldest_half() {
+        let mut seen = SeenState {
+            initialized: true,
+            key_version: SEEN_KEY_VERSION,
+            seen: (0..SEEN_MAX_KEYS).map(|i| format!("acct:k{i}")).collect(),
+        };
+        apply_poll_observation(&mut seen, vec!["acct:new".into()], true);
+        assert!(seen.seen.len() <= SEEN_MAX_KEYS / 2 + 1);
+        assert_eq!(seen.seen.last().map(String::as_str), Some("acct:new"));
+        assert!(!seen.seen.iter().any(|k| k == "acct:k0"), "oldest evicted");
     }
 
     #[test]

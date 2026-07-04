@@ -191,6 +191,23 @@ pub(crate) fn now_ms() -> u128 {
         .as_millis()
 }
 
+/// Logs one skipped inbox row with its filter-chain skip reason (#594).
+pub(crate) fn row_skipped(topic: &str, account: &str, dedup_key: &str, reason: &str) {
+    line(format!(
+        "row_skipped ts_ms={} topic={topic} account_hash={} dedup_key={dedup_key} reason={reason}",
+        now_ms(),
+        account_hash(account),
+    ));
+}
+
+/// Logs a seen-key-format rebaseline poll (observe-only, zero emits).
+pub(crate) fn rebaseline_key_version(topic: &str, from: u32, to: u32, observed: usize) {
+    line(format!(
+        "rebaseline_key_version ts_ms={} topic={topic} from={from} to={to} observed={observed}",
+        now_ms(),
+    ));
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
