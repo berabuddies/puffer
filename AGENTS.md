@@ -141,7 +141,7 @@ style. Full design: `docs/architecture/monitor-pipeline.md`.
   approves the draft in the desktop UI; only then does the daemon send the Telegram reply / create
   the Gmail draft / RSVP the Calendar invite, via the `task_monitor_action_execute` RPC. Never push
   an outward effect from an agent turn (no connector send tool, no `MonitorReplySend`, no
-  `TaskUpdate status:completed` to force a send). `task_monitor_complete` refuses human-gated tasks.
+  `TaskUpdate status:completed` to force a send). `task_monitor_complete` refuses human-gated tasks, with one exception: `completed_via: "no_reply_needed"` records the human "reviewed, no reply needed" decision (with an audit entry and optional `reason`) instead of a send receipt (#676).
 - **`TaskCreate` skip is success, not failure.** A `{success:true, skipped:true, reason}` result
   means the server gate intentionally suppressed the task (already handled in Telegram, duplicate,
   untrusted source). Do not retry by mutating source metadata.

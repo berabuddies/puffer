@@ -76,7 +76,7 @@ Outward actions (send a Telegram reply, create a Gmail draft, RSVP a Calendar in
   or the legacy `monitor-reply-action`) whose tool set is restricted to `MonitorActionDraft`
   (legacy: `MonitorReplyDraft`) + research tools. It PREPARES a draft and writes it to the task's
   `pending_action` (or legacy `pending_reply`). It cannot send: there is no connector send tool in
-  the action turn's tool set, and `task_monitor_complete` refuses to close a human-gated task.
+  the action turn's tool set, and `task_monitor_complete` refuses to close a human-gated task (except for the human's own `completed_via: "no_reply_needed"` decision, which is recorded with a `monitor_completion_events` audit entry, #676).
 - **Human (bobo)** reviews the draft in `PendingActionModal` (or the legacy `ReplyDraftModal`),
   edits it, and approves.
 - **Daemon executes** the outward effect ONLY via the `task_monitor_action_execute` RPC (legacy:
