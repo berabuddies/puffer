@@ -71,6 +71,7 @@ pub use permissions::BrowserActionSet;
 pub use permissions::SessionPermissionState;
 pub use plan_mode::enter_plan_mode;
 pub use runtime::background_tasks;
+pub use runtime::invalidate_copilot_bearer;
 pub use runtime::claude_tools::execute_workflow_tool;
 pub use runtime::execute_tool_action_once;
 pub use runtime::execute_user_prompt as execute_user_turn;

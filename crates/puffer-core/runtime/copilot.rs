@@ -19,6 +19,12 @@ const EXPIRY_SKEW_SECS: u64 = 120;
 /// Fallback lifetime when the response omits `expires_at` (Copilot tokens are
 /// typically ~30 min).
 const FALLBACK_LIFETIME_SECS: u64 = 25 * 60;
+/// How long to reuse a bearer whose auto-mode session mint failed before
+/// re-exchanging. Bounds retries to ~this interval during a `/models/session`
+/// outage instead of re-running the token exchange on every chat turn (which
+/// risks a GitHub secondary-rate-limit lockout). Must exceed `EXPIRY_SKEW_SECS`
+/// for the cache entry to be reused at all.
+const SESSION_MINT_RETRY_SECS: u64 = EXPIRY_SKEW_SECS + 30;
 
 /// Default Copilot API host when the token response omits `endpoints.api`.
 const DEFAULT_COPILOT_API: &str = "https://api.githubcopilot.com";
@@ -157,21 +163,26 @@ pub(crate) fn copilot_bearer_token(github_token: &str) -> Result<CopilotAuth> {
         api_url,
         session,
     };
-    // Cache the exchange until shortly before the bearer expires — EXCEPT when
-    // an auto-only plan's session mint failed transiently (e.g. a flaky
-    // network). Caching `session: None` there would make every chat run
-    // without `Copilot-Session-Token` and fail with `model_not_supported` for
-    // the whole bearer window; skipping the cache retries the mint on the next
-    // request instead. (Paid plans legitimately have no session, so cache them.)
-    if !(auto_only && auth.session.is_none()) {
-        cache().lock().unwrap().insert(
-            github_token.to_string(),
-            CachedToken {
-                auth: auth.clone(),
-                expires_at_secs: expires_at,
-            },
-        );
-    }
+    // Cache the exchange until shortly before the bearer expires. When an
+    // auto-only plan's session mint failed transiently (flaky network /
+    // `/models/session` outage), cache the session-less bearer only briefly
+    // (SESSION_MINT_RETRY_SECS) instead of the full window: long enough to stop
+    // re-running the token exchange on every chat turn (which risks a GitHub
+    // secondary-rate-limit lockout), short enough to re-mint the session soon
+    // after the outage clears. (Paid plans legitimately have no session — cache
+    // those for the full window.)
+    let cache_expires_at = if auto_only && auth.session.is_none() {
+        (now + SESSION_MINT_RETRY_SECS).min(expires_at)
+    } else {
+        expires_at
+    };
+    cache().lock().unwrap().insert(
+        github_token.to_string(),
+        CachedToken {
+            auth: auth.clone(),
+            expires_at_secs: cache_expires_at,
+        },
+    );
     Ok(auth)
 }
 

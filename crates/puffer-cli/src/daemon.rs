@@ -2971,7 +2971,12 @@ fn handle_copilot_login_poll(state: &DaemonState, params: &Value) -> Result<Valu
             Ok(json!({ "status": "error", "error": err }))
         }
         crate::copilot_login::DeviceFlowPoll::Done(token) => {
-            let mut inputs = state.build_runtime_inputs()?;
+            // No discovery here: we only need auth_store to write the new
+            // credential (and the copilot entry would error anyway, since the
+            // credential isn't stored yet). The snapshot below runs its own
+            // fresh discovery — this avoids a second, useless network pass that
+            // could add seconds of latency to the login-complete response.
+            let mut inputs = state.build_runtime_inputs_without_discovery()?;
             let auth_path = state.paths.user_config_dir.join("auth.json");
             set_stored_credential(
                 &mut inputs.auth_store,
@@ -3097,13 +3102,27 @@ fn handle_logout_provider(state: &DaemonState, params: &Value) -> Result<Value> 
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
     let provider_id = canonical_desktop_provider_id(requested_provider_id);
-    let mut inputs = state.build_runtime_inputs()?;
+    let mut inputs = state.build_runtime_inputs_without_discovery()?;
     let auth_path = state.paths.user_config_dir.join("auth.json");
+    // Capture the GitHub token before removing it so we can drop the exchanged
+    // Copilot bearer keyed by it (below) — otherwise a logged-out account's
+    // still-valid short-lived bearer lingers in the process cache until expiry.
+    let copilot_github_token = if provider_id == "github-copilot" {
+        match inputs.auth_store.get(&provider_id) {
+            Some(StoredCredential::OAuth(credential)) => Some(credential.access_token.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
     desktop_api::logout_provider(&mut inputs.auth_store, &auth_path, &provider_id)?;
     // Drop this provider's cached discovery so a later re-login (possibly a
     // different account, e.g. Copilot) re-discovers instead of serving the
     // logged-out account's cached, account-specific model list.
     puffer_provider_registry::invalidate_provider_discovery_cache(&provider_id);
+    if let Some(token) = copilot_github_token {
+        puffer_core::invalidate_copilot_bearer(&token);
+    }
     let fresh = state.build_runtime_inputs()?;
     let config = state.config.lock().unwrap().clone();
     let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(

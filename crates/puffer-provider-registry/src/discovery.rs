@@ -266,6 +266,14 @@ impl ModelDiscoveryClient {
         // 2. Auto-only SKU: the picker flags are all false by design. Ask the
         //    (unbilled) auto-mode session endpoint which models the backend is
         //    willing to serve this account.
+        //    INVARIANT: models offered from this session set are only usable if
+        //    the chat path attaches `Copilot-Session-Token`, which puffer-core's
+        //    copilot runtime does when `copilot_sku_is_auto_only` (token-envelope
+        //    sku) is true. Both this branch and that runtime check rely on the
+        //    same "free/student ⟺ picker-disabled ⟺ auto-only" correspondence
+        //    GitHub currently maintains; if a future SKU breaks it (e.g. a paid
+        //    account with picker disabled on every model), keep the two in sync
+        //    so the session set is never offered without the token being sent.
         if let Some(available) = self.copilot_session_available_models(api_url, token, headers) {
             if !available.is_empty() {
                 let in_session = |entry: &Value| {
