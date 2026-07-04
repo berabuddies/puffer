@@ -203,6 +203,29 @@ pub(crate) fn row_skipped(topic: &str, account: &str, dedup_key: &str, reason: &
     ));
 }
 
+/// Logs one account entering observe-only mode for this poll: its logged-in
+/// mailbox identity changed, or it joined an established store with no keys
+/// of its own. Identifiers are fingerprinted like everywhere else here.
+pub(crate) fn account_observe_only(topic: &str, account: &str, reason: &str, mailbox: &str) {
+    line(format!(
+        "account_observe_only ts_ms={} topic={topic} account_hash={} reason={reason} mailbox_hash={}",
+        now_ms(),
+        account_hash(account),
+        account_hash(mailbox),
+    ));
+}
+
+/// Logs a configured-account vs logged-in-mailbox mismatch, once per store
+/// lifetime (`?authuser=` fell back to the default session account).
+pub(crate) fn account_mismatch(topic: &str, account: &str, mailbox: &str) {
+    line(format!(
+        "account_mismatch ts_ms={} topic={topic} account_hash={} mailbox_hash={}",
+        now_ms(),
+        account_hash(account),
+        account_hash(mailbox),
+    ));
+}
+
 /// Logs a seen-key-format rebaseline poll (observe-only, zero emits).
 pub(crate) fn rebaseline_key_version(topic: &str, from: u32, to: u32, observed: usize) {
     line(format!(

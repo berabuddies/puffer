@@ -66,6 +66,12 @@ struct SeenState {
     key_version: u32,
     #[serde(default)]
     seen: Vec<String>,
+    /// Configured account → mailbox actually logged in when its rows were
+    /// observed. `?authuser=` silently falls back to the default session
+    /// account, so a mailbox-identity flip changes every row id under the
+    /// same key prefix — that must rebaseline, not flood.
+    #[serde(default)]
+    mailboxes: BTreeMap<String, String>,
 }
 
 /// Fresh installs start on the current key version so the initial-window
@@ -78,6 +84,7 @@ impl Default for SeenState {
             initialized: false,
             key_version: SEEN_KEY_VERSION,
             seen: Vec::new(),
+            mailboxes: BTreeMap::new(),
         }
     }
 }
@@ -93,6 +100,29 @@ impl SeenState {
     /// and must rebaseline (observe, don't emit) before emitting again.
     fn needs_rebaseline(&self) -> bool {
         self.key_version != SEEN_KEY_VERSION
+    }
+
+    /// True when this account's logged-in mailbox differs from the one its
+    /// seen keys were recorded under (empty observations never count: an
+    /// extraction miss must not wipe valid state).
+    fn mailbox_changed(&self, account: &str, observed: &str) -> bool {
+        if observed.is_empty() {
+            return false;
+        }
+        self.mailboxes
+            .get(account)
+            .is_some_and(|prev| !prev.is_empty() && prev != observed)
+    }
+
+    /// True when an account joins an already-established store with no keys
+    /// of its own: its whole backlog would otherwise emit as new mail, so
+    /// its first poll observes silently instead.
+    fn account_needs_bootstrap(&self, account: &str) -> bool {
+        let prefix = format!("{account}:");
+        self.initialized
+            && !self.seen.is_empty()
+            && !self.mailboxes.contains_key(account)
+            && !self.seen.iter().any(|key| key.starts_with(&prefix))
     }
 }
 
@@ -490,6 +520,7 @@ async fn poll_once(
     let seen_count_before = seen.seen.len();
     let initialized_before = seen.initialized;
     let mut newly_seen: Vec<String> = Vec::new();
+    let mut observed_mailboxes: BTreeMap<String, String> = BTreeMap::new();
     let mut successful_poll = false;
     let rebaseline = seen.needs_rebaseline();
     let mut observed_rows = 0usize;
@@ -532,6 +563,27 @@ async fn poll_once(
                 continue;
             }
         }
+        let mailbox = result
+            .get("mailbox")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let account_observe_only = if seen.mailbox_changed(account, &mailbox) {
+            diag::account_observe_only(&env.topic, account, "mailbox_changed", &mailbox);
+            true
+        } else if seen.account_needs_bootstrap(account) {
+            diag::account_observe_only(&env.topic, account, "account_bootstrap", &mailbox);
+            true
+        } else {
+            false
+        };
+        if !mailbox.is_empty() {
+            if !seen.mailboxes.contains_key(account) && !account.eq_ignore_ascii_case(&mailbox) {
+                diag::account_mismatch(&env.topic, account, &mailbox);
+            }
+            observed_mailboxes.insert(account.clone(), mailbox);
+        }
         let rows = result
             .get("rows")
             .and_then(Value::as_array)
@@ -551,8 +603,10 @@ async fn poll_once(
                 continue;
             }
             newly_seen.push(key.clone());
-            if rebaseline {
-                // Key format changed: observe silently, never flood (#594).
+            if rebaseline || account_observe_only {
+                // Key format or mailbox identity changed, or a new account
+                // joined an established store: observe silently, never
+                // flood (#594 and the mailbox-flip variant of it).
                 continue;
             }
             if let Some(reason) = row_skip_reason(seen, &key, &row) {
@@ -571,7 +625,7 @@ async fn poll_once(
             newly_seen.len(),
         );
     }
-    apply_poll_observation(seen, newly_seen, successful_poll);
+    apply_poll_observation(seen, newly_seen, observed_mailboxes, successful_poll);
     diag::poll_complete(
         &env.topic,
         successful_poll,
@@ -799,12 +853,15 @@ fn row_skip_reason(seen: &SeenState, key: &str, row: &Value) -> Option<&'static 
 
 /// Folds one successful poll's observed keys into the seen state. On a
 /// key-version rebaseline the old-format keys are dropped and the store is
-/// re-stamped. Re-observed keys move to the back so still-visible rows are
-/// never the eviction victims (a pinned thread outliving SEEN_MAX_KEYS new
-/// mails must not be evicted and re-emit as new).
+/// re-stamped; on a mailbox-identity flip only that account's keys are
+/// dropped (they identify rows of a different mailbox). Re-observed keys
+/// move to the back so still-visible rows are never the eviction victims
+/// (a pinned thread outliving SEEN_MAX_KEYS new mails must not be evicted
+/// and re-emit as new).
 fn apply_poll_observation(
     seen: &mut SeenState,
     newly_observed: Vec<String>,
+    observed_mailboxes: BTreeMap<String, String>,
     successful_poll: bool,
 ) {
     if !successful_poll {
@@ -814,6 +871,13 @@ fn apply_poll_observation(
         seen.seen.clear();
         seen.key_version = SEEN_KEY_VERSION;
     }
+    for (account, mailbox) in &observed_mailboxes {
+        if seen.mailbox_changed(account, mailbox) {
+            let prefix = format!("{account}:");
+            seen.seen.retain(|key| !key.starts_with(&prefix));
+        }
+    }
+    seen.mailboxes.extend(observed_mailboxes);
     let batch_len = newly_observed.len();
     for key in newly_observed {
         if let Some(position) = seen.seen.iter().position(|k| k == &key) {
@@ -978,6 +1042,7 @@ mod tests {
             initialized: true,
             key_version: SEEN_KEY_VERSION,
             seen: keys.iter().map(|k| k.to_string()).collect(),
+            mailboxes: BTreeMap::new(),
         }
     }
 
@@ -1006,6 +1071,7 @@ mod tests {
             initialized: false,
             key_version: SEEN_KEY_VERSION,
             seen: Vec::new(),
+            mailboxes: BTreeMap::new(),
         };
         assert_eq!(
             row_skip_reason(&fresh, "acct:c9", &json!({"index": 0})),
@@ -1040,9 +1106,15 @@ mod tests {
             initialized: true,
             key_version: 0,
             seen: (0..75).map(|i| format!("acct:old-{i}")).collect(),
+            mailboxes: BTreeMap::new(),
         };
         assert!(seen.needs_rebaseline(), "old store must rebaseline");
-        apply_poll_observation(&mut seen, vec!["acct:c1".into(), "acct:c2".into()], true);
+        apply_poll_observation(
+            &mut seen,
+            vec!["acct:c1".into(), "acct:c2".into()],
+            BTreeMap::new(),
+            true,
+        );
         assert_eq!(seen.key_version, SEEN_KEY_VERSION);
         assert!(!seen.needs_rebaseline());
         assert!(
@@ -1081,6 +1153,7 @@ mod tests {
             initialized: true,
             key_version: SEEN_KEY_VERSION + 1,
             seen: vec!["acct:x".into()],
+            mailboxes: BTreeMap::new(),
         };
         assert!(seen.needs_rebaseline());
     }
@@ -1091,8 +1164,9 @@ mod tests {
             initialized: true,
             key_version: SEEN_KEY_VERSION,
             seen: (0..SEEN_MAX_KEYS).map(|i| format!("acct:k{i}")).collect(),
+            mailboxes: BTreeMap::new(),
         };
-        apply_poll_observation(&mut seen, vec!["acct:new".into()], true);
+        apply_poll_observation(&mut seen, vec!["acct:new".into()], BTreeMap::new(), true);
         assert_eq!(seen.seen.len(), SEEN_MAX_KEYS / 2);
         assert_eq!(seen.seen.last().map(String::as_str), Some("acct:new"));
         assert!(!seen.contains("acct:k0"), "oldest evicted");
@@ -1106,9 +1180,10 @@ mod tests {
             initialized: true,
             key_version: SEEN_KEY_VERSION,
             seen: (0..SEEN_MAX_KEYS).map(|i| format!("acct:k{i}")).collect(),
+            mailboxes: BTreeMap::new(),
         };
         let batch: Vec<String> = (0..1500).map(|i| format!("acct:n{i}")).collect();
-        apply_poll_observation(&mut seen, batch.clone(), true);
+        apply_poll_observation(&mut seen, batch.clone(), BTreeMap::new(), true);
         assert!(
             batch.iter().all(|k| seen.contains(k)),
             "every key observed this poll must survive the cap"
@@ -1125,13 +1200,91 @@ mod tests {
             initialized: true,
             key_version: SEEN_KEY_VERSION,
             seen: (0..SEEN_MAX_KEYS).map(|i| format!("acct:k{i}")).collect(),
+            mailboxes: BTreeMap::new(),
         };
-        apply_poll_observation(&mut seen, vec!["acct:k0".into(), "acct:new".into()], true);
+        apply_poll_observation(
+            &mut seen,
+            vec!["acct:k0".into(), "acct:new".into()],
+            BTreeMap::new(),
+            true,
+        );
         assert!(
             seen.contains("acct:k0"),
             "re-observed key survives eviction"
         );
         assert!(!seen.contains("acct:k1"), "unrefreshed oldest evicted");
+    }
+
+    #[test]
+    fn mailbox_flip_wipes_only_that_accounts_keys() {
+        // `?authuser=` fallback flipped account `a`'s mailbox: every row id
+        // under `a:` identifies a different mailbox now, so those keys are
+        // dropped and the batch re-baselines them; account `b` is untouched.
+        let mut seen = SeenState {
+            initialized: true,
+            key_version: SEEN_KEY_VERSION,
+            seen: vec!["a:old1".into(), "b:keep".into(), "a:old2".into()],
+            mailboxes: BTreeMap::from([
+                ("a".to_string(), "one@example.com".to_string()),
+                ("b".to_string(), "b@example.com".to_string()),
+            ]),
+        };
+        assert!(seen.mailbox_changed("a", "two@example.com"));
+        assert!(!seen.mailbox_changed("a", ""), "extraction miss is inert");
+        apply_poll_observation(
+            &mut seen,
+            vec!["a:new1".into()],
+            BTreeMap::from([("a".to_string(), "two@example.com".to_string())]),
+            true,
+        );
+        assert!(!seen.contains("a:old1") && !seen.contains("a:old2"));
+        assert!(seen.contains("b:keep"), "other account untouched");
+        assert!(seen.contains("a:new1"));
+        assert_eq!(
+            seen.mailboxes.get("a").map(String::as_str),
+            Some("two@example.com")
+        );
+    }
+
+    #[test]
+    fn first_mailbox_record_does_not_rebaseline() {
+        // Upgrade path: existing stores have no mailboxes map; the first
+        // observation records identity without wiping anything.
+        let mut seen = seen_v2(&["acct:c1"]);
+        assert!(!seen.mailbox_changed("acct", "real@example.com"));
+        apply_poll_observation(
+            &mut seen,
+            Vec::new(),
+            BTreeMap::from([("acct".to_string(), "real@example.com".to_string())]),
+            true,
+        );
+        assert!(seen.contains("acct:c1"), "no wipe on first record");
+        assert_eq!(
+            seen.mailboxes.get("acct").map(String::as_str),
+            Some("real@example.com")
+        );
+    }
+
+    #[test]
+    fn new_account_on_established_store_bootstraps_silently() {
+        // Adding a second account to an established store must not flood its
+        // whole backlog; existing single-account stores never bootstrap.
+        let seen = seen_v2(&["a:k1"]);
+        assert!(seen.account_needs_bootstrap("b"), "new account bootstraps");
+        assert!(
+            !seen.account_needs_bootstrap("a"),
+            "account with keys does not bootstrap even without a mailbox record"
+        );
+        assert!(
+            !SeenState::default().account_needs_bootstrap("a"),
+            "fresh store uses the initial window instead"
+        );
+    }
+
+    #[test]
+    fn inbox_script_extracts_logged_in_mailbox() {
+        assert!(GMAIL_INBOX_SCRIPT.contains("SignOutOptions"));
+        assert!(GMAIL_INBOX_SCRIPT.contains("mailbox:"));
     }
 
     #[test]

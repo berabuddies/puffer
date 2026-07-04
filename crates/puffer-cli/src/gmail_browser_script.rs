@@ -112,6 +112,14 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
     /inbox is empty/i.test(bodyText) ||
     /no mail/i.test(bodyText);
   const status = rows.length > 0 || empty ? "ok" : "loading";
+  // Logged-in mailbox identity: `?authuser=` silently falls back to the
+  // default session account when the configured address is not signed in,
+  // so the scraped mailbox can differ from the configured account.
+  const accountEl = document.querySelector(
+    'a[aria-label*="Account"], a[href*="SignOutOptions"]'
+  );
+  const accountLabel = (accountEl && accountEl.getAttribute("aria-label")) || "";
+  const mailboxMatch = accountLabel.match(/[\w.+-]+@[\w.-]+/);
   return {
     status,
     href,
@@ -119,6 +127,7 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
     bodyText: bodyText.slice(0, 200),
     empty,
     rows,
+    mailbox: mailboxMatch ? mailboxMatch[0].toLowerCase() : "",
     candidateRowCount: candidateRows.length,
     visibleRowCount: visibleRows.length,
     filteredRowCount: rows.length,
