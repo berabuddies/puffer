@@ -2988,16 +2988,21 @@ fn handle_copilot_login_poll(state: &DaemonState, params: &Value) -> Result<Valu
                 &inputs.auth_store,
                 "github-copilot",
             );
+            // A different Copilot account may have been connected before: its
+            // account-specific model list is cached under the account-agnostic
+            // "github-copilot" id, so drop it to force a re-discovery for THIS
+            // account (otherwise a lower-tier account is offered the previous
+            // account's models and hits model_not_supported at chat time).
+            puffer_provider_registry::invalidate_provider_discovery_cache("github-copilot");
+            let config = state.config.lock().unwrap().clone();
             // The credential is now persisted, so the login HAS succeeded.
-            // Building the refreshed settings snapshot is best-effort: a
-            // transient failure here must not report a failed login (which would
-            // leave the token on disk while the UI says it failed). Return
-            // `done` regardless; the client reconciles via a settings refresh
-            // when the snapshot is absent.
+            // Prefer a freshly-reloaded snapshot, but fall back to one built
+            // from the inputs we already hold (which include the new
+            // credential) so a transient reload failure still returns a usable
+            // snapshot rather than none — the client should never have to guess.
             let snapshot: Option<SettingsSnapshotDto> = (|| {
                 reload_daemon_config(state)?;
                 let fresh = state.build_runtime_inputs()?;
-                let config = state.config.lock().unwrap().clone();
                 desktop_api::load_settings_snapshot(
                     &state.paths,
                     &config,
@@ -3007,6 +3012,16 @@ fn handle_copilot_login_poll(state: &DaemonState, params: &Value) -> Result<Valu
                     &fresh.session_store,
                 )
             })()
+            .or_else(|_| {
+                desktop_api::load_settings_snapshot(
+                    &state.paths,
+                    &config,
+                    &inputs.resources,
+                    &inputs.providers,
+                    &inputs.auth_store,
+                    &inputs.session_store,
+                )
+            })
             .ok();
             match snapshot {
                 Some(snapshot) => Ok(json!({ "status": "done", "snapshot": snapshot })),
@@ -3085,6 +3100,10 @@ fn handle_logout_provider(state: &DaemonState, params: &Value) -> Result<Value> 
     let mut inputs = state.build_runtime_inputs()?;
     let auth_path = state.paths.user_config_dir.join("auth.json");
     desktop_api::logout_provider(&mut inputs.auth_store, &auth_path, &provider_id)?;
+    // Drop this provider's cached discovery so a later re-login (possibly a
+    // different account, e.g. Copilot) re-discovers instead of serving the
+    // logged-out account's cached, account-specific model list.
+    puffer_provider_registry::invalidate_provider_discovery_cache(&provider_id);
     let fresh = state.build_runtime_inputs()?;
     let config = state.config.lock().unwrap().clone();
     let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(

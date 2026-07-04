@@ -1425,17 +1425,24 @@
       statusMessage = `GitHub Copilot: enter code ${start.userCode} at ${start.verificationUri} to authorize.`;
       const deadlineMs = Date.now() + (start.expiresIn > 0 ? start.expiresIn : 900) * 1000;
       let intervalMs = Math.max(start.interval, 1) * 1000;
+      // Tolerate a few transient transport blips (esp. over a remote
+      // connection) without aborting the still-valid device code — but don't
+      // mask a persistent/terminal failure (e.g. the daemon can't write
+      // auth.json) behind the generic timeout: surface it after several
+      // consecutive rejections.
+      let consecutivePollErrors = 0;
+      const MAX_CONSECUTIVE_POLL_ERRORS = 4;
       while (Date.now() < deadlineMs) {
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
         if (generation !== activeLoginGeneration) return; // canceled while waiting
-        // A single transient transport blip (esp. over a remote connection)
-        // must not abort an otherwise-valid login — the device code is still
-        // good. Treat a rejected poll as "keep waiting"; the deadline still
-        // bounds the loop. (The daemon-side poll is likewise resilient.)
         let poll: Awaited<ReturnType<typeof copilotLoginPoll>>;
         try {
           poll = await copilotLoginPoll(start.deviceCode, remoteConnection);
-        } catch {
+          consecutivePollErrors = 0;
+        } catch (error) {
+          if (generation !== activeLoginGeneration) return;
+          consecutivePollErrors += 1;
+          if (consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) throw error;
           continue;
         }
         if (generation !== activeLoginGeneration) return; // canceled mid-poll
@@ -1495,12 +1502,11 @@
     copilotLogin = null;
     authBusyProviderId = null;
     statusMessage = "Login canceled.";
-    // If the cancel raced a backend completion (the credential may already be
-    // persisted), reconcile so the UI reflects the true connected state rather
-    // than showing the provider as disconnected until a manual refresh. Safe
-    // for a plain cancel too — it just re-reads the current snapshot. Runs
-    // after clearing authBusyProviderId so refreshSettings' busy-guard passes.
-    void refreshSettings();
+    // NOTE: we deliberately do NOT auto-refresh settings here. A cancel that
+    // raced a backend completion (credential already persisted) is a rare edge
+    // that reconciles on the next natural settings view; a fire-and-forget
+    // refresh here runs under a different generation counter and could clobber
+    // a subsequently-started login's snapshot.
   }
 
   function normalizedProviderConnectionId(providerId: string): string {
