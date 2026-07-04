@@ -2304,6 +2304,81 @@ mod tests {
     }
 
     #[test]
+    fn self_burst_of_five_is_fully_gated_across_mixed_signals() {
+        // #766 test-matrix row "自发连发 5 条全拦": a burst of five
+        // self-authored messages — three carrying the grammers out bit and
+        // two where the bit was lost and only the sender_is_self backstop
+        // remains — must ALL be gate-skipped on the batch path: dispatcher
+        // never runs, nothing fails, and each envelope records the
+        // router_self_gate_skipped trace stage (the #756 regression was
+        // "only the first message gets skipped").
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(monitor_binding_with_classify_prompt())
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(PanicClassifier);
+        let gate = drop_all_gate();
+        let trace_path = dir.path().join("monitor-trace.json");
+        let trace_store = crate::monitor_trace::MonitorTraceStore::load(&trace_path).unwrap();
+
+        let envelopes: Vec<EventEnvelope> = (0..5)
+            .map(|index| {
+                let payload = if index < 3 {
+                    serde_json::json!({ "is_outgoing": true, "chat_id": 42 })
+                } else {
+                    // Out bit lost in delivery: only the identity backstop.
+                    serde_json::json!({ "sender_is_self": true, "chat_id": 42 })
+                };
+                EventEnvelope {
+                    envelope_id: format!("env-burst-{index}"),
+                    subscriber_id: "telegram-user".into(),
+                    received_at_ms: 0,
+                    event: Event {
+                        topic: "telegram-user".into(),
+                        kind: "message".into(),
+                        control: false,
+                        dedup_key: None,
+                        text: format!("my own message {index}"),
+                        payload,
+                    },
+                }
+            })
+            .collect();
+
+        let result = process_envelope_batch_result_with_monitor_digest(
+            &envelopes,
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            &gate,
+            None,
+            Some(&trace_store),
+            None,
+        );
+
+        assert!(!result.matched, "no self message may match");
+        assert_eq!(result.acted, 0);
+        assert_eq!(result.failed, 0, "no Failed runs from a self burst");
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "dispatcher must never run for a self burst"
+        );
+        let raw = std::fs::read_to_string(&trace_path).unwrap();
+        assert_eq!(
+            raw.matches("router_self_gate_skipped").count(),
+            5,
+            "every message in the burst records the gate-skip stage"
+        );
+    }
+
+    #[test]
     fn self_dispatch_with_open_task_records_trace_stage() {
         let dir = tempdir().unwrap();
         let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
