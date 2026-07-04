@@ -116,6 +116,16 @@ fn required_object<'a>(
         .with_context(|| format!("monitor.{key} must be an object"))
 }
 
+/// The chat-level reply target consumed by `monitor_reply_target`; built here
+/// so the single-source and consolidated-burst renderers cannot drift.
+fn telegram_delivery_target(chat_id: &str, chat_kind: &str) -> Value {
+    json!({
+        "type": "telegram_chat",
+        "chat_id": chat_id,
+        "chat_kind": chat_kind,
+    })
+}
+
 fn telegram_source_context(contract: &MonitorContract) -> Value {
     let chat_id = string_field(&contract.source, &["chat_id", "chatId"]).unwrap_or_default();
     let chat_kind = string_field(&contract.source, &["chat_kind", "chatKind"])
@@ -130,11 +140,7 @@ fn telegram_source_context(contract: &MonitorContract) -> Value {
         "connection_slug": string_field(&contract.source, &["connection_slug", "connectionSlug"]),
         "connector_slug": string_field(&contract.source, &["connector_slug", "connectorSlug"]),
         "summary": format!("{summary_label} from chat_id {chat_id}"),
-        "delivery_target": {
-            "type": "telegram_chat",
-            "chat_id": chat_id,
-            "chat_kind": chat_kind,
-        },
+        "delivery_target": telegram_delivery_target(&chat_id, &chat_kind),
         "sender": sender_from_source(&contract.source),
         "text": string_field(&contract.source, &["text", "message_text", "messageText"]),
         "message_id": contract
@@ -203,11 +209,7 @@ fn generic_source_context(contract: &MonitorContract) -> Value {
         if let Some(chat_id) = string_field(&contract.source, &["chat_id", "chatId"]) {
             let chat_kind = string_field(&contract.source, &["chat_kind", "chatKind"])
                 .unwrap_or_else(|| "user".to_string());
-            context["delivery_target"] = json!({
-                "type": "telegram_chat",
-                "chat_id": chat_id,
-                "chat_kind": chat_kind,
-            });
+            context["delivery_target"] = telegram_delivery_target(&chat_id, &chat_kind);
         }
     }
     context
@@ -257,11 +259,17 @@ fn string_field(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
 }
 
 fn non_empty_string(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    match value? {
+        // Id-like fields arrive as JSON numbers from some producers (the
+        // telegram subscriber stamps chat_id/message_id as i64); coerce them
+        // instead of silently dropping the identity.
+        Value::Number(number) => Some(number.to_string()),
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn canonical_json(value: &Value) -> Result<String> {
@@ -300,10 +308,10 @@ mod tests {
 
     #[test]
     fn generic_review_source_context_emits_telegram_delivery_target() {
-        // A same-chat telegram burst carries chat identity (stamped as strings
-        // by the contract builder); the rendered source_context must expose the
-        // same chat-level delivery target as a single-source telegram task so
-        // the reply path works (agentenv/monorepo#761, #722).
+        // A same-chat telegram burst carries chat identity (stamped verbatim
+        // as i64 by the contract builder); the rendered source_context must
+        // expose the same chat-level delivery target as a single-source
+        // telegram task so the reply path works (agentenv/monorepo#761, #722).
         let metadata: Map<String, Value> = serde_json::from_value(json!({
             "monitor": {
                 "schema_version": 2,
@@ -311,7 +319,7 @@ mod tests {
                 "source": {
                     "connector_slug": "telegram-login",
                     "connection_slug": "telegram-user",
-                    "chat_id": "8689648954",
+                    "chat_id": 8689648954i64,
                     "chat_kind": "group",
                     "envelope_ids": ["env-a", "env-b"],
                     "summary": "Monitor item"
@@ -352,6 +360,32 @@ mod tests {
         let contract = parse_monitor_contract(&metadata).unwrap().unwrap();
         let context = display_source_context(&contract);
         assert_eq!(context.get("delivery_target"), None);
+    }
+
+    #[test]
+    fn telegram_source_context_coerces_numeric_chat_id() {
+        // The telegram subscriber stamps ids as JSON numbers and
+        // telegram_contract_from_stamp copies them verbatim; the rendered
+        // delivery target must carry the id instead of an empty string.
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "monitor": {
+                "schema_version": 2,
+                "kind": "telegram.reply",
+                "source": {
+                    "connector_slug": "telegram-login",
+                    "connection_slug": "telegram-user",
+                    "chat_id": 8689648954i64,
+                    "chat_kind": "group",
+                    "message_id": 6090
+                },
+                "action": { "type": "draft_then_approve" }
+            }
+        }))
+        .unwrap();
+        let contract = parse_monitor_contract(&metadata).unwrap().unwrap();
+        let context = display_source_context(&contract);
+        assert_eq!(context["delivery_target"]["chat_id"], json!("8689648954"));
+        assert_eq!(context["delivery_target"]["chat_kind"], json!("group"));
     }
 
     #[test]

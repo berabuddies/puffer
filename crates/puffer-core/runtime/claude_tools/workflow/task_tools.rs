@@ -1107,6 +1107,7 @@ fn duplicate_monitor_task_skip(
     let candidate_subject = normalize_monitor_subject(subject);
     let candidate_envelopes = monitor_envelope_ids(metadata);
     let candidate_sources = monitor_source_message_ids(metadata);
+    let candidate_senders = monitor_sender_ids(metadata);
     for task in tasks {
         if !same_monitor_task_scope(metadata, &task.metadata) {
             continue;
@@ -1148,17 +1149,21 @@ fn duplicate_monitor_task_skip(
         }
         if let Some(candidate_subject) = candidate_subject.as_deref() {
             if normalize_monitor_subject(&task.subject).as_deref() == Some(candidate_subject) {
-                // Same normalized subject, but two different KNOWN senders are
-                // two distinct requests (e.g. two people in a group asking the
+                // Same normalized subject, but distinct KNOWN senders are
+                // distinct requests (e.g. two people in a group asking the
                 // same thing) — each keeps its own task (agentenv/monorepo#655).
-                // If either sender is unknown, keep the historical
-                // subject-only fold (DMs are 1:1; sender adds nothing there).
-                let candidate_sender = monitor_sender_id(metadata);
-                let existing_sender = monitor_sender_id(&task.metadata);
-                let senders_differ = matches!(
-                    (candidate_sender.as_deref(), existing_sender.as_deref()),
-                    (Some(left), Some(right)) if left != right
-                );
+                // The candidate folds only when every sender it is known to
+                // carry (one for single-source tasks, several for a
+                // mixed-sender burst) is already represented by the existing
+                // task. If either side has no known sender, keep the
+                // historical subject-only fold (DMs are 1:1; sender adds
+                // nothing there).
+                let existing_senders = monitor_sender_ids(&task.metadata);
+                let senders_differ = !candidate_senders.is_empty()
+                    && !existing_senders.is_empty()
+                    && !candidate_senders
+                        .iter()
+                        .all(|sender| existing_senders.contains(sender));
                 if !senders_differ {
                     return Some(monitor_task_skip_payload(
                         "duplicate_monitor_task",
@@ -1334,6 +1339,26 @@ fn monitor_sender_id(metadata: &Map<String, Value>) -> Option<String> {
         .ok()
         .flatten()
         .and_then(|contract| string_field_from_map(&contract.source, &["sender_id", "senderId"]))
+}
+
+/// All distinct sender identities a task is known to carry: the plural
+/// `sender_ids` stamp of a mixed-sender burst, or the single
+/// [`monitor_sender_id`]. Empty when no sender is known.
+fn monitor_sender_ids(metadata: &Map<String, Value>) -> Vec<String> {
+    if let Some(values) = metadata
+        .get("sender_ids")
+        .or_else(|| metadata.get("senderIds"))
+        .and_then(Value::as_array)
+    {
+        let ids = values
+            .iter()
+            .filter_map(value_to_string)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            return ids;
+        }
+    }
+    monitor_sender_id(metadata).into_iter().collect()
 }
 
 fn normalize_monitor_subject(subject: &str) -> Option<String> {
@@ -1691,18 +1716,30 @@ fn stamp_shared_monitor_source_identity(
     metadata: &mut Map<String, Value>,
     stamps: &[MonitorSourceStampContext],
 ) {
-    if let Some(chat_id) = uniform_stamp_i64(stamps, &["chat_id", "chatId"]) {
+    if let Some(chat_id) = uniform_stamp(stamps, &["chat_id", "chatId"], value_i64_field) {
         metadata.insert("chat_id".to_string(), Value::from(chat_id));
     }
-    if let Some(sender_id) = uniform_stamp_i64(stamps, &["sender_id", "senderId"]) {
+    if let Some(sender_id) = uniform_stamp(stamps, &["sender_id", "senderId"], value_i64_field) {
         metadata.insert("sender_id".to_string(), Value::from(sender_id));
+    } else {
+        // Mixed senders in one burst: stamp the distinct set so the
+        // subject-dedup leg can tell a known multi-sender burst apart from a
+        // sender-less record instead of folding it into one person's task
+        // (agentenv/monorepo#655).
+        let mut sender_ids = stamps
+            .iter()
+            .filter_map(|stamp| value_i64_field(&stamp.payload, &["sender_id", "senderId"]))
+            .collect::<Vec<_>>();
+        sender_ids.sort_unstable();
+        sender_ids.dedup();
+        if sender_ids.len() >= 2 {
+            metadata.insert(
+                "sender_ids".to_string(),
+                Value::Array(sender_ids.into_iter().map(Value::from).collect()),
+            );
+        }
     }
-    let mut source_message_ids = stamps
-        .iter()
-        .filter_map(source_message_id_from_stamp)
-        .collect::<Vec<_>>();
-    source_message_ids.sort_unstable();
-    source_message_ids.dedup();
+    let source_message_ids = sorted_source_message_ids(stamps);
     if !source_message_ids.is_empty() {
         metadata.insert(
             "source_message_ids".to_string(),
@@ -1711,28 +1748,18 @@ fn stamp_shared_monitor_source_identity(
     }
 }
 
-/// Returns the i64 value for `keys` iff every stamp's payload has it and they all
-/// agree; otherwise `None` (the field is not uniform across the batch, so there is
-/// no single authoritative value to stamp — e.g. a genuinely cross-chat review).
-fn uniform_stamp_i64(stamps: &[MonitorSourceStampContext], keys: &[&str]) -> Option<i64> {
-    let mut agreed: Option<i64> = None;
+/// Returns the extracted value for `keys` iff every stamp's payload has it and
+/// they all agree; otherwise `None` (the field is not uniform across the batch,
+/// so there is no single authoritative value to stamp — e.g. a genuinely
+/// cross-chat review). `extract` is `value_i64_field`/`value_string_field`.
+fn uniform_stamp<T: PartialEq>(
+    stamps: &[MonitorSourceStampContext],
+    keys: &[&str],
+    extract: impl Fn(&Value, &[&str]) -> Option<T>,
+) -> Option<T> {
+    let mut agreed: Option<T> = None;
     for stamp in stamps {
-        let value = value_i64_field(&stamp.payload, keys)?;
-        match agreed {
-            None => agreed = Some(value),
-            Some(existing) if existing == value => {}
-            Some(_) => return None,
-        }
-    }
-    agreed
-}
-
-/// String counterpart of `uniform_stamp_i64`: Some(value) iff every stamp's
-/// payload carries a value for `keys` and they all agree.
-fn uniform_stamp_string(stamps: &[MonitorSourceStampContext], keys: &[&str]) -> Option<String> {
-    let mut agreed: Option<String> = None;
-    for stamp in stamps {
-        let value = value_string_field(&stamp.payload, keys)?;
+        let value = extract(&stamp.payload, keys)?;
         match &agreed {
             None => agreed = Some(value),
             Some(existing) if *existing == value => {}
@@ -2235,21 +2262,17 @@ fn generic_review_contract_from_stamps(stamps: &[MonitorSourceStampContext]) -> 
         );
     }
     // Uniform chat identity keeps a same-chat burst deliverable: the reply
-    // layer needs a chat-level target, and monitor_contract's string_field is
-    // strict string-only, so chat_id is stamped as a string
-    // (agentenv/monorepo#761, #722).
-    if let Some(chat_id) = uniform_stamp_i64(stamps, &["chat_id", "chatId"]) {
-        source.insert("chat_id".to_string(), Value::String(chat_id.to_string()));
-        if let Some(chat_kind) = uniform_stamp_string(stamps, &["chat_kind", "chatKind"]) {
+    // layer resolves its chat-level target from the contract source, exactly
+    // like a single-source telegram task (agentenv/monorepo#761, #722).
+    if let Some(chat_id) = uniform_stamp(stamps, &["chat_id", "chatId"], value_i64_field) {
+        source.insert("chat_id".to_string(), Value::from(chat_id));
+        if let Some(chat_kind) =
+            uniform_stamp(stamps, &["chat_kind", "chatKind"], value_string_field)
+        {
             source.insert("chat_kind".to_string(), Value::String(chat_kind));
         }
     }
-    let mut source_message_ids = stamps
-        .iter()
-        .filter_map(source_message_id_from_stamp)
-        .collect::<Vec<_>>();
-    source_message_ids.sort_unstable();
-    source_message_ids.dedup();
+    let source_message_ids = sorted_source_message_ids(stamps);
     if !source_message_ids.is_empty() {
         source.insert(
             "source_message_ids".to_string(),
@@ -2288,6 +2311,17 @@ fn generic_review_contract_from_stamps(stamps: &[MonitorSourceStampContext]) -> 
 
 fn required_gmail_source_present(source: &Map<String, Value>) -> bool {
     string_field_from_map(source, &["thread_id", "threadId"]).is_some()
+}
+
+/// Distinct per-message ids across a stamp batch, sorted for stable output.
+fn sorted_source_message_ids(stamps: &[MonitorSourceStampContext]) -> Vec<i64> {
+    let mut ids = stamps
+        .iter()
+        .filter_map(source_message_id_from_stamp)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 fn source_message_id_from_stamp(stamp: &MonitorSourceStampContext) -> Option<i64> {
@@ -4419,6 +4453,66 @@ mod tests {
     }
 
     #[test]
+    fn issue_655_mixed_sender_burst_stamps_sender_ids() {
+        // A burst whose stamps disagree on sender_id has no single sender to
+        // stamp, but the distinct set is recorded so dedup can tell a known
+        // multi-sender burst apart from a sender-less record.
+        let stamps = vec![
+            issue625_stamp("env-a", 8_689_648_954, 42, 6090),
+            issue625_stamp("env-b", 8_689_648_954, 43, 6091),
+        ];
+        let mut metadata = serde_json::Map::new();
+        stamp_shared_monitor_source_identity(&mut metadata, &stamps);
+        assert_eq!(metadata.get("sender_id"), None);
+        assert_eq!(metadata.get("sender_ids"), Some(&json!([42, 43])));
+    }
+
+    #[test]
+    fn issue_655_multi_sender_burst_does_not_fold_into_single_sender_task() {
+        // A consolidated burst carrying messages from Alice AND Bob must not
+        // be absorbed by Alice's pre-existing same-subject task — that would
+        // silently drop Bob's request (agentenv/monorepo#655).
+        let original = issue655_existing_with_sender(
+            "Telegram: road test registration needs immediate decision",
+            42,
+        );
+        let (mut candidate, subject) = issue625_candidate(
+            "Telegram: road test registration needs immediate decision",
+            None,
+        );
+        candidate.insert("sender_ids".into(), json!([42, 43]));
+        assert!(
+            duplicate_monitor_task_skip(&[original], &candidate, &subject).is_none(),
+            "a multi-sender burst must keep its own task"
+        );
+    }
+
+    #[test]
+    fn issue_655_single_sender_folds_into_burst_that_contains_them() {
+        // The converse: one more message from a sender already represented by
+        // an open multi-sender burst task is still a duplicate.
+        let mut original = issue625_existing(
+            "Telegram: road test registration needs immediate decision",
+            "pending",
+            None,
+            false,
+        );
+        original
+            .metadata
+            .insert("sender_ids".into(), json!([42, 43]));
+        let (candidate, subject) = issue655_with_sender(
+            issue625_candidate(
+                "Telegram: road test registration needs immediate decision",
+                None,
+            ),
+            42,
+        );
+        let v = duplicate_monitor_task_skip(&[original], &candidate, &subject)
+            .expect("a sender already in the burst still folds");
+        assert_eq!(v["reason"], "duplicate_monitor_task");
+    }
+
+    #[test]
     fn issue_625_same_message_id_dedups_across_completion() {
         // The #625 fix: a reconnect/replay re-delivers the EXACT same Telegram message
         // (same chat_id+message_id) after the original task was completed. Message
@@ -4558,8 +4652,10 @@ mod tests {
     #[test]
     fn issue_761_generic_review_contract_carries_uniform_chat_identity() {
         // A same-chat burst must keep its chat identity inside the contract
-        // source (as a STRING — monitor_contract's string_field is strict) so
-        // the source_context can render a delivery target (agentenv/monorepo#761).
+        // source so the source_context can render a delivery target
+        // (agentenv/monorepo#761). It is stamped verbatim as an i64, exactly
+        // like the single-source telegram contract; the renderer's
+        // string_field coerces numeric ids.
         let stamps = vec![
             issue625_stamp("env-a", 8_689_648_954, 42, 6090),
             issue625_stamp("env-b", 8_689_648_954, 42, 6091),
@@ -4567,8 +4663,8 @@ mod tests {
         let contract = generic_review_contract_from_stamps(&stamps);
         assert_eq!(
             contract.source.get("chat_id"),
-            Some(&json!("8689648954")),
-            "chat_id must be stamped as a JSON string"
+            Some(&json!(8_689_648_954i64)),
+            "chat_id is stamped verbatim as an i64"
         );
         assert_eq!(
             contract.source.get("source_message_ids"),
