@@ -1148,11 +1148,24 @@ fn duplicate_monitor_task_skip(
         }
         if let Some(candidate_subject) = candidate_subject.as_deref() {
             if normalize_monitor_subject(&task.subject).as_deref() == Some(candidate_subject) {
-                return Some(monitor_task_skip_payload(
-                    "duplicate_monitor_task",
-                    Some(task.task_id.as_str()),
-                    None,
-                ));
+                // Same normalized subject, but two different KNOWN senders are
+                // two distinct requests (e.g. two people in a group asking the
+                // same thing) — each keeps its own task (agentenv/monorepo#655).
+                // If either sender is unknown, keep the historical
+                // subject-only fold (DMs are 1:1; sender adds nothing there).
+                let candidate_sender = monitor_sender_id(metadata);
+                let existing_sender = monitor_sender_id(&task.metadata);
+                let senders_differ = matches!(
+                    (candidate_sender.as_deref(), existing_sender.as_deref()),
+                    (Some(left), Some(right)) if left != right
+                );
+                if !senders_differ {
+                    return Some(monitor_task_skip_payload(
+                        "duplicate_monitor_task",
+                        Some(task.task_id.as_str()),
+                        None,
+                    ));
+                }
             }
         }
     }
@@ -1305,6 +1318,22 @@ fn monitor_source_message_ids(metadata: &Map<String, Value>) -> HashSet<i64> {
         }
     }
     ids
+}
+
+/// Sender identity for dedup: top-level `sender_id` (stamped on bursts and by
+/// the triage runner), falling back to the typed contract's `source.sender_id`
+/// (single-source tasks). Normalized to a string because the id arrives as a
+/// JSON number from the telegram subscriber but as a string in stamped forms.
+fn monitor_sender_id(metadata: &Map<String, Value>) -> Option<String> {
+    for key in ["sender_id", "senderId"] {
+        if let Some(value) = metadata.get(key).and_then(value_to_string) {
+            return Some(value);
+        }
+    }
+    parse_monitor_contract(metadata)
+        .ok()
+        .flatten()
+        .and_then(|contract| string_field_from_map(&contract.source, &["sender_id", "senderId"]))
 }
 
 fn normalize_monitor_subject(subject: &str) -> Option<String> {
@@ -4310,6 +4339,83 @@ mod tests {
             meta.insert("source_message_id".into(), json!(id));
         }
         (meta, subject.to_string())
+    }
+
+    fn issue655_with_sender(
+        base: (Map<String, Value>, String),
+        sender_id: i64,
+    ) -> (Map<String, Value>, String) {
+        let (mut meta, subject) = base;
+        meta.insert("sender_id".into(), json!(sender_id));
+        (meta, subject)
+    }
+
+    fn issue655_existing_with_sender(subject: &str, sender_id: i64) -> StoredTask {
+        let mut task = issue625_existing(subject, "pending", None, false);
+        task.metadata.insert("sender_id".into(), json!(sender_id));
+        task
+    }
+
+    #[test]
+    fn issue_655_same_subject_different_senders_do_not_fold() {
+        // Two different people asking the same thing in one group are two
+        // distinct requests — the subject leg must not collapse them
+        // (agentenv/monorepo#655).
+        let original = issue655_existing_with_sender(
+            "Telegram: road test registration needs immediate decision",
+            42,
+        );
+        let (candidate, subject) = issue655_with_sender(
+            issue625_candidate(
+                "Telegram: road test registration needs immediate decision",
+                None,
+            ),
+            43,
+        );
+        assert!(
+            duplicate_monitor_task_skip(&[original], &candidate, &subject).is_none(),
+            "different senders with the same subject must each keep a task"
+        );
+    }
+
+    #[test]
+    fn issue_655_same_subject_same_sender_still_folds() {
+        let original = issue655_existing_with_sender(
+            "Telegram: road test registration needs immediate decision",
+            42,
+        );
+        let (candidate, subject) = issue655_with_sender(
+            issue625_candidate(
+                "Telegram: road test registration needs immediate decision",
+                None,
+            ),
+            42,
+        );
+        let v = duplicate_monitor_task_skip(&[original], &candidate, &subject)
+            .expect("same sender + same open subject still folds (#432)");
+        assert_eq!(v["reason"], "duplicate_monitor_task");
+    }
+
+    #[test]
+    fn issue_655_unknown_sender_keeps_historical_fold() {
+        // If either side lacks a sender (DMs, older records), behavior is
+        // unchanged: subject-only fold.
+        let original = issue625_existing(
+            "Telegram: road test registration needs immediate decision",
+            "pending",
+            None,
+            false,
+        );
+        let (candidate, subject) = issue655_with_sender(
+            issue625_candidate(
+                "Telegram: road test registration needs immediate decision",
+                None,
+            ),
+            43,
+        );
+        let v = duplicate_monitor_task_skip(&[original], &candidate, &subject)
+            .expect("unknown sender on one side keeps the historical fold");
+        assert_eq!(v["reason"], "duplicate_monitor_task");
     }
 
     #[test]
