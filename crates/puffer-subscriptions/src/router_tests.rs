@@ -223,7 +223,10 @@ mod tests {
             &gate,
         );
 
-        assert!(result.matched, "monitor binding may handle the self message");
+        assert!(
+            result.matched,
+            "monitor binding may handle the self message"
+        );
         assert_eq!(result.acted, 1);
         assert_eq!(result.failed, 0);
         assert_eq!(
@@ -2055,7 +2058,10 @@ mod tests {
                 contact_ids: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
-                action: ActionSpec::TriageAgent { prompt: "triage".into(), model: None },
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
                 created_at_ms: 0,
             })
             .unwrap();
@@ -2076,9 +2082,18 @@ mod tests {
             },
         };
         let denied = process_envelope_result(
-            &envelope, &store, Some(&history_store), &dispatcher, &classifier, None, &drop_all_gate(),
+            &envelope,
+            &store,
+            Some(&history_store),
+            &dispatcher,
+            &classifier,
+            None,
+            &drop_all_gate(),
         );
-        assert!(!denied.matched, "no positive selector => denied before triage");
+        assert!(
+            !denied.matched,
+            "no positive selector => denied before triage"
+        );
         let hist = history_store.list();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].action_log[0].action, "monitor_lark_default_deny");
@@ -2095,12 +2110,17 @@ mod tests {
                 connection_slug: "lark-browser".into(),
                 connector_slug: Some("lark-browser".into()),
                 status: WorkflowBindingStatus::Enabled,
-                filter: Some(FilterSpec::Json(serde_json::json!({"chat_id":"7649938091766976625"}))),
+                filter: Some(FilterSpec::Json(
+                    serde_json::json!({"chat_id":"7649938091766976625"}),
+                )),
                 ignore_filters: Vec::new(),
                 contact_ids: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
-                action: ActionSpec::TriageAgent { prompt: "triage".into(), model: None },
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
                 created_at_ms: 0,
             })
             .unwrap();
@@ -2120,9 +2140,18 @@ mod tests {
             },
         };
         let passed = process_envelope_result(
-            &envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate(),
+            &envelope,
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &drop_all_gate(),
         );
-        assert!(passed.matched, "positive selector => passes the guard (chat_id matches)");
+        assert!(
+            passed.matched,
+            "positive selector => passes the guard (chat_id matches)"
+        );
     }
 
     #[test]
@@ -2141,7 +2170,10 @@ mod tests {
                 contact_ids: Vec::new(),
                 classify_prompt: None,
                 classify_model: None,
-                action: ActionSpec::TriageAgent { prompt: "triage".into(), model: None },
+                action: ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
                 created_at_ms: 0,
             })
             .unwrap();
@@ -2161,8 +2193,105 @@ mod tests {
             },
         };
         let passed = process_envelope_result(
-            &envelope, &store, None, &dispatcher, &classifier, None, &drop_all_gate(),
+            &envelope,
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &drop_all_gate(),
         );
-        assert!(passed.matched, "non-lark topic must NOT be denied by the lark guard");
+        assert!(
+            passed.matched,
+            "non-lark topic must NOT be denied by the lark guard"
+        );
+    }
+
+    #[test]
+    fn sender_is_self_only_event_never_reaches_non_monitor_binding() {
+        // #756 regression: a self-authored message whose grammers `out` bit was
+        // lost (is_outgoing absent) must still be treated as self and must not
+        // dispatch a non-monitor (e.g. auto-reply connector_act) binding.
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::store::WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(crate::spec::WorkflowBindingSpec {
+                slug: "tg-review-auto-reply".into(),
+                description: "auto reply".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: crate::spec::WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: crate::spec::ActionSpec::ConnectorAct {
+                    connector_slug: "telegram-login".into(),
+                    action: "send_message".into(),
+                    input: serde_json::json!({}),
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl crate::action::ActionDispatcher for Counting {
+            fn dispatch(
+                &self,
+                _action: &crate::spec::ActionSpec,
+                _envelope: &puffer_subscriber_runtime::EventEnvelope,
+            ) -> crate::action::ActionResult {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::action::ActionResult::success("dispatched")
+            }
+        }
+        let dispatcher: std::sync::Arc<dyn crate::action::ActionDispatcher> =
+            std::sync::Arc::new(Counting(calls.clone()));
+        let classifier: std::sync::Arc<dyn crate::classify::Classifier> =
+            std::sync::Arc::new(crate::classify::NullClassifier);
+        // Gate returning true: proves the non-monitor skip is structural, not
+        // dependent on the gate verdict.
+        struct AlwaysDispatchGate;
+        impl crate::self_gate::SelfMessageGate for AlwaysDispatchGate {
+            fn should_dispatch_self_message(&self, _e: &puffer_subscriber_runtime::Event) -> bool {
+                true
+            }
+        }
+        let gate: std::sync::Arc<dyn crate::self_gate::SelfMessageGate> =
+            std::sync::Arc::new(AlwaysDispatchGate);
+
+        let envelope = puffer_subscriber_runtime::EventEnvelope {
+            envelope_id: "env-self-1".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: puffer_subscriber_runtime::Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "my own message".into(),
+                // NOTE: no is_outgoing — only the Task-1 dual-signal field.
+                payload: serde_json::json!({ "sender_is_self": true, "chat_id": 42 }),
+            },
+        };
+
+        let result = crate::router::process_envelope_result(
+            &envelope,
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            None,
+            &gate,
+        );
+
+        assert!(
+            !result.matched,
+            "self event must not match non-monitor binding"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
