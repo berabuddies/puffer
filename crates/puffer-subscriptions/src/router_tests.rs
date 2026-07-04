@@ -2294,4 +2294,107 @@ mod tests {
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn self_dispatch_with_open_task_records_trace_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::store::WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(crate::spec::WorkflowBindingSpec {
+                slug: "monitor-telegram-user".into(),
+                description: "Monitor telegram-user for actionable tasks".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: Some("telegram-login".into()),
+                status: crate::spec::WorkflowBindingStatus::Enabled,
+                filter: None,
+                ignore_filters: Vec::new(),
+                contact_ids: Vec::new(),
+                classify_prompt: None,
+                classify_model: None,
+                action: crate::spec::ActionSpec::TriageAgent {
+                    prompt: "triage".into(),
+                    model: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+
+        struct OkDispatcher;
+        impl crate::action::ActionDispatcher for OkDispatcher {
+            fn dispatch(
+                &self,
+                _action: &crate::spec::ActionSpec,
+                _envelope: &puffer_subscriber_runtime::EventEnvelope,
+            ) -> crate::action::ActionResult {
+                crate::action::ActionResult::success("ok")
+            }
+        }
+        struct AlwaysDispatchGate;
+        impl crate::self_gate::SelfMessageGate for AlwaysDispatchGate {
+            fn should_dispatch_self_message(&self, _e: &puffer_subscriber_runtime::Event) -> bool {
+                true
+            }
+        }
+        let dispatcher: std::sync::Arc<dyn crate::action::ActionDispatcher> =
+            std::sync::Arc::new(OkDispatcher);
+        let classifier: std::sync::Arc<dyn crate::classify::Classifier> =
+            std::sync::Arc::new(crate::classify::NullClassifier);
+        let gate: std::sync::Arc<dyn crate::self_gate::SelfMessageGate> =
+            std::sync::Arc::new(AlwaysDispatchGate);
+        let trace_path = dir.path().join("monitor-trace.json");
+        let trace_store = crate::monitor_trace::MonitorTraceStore::load(&trace_path).unwrap();
+
+        let envelope = puffer_subscriber_runtime::EventEnvelope {
+            envelope_id: "env-self-trace".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: puffer_subscriber_runtime::Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "done, just sent it".into(),
+                payload: serde_json::json!({ "sender_is_self": true, "chat_id": 42 }),
+            },
+        };
+
+        // Single-envelope path.
+        crate::router::process_envelope_result_with_monitor_digest(
+            &envelope,
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            &gate,
+            None,
+            Some(&trace_store),
+            None,
+        );
+        let raw = std::fs::read_to_string(&trace_path).unwrap();
+        assert!(
+            raw.contains("router_self_dispatch_open_task"),
+            "single path must record stage"
+        );
+
+        // Batch path.
+        let trace_path2 = dir.path().join("monitor-trace-batch.json");
+        let trace_store2 = crate::monitor_trace::MonitorTraceStore::load(&trace_path2).unwrap();
+        crate::router::process_envelope_batch_result_with_monitor_digest(
+            std::slice::from_ref(&envelope),
+            &store,
+            None,
+            &dispatcher,
+            &classifier,
+            &gate,
+            None,
+            Some(&trace_store2),
+            None,
+        );
+        let raw2 = std::fs::read_to_string(&trace_path2).unwrap();
+        assert!(
+            raw2.contains("router_self_dispatch_open_task"),
+            "batch path must record stage"
+        );
+    }
 }

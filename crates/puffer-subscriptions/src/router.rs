@@ -163,6 +163,7 @@ pub(crate) fn process_envelope_result_with_monitor_digest(
                 continue;
             }
             result.matched = true;
+            record_self_dispatch(trace_store, &spec, envelope);
             dispatch_one_matched_envelope(
                 &spec,
                 envelope,
@@ -581,6 +582,7 @@ pub(crate) fn process_envelope_batch_result_with_monitor_digest(
                     continue;
                 }
                 result.matched = true;
+                record_self_dispatch(trace_store, &spec, envelope);
                 dispatch_one_matched_envelope(
                     &spec,
                     envelope,
@@ -1205,6 +1207,21 @@ fn record_self_gate_skip(
         "router_self_gate_skipped",
         "subscription_router",
         "Outgoing/self message is not eligible for this workflow binding.",
+    );
+}
+
+fn record_self_dispatch(
+    trace_store: Option<&MonitorTraceStore>,
+    spec: &WorkflowBindingSpec,
+    envelope: &EventEnvelope,
+) {
+    record_router_trace(
+        trace_store,
+        spec,
+        envelope,
+        "router_self_dispatch_open_task",
+        "subscription_router",
+        "Outgoing/self message dispatched for completion detection (open task).",
     );
 }
 
