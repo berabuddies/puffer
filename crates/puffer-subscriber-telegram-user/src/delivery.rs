@@ -83,6 +83,11 @@ impl DeliveryCursor {
         true
     }
 
+    /// The authenticated account's user id, if recorded.
+    pub(crate) fn account_user_id(&self) -> Option<i64> {
+        self.account_user_id
+    }
+
     /// Returns whether this message's chat has an existing cursor entry.
     pub(crate) fn has_chat(&self, message: &Message) -> bool {
         self.chats.contains_key(&message_chat_key(message))
@@ -192,6 +197,7 @@ pub(crate) async fn emit_message_if_new(
         notification_muted,
         delivery_source,
         source_received_at_ms,
+        cursor.account_user_id(),
     );
     if let Err(error) = emit(&event) {
         let error_text = error.to_string();

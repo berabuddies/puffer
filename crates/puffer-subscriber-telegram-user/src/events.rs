@@ -67,6 +67,18 @@ pub fn emit_control(topic: &str, kind: &str, payload: Value) -> anyhow::Result<(
     emit(&event)
 }
 
+/// Whether a message is authored by the logged-in account. Dual signal:
+/// grammers' `out` bit is authoritative when present, and the persisted
+/// account user id backstops delivery paths where the bit is lost
+/// (update gaps, unknown-peer recovery — agentenv/monorepo#756).
+pub(crate) fn sender_matches_self(
+    is_outgoing: bool,
+    sender_id: Option<i64>,
+    self_user_id: Option<i64>,
+) -> bool {
+    is_outgoing || (sender_id.is_some() && sender_id == self_user_id)
+}
+
 /// Builds the `message`-kind event for a new Telegram message update.
 ///
 /// `kind` is `"channel_post"` when the message came from a broadcast channel
@@ -80,6 +92,7 @@ pub fn build_message_event(
     notification_muted: bool,
     delivery_source: &str,
     source_received_at_ms: Option<i128>,
+    self_user_id: Option<i64>,
 ) -> Event {
     let chat = message.chat();
     let peer = message_peer_metadata(message, peer_cache);
@@ -144,6 +157,14 @@ pub fn build_message_event(
         );
     }
     payload.insert("is_outgoing".to_string(), json!(is_outgoing));
+    payload.insert(
+        "sender_is_self".to_string(),
+        json!(sender_matches_self(
+            is_outgoing,
+            peer.sender_id,
+            self_user_id
+        )),
+    );
     payload.insert("notification_muted".to_string(), json!(notification_muted));
     payload.insert("notification_silent".to_string(), json!(message.silent()));
     if let Some(reply_to) = reply_header_payload(message.reply_header()) {
@@ -403,5 +424,27 @@ mod tests {
         assert_eq!(peer.sender_username.as_deref(), Some("johnsmith1847"));
         assert_eq!(peer.chat_title.as_deref(), Some("smith john"));
         assert_eq!(peer.chat_username.as_deref(), Some("johnsmith1847"));
+    }
+}
+
+#[cfg(test)]
+mod sender_is_self_tests {
+    use super::sender_matches_self;
+
+    #[test]
+    fn out_bit_alone_is_self() {
+        assert!(sender_matches_self(true, None, None));
+    }
+
+    #[test]
+    fn sender_id_match_backstops_lost_out_bit() {
+        assert!(sender_matches_self(false, Some(42), Some(42)));
+    }
+
+    #[test]
+    fn not_self_when_neither_signal() {
+        assert!(!sender_matches_self(false, Some(43), Some(42)));
+        assert!(!sender_matches_self(false, None, Some(42)));
+        assert!(!sender_matches_self(false, Some(42), None));
     }
 }
