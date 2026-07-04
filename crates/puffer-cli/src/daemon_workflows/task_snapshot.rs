@@ -294,26 +294,6 @@ fn scope_label(scope_kind: &str, scope_id: &str) -> String {
     format!("{scope_kind} {scope_id}")
 }
 
-fn metadata_string(
-    metadata: &Map<String, Value>,
-    top_level_keys: &[&str],
-    monitor_keys: &[&str],
-) -> Option<String> {
-    top_level_keys
-        .iter()
-        .find_map(|key| string_value(metadata.get(*key)))
-        .or_else(|| {
-            metadata
-                .get("monitor")
-                .and_then(Value::as_object)
-                .and_then(|monitor| {
-                    monitor_keys
-                        .iter()
-                        .find_map(|key| string_value(monitor.get(*key)))
-                })
-        })
-}
-
 fn metadata_bool(metadata: &Map<String, Value>, key: &str) -> bool {
     metadata
         .get(key)
@@ -667,12 +647,19 @@ fn sender_avatar_url_from_cache(
 }
 
 fn sender_avatar_contact_ids(metadata: &Map<String, Value>, context: &Value) -> Vec<String> {
+    // A mixed-sender burst has no single contact. Attributing the task to one
+    // member — or to a leaked singular sender hint — is exactly the
+    // wrong-contact bug (agentenv/monorepo#682): return no ids so the snapshot
+    // enriches no single contact rather than fabricating one.
+    if is_mixed_sender_burst(metadata) {
+        return Vec::new();
+    }
     let sender = context.get("sender").and_then(Value::as_object);
     let mut ids = BTreeSet::new();
     if let Some(sender_id) = sender
         .and_then(|sender| scalar_string(sender.get("id")))
         .or_else(|| {
-            metadata_scalar_string(
+            metadata_string(
                 metadata,
                 &["sender_id", "senderId"],
                 &["sender_id", "senderId"],
@@ -694,7 +681,7 @@ fn sender_avatar_contact_ids(metadata: &Map<String, Value>, context: &Value) -> 
     if let Some(username) = sender
         .and_then(|sender| scalar_string(sender.get("username")))
         .or_else(|| {
-            metadata_scalar_string(
+            metadata_string(
                 metadata,
                 &["sender_username", "senderUsername"],
                 &["sender_username", "senderUsername"],
@@ -711,7 +698,25 @@ fn sender_avatar_contact_ids(metadata: &Map<String, Value>, context: &Value) -> 
     ids.into_iter().collect()
 }
 
-fn metadata_scalar_string(
+/// Whether the plural `sender_ids` stamp marks this as a mixed-sender burst
+/// (>=2 distinct members) — a task with no single contact it can be
+/// attributed to (agentenv/monorepo#682, #655).
+fn is_mixed_sender_burst(metadata: &Map<String, Value>) -> bool {
+    metadata
+        .get("sender_ids")
+        .or_else(|| metadata.get("senderIds"))
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values
+                .iter()
+                .filter_map(|value| scalar_string(Some(value)))
+                .collect::<BTreeSet<_>>()
+                .len()
+                >= 2
+        })
+}
+
+fn metadata_string(
     metadata: &Map<String, Value>,
     top_level_keys: &[&str],
     monitor_keys: &[&str],
@@ -773,6 +778,9 @@ fn derived_monitor_source_context(metadata: &Map<String, Value>) -> Option<Value
     if !connector_slug.contains("telegram") {
         return None;
     }
+    // Ids are stamped as i64 by the subscriber/burst paths and as strings by
+    // older records — the number-tolerant reader keeps legacy no-contract
+    // tasks renderable either way (agentenv/monorepo#682).
     let chat_id = metadata_string(metadata, &["chat_id", "chatId"], &["chat_id", "chatId"])?;
     let chat_kind = metadata_string(
         metadata,
@@ -1241,5 +1249,160 @@ mod tests {
         assert_eq!(source_messages[6]["direction"], "outgoing");
         assert_eq!(source_messages[7]["text"], "简报下今年F1的竞争格局");
         assert_eq!(source_messages[7]["message_id"], 53953);
+    }
+
+    #[test]
+    fn issue_682_group_message_resolves_actual_sender_contact() {
+        // A telegram GROUP message from member B (in a group owned by A) must
+        // resolve to B's contact id, never the group/chat or its owner
+        // (agentenv/monorepo#682). The subscriber stamps sender_id as B's i64;
+        // the render layer must carry it into source_context.sender.id and the
+        // snapshot must derive exactly B's contact id.
+        let group_chat_id = -1_001_234_567_890i64; // a group chat id, never a contact
+        let sender_b = 5_229_190_700i64;
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "_monitor": true,
+            "monitor_connection": "telegram-user",
+            "monitor_connector": "telegram-login",
+            "monitor": {
+                "schema_version": 2,
+                "kind": "telegram.reply",
+                "source": {
+                    "connector_slug": "telegram-login",
+                    "connection_slug": "telegram-user",
+                    "chat_id": group_chat_id,
+                    "chat_kind": "group",
+                    "sender_id": sender_b,
+                    "message_id": 6090
+                },
+                "action": { "type": "draft_then_approve" }
+            }
+        }))
+        .unwrap();
+        let context = monitor_source_context(&metadata).expect("group message context");
+        assert_eq!(
+            context["sender"]["id"],
+            json!(sender_b.to_string()),
+            "render must carry the actual group-message sender id"
+        );
+        let ids = sender_avatar_contact_ids(&metadata, &context);
+        assert_eq!(
+            ids,
+            vec![format!("telegram-user-id@{sender_b}")],
+            "group message must attribute to the actual sender B, never the group/chat"
+        );
+    }
+
+    #[test]
+    fn issue_682_numeric_sender_id_resolves_to_contact_end_to_end() {
+        // Subscriber-shaped identity arrives as i64. The render layer coerces it
+        // into source_context.sender.id (string) and the snapshot derives the
+        // telegram-user-id contact id — locked end to end (agentenv/monorepo#682).
+        let sender = 8_759_047_281i64;
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "_monitor": true,
+            "monitor_connection": "telegram-user",
+            "monitor_connector": "telegram-login",
+            "monitor": {
+                "schema_version": 2,
+                "kind": "telegram.reply",
+                "source": {
+                    "connector_slug": "telegram-login",
+                    "connection_slug": "telegram-user",
+                    "chat_id": sender,
+                    "chat_kind": "user",
+                    "sender_id": sender,
+                    "message_id": 6090
+                },
+                "action": { "type": "draft_then_approve" }
+            }
+        }))
+        .unwrap();
+        let context = monitor_source_context(&metadata).expect("numeric sender context");
+        assert_eq!(
+            context["sender"]["id"],
+            json!(sender.to_string()),
+            "numeric sender id must render as a string"
+        );
+        let ids = sender_avatar_contact_ids(&metadata, &context);
+        assert!(
+            ids.contains(&format!("telegram-user-id@{sender}")),
+            "numeric sender id must derive its telegram-user-id contact, got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn issue_682_multi_sender_burst_has_no_single_contact_attribution() {
+        // A mixed-sender burst stamps the plural `sender_ids` set (>=2 distinct
+        // members). It has no single contact, so the task must not be attributed
+        // to one member — even a leaked singular sender hint must not win over
+        // the known multi-sender set (agentenv/monorepo#682, #655).
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "_monitor": true,
+            "monitor_connection": "telegram-user",
+            "monitor_connector": "telegram-login",
+            "chat_id": -1_001_234_567_890i64,
+            "chat_kind": "group",
+            "sender_ids": [42, 43],
+            // A stray singular hint must not fabricate a single-contact link.
+            "sender_id": 42,
+            "source_message_ids": [6090, 6091]
+        }))
+        .unwrap();
+        let context = monitor_source_context(&metadata)
+            .expect("a mixed-sender burst still derives a source context");
+        let ids = sender_avatar_contact_ids(&metadata, &context);
+        assert!(
+            ids.is_empty(),
+            "mixed-sender burst must not attribute to one contact, got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn issue_682_legacy_numeric_chat_id_derives_human_gated_completion_policy() {
+        // The number-tolerant derive also feeds default_monitor_completion_policy:
+        // a legacy reply-shaped telegram task with a numeric chat_id must now
+        // ADVERTISE the human gating the daemon already enforces (its
+        // enforcement leg was number-tolerant all along) instead of showing no
+        // policy (agentenv/monorepo#682).
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "_monitor": true,
+            "monitor_connection": "telegram-user",
+            "monitor_connector": "telegram-login",
+            "chat_id": 42i64,
+            "chat_kind": "user",
+            "sender_id": 42i64,
+            "actions": [{"name": "reply", "prompt": "Reply to the sender"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            monitor_completion_policy(&metadata),
+            Some(json!({
+                "mode": "draft_then_approve",
+                "requires_human_approval": true,
+                "requires_receipt": true,
+            }))
+        );
+    }
+
+    #[test]
+    fn issue_682_legacy_numeric_ids_still_derive_source_context() {
+        // A legacy task without a typed contract falls back to
+        // derived_monitor_source_context; ids stamped as i64 must not kill the
+        // whole derivation (agentenv/monorepo#682).
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "_monitor": true,
+            "monitor_connection": "telegram-user",
+            "monitor_connector": "telegram-login",
+            "chat_id": 42i64,
+            "chat_kind": "user",
+            "sender_id": 42i64
+        }))
+        .unwrap();
+        let context = monitor_source_context(&metadata).expect("legacy numeric context");
+        assert_eq!(context["sender"]["id"], json!("42"));
+        assert_eq!(context["delivery_target"]["chat_id"], json!("42"));
+        let ids = sender_avatar_contact_ids(&metadata, &context);
+        assert_eq!(ids, vec!["telegram-user-id@42".to_string()]);
     }
 }
