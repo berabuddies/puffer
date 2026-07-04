@@ -1431,22 +1431,28 @@
         const poll = await copilotLoginPoll(start.deviceCode, remoteConnection);
         if (generation !== activeLoginGeneration) return; // canceled mid-poll
         if (poll.status === "done") {
-          if (poll.snapshot) {
-            settingsSnapshot = poll.snapshot;
-          } else {
-            // Daemon persisted the credential but couldn't build a snapshot;
-            // fetch it so the UI reflects the now-connected provider.
-            settingsSnapshot = await loadSettingsSnapshot(remoteConnection);
-            if (generation !== activeLoginGeneration) return;
-          }
-          onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
-          onboarding = shouldShowOnboarding(settingsSnapshot);
-          if (wasOnboarding && !onboarding) {
-            tweaks = { ...tweaks, screen: "workspace" };
-          }
-          statusMessage = "Connected to GitHub Copilot.";
-          await refreshGroups();
+          // `done` means the daemon has persisted the credential, so the login
+          // has succeeded — commit that first. Applying the snapshot and
+          // refreshing groups is best-effort: a transient failure (including
+          // the fallback loadSettingsSnapshot when the daemon returned done
+          // without a snapshot) must NOT turn the success into a reported
+          // failure. The UI reconciles on the next refresh.
           copilotLogin = null;
+          statusMessage = "Connected to GitHub Copilot.";
+          try {
+            const snap = poll.snapshot ?? (await loadSettingsSnapshot(remoteConnection));
+            if (generation === activeLoginGeneration && snap) {
+              settingsSnapshot = snap;
+              onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
+              onboarding = shouldShowOnboarding(settingsSnapshot);
+              if (wasOnboarding && !onboarding) {
+                tweaks = { ...tweaks, screen: "workspace" };
+              }
+            }
+            await refreshGroups();
+          } catch {
+            // Connected; snapshot/groups reconcile on the next settings refresh.
+          }
           return;
         }
         if (poll.status === "error") {
