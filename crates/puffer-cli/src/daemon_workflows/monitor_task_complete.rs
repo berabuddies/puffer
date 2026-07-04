@@ -69,14 +69,12 @@ pub(crate) fn handle_monitor_task_complete(paths: &ConfigPaths, params: &Value) 
         // decision this gate exists to collect — it passes with an audit
         // entry instead of a send receipt. Every other completed_via still
         // requires the reply flow for human-gated tasks.
-        let no_reply_needed = completed_via == NO_REPLY_NEEDED_VIA;
-        if !no_reply_needed && is_human_gated_reply_task(task_object) {
+        if completed_via == NO_REPLY_NEEDED_VIA {
+            append_no_reply_audit(task_object, params.reason.as_deref())?;
+        } else if is_human_gated_reply_task(task_object) {
             anyhow::bail!(
                 "human-gated monitor reply tasks require human approval and a send receipt"
             );
-        }
-        if no_reply_needed {
-            append_no_reply_audit(task_object, params.reason.as_deref())?;
         }
         task_object.insert("status".to_string(), Value::String("completed".to_string()));
         task_object.insert("completed_via".to_string(), Value::String(completed_via));
@@ -85,7 +83,10 @@ pub(crate) fn handle_monitor_task_complete(paths: &ConfigPaths, params: &Value) 
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
 
-    super::handle_workflow_list(paths)
+    // include_workflows=false, like the ignore/create writebacks: building the
+    // workflow runtime client inside the daemon's async dispatch panics on
+    // runtime drop, which swallows the response frame after a successful write.
+    super::handle_workflow_list_with_runtime(paths, false)
 }
 
 /// Whether the task is already in a terminal lifecycle state. Only `pending`
