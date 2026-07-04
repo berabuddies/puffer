@@ -70,6 +70,15 @@ fn cache() -> &'static Mutex<HashMap<String, CachedToken>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Drops the cached exchanged bearer for a GitHub token. Called when the chat
+/// endpoint rejects the bearer with 401 (e.g. it was invalidated before its
+/// cached expiry — revoked Copilot seat, server-side rotation): the next
+/// request then re-exchanges the GitHub token instead of reusing the dead
+/// bearer until it expires.
+pub(crate) fn invalidate_bearer(github_token: &str) {
+    cache().lock().unwrap().remove(github_token);
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

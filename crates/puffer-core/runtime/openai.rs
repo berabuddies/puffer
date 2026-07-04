@@ -730,6 +730,24 @@ fn codex_style_for_provider(provider: &ProviderDescriptor, oauth: bool) -> bool 
             != Some("1")
 }
 
+/// On a 401 from the GitHub Copilot chat endpoint, drop the cached exchanged
+/// bearer so the next turn re-exchanges the stored GitHub token. Copilot carries
+/// no `refresh_token` (the OAuth refresh path is skipped), so without this a
+/// bearer invalidated before its ~25min cached expiry would keep 401-ing every
+/// turn until expiry with no auto-recovery.
+fn evict_copilot_bearer_on_unauthorized(
+    auth_store: &AuthStore,
+    execution: &OpenAIExecutionConfig,
+    unauthorized: bool,
+) {
+    if !unauthorized || execution.provider_id != "github-copilot" {
+        return;
+    }
+    if let Some(StoredCredential::OAuth(credential)) = auth_store.get("github-copilot") {
+        super::copilot::invalidate_bearer(&credential.access_token);
+    }
+}
+
 /// Sends a blocking OpenAI request and refreshes OAuth credentials once after a 401.
 pub(super) fn send_openai_request_with_refresh<F>(
     auth_store: &mut AuthStore,
@@ -763,6 +781,11 @@ where
         false,
         proxy,
     )?;
+    evict_copilot_bearer_on_unauthorized(
+        auth_store,
+        execution,
+        response.status == StatusCode::UNAUTHORIZED,
+    );
     if response.status != StatusCode::UNAUTHORIZED || execution.refresh_token.is_none() {
         return parse_http_json_response(&request.url, false, response);
     }
@@ -847,6 +870,11 @@ where
             );
         },
     )?;
+    evict_copilot_bearer_on_unauthorized(
+        auth_store,
+        execution,
+        response.status() == StatusCode::UNAUTHORIZED,
+    );
     if response.status() != StatusCode::UNAUTHORIZED || execution.refresh_token.is_none() {
         return parse_openai_stream_response(&request.url, response, on_event);
     }

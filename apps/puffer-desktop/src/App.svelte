@@ -1428,7 +1428,16 @@
       while (Date.now() < deadlineMs) {
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
         if (generation !== activeLoginGeneration) return; // canceled while waiting
-        const poll = await copilotLoginPoll(start.deviceCode, remoteConnection);
+        // A single transient transport blip (esp. over a remote connection)
+        // must not abort an otherwise-valid login — the device code is still
+        // good. Treat a rejected poll as "keep waiting"; the deadline still
+        // bounds the loop. (The daemon-side poll is likewise resilient.)
+        let poll: Awaited<ReturnType<typeof copilotLoginPoll>>;
+        try {
+          poll = await copilotLoginPoll(start.deviceCode, remoteConnection);
+        } catch {
+          continue;
+        }
         if (generation !== activeLoginGeneration) return; // canceled mid-poll
         if (poll.status === "done") {
           // `done` means the daemon has persisted the credential, so the login
