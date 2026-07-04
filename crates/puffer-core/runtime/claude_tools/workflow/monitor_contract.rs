@@ -184,14 +184,33 @@ fn calendar_source_context(contract: &MonitorContract) -> Value {
 }
 
 fn generic_source_context(contract: &MonitorContract) -> Value {
-    json!({
+    let mut context = json!({
         "kind": "generic_review",
         "connection_slug": string_field(&contract.source, &["connection_slug", "connectionSlug"]),
         "connector_slug": string_field(&contract.source, &["connector_slug", "connectorSlug"]),
         "summary": string_field(&contract.source, &["summary", "subject", "title"]).unwrap_or_else(|| "Monitor item".to_string()),
         "sender": sender_from_source(&contract.source),
         "text": string_field(&contract.source, &["text", "body", "description"]),
-    })
+    });
+    // A consolidated same-chat telegram burst carries uniform chat identity;
+    // give it the same chat-level delivery target as a single-source telegram
+    // task so the reply path works (agentenv/monorepo#761, #722). Non-telegram
+    // or cross-chat reviews stay review-only.
+    let is_telegram = string_field(&contract.source, &["connector_slug", "connectorSlug"])
+        .or_else(|| string_field(&contract.source, &["connection_slug", "connectionSlug"]))
+        .is_some_and(|slug| slug.contains("telegram"));
+    if is_telegram {
+        if let Some(chat_id) = string_field(&contract.source, &["chat_id", "chatId"]) {
+            let chat_kind = string_field(&contract.source, &["chat_kind", "chatKind"])
+                .unwrap_or_else(|| "user".to_string());
+            context["delivery_target"] = json!({
+                "type": "telegram_chat",
+                "chat_id": chat_id,
+                "chat_kind": chat_kind,
+            });
+        }
+    }
+    context
 }
 
 fn sender_from_source(source: &Map<String, Value>) -> Value {
@@ -277,6 +296,62 @@ mod tests {
 
     fn metadata(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn generic_review_source_context_emits_telegram_delivery_target() {
+        // A same-chat telegram burst carries chat identity (stamped as strings
+        // by the contract builder); the rendered source_context must expose the
+        // same chat-level delivery target as a single-source telegram task so
+        // the reply path works (agentenv/monorepo#761, #722).
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "monitor": {
+                "schema_version": 2,
+                "kind": "generic.review",
+                "source": {
+                    "connector_slug": "telegram-login",
+                    "connection_slug": "telegram-user",
+                    "chat_id": "8689648954",
+                    "chat_kind": "group",
+                    "envelope_ids": ["env-a", "env-b"],
+                    "summary": "Monitor item"
+                },
+                "action": { "type": "review_only" }
+            }
+        }))
+        .unwrap();
+        let contract = parse_monitor_contract(&metadata).unwrap().unwrap();
+        let context = display_source_context(&contract);
+        assert_eq!(
+            context["delivery_target"],
+            json!({
+                "type": "telegram_chat",
+                "chat_id": "8689648954",
+                "chat_kind": "group",
+            })
+        );
+    }
+
+    #[test]
+    fn generic_review_source_context_without_chat_id_stays_review_only() {
+        // Cross-chat or non-telegram bursts have no uniform chat target.
+        let metadata: Map<String, Value> = serde_json::from_value(json!({
+            "monitor": {
+                "schema_version": 2,
+                "kind": "generic.review",
+                "source": {
+                    "connector_slug": "telegram-login",
+                    "connection_slug": "telegram-user",
+                    "envelope_ids": ["env-a", "env-b"],
+                    "summary": "Monitor item"
+                },
+                "action": { "type": "review_only" }
+            }
+        }))
+        .unwrap();
+        let contract = parse_monitor_contract(&metadata).unwrap().unwrap();
+        let context = display_source_context(&contract);
+        assert_eq!(context.get("delivery_target"), None);
     }
 
     #[test]

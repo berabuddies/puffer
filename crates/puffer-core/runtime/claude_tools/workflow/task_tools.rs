@@ -4488,6 +4488,40 @@ mod tests {
     }
 
     #[test]
+    fn issue_761_generic_review_burst_task_is_repliable() {
+        // End to end: burst stamps -> contract -> stamped metadata ->
+        // monitor_reply_target resolves a chat-level telegram target.
+        let stamps = vec![
+            issue625_stamp("env-a", 8_689_648_954, 42, 6090),
+            issue625_stamp("env-b", 8_689_648_954, 42, 6091),
+        ];
+        let contract = generic_review_contract_from_stamps(&stamps);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("_monitor".into(), json!(true));
+        metadata.insert("monitor_connection".into(), json!("telegram-user"));
+        metadata.insert("monitor_connector".into(), json!("telegram-login"));
+        apply_stamped_monitor_contract(&mut metadata, contract)
+            .expect("apply generic.review contract");
+        let task: StoredTask = serde_json::from_value(json!({
+            "task_id": "monitor-burst",
+            "subject": "Telegram: consolidated burst",
+            "description": "",
+            "active_form": "",
+            "status": "pending",
+            "owner": null,
+            "blocks": [],
+            "blocked_by": [],
+            "metadata": Value::Object(metadata),
+            "output": null,
+        }))
+        .expect("construct burst StoredTask");
+        let target = monitor_reply_target(&task)
+            .expect("a same-chat burst task must be repliable (agentenv/monorepo#761)");
+        assert_eq!(target.chat_id, "8689648954");
+        assert_eq!(target.connector_slug, "telegram-login");
+    }
+
+    #[test]
     fn issue_625_generic_review_task_dedups_by_message_id() {
         // The goal of option (a): a consolidated generic.review task now carries
         // chat_id + source_message_ids, so a re-delivery of one of its messages dedups
