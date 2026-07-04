@@ -258,7 +258,11 @@ impl ModelDiscoveryClient {
                 && (copilot_model_picker_enabled(entry)
                     || entry.get("id").and_then(|v| v.as_str()) == Some("gpt-4o-mini"))
         };
-        if data.iter().any(|entry| copilot_model_picker_enabled(entry)) {
+        // Only commit to the picker set if it actually yields models. Otherwise
+        // (every picker-enabled model is policy-disabled/unconfigured or
+        // internal) fall through to the session / default-fallback tiers instead
+        // of returning an empty list.
+        if data.iter().any(strict) {
             data.retain(strict);
             return;
         }

@@ -1468,6 +1468,9 @@
             await refreshGroups();
           } catch {
             // Connected; snapshot/groups reconcile on the next settings refresh.
+            // (Triply-rare: daemon fresh build + daemon held-inputs build +
+            // this client fallback would all have to fail. If it happens during
+            // onboarding the screen advances on the next manual refresh.)
           }
           return;
         }

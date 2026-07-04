@@ -78,9 +78,14 @@ fn cache() -> &'static Mutex<HashMap<String, CachedToken>> {
 
 /// Drops the cached exchanged bearer for a GitHub token. Called when the chat
 /// endpoint rejects the bearer with 401 (e.g. it was invalidated before its
-/// cached expiry — revoked Copilot seat, server-side rotation): the next
-/// request then re-exchanges the GitHub token instead of reusing the dead
-/// bearer until it expires.
+/// cached expiry — revoked Copilot seat, server-side rotation), and on
+/// logout/reconnect, so the dead/logged-out bearer isn't reused or left
+/// resident.
+///
+/// Best-effort: a chat turn already past the cache read but not yet re-inserting
+/// can re-populate this key just after eviction, so a logged-out token's bearer
+/// may linger until its natural ~25min expiry. Bounding that fully would need a
+/// revocation set with its own GC; not worth it for a short-lived bearer.
 pub(crate) fn invalidate_bearer(github_token: &str) {
     cache().lock().unwrap().remove(github_token);
 }
