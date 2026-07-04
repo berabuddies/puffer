@@ -107,6 +107,9 @@
     onLoginCopilot(providerId);
   }
   async function openExternalUrl(url: string) {
+    // Only ever open http(s) — mirror the open_url command's allowlist so the
+    // window.open fallback can't be used to reach file:// / native handlers.
+    if (!/^https?:\/\//i.test(url)) return;
     // window.open is unreliable in the Tauri webview; use the opener command.
     try {
       const { invoke } = await import("@tauri-apps/api/core");

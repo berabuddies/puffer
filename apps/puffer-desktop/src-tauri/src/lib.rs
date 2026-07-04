@@ -45,6 +45,8 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "load_settings_snapshot",
     "login_with_oauth",
     "login_with_agentenv",
+    "copilot_login_start",
+    "copilot_login_poll",
     "login_with_api_key",
     "logout_provider",
     "list_external_credentials",
@@ -209,6 +211,25 @@ fn login_with_oauth(
 fn login_with_agentenv(app: AppHandle, state: State<'_, SharedBackend>) -> Result<Value, String> {
     agentenv_auth::login_with_agentenv().map_err(|error| error.to_string())?;
     backend_call(app, state, "load_settings_snapshot", json!({}))
+}
+
+#[tauri::command]
+fn copilot_login_start(app: AppHandle, state: State<'_, SharedBackend>) -> Result<Value, String> {
+    backend_call(app, state, "copilot_login_start", json!({}))
+}
+
+#[tauri::command]
+fn copilot_login_poll(
+    app: AppHandle,
+    state: State<'_, SharedBackend>,
+    device_code: String,
+) -> Result<Value, String> {
+    backend_call(
+        app,
+        state,
+        "copilot_login_poll",
+        json!({ "deviceCode": device_code }),
+    )
 }
 
 #[tauri::command]
@@ -604,6 +625,8 @@ pub fn run() {
             load_settings_snapshot,
             login_with_oauth,
             login_with_agentenv,
+            copilot_login_start,
+            copilot_login_poll,
             login_with_api_key,
             logout_provider,
             list_external_credentials,

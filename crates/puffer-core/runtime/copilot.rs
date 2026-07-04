@@ -120,11 +120,15 @@ pub(crate) fn copilot_bearer_token(github_token: &str) -> Result<CopilotAuth> {
         .get("expires_at")
         .and_then(|e| e.as_u64())
         .unwrap_or(now + FALLBACK_LIFETIME_SECS);
-    // The account-specific API host (individual / business / enterprise).
+    // The account-specific API host (individual / business / enterprise). This
+    // value comes from the (TLS, authenticated) token-exchange response; still,
+    // only trust an https URL before we send the Copilot bearer + session token
+    // to it — anything else falls back to the default host.
     let api_url = value
         .get("endpoints")
         .and_then(|endpoints| endpoints.get("api"))
         .and_then(|api| api.as_str())
+        .filter(|api| api.starts_with("https://"))
         .unwrap_or(DEFAULT_COPILOT_API)
         .trim_end_matches('/')
         .to_string();

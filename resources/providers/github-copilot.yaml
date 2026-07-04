@@ -29,6 +29,10 @@ discovery:
 # `X-GitHub-Api-Version`, and reshuffles Copilot plan/model policy often (three
 # plan/billing changes in 2026 H1 alone) — bump these when Copilot responses
 # start misbehaving. Versions mirror current clients as of 2026-07.
+# IMPORTANT: these versions are ALSO hardcoded in the token-exchange /
+# session-mint / discovery requests (crates/puffer-core/runtime/copilot.rs and
+# crates/puffer-provider-registry/src/discovery.rs). Bump all sites together —
+# updating only this descriptor leaves those requests on the old version.
 headers:
   Copilot-Integration-Id: vscode-chat
   Editor-Version: vscode/1.104.0

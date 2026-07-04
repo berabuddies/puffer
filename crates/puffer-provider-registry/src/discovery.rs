@@ -41,10 +41,13 @@ fn copilot_discovery_bearer(github_token: &str) -> Option<(String, String)> {
     }
     let value: Value = response.json().ok()?;
     let token = value.get("token").and_then(|t| t.as_str())?.to_string();
+    // Only trust an https endpoint before sending the Copilot bearer to it;
+    // fall back to the default host otherwise (mirrors copilot.rs).
     let api_url = value
         .get("endpoints")
         .and_then(|endpoints| endpoints.get("api"))
         .and_then(|api| api.as_str())
+        .filter(|api| api.starts_with("https://"))
         .unwrap_or("https://api.githubcopilot.com")
         .trim_end_matches('/')
         .to_string();
@@ -265,7 +268,7 @@ impl ModelDiscoveryClient {
         //    willing to serve this account.
         if let Some(available) = self.copilot_session_available_models(api_url, token, headers) {
             if !available.is_empty() {
-                data.retain(|entry| {
+                let in_session = |entry: &Value| {
                     copilot_model_is_chat(entry)
                         && !copilot_model_is_internal(entry)
                         && entry
@@ -273,8 +276,12 @@ impl ModelDiscoveryClient {
                             .and_then(|v| v.as_str())
                             .map(|id| available.contains(id))
                             .unwrap_or(false)
-                });
-                if !data.is_empty() {
+                };
+                // Only narrow to the session set if it actually intersects the
+                // catalog; otherwise leave `data` intact so tier 3 can still run
+                // on the full list instead of an emptied one.
+                if data.iter().any(in_session) {
+                    data.retain(in_session);
                     return;
                 }
             }
