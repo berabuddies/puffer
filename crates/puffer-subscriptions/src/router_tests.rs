@@ -47,6 +47,14 @@ mod tests {
         }
     }
 
+    /// Test double: reports success for every dispatch.
+    struct OkDispatcher;
+    impl ActionDispatcher for OkDispatcher {
+        fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
+            ActionResult::success("ok")
+        }
+    }
+
     fn monitor_binding_with_classify_prompt() -> WorkflowBindingSpec {
         WorkflowBindingSpec {
             slug: "monitor-telegram-user".into(),
@@ -1440,14 +1448,6 @@ mod tests {
 
     #[test]
     fn contact_filters_suppress_unlisted_contacts() {
-        struct OkDispatcher;
-
-        impl ActionDispatcher for OkDispatcher {
-            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
-                ActionResult::success("ok")
-            }
-        }
-
         let dir = tempdir().unwrap();
         let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
         store
@@ -1671,12 +1671,6 @@ mod tests {
         // BuiltinActionDispatcher, whose ForwardMessage fails with no outbound
         // configured — which incidentally tested the buggy "failed run blocks
         // forever" behavior. Dedup-on-replay is about successfully-handled events.)
-        struct OkDispatcher;
-        impl ActionDispatcher for OkDispatcher {
-            fn dispatch(&self, _action: &ActionSpec, _envelope: &EventEnvelope) -> ActionResult {
-                ActionResult::success("forwarded")
-            }
-        }
         let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(OkDispatcher);
         let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
         let history_store = WorkflowHistoryStore::load(dir.path().join("history.json")).unwrap();
@@ -2212,62 +2206,24 @@ mod tests {
         // #756 regression: a self-authored message whose grammers `out` bit was
         // lost (is_outgoing absent) must still be treated as self and must not
         // dispatch a non-monitor (e.g. auto-reply connector_act) binding.
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            crate::store::WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(crate::spec::WorkflowBindingSpec {
-                slug: "tg-review-auto-reply".into(),
-                description: "auto reply".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: Some("telegram-login".into()),
-                status: crate::spec::WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                contact_ids: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: crate::spec::ActionSpec::ConnectorAct {
-                    connector_slug: "telegram-login".into(),
-                    action: "send_message".into(),
-                    input: serde_json::json!({}),
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(auto_reply_binding()).unwrap();
 
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-        impl crate::action::ActionDispatcher for Counting {
-            fn dispatch(
-                &self,
-                _action: &crate::spec::ActionSpec,
-                _envelope: &puffer_subscriber_runtime::EventEnvelope,
-            ) -> crate::action::ActionResult {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                crate::action::ActionResult::success("dispatched")
-            }
-        }
-        let dispatcher: std::sync::Arc<dyn crate::action::ActionDispatcher> =
-            std::sync::Arc::new(Counting(calls.clone()));
-        let classifier: std::sync::Arc<dyn crate::classify::Classifier> =
-            std::sync::Arc::new(crate::classify::NullClassifier);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
         // Gate returning true: proves the non-monitor skip is structural, not
         // dependent on the gate verdict.
-        struct AlwaysDispatchGate;
-        impl crate::self_gate::SelfMessageGate for AlwaysDispatchGate {
-            fn should_dispatch_self_message(&self, _e: &puffer_subscriber_runtime::Event) -> bool {
-                true
-            }
-        }
-        let gate: std::sync::Arc<dyn crate::self_gate::SelfMessageGate> =
-            std::sync::Arc::new(AlwaysDispatchGate);
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(AllowAllSelfGate);
 
-        let envelope = puffer_subscriber_runtime::EventEnvelope {
+        let envelope = EventEnvelope {
             envelope_id: "env-self-1".into(),
             subscriber_id: "telegram-user".into(),
             received_at_ms: 0,
-            event: puffer_subscriber_runtime::Event {
+            event: Event {
                 topic: "telegram-user".into(),
                 kind: "message".into(),
                 control: false,
@@ -2278,7 +2234,7 @@ mod tests {
             },
         };
 
-        let result = crate::router::process_envelope_result(
+        let result = process_envelope_result(
             &envelope,
             &store,
             None,
@@ -2292,64 +2248,80 @@ mod tests {
             !result.matched,
             "self event must not match non-monitor binding"
         );
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn inbound_events_are_not_diverted_by_falsy_sender_is_self() {
+        // Negative guard for #756: `sender_is_self: false`, the key absent,
+        // and a non-bool `"true"` (payload_bool is bool-only) must all flow
+        // through normal dispatch even with the default drop-all self gate —
+        // otherwise genuine inbound mail would silently vanish from triage.
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store.create(auto_reply_binding()).unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(CountingDispatcher {
+            calls: calls.clone(),
+        });
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let payloads = [
+            serde_json::json!({ "sender_is_self": false, "chat_id": 42 }),
+            serde_json::json!({ "chat_id": 42 }),
+            serde_json::json!({ "sender_is_self": "true", "chat_id": 42 }),
+        ];
+        for (index, payload) in payloads.into_iter().enumerate() {
+            let envelope = EventEnvelope {
+                envelope_id: format!("env-inbound-{index}"),
+                subscriber_id: "telegram-user".into(),
+                received_at_ms: 0,
+                event: Event {
+                    topic: "telegram-user".into(),
+                    kind: "message".into(),
+                    control: false,
+                    dedup_key: None,
+                    text: "hello from a contact".into(),
+                    payload,
+                },
+            };
+            let result = process_envelope_result(
+                &envelope,
+                &store,
+                None,
+                &dispatcher,
+                &classifier,
+                None,
+                &drop_all_gate(),
+            );
+            assert!(result.matched, "inbound variant {index} must match");
+        }
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            3,
+            "all inbound variants dispatched"
+        );
     }
 
     #[test]
     fn self_dispatch_with_open_task_records_trace_stage() {
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            crate::store::WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
-        store
-            .create(crate::spec::WorkflowBindingSpec {
-                slug: "monitor-telegram-user".into(),
-                description: "Monitor telegram-user for actionable tasks".into(),
-                connection_slug: "telegram-user".into(),
-                connector_slug: Some("telegram-login".into()),
-                status: crate::spec::WorkflowBindingStatus::Enabled,
-                filter: None,
-                ignore_filters: Vec::new(),
-                contact_ids: Vec::new(),
-                classify_prompt: None,
-                classify_model: None,
-                action: crate::spec::ActionSpec::TriageAgent {
-                    prompt: "triage".into(),
-                    model: None,
-                },
-                created_at_ms: 0,
-            })
-            .unwrap();
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        let mut binding = monitor_binding_with_classify_prompt();
+        binding.classify_prompt = None;
+        store.create(binding).unwrap();
 
-        struct OkDispatcher;
-        impl crate::action::ActionDispatcher for OkDispatcher {
-            fn dispatch(
-                &self,
-                _action: &crate::spec::ActionSpec,
-                _envelope: &puffer_subscriber_runtime::EventEnvelope,
-            ) -> crate::action::ActionResult {
-                crate::action::ActionResult::success("ok")
-            }
-        }
-        struct AlwaysDispatchGate;
-        impl crate::self_gate::SelfMessageGate for AlwaysDispatchGate {
-            fn should_dispatch_self_message(&self, _e: &puffer_subscriber_runtime::Event) -> bool {
-                true
-            }
-        }
-        let dispatcher: std::sync::Arc<dyn crate::action::ActionDispatcher> =
-            std::sync::Arc::new(OkDispatcher);
-        let classifier: std::sync::Arc<dyn crate::classify::Classifier> =
-            std::sync::Arc::new(crate::classify::NullClassifier);
-        let gate: std::sync::Arc<dyn crate::self_gate::SelfMessageGate> =
-            std::sync::Arc::new(AlwaysDispatchGate);
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(OkDispatcher);
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let gate: Arc<dyn SelfMessageGate> = Arc::new(AllowAllSelfGate);
         let trace_path = dir.path().join("monitor-trace.json");
         let trace_store = crate::monitor_trace::MonitorTraceStore::load(&trace_path).unwrap();
 
-        let envelope = puffer_subscriber_runtime::EventEnvelope {
+        let envelope = EventEnvelope {
             envelope_id: "env-self-trace".into(),
             subscriber_id: "telegram-user".into(),
             received_at_ms: 0,
-            event: puffer_subscriber_runtime::Event {
+            event: Event {
                 topic: "telegram-user".into(),
                 kind: "message".into(),
                 control: false,
@@ -2360,7 +2332,7 @@ mod tests {
         };
 
         // Single-envelope path.
-        crate::router::process_envelope_result_with_monitor_digest(
+        process_envelope_result_with_monitor_digest(
             &envelope,
             &store,
             None,
@@ -2380,7 +2352,7 @@ mod tests {
         // Batch path.
         let trace_path2 = dir.path().join("monitor-trace-batch.json");
         let trace_store2 = crate::monitor_trace::MonitorTraceStore::load(&trace_path2).unwrap();
-        crate::router::process_envelope_batch_result_with_monitor_digest(
+        process_envelope_batch_result_with_monitor_digest(
             std::slice::from_ref(&envelope),
             &store,
             None,
