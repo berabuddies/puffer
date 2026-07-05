@@ -1499,6 +1499,14 @@
   // the generation makes the pending handler ignore its late result; clearing
   // the busy flag frees the UI immediately so another provider can be connected
   // without waiting out the OAuth/device-code timeout.
+  //
+  // This cancels the CLIENT wait only; the daemon RPC has no cancel channel, so
+  // an abandoned OpenAI/Codex OAuth keeps its callback listener on the fixed
+  // port 1455 until its ~180s wait expires. Connecting any OTHER provider works
+  // immediately (the point of cancel); only an immediate re-try of OpenAI/Codex
+  // itself may briefly fail to bind that port. Anthropic uses an ephemeral port
+  // and is unaffected. A full fix needs a daemon-side OAuth cancel (pre-existing
+  // shared flow, out of scope here).
   function cancelActiveLogin() {
     if (copilotLogin === null && authBusyProviderId === null) return;
     activeLoginGeneration += 1;
