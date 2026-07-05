@@ -190,7 +190,19 @@ pub(crate) fn copilot_bearer_token(github_token: &str) -> Result<CopilotAuth> {
     } else {
         expires_at
     };
-    cache().lock().unwrap().insert(
+    let mut guard = cache().lock().unwrap();
+    // Concurrent auto-only exchanges are last-writer-wins; don't let this
+    // mint-failed (session-less) result overwrite a good session another turn
+    // just cached, which would strand chat with no Copilot-Session-Token for
+    // ~SESSION_MINT_RETRY_SECS. Prefer the existing valid session instead.
+    if auto_only && auth.session.is_none() {
+        if let Some(existing) = guard.get(github_token) {
+            if existing.auth.session.is_some() && existing.expires_at_secs > now + EXPIRY_SKEW_SECS {
+                return Ok(existing.auth.clone());
+            }
+        }
+    }
+    guard.insert(
         github_token.to_string(),
         CachedToken {
             auth: auth.clone(),

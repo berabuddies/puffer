@@ -3011,13 +3011,15 @@ fn handle_copilot_login_poll(state: &DaemonState, params: &Value) -> Result<Valu
             puffer_provider_registry::invalidate_provider_discovery_cache("github-copilot");
             let config = state.config.lock().unwrap().clone();
             // The credential is now persisted, so the login HAS succeeded.
-            // Prefer a freshly-reloaded snapshot, but fall back to one built
-            // from the inputs we already hold (which include the new
-            // credential) so a transient reload failure still returns a usable
-            // snapshot rather than none — the client should never have to guess.
+            // Build the snapshot WITHOUT discovery: it only needs to reflect the
+            // now-connected provider (from auth_store), and Copilot's model list
+            // is discovered lazily (list_provider_models / background) when the
+            // picker opens. Running full multi-provider network discovery here
+            // could exceed the login-poll RPC timeout, surfacing a saved login
+            // as a failure. Fall back to the already-held inputs if reload fails.
             let snapshot: Option<SettingsSnapshotDto> = (|| {
                 reload_daemon_config(state)?;
-                let fresh = state.build_runtime_inputs()?;
+                let fresh = state.build_runtime_inputs_without_discovery()?;
                 desktop_api::load_settings_snapshot(
                     &state.paths,
                     &config,
