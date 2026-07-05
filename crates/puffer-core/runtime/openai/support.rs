@@ -497,7 +497,12 @@ pub(super) fn trace_openai_http_request(url: &str, headers: &[(String, String)],
     let rendered_headers = headers
         .iter()
         .map(|(key, value)| {
-            if key.eq_ignore_ascii_case("authorization") {
+            // Redact bearer-equivalent secrets. Copilot-Session-Token is an
+            // account-scoped JWT that authorizes (billed) chat, so it must be
+            // masked like Authorization.
+            if key.eq_ignore_ascii_case("authorization")
+                || key.eq_ignore_ascii_case("copilot-session-token")
+            {
                 format!("{key}: <redacted>")
             } else {
                 format!("{key}: {value}")
