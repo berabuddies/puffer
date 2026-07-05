@@ -77,7 +77,7 @@ events[]          # 生命周期事件（沿用 monitor_reply_events 事件形�
 要点：
 
 - **monitor 任务不再内嵌草稿**：task metadata 只存 `outbound_action_id` 引用；`pending_reply` / `pending_action` 内嵌形状与状态机代码全部删除。
-- **收件人来源分级**：monitor 任务的收件人仍由服务端 source_context stamp（模型不可指定，`recipient_source: stamped`）；显式指令场景（#634）收件人由模型从用户指令提取（`recipient_source: model`），审批卡区分显示、人眼确认。
+- **收件人 stamping 机制**：`ConnectorActionDraft` 带 `task_id` 时——① 必须匹配当前 turn 的 `monitor_reply_scope`（沿用现有 scope 绑定，防任意任务写入）；② 服务端从任务 source_context 解析收件人并**覆盖**模型输入（`recipient_source: stamped`，模型永远不能为任务回复指定收件人）。不带 `task_id` 时（普通会话或显式指令发第三方），收件人取模型输入（`recipient_source: model`），审批卡区分显示、人眼确认。
 - **cancelled / expired 是终态**：不可 supersede、不可 approve。"取消后重新要求发送" = 创建全新 action（新 id、新 version）。
 - 并发：沿用现有 per-id 锁模式（参考 `DRAFT_LOCKS`），文件原子写。
 
@@ -86,18 +86,18 @@ events[]          # 生命周期事件（沿用 monitor_reply_events 事件形�
 ```rust
 enum SendOrigin {
     LlmInitiated { session_id, turn_id, task_id: Option<String> },
-    RuleAutomation { rule_id },
-    HumanApproved { action_id },
+    RuleAutomation { rule_id },   // 含 workflow 引擎的 forward/send 节点（用户配置即长效授权）
 }
 fn evaluate(origin, connector_slug, action_slug, catalog) -> GateDecision
-// GateDecision: Allowed { audit } | RequiresDraft | Blocked { reason }
+// GateDecision: Allowed { reason } | RequiresDraft
 ```
+
+闸门只在"发起"时机评估（ConnectorAct / 草稿创建 / 规则 dispatch）。execute RPC 是人审之后的执行器，不再过闸；账号断连、action 不存在等是校验错误，不属于闸门决策——不设 `Blocked` 变体，也不设 `HumanApproved` origin。
 
 规则（净简化，无新增分支）：
 
-1. `LlmInitiated` + 外发动作 → `RequiresDraft`，无例外。两份 `monitor_task_is_human_gated` 及配套 delivery-target 嗅探全部删除。
+1. `LlmInitiated` + 外发动作 → `RequiresDraft`，无例外。发送路径上的两份 `monitor_task_is_human_gated` 判定删除。**删除边界**：`completion_policy` 元数据及其"任务完成需人确认"的 triage 语义保留（TaskUpdate/mark-done 流程仍在用），本方案只删发送闸门用途。
 2. `RuleAutomation` → `Allowed` + 审计。
-3. `HumanApproved` → 放行（只能来自 execute RPC）。
 4. **外发动作判定以 builtin catalog 为唯一事实源**：删除 `send_like_action_slug` 启发式；catalog 中 `external_side_effect: true` 的 action 一律 `RequiresDraft`。轻动作豁免（如 `react`）必须在 catalog 显式标 `category: external_reaction` 白名单，不靠 slug 猜。
 5. **模板加固（堵 #728-V1）**：`ConnectorCatalogStore::upsert` 校验——用户模板覆盖同 slug builtin 时，各 action 的 `category` / `external_side_effect` 不得弱于 builtin 同名 action；gate 读 catalog 时以 builtin 权限为下限合并。
 
@@ -112,6 +112,9 @@ fn evaluate(origin, connector_slug, action_slug, catalog) -> GateDecision
 | `outbound_action_status {action_id, version}` | `connector_action_draft_status` |
 
 - `execute` 保留现有防重语义：version 校验、provenance 校验（created_by=ConnectorActionDraft）、stale `sending` → `uncertain` → `duplicate_risk_ack_required`。
+- **执行器抽象**：`execute` 按 action 分派——telegram 等 connector send 走 `installed_connector_action_executor`；gmail.reply 走现有浏览器工作流执行器。gmail 的多阶段过程（创建草稿/打开线程等）不再产生独立状态，统一收敛为 `sending` 态 + `events[]` 记录阶段，成败落 `sent`/`failed`。
+- **任务回写**：action 的 `origin.task_id` 存在时，`sent` 后回写任务（receipt + 标 completed），`cancelled`/`expired` 时清除任务上的 `outbound_action_id` 引用。该逻辑收敛在统一的 `outbound_action.rs`，替代旧三个 workflow 里的各自回写。
+- **快照面（BOBO 数据源）**：task snapshot（`handle_workflow_list`/task_snapshot）按 `outbound_action_id` join 出 action 记录内嵌到任务快照，BOBO 审批卡照常从快照渲染；desktop 工具卡从工具输出渲染 + `outbound_action_status` 轮询。
 - TTL 惰性判定：execute 时 `now > expires_at` → 拒绝并标 `expired`。不做后台清扫任务。
 - BOBO 与 desktop 同步适配新 RPC（⚠️ 需 BOBO 修改，父单标 in-review）。desktop 审批卡（ToolCard connector-draft）增加 Cancel 按钮调 `outbound_action_cancel`。
 
@@ -125,7 +128,7 @@ fn evaluate(origin, connector_slug, action_slug, catalog) -> GateDecision
 ## 8. 审计
 
 - 每次 gate 决策 append 一行 `~/.puffer/outbound_audit.ndjson`：
-  `{at_ms, origin, connector, action, decision: allowed_rule|draft_required|blocked|approved_send|cancelled|expired, action_id?, rule_id?}`
+  `{at_ms, origin, connector, action, decision: allowed_rule|draft_required|approved_send|cancelled|expired, action_id?, rule_id?}`
 - action 记录内 `events[]` 保留生命周期事件（draft_created / cancelled / send_started / sent / send_failed …）。
 - 职责：NDJSON 回答"闸门整体是否一致"（回归验证、可 grep）；`events[]` 回答"这条 action 经历了什么"（审批卡、排查）。
 - 审计写失败不阻塞发送（best-effort + stderr 告警）。
@@ -133,11 +136,13 @@ fn evaluate(origin, connector_slug, action_slug, catalog) -> GateDecision
 ## 9. 删除清单（本方案主要收益之一）
 
 - daemon workflows：`monitor_reply_send.rs`、`monitor_action_execute.rs`、`connector_action_execute.rs` → 合并为一个 `outbound_action.rs`
-- 两份 `monitor_task_is_human_gated` + `monitor_task_has_telegram_delivery_target` + `monitor_task_has_delivery_target`
+- 发送路径上的两份 `monitor_task_is_human_gated` + `monitor_task_has_telegram_delivery_target`
 - 工具：`MonitorReplySend` / `MonitorReplyDraft` / `MonitorActionDraft` 及 dispatch 分支
 - `send_like_action_slug` 启发式
 - task metadata 中 `pending_reply` / `pending_action` 全部读写代码
 - 磁盘遗留旧 draft 数据：不迁移、直接忽略（旧字段无人读取 = 天然作废，无发送风险）
+
+**保留项（防误删）**：daemon 的 `resolve_monitor_reply_turn_scope` 仍需一个"任务有可回复目标"的最小检查来决定是否授予 action turn scope——保留 `monitor_task_has_delivery_target`（daemon.rs 版）单独用于 scope 判定，收敛为唯一一份。
 
 ## 10. 错误处理
 
@@ -155,6 +160,8 @@ fn evaluate(origin, connector_slug, action_slug, catalog) -> GateDecision
 6. 用户模板弱化 builtin 权限 → upsert 被拒。
 7. TTL 过期 → execute 拒绝并标 `expired`。
 8. 迁移 `monitor_reply_send.rs` 现有防重测试族（forged provenance / stale sending / version mismatch）到统一 RPC。
+9. 带 `task_id` 草稿：scope 不匹配 → 拒绝；收件人被服务端 stamp 覆盖（模型输入的收件人不生效）。
+10. `sent` 后任务回写 receipt + completed；task snapshot 内嵌 join 出的 action 记录（BOBO 渲染面）。
 
 性能说明：人审路径频率量级低，无额外性能设计；文件锁 + 原子写与现状一致。
 
