@@ -302,9 +302,16 @@ impl ModelDiscoveryClient {
             }
         }
 
-        // 3. Last resort (session endpoint unreachable): the server-marked
-        //    default/fallback chat models — still queried per-account. Internal
-        //    routing models can also carry these flags, so exclude them here too.
+        // 3. Last resort — reached when tier 1 found no picker model AND the
+        //    tier-2 session lookup was unavailable (a transient /models/session
+        //    outage on an auto-only account). Offer the server-marked
+        //    default/fallback chat models as a best-effort guess (excluding
+        //    internal ones). BEST-EFFORT ONLY: for an auto-only account the
+        //    session is the real source of truth for what's usable, and the
+        //    chat path attaches Copilot-Session-Token, so a model shown here
+        //    that the recovered session doesn't include will be rejected
+        //    (model_not_supported) until the next discovery/TTL re-runs tier 2.
+        //    There is no reliable list to show while the session is down.
         data.retain(|entry| {
             copilot_model_is_chat(entry)
                 && copilot_policy_ok(entry)
