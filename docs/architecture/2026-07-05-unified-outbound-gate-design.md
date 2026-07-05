@@ -1,64 +1,64 @@
-# 统一出站动作人审闸门（plan-05 / agentenv#767）设计
+# Unified Outbound Action Approval Gate (plan-05 / agentenv#767) Design
 
-日期：2026-07-05
-分支：`plan-05/unified-outbound-gate`
-关联 issue：agentenv/monorepo#767（父单），#728 / #561 / #634（子单）
-约束：不考虑向后兼容；以长期收益、稳定性为先；防止过度设计。
+Date: 2026-07-05
+Branch: `plan-05/unified-outbound-gate`
+Related issues: agentenv/monorepo#767 (parent), #728 / #561 / #634 (children)
+Constraints: no backward compatibility; optimize for long-term maintainability and stability; avoid over-engineering.
 
-## 1. 问题
+## 1. Problem
 
-"向外发消息"在现有代码里经过 4 处互不复用的判定和 3 套并行的草稿状态机：
+"Send a message outward" currently passes through 4 non-shared policy checks and 3 parallel draft state machines:
 
-| 层 | 位置 | 缺陷 |
+| Layer | Location | Defect |
 |---|---|---|
-| 工具层 ConnectorAct | `connector_tools.rs:646` | `send_like_action_slug` 启发式脆弱；查用户模板可被弱化覆盖（#728-V1/V2） |
-| 工具层 MonitorReplySend | `task_tools.rs:473/2677` | 非 human-gated 任务免审直发；判定靠 metadata 形状嗅探（#728-V3） |
-| daemon 层 | `daemon.rs:5337` | 第二份 `monitor_task_is_human_gated` 实现，与 core 版漂移 |
-| 人审 RPC | `monitor_reply_send` / `monitor_action_execute` / `connector_action_execute` | 三个独立状态机；**没有任何 cancel RPC**，取消是纯客户端手势（#561） |
+| Tool layer, ConnectorAct | `connector_tools.rs:646` | `send_like_action_slug` heuristic is fragile; looks up user templates that can override builtins with weaker permissions (#728-V1/V2) |
+| Tool layer, MonitorReplySend | `task_tools.rs:473/2677` | Non-human-gated tasks send directly without review; the predicate sniffs metadata shapes (#728-V3) |
+| Daemon layer | `daemon.rs:5337` | A second, drifting implementation of `monitor_task_is_human_gated` |
+| Approval RPCs | `monitor_reply_send` / `monitor_action_execute` / `connector_action_execute` | Three independent state machines; **no cancel RPC exists** — cancellation is a client-local gesture only (#561) |
 
-三套草稿存储：`pending_reply`、`pending_action`（task metadata 内嵌）、`outbound_action_drafts.json`。
-monitor action turn 被 `allowed_tools` 硬锁 + prompt 明文禁止，显式用户指令也无法向其他收件人发起人审（#634）。
+Three draft stores: `pending_reply` and `pending_action` (embedded in task metadata) plus `outbound_action_drafts.json` (standalone file).
+Monitor action turns are hard-locked by `allowed_tools` plus explicit prompt prohibitions, so even an explicit user instruction cannot start a reviewed send to another recipient (#634).
 
-## 2. 核心不变式
+## 2. Core Invariant
 
-**整个代码库只有一个函数能触发 LLM 发起的外部发送：`OutboundStore::execute_approved()`，它只接受 `approved` 态的 action。**
+**Exactly one function in the codebase can execute an LLM-initiated external send: `OutboundStore::execute_approved()`, and it only accepts actions in the `approved` state.**
 
-人审卡拦截的是模型意志，不拦截用户意志：
+The approval card intercepts model volition, not user volition:
 
-- LLM 发起（agent 会话 / 任务会话 / 后台任务）→ 一律先落草稿，人审后发。无免审分支。
-- 规则自动动作（subscriptions ActionDispatcher，用户配置监控规则触发）→ 豁免闸门（配置规则即长效授权），但记审计。
-- 人审批准 → 放行执行。
+- LLM-initiated (agent session / task session / background task) → always lands as a draft first, sent only after human approval. No ungated branch.
+- Rule automation (subscriptions ActionDispatcher, fired by user-configured monitor rules) → exempt from the gate (configuring the rule is standing approval), but audited.
+- Human-approved → executed.
 
-## 3. 架构
+## 3. Architecture
 
-落位：`puffer-subscriptions` 新增两个模块（不新建 crate）：
+Placement: two new modules in `puffer-subscriptions` (no new crate):
 
-- `outbound_gate.rs` — 纯判定函数
-- `outbound_store.rs` — 单一存储 + 状态机
+- `outbound_gate.rs` — pure decision function
+- `outbound_store.rs` — single store + state machine
 
-依赖方向天然成立：`puffer-core`（工具层）与 `puffer-cli`（daemon RPC）均已依赖 subscriptions；catalog/permission 事实源本就在此。
+Dependency direction already works: both `puffer-core` (tool layer) and `puffer-cli` (daemon RPCs) depend on subscriptions, and the catalog/permission source of truth already lives there.
 
 ```
-LLM 意志                                人类意志
-────────                               ────────
-ConnectorActionDraft (唯一草稿工具)      approve/cancel RPC (唯一裁决入口)
+Model volition                          Human volition
+──────────────                          ──────────────
+ConnectorActionDraft (sole draft tool)   approve/cancel RPC (sole verdict entry)
         │                                    │
         ▼                                    ▼
    ┌─────────────────────────────────────────────┐
    │ OutboundStore (~/.puffer/outbound_actions.json)│
    │ draft_ready ──approve──▶ sending ──▶ sent    │
    │     │  │                    │                │
-   │  cancel TTL过期          send失败            │
+   │  cancel TTL expiry       send failure        │
    │     ▼  ▼                    ▼                │
    │ cancelled expired    failed / uncertain      │
    └─────────────────────────────────────────────┘
         ▲
-   OutboundGate::evaluate() — 纯函数
+   OutboundGate::evaluate() — pure function
 ```
 
-## 4. 数据模型
+## 4. Data Model
 
-单一 action 记录 schema（替代现有三种草稿形状）：
+Single action record schema (replaces all three existing draft shapes):
 
 ```
 id, version,
@@ -67,114 +67,114 @@ recipient_stable_id, recipient_source: "stamped" | "model",
 message, content_hash,
 origin { session_id, turn_id, task_id? },
 status,           # draft_ready | sending | sent | cancelled | expired | failed | uncertain
-created_at, expires_at,   # 默认 24h TTL
+created_at, expires_at,   # default 24h TTL
 approved_message, approved_by, approved_at,
 client_request_id, send_attempt_id,
 receipt, error,
-events[]          # 生命周期事件（沿用 monitor_reply_events 事件形状）
+events[]          # lifecycle events (same shape as today's monitor_reply_events)
 ```
 
-要点：
+Key points:
 
-- **monitor 任务不再内嵌草稿**：task metadata 只存 `outbound_action_id` 引用；`pending_reply` / `pending_action` 内嵌形状与状态机代码全部删除。
-- **收件人 stamping 机制**：`ConnectorActionDraft` 带 `task_id` 时——① 必须匹配当前 turn 的 `monitor_reply_scope`（沿用现有 scope 绑定，防任意任务写入）；② 服务端从任务 source_context 解析收件人并**覆盖**模型输入（`recipient_source: stamped`，模型永远不能为任务回复指定收件人）。不带 `task_id` 时（普通会话或显式指令发第三方），收件人取模型输入（`recipient_source: model`），审批卡区分显示、人眼确认。
-- **cancelled / expired 是终态**：不可 supersede、不可 approve。"取消后重新要求发送" = 创建全新 action（新 id、新 version）。
-- 并发：沿用现有 per-id 锁模式（参考 `DRAFT_LOCKS`），文件原子写。
+- **Monitor tasks no longer embed drafts**: task metadata stores only an `outbound_action_id` reference; the `pending_reply` / `pending_action` embedded shapes and their state-machine code are deleted entirely.
+- **Recipient stamping**: when `ConnectorActionDraft` carries a `task_id` — ① it must match the current turn's `monitor_reply_scope` (existing scope binding, prevents writing arbitrary tasks); ② the server resolves the recipient from the task's source_context and **overrides** the model input (`recipient_source: stamped`; the model can never choose the recipient of a task reply). Without `task_id` (plain session, or an explicit instruction to message a third party), the recipient comes from model input (`recipient_source: model`); the approval card renders the distinction for human verification.
+- **`cancelled` / `expired` are terminal**: cannot be superseded, cannot be approved. "Cancel, then ask to send again" = a brand-new action (new id, new version).
+- Concurrency: existing per-id lock pattern (see `DRAFT_LOCKS`), atomic file writes.
 
-## 5. 闸门判定
+## 5. Gate Decision
 
 ```rust
 enum SendOrigin {
     LlmInitiated { session_id, turn_id, task_id: Option<String> },
-    RuleAutomation { rule_id },   // 含 workflow 引擎的 forward/send 节点（用户配置即长效授权）
+    RuleAutomation { rule_id },   // includes workflow-engine forward/send nodes (user config = standing approval)
 }
 fn evaluate(origin, connector_slug, action_slug, catalog) -> GateDecision
 // GateDecision: Allowed { reason } | RequiresDraft
 ```
 
-闸门只在"发起"时机评估（ConnectorAct / 草稿创建 / 规则 dispatch）。execute RPC 是人审之后的执行器，不再过闸；账号断连、action 不存在等是校验错误，不属于闸门决策——不设 `Blocked` 变体，也不设 `HumanApproved` origin。
+The gate evaluates only at initiation time (ConnectorAct / draft creation / rule dispatch). The execute RPC runs after human approval and does not pass the gate again; disconnected accounts, unknown actions and the like are validation errors, not gate decisions — there is no `Blocked` variant and no `HumanApproved` origin.
 
-规则（净简化，无新增分支）：
+Rules (a net simplification, no new branches):
 
-1. `LlmInitiated` + 外发动作 → `RequiresDraft`，无例外。发送路径上的两份 `monitor_task_is_human_gated` 判定删除。**删除边界**：`completion_policy` 元数据及其"任务完成需人确认"的 triage 语义保留（TaskUpdate/mark-done 流程仍在用），本方案只删发送闸门用途。
-2. `RuleAutomation` → `Allowed` + 审计。
-4. **外发动作判定以 builtin catalog 为唯一事实源**：删除 `send_like_action_slug` 启发式；catalog 中 `external_side_effect: true` 的 action 一律 `RequiresDraft`。轻动作豁免（如 `react`）必须在 catalog 显式标 `category: external_reaction` 白名单，不靠 slug 猜。
-5. **模板加固（堵 #728-V1）**：`ConnectorCatalogStore::upsert` 校验——用户模板覆盖同 slug builtin 时，各 action 的 `category` / `external_side_effect` 不得弱于 builtin 同名 action；gate 读 catalog 时以 builtin 权限为下限合并。
+1. `LlmInitiated` + external send action → `RequiresDraft`, no exceptions. The two send-path `monitor_task_is_human_gated` predicates are deleted. **Deletion boundary**: the `completion_policy` metadata and its "task completion requires human confirmation" triage semantics stay (the TaskUpdate / mark-done flow still uses them); this design removes only its send-gating use.
+2. `RuleAutomation` → `Allowed` + audit.
+3. **What counts as an external send is decided solely by the builtin catalog**: the `send_like_action_slug` heuristic is deleted; any catalog action with `external_side_effect: true` is `RequiresDraft`. Light actions exempted by design (e.g. `react`) must be explicitly whitelisted in the catalog as `category: external_reaction` — never guessed from slugs.
+4. **Template hardening (closes #728-V1)**: `ConnectorCatalogStore::upsert` validates that a user template overriding a builtin slug must not weaken any action's `category` / `external_side_effect` relative to the builtin action of the same name; when the gate reads the catalog, builtin permissions act as the floor in a merge.
 
-## 6. RPC 面（daemon）
+## 6. RPC Surface (daemon)
 
-三套发送 RPC 收敛为三个统一方法，旧 RPC 直接删除：
+Three send RPC families collapse into three unified methods; the old RPCs are deleted outright:
 
-| 新 RPC | 替代 |
+| New RPC | Replaces |
 |---|---|
 | `outbound_action_execute {action_id, version, approved_message, client_request_id}` | `monitor_reply_send` + `monitor_action_execute` + `connector_action_execute` |
-| `outbound_action_cancel {action_id, version, reason?}` | （此前不存在——#561 根修） |
+| `outbound_action_cancel {action_id, version, reason?}` | (did not exist — the root fix for #561) |
 | `outbound_action_status {action_id, version}` | `connector_action_draft_status` |
 
-- `execute` 保留现有防重语义：version 校验、provenance 校验（created_by=ConnectorActionDraft）、stale `sending` → `uncertain` → `duplicate_risk_ack_required`。
-- **执行器抽象**：`execute` 按 action 分派——telegram 等 connector send 走 `installed_connector_action_executor`；gmail.reply 走现有浏览器工作流执行器。gmail 的多阶段过程（创建草稿/打开线程等）不再产生独立状态，统一收敛为 `sending` 态 + `events[]` 记录阶段，成败落 `sent`/`failed`。
-- **任务回写**：action 的 `origin.task_id` 存在时，`sent` 后回写任务（receipt + 标 completed），`cancelled`/`expired` 时清除任务上的 `outbound_action_id` 引用。该逻辑收敛在统一的 `outbound_action.rs`，替代旧三个 workflow 里的各自回写。
-- **快照面（BOBO 数据源）**：task snapshot（`handle_workflow_list`/task_snapshot）按 `outbound_action_id` join 出 action 记录内嵌到任务快照，BOBO 审批卡照常从快照渲染；desktop 工具卡从工具输出渲染 + `outbound_action_status` 轮询。
-- TTL 惰性判定：execute 时 `now > expires_at` → 拒绝并标 `expired`。不做后台清扫任务。
-- BOBO 与 desktop 同步适配新 RPC（⚠️ 需 BOBO 修改，父单标 in-review）。desktop 审批卡（ToolCard connector-draft）增加 Cancel 按钮调 `outbound_action_cancel`。
+- `execute` keeps today's anti-duplication semantics: version check, provenance check (created_by = ConnectorActionDraft), stale `sending` → `uncertain` → `duplicate_risk_ack_required`.
+- **Executor abstraction**: `execute` dispatches per action — telegram-style connector sends go through `installed_connector_action_executor`; gmail.reply goes through the existing browser-workflow executor. Gmail's multi-stage process (create draft / open thread / …) no longer mints extra statuses; it collapses into the `sending` state with stages recorded in `events[]`, terminating in `sent`/`failed`.
+- **Task write-back**: when `origin.task_id` is present, `sent` writes back to the task (receipt + mark completed); `cancelled`/`expired` clears the task's `outbound_action_id` reference. This logic lives once in the unified `outbound_action.rs`, replacing the per-workflow copies.
+- **Snapshot surface (BOBO's data source)**: the task snapshot (`handle_workflow_list`/task_snapshot) joins the action record by `outbound_action_id` and embeds it in the task snapshot; BOBO renders approval cards from the snapshot as before, while desktop renders the tool card from tool output plus `outbound_action_status` polling.
+- Lazy TTL: at execute time, `now > expires_at` → reject and mark `expired`. No background sweeper.
+- BOBO and desktop adapt to the new RPCs together (⚠️ requires BOBO changes; parent issue labeled in-review). The desktop approval card (ToolCard connector-draft) gains a Cancel button calling `outbound_action_cancel`.
 
-## 7. 工具层
+## 7. Tool Layer
 
-- `ConnectorActionDraft` 成为唯一草稿工具，扩展 `task_id` 参数（monitor 场景写回任务引用）。
-- 删除 `MonitorReplyDraft`、`MonitorActionDraft`、`MonitorReplySend` 三个工具及 dispatch 分支。
-- `ConnectorAct` 保留给非外发动作（read_history 等）；外发动作返回引导错误 "use ConnectorActionDraft"。
-- **monitor action turn（#634）**：`monitor-telegram-action.yaml` / `monitor-reply-action.yaml` 的 `allowed_tools` 改为 `ConnectorActionDraft + WebSearch + WebFetch + AskUserQuestion`；prompt 措辞改为"任务回复的收件人以任务来源为准；仅当用户显式指令要求时，才可向其他收件人创建草稿，同样走人审"。
+- `ConnectorActionDraft` becomes the only draft tool, extended with a `task_id` parameter (monitor scenarios write the task reference back).
+- Delete `MonitorReplyDraft`, `MonitorActionDraft`, `MonitorReplySend` and their dispatch branches.
+- `ConnectorAct` remains for non-send actions (read_history etc.); send actions get a guiding error: "use ConnectorActionDraft".
+- **Monitor action turns (#634)**: `monitor-telegram-action.yaml` / `monitor-reply-action.yaml` change `allowed_tools` to `ConnectorActionDraft + WebSearch + WebFetch + AskUserQuestion`; the prompt wording becomes "the task reply's recipient is fixed to the task source; only under an explicit user instruction may you draft to another recipient, which goes through the same human review".
 
-## 8. 审计
+## 8. Audit
 
-- 每次 gate 决策 append 一行 `~/.puffer/outbound_audit.ndjson`：
+- Every gate decision appends one line to `~/.puffer/outbound_audit.ndjson`:
   `{at_ms, origin, connector, action, decision: allowed_rule|draft_required|approved_send|cancelled|expired, action_id?, rule_id?}`
-- action 记录内 `events[]` 保留生命周期事件（draft_created / cancelled / send_started / sent / send_failed …）。
-- 职责：NDJSON 回答"闸门整体是否一致"（回归验证、可 grep）；`events[]` 回答"这条 action 经历了什么"（审批卡、排查）。
-- 审计写失败不阻塞发送（best-effort + stderr 告警）。
+- The action record's `events[]` keeps lifecycle events (draft_created / cancelled / send_started / sent / send_failed …).
+- Division of duty: the NDJSON answers "is the gate consistent overall" (regression verification, greppable); `events[]` answers "what happened to this action" (approval card, debugging).
+- Audit write failures never block sends (best-effort + stderr warning).
 
-## 9. 删除清单（本方案主要收益之一）
+## 9. Deletion List (a primary payoff of this design)
 
-- daemon workflows：`monitor_reply_send.rs`、`monitor_action_execute.rs`、`connector_action_execute.rs` → 合并为一个 `outbound_action.rs`
-- 发送路径上的两份 `monitor_task_is_human_gated` + `monitor_task_has_telegram_delivery_target`
-- 工具：`MonitorReplySend` / `MonitorReplyDraft` / `MonitorActionDraft` 及 dispatch 分支
-- `send_like_action_slug` 启发式
-- task metadata 中 `pending_reply` / `pending_action` 全部读写代码
-- 磁盘遗留旧 draft 数据：不迁移、直接忽略（旧字段无人读取 = 天然作废，无发送风险）
+- Daemon workflows: `monitor_reply_send.rs`, `monitor_action_execute.rs`, `connector_action_execute.rs` → merged into one `outbound_action.rs`
+- The two send-path `monitor_task_is_human_gated` + `monitor_task_has_telegram_delivery_target`
+- Tools: `MonitorReplySend` / `MonitorReplyDraft` / `MonitorActionDraft` and their dispatch branches
+- The `send_like_action_slug` heuristic
+- All reads/writes of `pending_reply` / `pending_action` in task metadata
+- Legacy on-disk draft data: not migrated, simply ignored (unread fields = naturally void, no send risk)
 
-**保留项（防误删）**：daemon 的 `resolve_monitor_reply_turn_scope` 仍需一个"任务有可回复目标"的最小检查来决定是否授予 action turn scope——保留 `monitor_task_has_delivery_target`（daemon.rs 版）单独用于 scope 判定，收敛为唯一一份。
+**Kept (do not over-delete)**: the daemon's `resolve_monitor_reply_turn_scope` still needs a minimal "task has a replyable target" check to decide whether to grant the action-turn scope — keep `monitor_task_has_delivery_target` (the daemon.rs version) solely for scope resolution, converging on a single copy.
 
-## 10. 错误处理
+## 10. Error Handling
 
-- 执行失败：`sending → failed`，可重新 approve 重试。
-- 进程中断残留 `sending`：状态探测标 `uncertain`，需 `duplicate_risk_ack` 才能重试（沿用现有语义）。
-- 找不到 action / version 不匹配 / 终态 action：execute 与 cancel 均明确报错，不做静默兜底。
+- Send failure: `sending → failed`, re-approvable for retry.
+- Stale `sending` left by a crashed process: probed and marked `uncertain`; requires `duplicate_risk_ack` before retry (existing semantics).
+- Unknown action / version mismatch / terminal action: both execute and cancel fail loudly; no silent fallbacks.
 
-## 11. 测试矩阵（对应 #767 验收表）
+## 11. Test Matrix (maps to the #767 acceptance table)
 
-1. agent 会话直发 TG → 必出草稿卡，approve 后才发（工具层单测 + daemon RPC 集成测试）。
-2. cancel 后 approve/execute → 拒绝，终态不可逆；supersede 到 cancelled action → 拒绝。
-3. 取消后重新要求发送 → 新 action id、新人审。
-4. 任务会话显式指令发第三方 → 出草稿卡（`recipient_source: model`），approve 后发出。
-5. 无显式指令自发 → gate `RequiresDraft`，永不静默发送。
-6. 用户模板弱化 builtin 权限 → upsert 被拒。
-7. TTL 过期 → execute 拒绝并标 `expired`。
-8. 迁移 `monitor_reply_send.rs` 现有防重测试族（forged provenance / stale sending / version mismatch）到统一 RPC。
-9. 带 `task_id` 草稿：scope 不匹配 → 拒绝；收件人被服务端 stamp 覆盖（模型输入的收件人不生效）。
-10. `sent` 后任务回写 receipt + completed；task snapshot 内嵌 join 出的 action 记录（BOBO 渲染面）。
+1. Agent session sends TG directly → draft card must appear; sends only after approve (tool-layer unit tests + daemon RPC integration tests).
+2. Approve/execute after cancel → rejected, terminal state irreversible; superseding a cancelled action → rejected.
+3. Cancel then explicitly ask to send again → new action id, new human review.
+4. Task session with explicit instruction to message a third party → draft card (`recipient_source: model`), sent after approval.
+5. Model decides to send without explicit instruction → gate `RequiresDraft`, never a silent send.
+6. User template weakening builtin permissions → upsert rejected.
+7. TTL expiry → execute rejects and marks `expired`.
+8. Migrate the existing anti-duplication test family in `monitor_reply_send.rs` (forged provenance / stale sending / version mismatch) to the unified RPC.
+9. Drafts with `task_id`: scope mismatch → rejected; recipient is server-stamped, overriding model input.
+10. After `sent`, task write-back of receipt + completed; task snapshot embeds the joined action record (BOBO rendering surface).
 
-性能说明：人审路径频率量级低，无额外性能设计；文件锁 + 原子写与现状一致。
+Performance note: the approval path is low-frequency; no extra performance work. File locking + atomic writes match the status quo.
 
-## 12. 明确不做（防过度设计）
+## 12. Explicitly Not Doing (over-engineering guards)
 
-- 规则自动动作过闸 / 逐条确认（Q1 决策：豁免 + 审计）。
-- 显式指令的意图检测机制（#634 用工具解锁 + prompt 措辞解决）。
-- 草稿的隐式作废（新 turn / turn 停止触发）——turn 取消传播属 plan-06。
-- 后台 TTL 清扫任务（惰性过期足够）。
-- 新建独立 crate。
-- 旧数据迁移。
+- Gating rule automations / per-message confirmation (Q1 decision: exempt + audit).
+- An intent-detection mechanism for "explicit instruction" (#634 is solved by tool unlock + prompt wording).
+- Implicit draft invalidation (new turn / turn stop) — turn-cancel propagation belongs to plan-06.
+- Background TTL sweeper (lazy expiry suffices).
+- A new standalone crate.
+- Legacy data migration.
 
-## Out of scope（与 #767 一致）
+## Out of Scope (matches #767)
 
-- turn 取消传播与后台任务收割（plan-06）。
-- 审批对话框 UX 与 ACL 确定性（plan-09）。
+- Turn-cancel propagation and background-task reaping (plan-06).
+- Approval dialog UX and ACL determinism (plan-09).
