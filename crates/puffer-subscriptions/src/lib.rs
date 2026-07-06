@@ -29,6 +29,7 @@ mod event_schema;
 mod history;
 mod manager;
 mod monitor_trace;
+pub mod outbound_audit;
 pub mod outbound_gate;
 pub mod outbound_store;
 mod protocol;
@@ -84,6 +85,10 @@ pub use manager::{
 pub use monitor_trace::{
     MonitorTraceIdentity, MonitorTraceMessage, MonitorTraceStage, MonitorTraceStageStatus,
     MonitorTraceStatus, MonitorTraceStore, MonitorTraceStoreError,
+};
+pub use outbound_audit::{
+    append_gate_audit, AuditEntry, AUDIT_DECISION_ALLOWED_RULE, AUDIT_DECISION_APPROVED_SEND,
+    AUDIT_DECISION_CANCELLED, AUDIT_DECISION_DRAFT_REQUIRED, AUDIT_DECISION_EXPIRED,
 };
 pub use outbound_gate::{
     action_requires_human_review, effective_action_permission, evaluate, GateDecision, SendOrigin,
