@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::monitor_contract::{display_source_context, parse_monitor_contract};
-use puffer_subscriptions::normalize_contact_id;
+use puffer_subscriptions::{normalize_contact_id, OutboundAction, OutboundStore};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -65,23 +65,27 @@ pub(crate) fn add_task_context(paths: &ConfigPaths, snapshot: &mut Value) {
     let mut tasks = Vec::new();
     let mut errors = Vec::new();
     let workflow = workflow_root(paths);
+    let outbound_store = outbound_store(paths, &mut errors);
     append_task_file(
         &workflow.join("tasks.json"),
         "agent",
         "workspace",
         "workspace",
+        outbound_store.as_ref(),
         &mut tasks,
         &mut errors,
     );
     append_scoped_agent_tasks(
         &workflow.join("sessions"),
         "session",
+        outbound_store.as_ref(),
         &mut tasks,
         &mut errors,
     );
     append_scoped_agent_tasks(
         &workflow.join("team_tasks"),
         "team",
+        outbound_store.as_ref(),
         &mut tasks,
         &mut errors,
     );
@@ -90,6 +94,7 @@ pub(crate) fn add_task_context(paths: &ConfigPaths, snapshot: &mut Value) {
         "monitor",
         "monitor",
         "monitors",
+        outbound_store.as_ref(),
         &mut tasks,
         &mut errors,
     );
@@ -107,6 +112,7 @@ pub(crate) fn add_task_context(paths: &ConfigPaths, snapshot: &mut Value) {
 fn append_scoped_agent_tasks(
     parent: &Path,
     scope_kind: &str,
+    outbound_store: Option<&OutboundStore>,
     tasks: &mut Vec<Value>,
     errors: &mut Vec<String>,
 ) {
@@ -123,6 +129,7 @@ fn append_scoped_agent_tasks(
                     "agent",
                     &scope,
                     &label,
+                    outbound_store,
                     tasks,
                     errors,
                 );
@@ -137,16 +144,23 @@ fn append_task_file(
     source: &str,
     scope: &str,
     scope_label: &str,
+    outbound_store: Option<&OutboundStore>,
     tasks: &mut Vec<Value>,
     errors: &mut Vec<String>,
 ) {
-    match load_task_file(path, source, scope, scope_label) {
+    match load_task_file(path, source, scope, scope_label, outbound_store) {
         Ok(rows) => tasks.extend(rows),
         Err(error) => errors.push(error.to_string()),
     }
 }
 
-fn load_task_file(path: &Path, source: &str, scope: &str, scope_label: &str) -> Result<Vec<Value>> {
+fn load_task_file(
+    path: &Path,
+    source: &str,
+    scope: &str,
+    scope_label: &str,
+    outbound_store: Option<&OutboundStore>,
+) -> Result<Vec<Value>> {
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -159,11 +173,17 @@ fn load_task_file(path: &Path, source: &str, scope: &str, scope_label: &str) -> 
     Ok(store
         .tasks
         .into_iter()
-        .map(|task| task_json(task, source, scope, scope_label))
+        .map(|task| task_json(task, source, scope, scope_label, outbound_store))
         .collect())
 }
 
-fn task_json(task: TaskSnapshotRecord, source: &str, scope: &str, scope_label: &str) -> Value {
+fn task_json(
+    task: TaskSnapshotRecord,
+    source: &str,
+    scope: &str,
+    scope_label: &str,
+    outbound_store: Option<&OutboundStore>,
+) -> Value {
     json!({
         "task_id": task.task_id,
         "subject": task.subject,
@@ -210,16 +230,7 @@ fn task_json(task: TaskSnapshotRecord, source: &str, scope: &str, scope_label: &
         "source_context": monitor_source_context(&task.metadata),
         "source_messages": monitor_source_messages(&task.metadata),
         "completion_policy": monitor_completion_policy(&task.metadata),
-        "pending_action": metadata_value(
-            &task.metadata,
-            &["pending_action", "pendingAction"],
-            &["pending_action", "pendingAction"]
-        ),
-        "pending_reply": metadata_value(
-            &task.metadata,
-            &["pending_reply", "pendingReply"],
-            &["reply", "draft"]
-        ),
+        "outboundAction": outbound_action_for_metadata(outbound_store, &task.metadata),
         "ignore_reason": metadata_string(
             &task.metadata,
             &["ignore_reason", "ignoreReason"],
@@ -253,6 +264,52 @@ fn task_json(task: TaskSnapshotRecord, source: &str, scope: &str, scope_label: &
         ),
         "actions": monitor_actions_for_status(&task.metadata, &task.status),
         "possible_ignore_reasons": monitor_ignore_reasons(&task.metadata),
+    })
+}
+
+pub(super) fn outbound_store(
+    paths: &ConfigPaths,
+    errors: &mut Vec<String>,
+) -> Option<OutboundStore> {
+    match OutboundStore::load(outbound_actions_path(paths)) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            errors.push(error.to_string());
+            None
+        }
+    }
+}
+
+pub(super) fn outbound_action_for_metadata(
+    store: Option<&OutboundStore>,
+    metadata: &Map<String, Value>,
+) -> Option<Value> {
+    let action_id = metadata_string(
+        metadata,
+        &["outbound_action_id", "outboundActionId"],
+        &["outbound_action_id", "outboundActionId"],
+    )?;
+    let action = store?.get(&action_id).ok().flatten()?;
+    Some(outbound_action_json(&action))
+}
+
+fn outbound_actions_path(paths: &ConfigPaths) -> PathBuf {
+    paths.user_config_dir.join("outbound_actions.json")
+}
+
+fn outbound_action_json(action: &OutboundAction) -> Value {
+    json!({
+        "id": action.id,
+        "version": action.version,
+        "status": action.status,
+        "message": action.message,
+        "approvedMessage": action.approved_message,
+        "recipientStableId": action.recipient_stable_id,
+        "recipientSource": action.recipient_source,
+        "createdAtMs": action.created_at_ms,
+        "expiresAtMs": action.expires_at_ms,
+        "receipt": action.receipt,
+        "error": action.error,
     })
 }
 
@@ -930,6 +987,7 @@ fn scalar_string(value: Option<&Value>) -> Option<String> {
 mod tests {
     use super::*;
     use puffer_config::ConfigPaths;
+    use puffer_subscriptions::{NewOutboundDraft, OutboundOrigin, OutboundStore, RecipientSource};
 
     #[test]
     fn task_context_reads_agent_session_team_and_monitor_tasks() {
@@ -1009,14 +1067,7 @@ mod tests {
                         "actions": [{
                             "actionName": "Send",
                             "actionPrompt": "Send the approved Telegram reply."
-                        }],
-                        "pending_action": {
-                            "id": "telegram-action-1",
-                            "type": "telegram_reply_draft_intent",
-                            "status": "sent",
-                            "version": 4,
-                            "agent_draft_text": "Thanks, sent."
-                        }
+                        }]
                     }
                 }]
             }))
@@ -1074,7 +1125,7 @@ mod tests {
             .iter()
             .find(|task| task["task_id"] == "monitor-sent")
             .unwrap();
-        assert_eq!(sent_monitor_task["pending_action"]["status"], "sent");
+        assert!(sent_monitor_task["outboundAction"].is_null());
         assert!(sent_monitor_task["actions"].as_array().unwrap().is_empty());
         assert!(snapshot["task_error"].is_null());
     }
@@ -1123,6 +1174,72 @@ mod tests {
             "8759047281"
         );
         assert!(monitor_task["completion_policy"].is_null());
+    }
+
+    #[test]
+    fn task_context_embeds_referenced_outbound_action() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let action = OutboundStore::load(paths.user_config_dir.join("outbound_actions.json"))
+            .unwrap()
+            .create_draft(NewOutboundDraft {
+                connector_slug: "telegram-login".to_string(),
+                connection_slug: "telegram-user".to_string(),
+                action: "send_message".to_string(),
+                input: json!({ "chat_id": "42", "message": "Deployment finished." }),
+                recipient_stable_id: "telegram:42".to_string(),
+                recipient_source: RecipientSource::Stamped,
+                message: "Deployment finished.".to_string(),
+                origin: OutboundOrigin {
+                    session_id: "session-1".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    task_id: Some("monitor-1".to_string()),
+                },
+                ttl_ms: None,
+            })
+            .unwrap();
+        let workflow = workflow_root(&paths);
+        std::fs::create_dir_all(&workflow).unwrap();
+        std::fs::write(
+            workflow.join("monitor_tasks.json"),
+            serde_json::to_string_pretty(&json!({
+                "tasks": [{
+                    "task_id": "monitor-1",
+                    "subject": "Answer Telegram support ping",
+                    "description": "Alice asked whether the deployment is finished.",
+                    "status": "pending",
+                    "metadata": {
+                        "_monitor": true,
+                        "monitor_connection": "telegram-user",
+                        "monitor_connector": "telegram-login",
+                        "outbound_action_id": action.id
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut snapshot = json!({});
+        add_task_context(&paths, &mut snapshot);
+        let tasks = snapshot["tasks"].as_array().unwrap();
+        let monitor_task = tasks
+            .iter()
+            .find(|task| task["task_id"] == "monitor-1")
+            .unwrap();
+
+        assert_eq!(monitor_task["outboundAction"]["id"], action.id);
+        assert_eq!(monitor_task["outboundAction"]["version"], 1);
+        assert_eq!(monitor_task["outboundAction"]["status"], "draft_ready");
+        assert_eq!(
+            monitor_task["outboundAction"]["message"],
+            "Deployment finished."
+        );
+        assert_eq!(
+            monitor_task["outboundAction"]["recipientStableId"],
+            "telegram:42"
+        );
+        assert_eq!(monitor_task["outboundAction"]["recipientSource"], "stamped");
     }
 
     #[test]

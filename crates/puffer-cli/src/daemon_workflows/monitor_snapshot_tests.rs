@@ -1,9 +1,34 @@
 use super::*;
+use puffer_subscriptions::{NewOutboundDraft, OutboundOrigin, OutboundStore, RecipientSource};
+
+fn create_outbound_action(paths: &ConfigPaths, task_id: &str, message: &str) -> String {
+    OutboundStore::load(paths.user_config_dir.join("outbound_actions.json"))
+        .unwrap()
+        .create_draft(NewOutboundDraft {
+            connector_slug: "telegram-login".to_string(),
+            connection_slug: "telegram-user".to_string(),
+            action: "send_message".to_string(),
+            input: json!({ "chat_id": "42", "message": message }),
+            recipient_stable_id: "telegram:42".to_string(),
+            recipient_source: RecipientSource::Stamped,
+            message: message.to_string(),
+            origin: OutboundOrigin {
+                session_id: "session-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                task_id: Some(task_id.to_string()),
+            },
+            ttl_ms: None,
+        })
+        .unwrap()
+        .id
+}
 
 #[test]
 fn workflow_snapshot_includes_monitor_tasks() {
     let tempdir = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
+    let outbound_action_id =
+        create_outbound_action(&paths, "monitor-1", "Deployment finished an hour ago.");
     let task_path = monitor_tasks_path(&paths);
     std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -34,12 +59,7 @@ fn workflow_snapshot_includes_monitor_tasks() {
                         "source_text": "回调失败率刚升到 18%，16:00 前给结论。",
                         "source_message_id": 6836,
                         "completion_policy": "human_gated_reply",
-                        "pending_reply": {
-                            "id": "draft-monitor-1-1",
-                            "status": "draft_ready",
-                            "version": 1,
-                            "agent_draft_text": "Deployment finished an hour ago."
-                        }
+                        "outbound_action_id": outbound_action_id
                     },
                     "started_at_ms": 10,
                     "updated_at_ms": 20
@@ -78,11 +98,11 @@ fn workflow_snapshot_includes_monitor_tasks() {
     );
     assert_eq!(tasks[0]["source_context"]["message_id"], 6836);
     assert_eq!(tasks[0]["completion_policy"], "human_gated_reply");
-    assert_eq!(tasks[0]["pending_reply"]["id"], "draft-monitor-1-1");
-    assert_eq!(tasks[0]["pending_reply"]["status"], "draft_ready");
-    assert_eq!(tasks[0]["pending_reply"]["version"], 1);
+    assert_eq!(tasks[0]["outboundAction"]["id"], outbound_action_id);
+    assert_eq!(tasks[0]["outboundAction"]["status"], "draft_ready");
+    assert_eq!(tasks[0]["outboundAction"]["version"], 1);
     assert_eq!(
-        tasks[0]["pending_reply"]["agent_draft_text"],
+        tasks[0]["outboundAction"]["message"],
         "Deployment finished an hour ago."
     );
     assert_eq!(snapshot["monitor_task_error"], Value::Null);

@@ -1214,12 +1214,7 @@ fn validate_monitor_task_metadata(metadata: &Map<String, Value>) -> Result<()> {
             bail!("monitor task metadata cannot include ignore filter field `{key}`");
         }
     }
-    for key in [
-        "pending_reply",
-        "pendingReply",
-        "monitor_reply_events",
-        "monitorReplyEvents",
-    ] {
+    for key in ["monitor_reply_events", "monitorReplyEvents"] {
         if metadata.contains_key(key) {
             bail!("monitor task metadata cannot include reserved field `{key}`");
         }
@@ -1350,10 +1345,6 @@ fn reject_llm_written_typed_monitor_fields(metadata: &Map<String, Value>) -> Res
         "monitor",
         "source_context",
         "sourceContext",
-        "pending_action",
-        "pendingAction",
-        "pending_reply",
-        "pendingReply",
         "completion_policy",
         "completionPolicy",
         "delivery_target",
@@ -1433,9 +1424,6 @@ fn apply_stamped_monitor_contract(
     metadata.insert("monitor".to_string(), Value::Object(monitor));
     stamp_legacy_monitor_scope_fields(metadata, &contract);
     normalize_monitor_task_metadata(metadata)?;
-    if matches!(&contract.kind, MonitorTaskKind::CalendarRsvp) {
-        insert_calendar_pending_action(metadata)?;
-    }
     Ok(())
 }
 
@@ -1510,38 +1498,6 @@ fn stamp_source_value_as_metadata(
         return;
     }
     metadata.insert(metadata_key.to_string(), value.clone());
-}
-
-fn insert_calendar_pending_action(metadata: &mut Map<String, Value>) -> Result<()> {
-    let contract = parse_monitor_contract(metadata)?
-        .context("calendar pending action requires typed monitor contract")?;
-    let monitor_hash = monitor_contract_hash(&contract)?;
-    metadata.insert(
-        "pending_action".to_string(),
-        json!({
-            "id": format!("action-calendar-{}", now_ms()),
-            "type": "calendar_rsvp",
-            "status": "awaiting_confirmation",
-            "version": 1,
-            "proposed_response": Value::Null,
-            "created_by": "server",
-            "monitor_snapshot": {
-                "schema_version": contract.schema_version,
-                "kind": contract.kind.as_str(),
-                "source": contract.source,
-                "action": contract.action,
-            },
-            "monitor_hash": monitor_hash,
-            "approved_response": Value::Null,
-            "approved_by": Value::Null,
-            "approved_at": Value::Null,
-            "client_request_id": Value::Null,
-            "attempt_id": Value::Null,
-            "receipt": Value::Null,
-            "error": Value::Null,
-        }),
-    );
-    Ok(())
 }
 
 fn typed_contract_from_stamp(stamp: &MonitorSourceStampContext) -> MonitorContract {
@@ -2076,8 +2032,6 @@ fn reserved_monitor_metadata_keys(key: &str) -> Option<&'static [&'static str]> 
         "chat_kind" | "chatKind" => Some(&["chat_kind", "chatKind"]),
         "sender_id" | "senderId" => Some(&["sender_id", "senderId"]),
         "sender_username" | "senderUsername" => Some(&["sender_username", "senderUsername"]),
-        "pending_reply" | "pendingReply" => Some(&["pending_reply", "pendingReply"]),
-        "pending_action" | "pendingAction" => Some(&["pending_action", "pendingAction"]),
         "monitor_reply_events" | "monitorReplyEvents" => {
             Some(&["monitor_reply_events", "monitorReplyEvents"])
         }
@@ -2917,7 +2871,7 @@ mod tests {
     }
 
     #[test]
-    fn task_create_stamps_calendar_pending_action_from_current_source_envelope() {
+    fn task_create_stamps_calendar_contract_from_current_source_envelope() {
         let (mut state, tmp) = make_state();
         state.set_monitor_source_stamp_contexts(vec![crate::MonitorSourceStampContext {
             envelope_id: "env-calendar".to_string(),
@@ -2969,18 +2923,6 @@ mod tests {
         assert_eq!(
             metadata.pointer("/source_context/delivery_target/event_id"),
             Some(&json!("event-123"))
-        );
-        assert_eq!(
-            metadata.pointer("/pending_action/type"),
-            Some(&json!("calendar_rsvp"))
-        );
-        assert_eq!(
-            metadata.pointer("/pending_action/status"),
-            Some(&json!("awaiting_confirmation"))
-        );
-        assert_eq!(
-            metadata.pointer("/pending_action/monitor_hash"),
-            metadata.pointer("/monitor/source_hash")
         );
     }
 
