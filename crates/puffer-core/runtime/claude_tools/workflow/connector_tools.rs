@@ -1,20 +1,20 @@
 //! Connector and connection workflow tools.
 
+use super::store::{load_store, monitor_tasks_path, now_ms, save_store, StoredTask, TaskStore};
 use crate::runtime::subscription_manager;
 use crate::AppState;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{Event, EventEnvelope};
 use puffer_subscriptions::{
-    connector_runtime_hints, connector_workflow_trigger_supported, suggested_connection_slug,
-    ActionDispatcher, ActionSpec, BuiltinActionDispatcher, ConnectionAuthStatus, ConnectionRecord,
-    ConnectionState, ConnectorActionDefinition, ConnectorActionRequest, ConnectorTemplate,
-    SubscriberManifestRoots,
+    append_gate_audit, connector_runtime_hints, connector_workflow_trigger_supported,
+    suggested_connection_slug, ActionDispatcher, ActionSpec, AuditEntry, BuiltinActionDispatcher,
+    ConnectionAuthStatus, ConnectionRecord, ConnectionState, ConnectorActionRequest,
+    ConnectorTemplate, GateDecision, NewOutboundDraft, OutboundOrigin, OutboundStore,
+    RecipientSource, SendOrigin, SubscriberManifestRoots, AUDIT_DECISION_DRAFT_REQUIRED,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use std::fs;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
@@ -74,6 +74,8 @@ struct ConnectorActionDraftInput {
     )]
     connection_slug: Option<String>,
     action: String,
+    #[serde(default, rename = "taskId", alias = "task_id")]
+    task_id: Option<String>,
     #[serde(default)]
     input: Value,
 }
@@ -263,9 +265,37 @@ fn execute_connector_act_with_dispatcher(
             parsed.action
         )
     })?;
-    if connector_action_requires_human_review_for_input(action_definition, &parsed.input) {
+    let origin = SendOrigin::LlmInitiated {
+        session_id: state.session.id.to_string(),
+        turn_id: state
+            .monitor_reply_scope
+            .as_ref()
+            .map(|scope| scope.turn_id.clone()),
+        task_id: state
+            .monitor_reply_scope
+            .as_ref()
+            .map(|scope| scope.task_id.clone()),
+    };
+    let decision = puffer_subscriptions::outbound_gate::evaluate(
+        &origin,
+        &parsed.connector_slug,
+        &template,
+        &parsed.action,
+    );
+    let paths = ConfigPaths::discover(cwd);
+    append_gate_audit(
+        &outbound_audit_path(&paths),
+        &audit_entry_for(
+            &origin,
+            &parsed.connector_slug,
+            &parsed.action,
+            &decision,
+            None,
+        ),
+    );
+    if matches!(decision, GateDecision::RequiresDraft) {
         anyhow::bail!(
-            "connector action `{}`/`{}` sends an external message and requires human draft review before execution",
+            "connector action `{}`/`{}` sends an external message and requires human review; create a draft with ConnectorActionDraft instead",
             parsed.connector_slug,
             parsed.action
         );
@@ -360,98 +390,148 @@ pub fn execute_connector_action_draft(
         .get(&parsed.connector_slug)
         .or_else(|| puffer_subscriptions::builtin_connector_template(&parsed.connector_slug))
         .ok_or_else(|| anyhow::anyhow!("connector `{}` not found", parsed.connector_slug))?;
-    let action_definition = template.actions.get(&parsed.action).ok_or_else(|| {
+    let _action_definition = template.actions.get(&parsed.action).ok_or_else(|| {
         anyhow::anyhow!(
             "connector `{}` does not define action `{}`",
             parsed.connector_slug,
             parsed.action
         )
     })?;
-    if !connector_action_requires_human_review_for_input(action_definition, &parsed.input) {
+    let origin = SendOrigin::LlmInitiated {
+        session_id: state.session.id.to_string(),
+        turn_id: state
+            .monitor_reply_scope
+            .as_ref()
+            .map(|scope| scope.turn_id.clone()),
+        task_id: parsed.task_id.clone(),
+    };
+    let decision = puffer_subscriptions::outbound_gate::evaluate(
+        &origin,
+        &parsed.connector_slug,
+        &template,
+        &parsed.action,
+    );
+    if matches!(decision, GateDecision::Allowed { .. }) {
+        let paths = ConfigPaths::discover(cwd);
+        append_gate_audit(
+            &outbound_audit_path(&paths),
+            &audit_entry_for(
+                &origin,
+                &parsed.connector_slug,
+                &parsed.action,
+                &decision,
+                None,
+            ),
+        );
         anyhow::bail!(
-            "ConnectorActionDraft is only for external message send actions that require human review"
+            "ConnectorActionDraft is only for external actions that require human review; use ConnectorAct for `{}`/`{}`",
+            parsed.connector_slug,
+            parsed.action
         );
     }
 
-    let connection = connector_action_connection(
-        &parsed.connector_slug,
-        parsed.connection_slug.as_deref(),
-        &parsed.input,
-    );
-    ensure_connector_action_draft_connection(&manager, &parsed.connector_slug, &connection)?;
     let mut action_input = parsed.input.clone();
-    if let Some(object) = action_input.as_object_mut() {
-        object
-            .entry("connection_slug")
-            .or_insert_with(|| Value::String(connection.clone()));
-        object
-            .entry("connector_slug")
-            .or_insert_with(|| Value::String(parsed.connector_slug.clone()));
-    }
-    let recipient_stable_id = draft_message_target(&action_input)
-        .context("ConnectorActionDraft requires a send recipient")?;
+    let mut recipient_source = RecipientSource::Model;
+    let (connection, recipient_stable_id) = if let Some(task_id) = parsed.task_id.as_deref() {
+        ensure_task_id_matches_scope(state, task_id)?;
+        let task = load_monitor_task_for_draft(state.session.cwd.as_path(), task_id)?;
+        let target = monitor_reply_target(&task)?;
+        if let Some(object) = action_input.as_object_mut() {
+            for key in [
+                "to",
+                "target",
+                "channel",
+                "chat_id",
+                "open_id",
+                "user",
+                "receive_id",
+            ] {
+                object.remove(key);
+            }
+            object.insert("chat_id".to_string(), Value::String(target.chat_id.clone()));
+            object.insert(
+                "connection_slug".to_string(),
+                Value::String(target.connection_slug.clone()),
+            );
+            object.insert(
+                "connector_slug".to_string(),
+                Value::String(target.connector_slug.clone()),
+            );
+        }
+        recipient_source = RecipientSource::Stamped;
+        (
+            target.connection_slug,
+            format!("telegram:{}", target.chat_id),
+        )
+    } else {
+        let connection = connector_action_connection(
+            &parsed.connector_slug,
+            parsed.connection_slug.as_deref(),
+            &parsed.input,
+        );
+        if let Some(object) = action_input.as_object_mut() {
+            object
+                .entry("connection_slug")
+                .or_insert_with(|| Value::String(connection.clone()));
+            object
+                .entry("connector_slug")
+                .or_insert_with(|| Value::String(parsed.connector_slug.clone()));
+        }
+        let recipient_stable_id = draft_message_target(&action_input)
+            .context("ConnectorActionDraft requires a send recipient")?;
+        (connection, recipient_stable_id)
+    };
+    ensure_connector_action_draft_connection(&manager, &parsed.connector_slug, &connection)?;
     let message = draft_message_text(&action_input)
         .context("ConnectorActionDraft requires a message body")?;
     let paths = ConfigPaths::discover(cwd);
-    let store_path = outbound_action_drafts_path(&paths);
-    let mut store = read_outbound_action_draft_store(&store_path)?;
-    let drafts = store
-        .get_mut("drafts")
-        .and_then(Value::as_array_mut)
-        .context("outbound action draft store missing drafts array")?;
-    let version = drafts
-        .iter()
-        .filter(|draft| {
-            draft.get("session_id").and_then(Value::as_str)
-                == Some(state.session.id.to_string().as_str())
-        })
-        .filter_map(|draft| draft.get("version").and_then(Value::as_u64))
-        .max()
-        .unwrap_or(0)
-        + 1;
-    let now_ms = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-    let draft_id = format!("draft-action-{}-{now_ms}", state.session.id.simple());
-    let created_at = OffsetDateTime::now_utc().to_string();
-    let content_hash = draft_content_hash(&recipient_stable_id, &message);
-    let draft = json!({
-        "id": draft_id,
-        "created_by": "ConnectorActionDraft",
-        "status": "draft_ready",
-        "version": version,
-        "connector_slug": parsed.connector_slug,
-        "connection_slug": connection,
-        "action": parsed.action,
-        "input": action_input,
-        "recipient_stable_id": recipient_stable_id,
-        "message": message,
-        "content_hash": content_hash,
-        "session_id": state.session.id.to_string(),
-        "turn_id": Value::Null,
-        "created_at": created_at,
-        "updated_at": created_at,
-        "approved_message": Value::Null,
-        "approved_by": Value::Null,
-        "approved_at": Value::Null,
-        "client_request_id": Value::Null,
-        "send_attempt_id": Value::Null,
-        "receipt": Value::Null,
-        "error": Value::Null,
-    });
-    drafts.push(draft);
-    write_outbound_action_draft_store(&store_path, &store)?;
+    let store = OutboundStore::load(outbound_actions_path(&paths))?;
+    let action = store.create_draft(NewOutboundDraft {
+        connector_slug: parsed.connector_slug.clone(),
+        connection_slug: connection.clone(),
+        action: parsed.action.clone(),
+        input: action_input,
+        recipient_stable_id,
+        recipient_source,
+        message,
+        origin: OutboundOrigin {
+            session_id: state.session.id.to_string(),
+            turn_id: state
+                .monitor_reply_scope
+                .as_ref()
+                .map(|scope| scope.turn_id.clone()),
+            task_id: parsed.task_id.clone(),
+        },
+        ttl_ms: None,
+    })?;
+    append_gate_audit(
+        &outbound_audit_path(&paths),
+        &audit_entry_for(
+            &origin,
+            &parsed.connector_slug,
+            &parsed.action,
+            &decision,
+            Some(action.id.clone()),
+        ),
+    );
+    if let Some(task_id) = parsed.task_id.as_deref() {
+        write_outbound_action_reference(state.session.cwd.as_path(), task_id, &action.id)?;
+    }
 
     Ok(serde_json::to_string_pretty(&json!({
         "success": true,
         "draft": {
-            "id": draft_id,
+            "id": action.id,
             "status": "draft_ready",
-            "version": version,
+            "version": action.version,
             "connectorSlug": parsed.connector_slug,
             "connectionSlug": connection,
             "action": parsed.action,
-            "recipientStableId": recipient_stable_id,
-            "message": message,
-            "contentHash": content_hash,
+            "recipientStableId": action.recipient_stable_id,
+            "recipientSource": recipient_source_json(action.recipient_source),
+            "message": action.message,
+            "contentHash": action.content_hash,
+            "taskId": action.origin.task_id,
         }
     }))?)
 }
@@ -636,44 +716,87 @@ fn synthetic_envelope(topic: &str, payload: &Value) -> EventEnvelope {
     }
 }
 
-fn connector_action_requires_human_review_for_input(
-    action: &ConnectorActionDefinition,
-    _input: &Value,
-) -> bool {
-    connector_action_requires_human_review(action)
+fn outbound_actions_path(paths: &ConfigPaths) -> PathBuf {
+    paths.user_config_dir.join("outbound_actions.json")
 }
 
-fn connector_action_requires_human_review(action: &ConnectorActionDefinition) -> bool {
-    let category = action.permission.category.as_str();
-    category == "external_message_send"
-        || (action.permission.external_side_effect && send_like_action_slug(&action.slug))
+fn outbound_audit_path(paths: &ConfigPaths) -> PathBuf {
+    paths.user_config_dir.join("outbound_audit.ndjson")
 }
 
-fn outbound_action_drafts_path(paths: &ConfigPaths) -> PathBuf {
-    paths.user_config_dir.join("outbound_action_drafts.json")
-}
-
-fn read_outbound_action_draft_store(path: &Path) -> Result<Value> {
-    if !path.exists() {
-        return Ok(json!({ "drafts": [] }));
+fn audit_entry_for(
+    origin: &SendOrigin,
+    connector: &str,
+    action: &str,
+    decision: &GateDecision,
+    action_id: Option<String>,
+) -> AuditEntry {
+    AuditEntry {
+        origin: match origin {
+            SendOrigin::LlmInitiated { .. } => "llm".to_string(),
+            SendOrigin::RuleAutomation { .. } => "rule".to_string(),
+        },
+        connector: connector.to_string(),
+        action: action.to_string(),
+        decision: gate_decision_label(decision).to_string(),
+        action_id,
+        rule_id: match origin {
+            SendOrigin::RuleAutomation { rule_id } => Some(rule_id.clone()),
+            SendOrigin::LlmInitiated { .. } => None,
+        },
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read outbound draft store {}", path.display()))?;
-    let mut store: Value = serde_json::from_str(&raw)
-        .with_context(|| format!("invalid outbound draft store {}", path.display()))?;
-    if store.get("drafts").and_then(Value::as_array).is_none() {
-        store["drafts"] = json!([]);
-    }
-    Ok(store)
 }
 
-fn write_outbound_action_draft_store(path: &Path, store: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+fn gate_decision_label(decision: &GateDecision) -> &'static str {
+    match decision {
+        GateDecision::RequiresDraft => AUDIT_DECISION_DRAFT_REQUIRED,
+        GateDecision::Allowed { reason } => reason,
     }
-    fs::write(path, serde_json::to_string_pretty(store)?)
-        .with_context(|| format!("failed to write outbound draft store {}", path.display()))
+}
+
+fn recipient_source_json(source: RecipientSource) -> &'static str {
+    match source {
+        RecipientSource::Stamped => "stamped",
+        RecipientSource::Model => "model",
+    }
+}
+
+fn ensure_task_id_matches_scope(state: &AppState, task_id: &str) -> Result<()> {
+    let Some(scope) = state.monitor_reply_scope.as_ref() else {
+        anyhow::bail!(
+            "ConnectorActionDraft taskId `{task_id}` requires a scoped monitor task turn"
+        );
+    };
+    if scope.task_id != task_id {
+        anyhow::bail!(
+            "ConnectorActionDraft taskId `{task_id}` does not match scoped monitor task `{}`",
+            scope.task_id
+        );
+    }
+    Ok(())
+}
+
+fn load_monitor_task_for_draft(cwd: &Path, task_id: &str) -> Result<StoredTask> {
+    let store = load_store::<TaskStore>(&monitor_tasks_path(cwd))?;
+    store
+        .tasks
+        .into_iter()
+        .find(|task| task.task_id == task_id)
+        .ok_or_else(|| anyhow::anyhow!("monitor task `{task_id}` not found"))
+}
+
+fn write_outbound_action_reference(cwd: &Path, task_id: &str, action_id: &str) -> Result<()> {
+    let path = monitor_tasks_path(cwd);
+    let mut store = load_store::<TaskStore>(&path)?;
+    let Some(task) = store.tasks.iter_mut().find(|task| task.task_id == task_id) else {
+        anyhow::bail!("monitor task `{task_id}` not found");
+    };
+    task.metadata.insert(
+        "outbound_action_id".to_string(),
+        Value::String(action_id.to_string()),
+    );
+    task.updated_at_ms = Some(now_ms());
+    save_store(&path, &store)
 }
 
 fn draft_message_target(input: &Value) -> Option<String> {
@@ -715,37 +838,129 @@ fn draft_message_value(value: &Value, accept_numbers: bool) -> Option<String> {
     None
 }
 
-fn draft_content_hash(recipient_stable_id: &str, text: &str) -> String {
-    let canonical = json!({
-        "recipient_stable_id": recipient_stable_id,
-        "text": text,
-        "media": [],
-    });
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MonitorReplyTarget {
+    connector_slug: String,
+    connection_slug: String,
+    chat_id: String,
 }
 
-fn send_like_action_slug(slug: &str) -> bool {
-    let normalized = slug.replace('-', "_").to_ascii_lowercase();
-    normalized == "send"
-        || normalized == "reply"
-        || normalized == "post"
-        || normalized == "publish"
-        || normalized == "send_message"
-        || normalized == "forward_message"
-        || normalized == "forward_messages"
-        || normalized.starts_with("send_")
-        || normalized.ends_with("_send")
-        || normalized.starts_with("reply_")
-        || normalized.ends_with("_reply")
-        || normalized.starts_with("post_")
-        || normalized.ends_with("_post")
-        || normalized.starts_with("publish_")
-        || normalized.ends_with("_publish")
-        || normalized.starts_with("forward_")
-        || normalized.ends_with("_forward")
+fn monitor_reply_target(task: &StoredTask) -> Result<MonitorReplyTarget> {
+    if !is_monitor_task_metadata(&task.metadata) {
+        anyhow::bail!("task `{}` is not a monitor task", task.task_id);
+    }
+    let source_context = monitor_source_context(&task.metadata)
+        .ok_or_else(|| anyhow::anyhow!("monitor task `{}` has no source_context", task.task_id))?;
+    let Some(context) = source_context.as_object() else {
+        anyhow::bail!(
+            "monitor task `{}` source_context is not an object",
+            task.task_id
+        );
+    };
+    let connector_slug = string_field_from_map(context, &["connector_slug", "connectorSlug"])
+        .or_else(|| metadata_string(&task.metadata, &["monitor_connector", "monitorConnector"]))
+        .ok_or_else(|| anyhow::anyhow!("monitor task `{}` has no connector slug", task.task_id))?;
+    if !connector_slug.contains("telegram") {
+        anyhow::bail!("ConnectorActionDraft currently supports Telegram monitor task replies only");
+    }
+    let connection_slug = string_field_from_map(context, &["connection_slug", "connectionSlug"])
+        .or_else(|| metadata_string(&task.metadata, &["monitor_connection", "monitorConnection"]))
+        .unwrap_or_else(|| connector_slug.clone());
+    let delivery_target = source_context_delivery_target(&source_context)
+        .ok_or_else(|| anyhow::anyhow!("monitor task `{}` has no delivery target", task.task_id))?;
+    let Some(delivery_target) = delivery_target.as_object() else {
+        anyhow::bail!(
+            "monitor task `{}` delivery target is not an object",
+            task.task_id
+        );
+    };
+    let target_type = string_field_from_map(delivery_target, &["type"]);
+    if target_type.as_deref() != Some("telegram_chat") {
+        anyhow::bail!(
+            "ConnectorActionDraft expected telegram_chat delivery target, got {}",
+            target_type.unwrap_or_else(|| "<missing>".to_string())
+        );
+    }
+    let chat_id =
+        string_field_from_map(delivery_target, &["chat_id", "chatId"]).ok_or_else(|| {
+            anyhow::anyhow!("monitor task `{}` has no Telegram chat_id", task.task_id)
+        })?;
+    Ok(MonitorReplyTarget {
+        connector_slug,
+        connection_slug,
+        chat_id,
+    })
+}
+
+fn is_monitor_task_metadata(metadata: &serde_json::Map<String, Value>) -> bool {
+    metadata
+        .get("_monitor")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || metadata.contains_key("monitor_connection")
+        || metadata.contains_key("monitorConnection")
+}
+
+fn monitor_source_context(metadata: &serde_json::Map<String, Value>) -> Option<Value> {
+    metadata
+        .get("source_context")
+        .or_else(|| metadata.get("sourceContext"))
+        .cloned()
+        .or_else(|| derived_monitor_source_context(metadata))
+}
+
+fn derived_monitor_source_context(metadata: &serde_json::Map<String, Value>) -> Option<Value> {
+    let connector_slug = metadata_string(metadata, &["monitor_connector", "monitorConnector"])?;
+    if !connector_slug.contains("telegram") {
+        return None;
+    }
+    let chat_id = metadata_string(metadata, &["chat_id", "chatId"])?;
+    let chat_kind = metadata_string(metadata, &["chat_kind", "chatKind"])
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| "user".to_string());
+    let connection_slug = metadata_string(metadata, &["monitor_connection", "monitorConnection"]);
+    Some(json!({
+        "kind": "telegram_direct_message",
+        "connection_slug": connection_slug,
+        "connector_slug": connector_slug,
+        "summary": format!("Telegram message from chat_id {chat_id}"),
+        "delivery_target": {
+            "type": "telegram_chat",
+            "chat_id": chat_id,
+            "chat_kind": chat_kind,
+        },
+    }))
+}
+
+fn source_context_delivery_target(context: &Value) -> Option<&Value> {
+    context
+        .get("delivery_target")
+        .or_else(|| context.get("deliveryTarget"))
+}
+
+fn metadata_string(metadata: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| metadata.get(*key))
+        .and_then(value_to_string)
+}
+
+fn string_field_from_map(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key))
+        .and_then(value_to_string)
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    value
+        .as_i64()
+        .map(|number| number.to_string())
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
 }
 
 fn connector_skill_template(template: &ConnectorTemplate) -> String {
@@ -877,9 +1092,8 @@ mod tests {
     use super::*;
     use puffer_config::{ensure_workspace_dirs, set_puffer_home_override, PufferConfig};
     use puffer_session_store::SessionStore;
-    use puffer_subscriptions::{
-        ActionResult, ConnectorPermissionDefinition, SubscriptionManagerBuilder,
-    };
+    use puffer_subscriptions::{ActionResult, SubscriptionManagerBuilder};
+    use std::fs;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -943,6 +1157,48 @@ mod tests {
         }
     }
 
+    fn write_monitor_task_with_delivery_target(
+        cwd: &Path,
+        task_id: &str,
+        connection_slug: &str,
+        chat_id: &str,
+    ) {
+        let path = ConfigPaths::discover(cwd)
+            .workspace_config_dir
+            .join("runtime/claude_workflow/monitor_tasks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let store = json!({
+            "tasks": [{
+                "task_id": task_id,
+                "subject": "Reply to Telegram",
+                "description": "Draft a reply",
+                "active_form": "Drafting a Telegram reply",
+                "status": "pending",
+                "owner": null,
+                "blocks": [],
+                "blocked_by": [],
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": connection_slug,
+                    "monitor_connector": "telegram-login",
+                    "source_context": {
+                        "kind": "telegram_direct_message",
+                        "connector_slug": "telegram-login",
+                        "connection_slug": connection_slug,
+                        "summary": "Telegram direct message from chat_id 42",
+                        "delivery_target": {
+                            "type": "telegram_chat",
+                            "chat_id": chat_id,
+                            "chat_kind": "user"
+                        }
+                    }
+                },
+                "output": null
+            }]
+        });
+        fs::write(path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
+    }
+
     #[derive(Default)]
     struct RecordingDispatcher {
         calls: Mutex<Vec<String>>,
@@ -987,71 +1243,6 @@ mod tests {
     }
 
     #[test]
-    fn interactive_connector_act_external_send_requires_draft_review_from_registry_category() {
-        let template = puffer_subscriptions::builtin_connector_template("telegram-login").unwrap();
-        let action = template.actions.get("send_message").unwrap();
-
-        assert!(connector_action_requires_human_review(action));
-    }
-
-    #[test]
-    fn interactive_connector_act_external_send_rejects_non_telegram_actions() {
-        let template = puffer_subscriptions::builtin_connector_template("slack-login").unwrap();
-        let action = template.actions.get("send_message").unwrap();
-
-        assert!(
-            connector_action_requires_human_review(action),
-            "external send gate must not be Telegram-specific"
-        );
-    }
-
-    #[test]
-    fn interactive_connector_act_default_denies_future_send_like_side_effects() {
-        for slug in [
-            "send",
-            "reply",
-            "send_story",
-            "forward_message",
-            "forward-messages",
-            "post_message",
-            "publish_update",
-        ] {
-            let action = ConnectorActionDefinition {
-                slug: slug.to_string(),
-                description: String::new(),
-                input_schema: json!({}),
-                output_schema: json!({}),
-                permission: ConnectorPermissionDefinition {
-                    category: "custom_action".to_string(),
-                    summary: String::new(),
-                    external_side_effect: true,
-                },
-            };
-
-            assert!(
-                connector_action_requires_human_review(&action),
-                "{slug} should require human review"
-            );
-        }
-    }
-
-    #[test]
-    fn interactive_connector_act_ignores_agent_supplied_category_spoof() {
-        let template = puffer_subscriptions::builtin_connector_template("telegram-login").unwrap();
-        let action = template.actions.get("send_message").unwrap();
-        let agent_input = json!({
-            "chat_id": 42,
-            "message": "hello",
-            "category": "read"
-        });
-
-        assert!(
-            connector_action_requires_human_review_for_input(action, &agent_input),
-            "server-owned registry category must win over agent-supplied category spoof"
-        );
-    }
-
-    #[test]
     fn interactive_connector_act_telegram_send_rejects_before_dispatch() {
         ensure_test_subscription_manager();
         let (mut state, tmp) = make_state();
@@ -1073,11 +1264,37 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("requires human draft review"));
+        assert!(err.to_string().contains("ConnectorActionDraft"));
         assert!(
             dispatcher.calls.lock().unwrap().is_empty(),
             "direct ConnectorAct send must reject before deepest dispatch exit"
         );
+    }
+
+    #[test]
+    fn connector_act_send_message_requires_draft_via_gate() {
+        ensure_test_subscription_manager();
+        let (mut state, tmp) = make_state();
+        let dispatcher = RecordingDispatcher::default();
+
+        let err = execute_connector_act_with_dispatcher(
+            &mut state,
+            tmp.path(),
+            json!({
+                "connector_slug": "telegram-login",
+                "connection_slug": "telegram-user",
+                "action": "send_message",
+                "input": {
+                    "chat_id": 123456789,
+                    "message": "this must become a draft"
+                }
+            }),
+            &dispatcher,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ConnectorActionDraft"));
+        assert!(dispatcher.calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1140,5 +1357,71 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("is not connected"));
         assert!(message.contains("/connect telegram-login"));
+    }
+
+    #[test]
+    fn connector_action_draft_with_task_id_stamps_recipient_from_task() {
+        let home = tempfile::tempdir().unwrap();
+        let _home_override = set_puffer_home_override(home.path());
+        let connection_slug = "telegram-user-task-draft";
+        ensure_connected_test_connection(connection_slug, "telegram-login");
+        let (mut state, tmp) = make_state();
+        let task_id = "monitor-1";
+        write_monitor_task_with_delivery_target(tmp.path(), task_id, connection_slug, "42");
+        let session_id = state.session.id.to_string();
+        state.set_monitor_reply_scope_for_turn(task_id.into(), session_id, "turn-1".into());
+
+        let raw = execute_connector_action_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "connector_slug": "telegram-login",
+                "connection_slug": connection_slug,
+                "action": "send_message",
+                "taskId": task_id,
+                "input": {
+                    "chat_id": 99,
+                    "message": "deployment is finished"
+                }
+            }),
+        )
+        .expect("task-scoped draft should be saved");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["draft"]["recipientStableId"], "telegram:42");
+        assert_eq!(payload["draft"]["recipientSource"], "stamped");
+        assert_eq!(payload["draft"]["taskId"], task_id);
+    }
+
+    #[test]
+    fn connector_action_draft_task_id_outside_scope_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home_override = set_puffer_home_override(home.path());
+        let connection_slug = "telegram-user-task-draft-mismatch";
+        ensure_connected_test_connection(connection_slug, "telegram-login");
+        let (mut state, tmp) = make_state();
+        write_monitor_task_with_delivery_target(tmp.path(), "monitor-2", connection_slug, "42");
+        let session_id = state.session.id.to_string();
+        state.set_monitor_reply_scope_for_turn("monitor-1".into(), session_id, "turn-1".into());
+
+        let err = execute_connector_action_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "connector_slug": "telegram-login",
+                "connection_slug": connection_slug,
+                "action": "send_message",
+                "taskId": "monitor-2",
+                "input": {
+                    "chat_id": 42,
+                    "message": "deployment is finished"
+                }
+            }),
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("taskId"));
+        assert!(message.contains("does not match scoped monitor task"));
     }
 }
