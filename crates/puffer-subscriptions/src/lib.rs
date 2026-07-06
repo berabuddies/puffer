@@ -29,6 +29,7 @@ mod event_schema;
 mod history;
 mod manager;
 mod monitor_trace;
+pub mod outbound_gate;
 mod protocol;
 mod proxy;
 mod router;
@@ -82,6 +83,9 @@ pub use manager::{
 pub use monitor_trace::{
     MonitorTraceIdentity, MonitorTraceMessage, MonitorTraceStage, MonitorTraceStageStatus,
     MonitorTraceStatus, MonitorTraceStore, MonitorTraceStoreError,
+};
+pub use outbound_gate::{
+    action_requires_human_review, effective_action_permission, evaluate, GateDecision, SendOrigin,
 };
 pub use protocol::{
     ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,

@@ -1163,7 +1163,7 @@ fn telegram_specific_actions() -> Vec<ConnectorActionDefinition> {
         telegram_action_definition(
             "react",
             "React to a Telegram message",
-            "external_message_interaction",
+            "external_reaction",
             "React to an external Telegram message",
             telegram_message_action_schema(),
         ),
