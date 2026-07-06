@@ -720,6 +720,12 @@ export class FakeDaemon {
     connectionSlug: string;
   }>();
   private readonly workflowExecutions = new Map<string, JsonRecord[]>();
+  private readonly outboundActions = new Map<string, {
+    version: number;
+    status: string;
+    error: string | null;
+    receipt: JsonRecord | null;
+  }>();
   private workflowNodeDefinitions: WorkflowNodeDefinitionFixture[] = [
     {
       type: "webhook",
@@ -1548,6 +1554,23 @@ export class FakeDaemon {
     this.methodFailures.set(method, failures);
   }
 
+  /**
+   * Seed the persisted state for an outbound action (unified outbound gate).
+   * Drives `outbound_action_status` responses and the terminal state that
+   * execute/cancel converge on. Unseeded actions read back as `draft_ready`.
+   */
+  seedOutboundAction(
+    actionId: string,
+    fixture: Partial<{ version: number; status: string; error: string | null; receipt: JsonRecord | null }> = {}
+  ): void {
+    this.outboundActions.set(actionId, {
+      version: fixture.version ?? 1,
+      status: fixture.status ?? "draft_ready",
+      error: fixture.error ?? null,
+      receipt: fixture.receipt ?? null
+    });
+  }
+
   setGroupedSessionFilter(filter: ((metadata: JsonRecord) => boolean) | null): void {
     this.groupedSessionFilter = filter;
   }
@@ -1841,6 +1864,12 @@ export class FakeDaemon {
         return this.listRuntimeWorkflowExecutions(request.params);
       case "workflow_get_execution":
         return this.getRuntimeWorkflowExecution(request.params);
+      case "outbound_action_execute":
+        return this.handleOutboundExecute(request.params);
+      case "outbound_action_cancel":
+        return this.handleOutboundCancel(request.params);
+      case "outbound_action_status":
+        return this.handleOutboundStatus(request.params);
       case "delete_secret":
         return this.deleteSecret(request.params);
       case "import_chrome_secrets":
@@ -2632,6 +2661,56 @@ export class FakeDaemon {
     };
     if (!matched) throw new Error(`workflow ${slug} not found`);
     return this.workflowListResponse();
+  }
+
+  // --- Unified outbound gate RPCs ------------------------------------------
+  // NOTE: `throwQueuedFailure(request.method)` runs at the top of dispatch, so a
+  // `failNext("outbound_action_execute", "outbound_action_expired")` rejects
+  // with the sentinel string before these handlers ever run — that is how the
+  // error-sentinel routing rows are exercised.
+
+  private handleOutboundExecute(params: JsonRecord): JsonRecord {
+    const actionId = String(params.action_id ?? "");
+    const existing = this.outboundActions.get(actionId);
+    const receipt: JsonRecord = { ok: true, providerMessageId: `msg-${actionId || "unknown"}` };
+    this.outboundActions.set(actionId, {
+      version: existing?.version ?? Number(params.version ?? 1),
+      status: "sent",
+      error: null,
+      receipt
+    });
+    return { actionId, status: "sent", receipt, updatedAtMs: Date.now() };
+  }
+
+  private handleOutboundCancel(params: JsonRecord): JsonRecord {
+    const actionId = String(params.action_id ?? "");
+    const existing = this.outboundActions.get(actionId);
+    this.outboundActions.set(actionId, {
+      version: existing?.version ?? Number(params.version ?? 1),
+      status: "cancelled",
+      error: null,
+      receipt: existing?.receipt ?? null
+    });
+    return { actionId, status: "cancelled", updatedAtMs: Date.now() };
+  }
+
+  private handleOutboundStatus(params: JsonRecord): JsonRecord {
+    const actionId = String(params.action_id ?? "");
+    const version = Number(params.version ?? 1);
+    const fixture = this.outboundActions.get(actionId) ?? {
+      version,
+      status: "draft_ready",
+      error: null,
+      receipt: null
+    };
+    return {
+      actionId,
+      version: fixture.version,
+      status: fixture.status,
+      error: fixture.error,
+      receipt: fixture.receipt,
+      updatedAtMs: Date.now()
+    };
   }
 
   private throwQueuedFailure(method: string): void {
