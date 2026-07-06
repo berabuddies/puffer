@@ -19,6 +19,7 @@ mod monitor_snapshot_tests;
 mod monitor_task_complete;
 mod monitor_task_ignore;
 mod monitor_trace;
+mod outbound_action;
 mod planned;
 mod runtime;
 mod snapshot_json;
@@ -43,6 +44,9 @@ pub(crate) use monitor_self_gate::MonitorSelfGate;
 pub(crate) use monitor_task_complete::handle_monitor_task_complete;
 pub(crate) use monitor_task_ignore::handle_monitor_task_ignore;
 pub(crate) use monitor_trace::handle_monitor_trace_list;
+pub(crate) use outbound_action::{
+    handle_outbound_action_cancel, handle_outbound_action_execute, handle_outbound_action_status,
+};
 pub(crate) use runtime::{
     handle_workflow_create, handle_workflow_deploy, handle_workflow_execute,
     handle_workflow_execute_in_memory, handle_workflow_get_execution,
