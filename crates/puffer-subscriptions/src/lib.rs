@@ -30,6 +30,7 @@ mod history;
 mod manager;
 mod monitor_trace;
 pub mod outbound_gate;
+pub mod outbound_store;
 mod protocol;
 mod proxy;
 mod router;
@@ -86,6 +87,10 @@ pub use monitor_trace::{
 };
 pub use outbound_gate::{
     action_requires_human_review, effective_action_permission, evaluate, GateDecision, SendOrigin,
+};
+pub use outbound_store::{
+    NewOutboundDraft, OutboundAction, OutboundOrigin, OutboundStore, RecipientSource,
+    DUPLICATE_RISK_ACK_REQUIRED, OUTBOUND_ACTION_EXPIRED, TERMINAL_OUTBOUND_ACTION,
 };
 pub use protocol::{
     ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,
