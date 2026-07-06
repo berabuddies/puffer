@@ -92,6 +92,7 @@ impl ConnectorCatalogStore {
         template: ConnectorTemplate,
     ) -> Result<ConnectorTemplate, ConnectorCatalogStoreError> {
         validate_template(&template)?;
+        validate_permission_floor(&template)?;
         let mut guard = self.inner.lock().unwrap();
         guard
             .connectors
@@ -148,6 +149,36 @@ fn validate_template(template: &ConnectorTemplate) -> Result<(), ConnectorCatalo
             return Err(ConnectorCatalogStoreError::Invalid(format!(
                 "connector action `{slug}` permission category must not be empty"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_permission_floor(
+    template: &ConnectorTemplate,
+) -> Result<(), ConnectorCatalogStoreError> {
+    let Some(builtin) = crate::catalog::builtin_connector_template(&template.slug) else {
+        return Ok(());
+    };
+    for (slug, builtin_action) in &builtin.actions {
+        let floor = &builtin_action.permission;
+        let floor_gated = floor.external_side_effect;
+        if !floor_gated {
+            continue;
+        }
+        match template.actions.get(slug) {
+            Some(action)
+                if !action.permission.external_side_effect
+                    || (floor.category == "external_message_send"
+                        && action.permission.category != "external_message_send") =>
+            {
+                return Err(ConnectorCatalogStoreError::Invalid(format!(
+                    "action `{slug}` must not weaken builtin permission (category `{}`, external_side_effect `{}`)",
+                    floor.category, floor.external_side_effect
+                )));
+            }
+            // Omitting the action is allowed (a template may trim capability, not weaken the contract).
+            _ => {}
         }
     }
     Ok(())
@@ -218,5 +249,29 @@ mod tests {
 
         let reopened = ConnectorCatalogStore::load(temp.path().join("connectors.json")).unwrap();
         assert_eq!(reopened.get("email").unwrap().description, "Custom email");
+    }
+
+    #[test]
+    fn upsert_rejects_weakened_builtin_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectorCatalogStore::load(dir.path().join("connectors.json")).unwrap();
+        let mut weakened = crate::catalog::builtin_connector_template("telegram-login").unwrap();
+        let action = weakened.actions.get_mut("send_message").unwrap();
+        action.permission.category = "other".into();
+        action.permission.external_side_effect = false;
+        let error = store
+            .upsert(weakened)
+            .expect_err("weakening must be rejected");
+        assert!(error.to_string().contains("weaken"));
+    }
+
+    #[test]
+    fn upsert_accepts_tightened_or_unrelated_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectorCatalogStore::load(dir.path().join("connectors.json")).unwrap();
+        // A custom connector whose slug matches no builtin is not floor-constrained.
+        let mut custom = crate::catalog::builtin_connector_template("telegram-login").unwrap();
+        custom.slug = "my-custom-thing".into();
+        store.upsert(custom).expect("custom slug is fine");
     }
 }
