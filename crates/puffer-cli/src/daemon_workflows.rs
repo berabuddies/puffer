@@ -5,13 +5,10 @@ mod binding_delete;
 #[cfg(test)]
 mod binding_snapshot_tests;
 mod connection_delete;
-mod connector_action_execute;
-mod monitor_action_execute;
 mod monitor_create;
 mod monitor_history;
 mod monitor_ignore_result;
 mod monitor_memory;
-mod monitor_reply_send;
 mod monitor_rules;
 mod monitor_self_gate;
 #[cfg(test)]
@@ -31,14 +28,9 @@ mod telegram_diagnostics_export_tests;
 pub(crate) use binding_create::handle_workflow_binding_create;
 pub(crate) use binding_delete::handle_workflow_binding_delete;
 pub(crate) use connection_delete::handle_workflow_connection_delete;
-pub(crate) use connector_action_execute::{
-    handle_connector_action_draft_status, handle_connector_action_execute,
-};
-pub(crate) use monitor_action_execute::handle_monitor_action_execute;
 pub(crate) use monitor_create::handle_monitor_create;
 pub(crate) use monitor_history::handle_monitor_history_list;
 pub(crate) use monitor_memory::handle_monitor_memory_save;
-pub(crate) use monitor_reply_send::handle_monitor_reply_send;
 pub(crate) use monitor_rules::{handle_monitor_rule_add, handle_monitor_rule_delete};
 pub(crate) use monitor_self_gate::MonitorSelfGate;
 pub(crate) use monitor_task_complete::handle_monitor_task_complete;

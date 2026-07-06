@@ -1769,17 +1769,14 @@ async fn dispatch_request(
         "monitor_task_complete" | "task_monitor_complete" => respond!(
             crate::daemon_workflows::handle_monitor_task_complete(&state.paths, &params)
         ),
-        "monitor_reply_send" | "task_monitor_reply_send" => respond!(
-            crate::daemon_workflows::handle_monitor_reply_send(&state.paths, &params)
+        "outbound_action_execute" => respond!(
+            crate::daemon_workflows::handle_outbound_action_execute(&state.paths, &params)
         ),
-        "monitor_action_execute" | "task_monitor_action_execute" => respond!(
-            crate::daemon_workflows::handle_monitor_action_execute(&state.paths, &params)
+        "outbound_action_cancel" => respond!(
+            crate::daemon_workflows::handle_outbound_action_cancel(&state.paths, &params)
         ),
-        "connector_action_execute" => respond!(
-            crate::daemon_workflows::handle_connector_action_execute(&state.paths, &params)
-        ),
-        "connector_action_draft_status" => respond!(
-            crate::daemon_workflows::handle_connector_action_draft_status(&state.paths, &params)
+        "outbound_action_status" => respond!(
+            crate::daemon_workflows::handle_outbound_action_status(&state.paths, &params)
         ),
         "monitor_memory_save" | "task_monitor_memory_save" => respond!(
             crate::daemon_workflows::handle_monitor_memory_save(&state.paths, &params)
@@ -5243,13 +5240,8 @@ fn resolve_monitor_reply_turn_scope(
         }
         Some(kind) if kind != "telegram.reply" => return Ok(None),
         _ => {
-            if !monitor_task_is_human_gated(&task) {
-                return Ok(None);
-            }
             if !monitor_task_has_delivery_target(&task) {
-                anyhow::bail!(
-                    "monitor task `{prompt_task_id}` is missing a source delivery target"
-                );
+                return Ok(None);
             }
             MONITOR_REPLY_ACTION_PROMPT_SCOPE
         }
@@ -5332,31 +5324,6 @@ fn monitor_tasks_path_for_scope(paths: &ConfigPaths) -> std::path::PathBuf {
         .join("runtime")
         .join("claude_workflow")
         .join("monitor_tasks.json")
-}
-
-fn monitor_task_is_human_gated(task: &Value) -> bool {
-    let Some(metadata) = task.get("metadata").and_then(Value::as_object) else {
-        return false;
-    };
-    let policy = metadata
-        .get("completion_policy")
-        .or_else(|| metadata.get("completionPolicy"));
-    let mode = policy.and_then(|policy| {
-        policy
-            .get("mode")
-            .and_then(Value::as_str)
-            .or_else(|| policy.as_str())
-    });
-    matches!(mode, Some("draft_then_approve" | "send_to_source"))
-        || policy
-            .and_then(|policy| {
-                policy
-                    .get("requires_human_approval")
-                    .or_else(|| policy.get("requiresHumanApproval"))
-                    .and_then(Value::as_bool)
-            })
-            .unwrap_or(false)
-        || monitor_task_has_delivery_target(task)
 }
 
 fn monitor_task_has_delivery_target(task: &Value) -> bool {
@@ -8843,6 +8810,13 @@ models: []
     /// (legacy `MonitorReplyDraft`) Telegram task `monitor-16` with a delivery
     /// target. The returned `TempDir` must outlive the state.
     fn monitor_reply_env() -> (tempfile::TempDir, DaemonState) {
+        monitor_reply_env_with_metadata(json!({
+            "completion_policy": { "mode": "draft_then_approve" },
+            "source_context": { "delivery_target": { "chat_id": 7842887746_i64 } }
+        }))
+    }
+
+    fn monitor_reply_env_with_metadata(metadata: Value) -> (tempfile::TempDir, DaemonState) {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let paths = ConfigPaths {
@@ -8863,10 +8837,7 @@ models: []
                 "tasks": [{
                     "task_id": "monitor-16",
                     "status": "open",
-                    "metadata": {
-                        "completion_policy": { "mode": "draft_then_approve" },
-                        "source_context": { "delivery_target": { "chat_id": 7842887746_i64 } }
-                    }
+                    "metadata": metadata
                 }]
             }))
             .unwrap(),
@@ -8929,6 +8900,28 @@ models: []
         .expect("re-arm scope resolves")
         .expect("re-running the action re-scopes the turn");
         assert_eq!(rearm.prompt_tool_scope, MONITOR_REPLY_ACTION_PROMPT_SCOPE);
+    }
+
+    #[test]
+    fn monitor_reply_scope_ignores_completion_policy_without_delivery_target() {
+        let (_temp, state) = monitor_reply_env_with_metadata(json!({
+            "completion_policy": { "mode": "draft_then_approve" }
+        }));
+        let session_id = Uuid::new_v4().to_string();
+
+        let scope = resolve_monitor_reply_turn_scope(
+            &state,
+            &json!({ "monitorActionTaskId": "monitor-16" }),
+            MONITOR_ACTION_MSG,
+            &session_id,
+            "turn-action",
+        )
+        .expect("scope resolution should not reject review-only tasks");
+
+        assert!(
+            scope.is_none(),
+            "completion policy alone must not create an outbound reply scope"
+        );
     }
 
     /// A plain (non-action) message carrying a `monitorActionTaskId` param is
