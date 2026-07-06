@@ -385,16 +385,62 @@ pub fn execute_connector_action_draft(
     let parsed: ConnectorActionDraftInput =
         serde_json::from_value(input).context("invalid ConnectorActionDraft input")?;
     let manager = subscription_manager()?;
+
+    // Resolve the effective connector, action, connection, and recipient. When a
+    // task id is present these are all stamped from the monitor task source, so
+    // the model's connector_slug/action/recipient inputs are advisory only and
+    // cannot redirect the draft to a different destination.
+    let mut action_input = parsed.input.clone();
+    let mut recipient_source = RecipientSource::Model;
+    let (connector_slug, action, connection, recipient_stable_id) =
+        if let Some(task_id) = parsed.task_id.as_deref() {
+            ensure_task_id_matches_scope(state, task_id)?;
+            let task = load_monitor_task_for_draft(state.session.cwd.as_path(), task_id)?;
+            let target = monitor_reply_target(&task)?;
+            if let Some(object) = action_input.as_object_mut() {
+                target.stamp_input(object);
+            }
+            recipient_source = RecipientSource::Stamped;
+            (
+                target.connector_slug().to_string(),
+                target.action().to_string(),
+                target.connection_slug().to_string(),
+                target.recipient_stable_id(),
+            )
+        } else {
+            let connection = connector_action_connection(
+                &parsed.connector_slug,
+                parsed.connection_slug.as_deref(),
+                &parsed.input,
+            );
+            if let Some(object) = action_input.as_object_mut() {
+                object
+                    .entry("connection_slug")
+                    .or_insert_with(|| Value::String(connection.clone()));
+                object
+                    .entry("connector_slug")
+                    .or_insert_with(|| Value::String(parsed.connector_slug.clone()));
+            }
+            let recipient_stable_id = draft_message_target(&action_input)
+                .context("ConnectorActionDraft requires a send recipient")?;
+            (
+                parsed.connector_slug.clone(),
+                parsed.action.clone(),
+                connection,
+                recipient_stable_id,
+            )
+        };
+
     let template = manager
         .connector_store()
-        .get(&parsed.connector_slug)
-        .or_else(|| puffer_subscriptions::builtin_connector_template(&parsed.connector_slug))
-        .ok_or_else(|| anyhow::anyhow!("connector `{}` not found", parsed.connector_slug))?;
-    let _action_definition = template.actions.get(&parsed.action).ok_or_else(|| {
+        .get(&connector_slug)
+        .or_else(|| puffer_subscriptions::builtin_connector_template(&connector_slug))
+        .ok_or_else(|| anyhow::anyhow!("connector `{}` not found", connector_slug))?;
+    let _action_definition = template.actions.get(&action).ok_or_else(|| {
         anyhow::anyhow!(
             "connector `{}` does not define action `{}`",
-            parsed.connector_slug,
-            parsed.action
+            connector_slug,
+            action
         )
     })?;
     let origin = SendOrigin::LlmInitiated {
@@ -405,91 +451,30 @@ pub fn execute_connector_action_draft(
             .map(|scope| scope.turn_id.clone()),
         task_id: parsed.task_id.clone(),
     };
-    let decision = puffer_subscriptions::outbound_gate::evaluate(
-        &origin,
-        &parsed.connector_slug,
-        &template,
-        &parsed.action,
-    );
+    let decision =
+        puffer_subscriptions::outbound_gate::evaluate(&origin, &connector_slug, &template, &action);
     if matches!(decision, GateDecision::Allowed { .. }) {
         let paths = ConfigPaths::discover(cwd);
         append_gate_audit(
             &outbound_audit_path(&paths),
-            &audit_entry_for(
-                &origin,
-                &parsed.connector_slug,
-                &parsed.action,
-                &decision,
-                None,
-            ),
+            &audit_entry_for(&origin, &connector_slug, &action, &decision, None),
         );
         anyhow::bail!(
             "ConnectorActionDraft is only for external actions that require human review; use ConnectorAct for `{}`/`{}`",
-            parsed.connector_slug,
-            parsed.action
+            connector_slug,
+            action
         );
     }
 
-    let mut action_input = parsed.input.clone();
-    let mut recipient_source = RecipientSource::Model;
-    let (connection, recipient_stable_id) = if let Some(task_id) = parsed.task_id.as_deref() {
-        ensure_task_id_matches_scope(state, task_id)?;
-        let task = load_monitor_task_for_draft(state.session.cwd.as_path(), task_id)?;
-        let target = monitor_reply_target(&task)?;
-        if let Some(object) = action_input.as_object_mut() {
-            for key in [
-                "to",
-                "target",
-                "channel",
-                "chat_id",
-                "open_id",
-                "user",
-                "receive_id",
-            ] {
-                object.remove(key);
-            }
-            object.insert("chat_id".to_string(), Value::String(target.chat_id.clone()));
-            object.insert(
-                "connection_slug".to_string(),
-                Value::String(target.connection_slug.clone()),
-            );
-            object.insert(
-                "connector_slug".to_string(),
-                Value::String(target.connector_slug.clone()),
-            );
-        }
-        recipient_source = RecipientSource::Stamped;
-        (
-            target.connection_slug,
-            format!("telegram:{}", target.chat_id),
-        )
-    } else {
-        let connection = connector_action_connection(
-            &parsed.connector_slug,
-            parsed.connection_slug.as_deref(),
-            &parsed.input,
-        );
-        if let Some(object) = action_input.as_object_mut() {
-            object
-                .entry("connection_slug")
-                .or_insert_with(|| Value::String(connection.clone()));
-            object
-                .entry("connector_slug")
-                .or_insert_with(|| Value::String(parsed.connector_slug.clone()));
-        }
-        let recipient_stable_id = draft_message_target(&action_input)
-            .context("ConnectorActionDraft requires a send recipient")?;
-        (connection, recipient_stable_id)
-    };
-    ensure_connector_action_draft_connection(&manager, &parsed.connector_slug, &connection)?;
+    ensure_connector_action_draft_connection(&manager, &connector_slug, &connection)?;
     let message = draft_message_text(&action_input)
         .context("ConnectorActionDraft requires a message body")?;
     let paths = ConfigPaths::discover(cwd);
     let store = OutboundStore::load(outbound_actions_path(&paths))?;
-    let action = store.create_draft(NewOutboundDraft {
-        connector_slug: parsed.connector_slug.clone(),
+    let action_record = store.create_draft(NewOutboundDraft {
+        connector_slug: connector_slug.clone(),
         connection_slug: connection.clone(),
-        action: parsed.action.clone(),
+        action: action.clone(),
         input: action_input,
         recipient_stable_id,
         recipient_source,
@@ -508,30 +493,30 @@ pub fn execute_connector_action_draft(
         &outbound_audit_path(&paths),
         &audit_entry_for(
             &origin,
-            &parsed.connector_slug,
-            &parsed.action,
+            &connector_slug,
+            &action,
             &decision,
-            Some(action.id.clone()),
+            Some(action_record.id.clone()),
         ),
     );
     if let Some(task_id) = parsed.task_id.as_deref() {
-        write_outbound_action_reference(state.session.cwd.as_path(), task_id, &action.id)?;
+        write_outbound_action_reference(state.session.cwd.as_path(), task_id, &action_record.id)?;
     }
 
     Ok(serde_json::to_string_pretty(&json!({
         "success": true,
         "draft": {
-            "id": action.id,
+            "id": action_record.id,
             "status": "draft_ready",
-            "version": action.version,
-            "connectorSlug": parsed.connector_slug,
+            "version": action_record.version,
+            "connectorSlug": connector_slug,
             "connectionSlug": connection,
-            "action": parsed.action,
-            "recipientStableId": action.recipient_stable_id,
-            "recipientSource": recipient_source_json(action.recipient_source),
-            "message": action.message,
-            "contentHash": action.content_hash,
-            "taskId": action.origin.task_id,
+            "action": action,
+            "recipientStableId": action_record.recipient_stable_id,
+            "recipientSource": recipient_source_json(action_record.recipient_source),
+            "message": action_record.message,
+            "contentHash": action_record.content_hash,
+            "taskId": action_record.origin.task_id,
         }
     }))?)
 }
@@ -838,11 +823,109 @@ fn draft_message_value(value: &Value, accept_numbers: bool) -> Option<String> {
     None
 }
 
+/// A monitor reply target resolved from the task source. The connector,
+/// connection, reply action, and recipient are all stamped from here so the
+/// model can never redirect a task-scoped draft to a different destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MonitorReplyTarget {
-    connector_slug: String,
-    connection_slug: String,
-    chat_id: String,
+enum MonitorReplyTarget {
+    Telegram {
+        connector_slug: String,
+        connection_slug: String,
+        chat_id: String,
+    },
+    Gmail {
+        connector_slug: String,
+        connection_slug: String,
+        thread_id: String,
+        message_id: Option<String>,
+        account: Option<String>,
+    },
+}
+
+impl MonitorReplyTarget {
+    fn connector_slug(&self) -> &str {
+        match self {
+            Self::Telegram { connector_slug, .. } | Self::Gmail { connector_slug, .. } => {
+                connector_slug
+            }
+        }
+    }
+
+    fn connection_slug(&self) -> &str {
+        match self {
+            Self::Telegram {
+                connection_slug, ..
+            }
+            | Self::Gmail {
+                connection_slug, ..
+            } => connection_slug,
+        }
+    }
+
+    /// The canonical reply action for this target. Task-scoped drafts always use
+    /// this action regardless of what the model passed, so a Gmail task always
+    /// drafts a `draft_reply` and a Telegram task always drafts a `send_message`.
+    fn action(&self) -> &'static str {
+        match self {
+            Self::Telegram { .. } => "send_message",
+            Self::Gmail { .. } => "draft_reply",
+        }
+    }
+
+    fn recipient_stable_id(&self) -> String {
+        match self {
+            Self::Telegram { chat_id, .. } => format!("telegram:{chat_id}"),
+            Self::Gmail { thread_id, .. } => format!("gmail:{thread_id}"),
+        }
+    }
+
+    /// Removes any model-supplied recipient/target keys and stamps the resolved
+    /// destination onto the connector action input.
+    fn stamp_input(&self, object: &mut serde_json::Map<String, Value>) {
+        for key in [
+            "to",
+            "target",
+            "channel",
+            "chat_id",
+            "open_id",
+            "user",
+            "receive_id",
+            "thread_id",
+            "gmail_thread_id",
+            "message_id",
+            "id",
+            "account",
+        ] {
+            object.remove(key);
+        }
+        object.insert(
+            "connection_slug".to_string(),
+            Value::String(self.connection_slug().to_string()),
+        );
+        object.insert(
+            "connector_slug".to_string(),
+            Value::String(self.connector_slug().to_string()),
+        );
+        match self {
+            Self::Telegram { chat_id, .. } => {
+                object.insert("chat_id".to_string(), Value::String(chat_id.clone()));
+            }
+            Self::Gmail {
+                thread_id,
+                message_id,
+                account,
+                ..
+            } => {
+                object.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+                if let Some(message_id) = message_id {
+                    object.insert("message_id".to_string(), Value::String(message_id.clone()));
+                }
+                if let Some(account) = account {
+                    object.insert("account".to_string(), Value::String(account.clone()));
+                }
+            }
+        }
+    }
 }
 
 fn monitor_reply_target(task: &StoredTask) -> Result<MonitorReplyTarget> {
@@ -860,9 +943,6 @@ fn monitor_reply_target(task: &StoredTask) -> Result<MonitorReplyTarget> {
     let connector_slug = string_field_from_map(context, &["connector_slug", "connectorSlug"])
         .or_else(|| metadata_string(&task.metadata, &["monitor_connector", "monitorConnector"]))
         .ok_or_else(|| anyhow::anyhow!("monitor task `{}` has no connector slug", task.task_id))?;
-    if !connector_slug.contains("telegram") {
-        anyhow::bail!("ConnectorActionDraft currently supports Telegram monitor task replies only");
-    }
     let connection_slug = string_field_from_map(context, &["connection_slug", "connectionSlug"])
         .or_else(|| metadata_string(&task.metadata, &["monitor_connection", "monitorConnection"]))
         .unwrap_or_else(|| connector_slug.clone());
@@ -875,21 +955,41 @@ fn monitor_reply_target(task: &StoredTask) -> Result<MonitorReplyTarget> {
         );
     };
     let target_type = string_field_from_map(delivery_target, &["type"]);
-    if target_type.as_deref() != Some("telegram_chat") {
-        anyhow::bail!(
-            "ConnectorActionDraft expected telegram_chat delivery target, got {}",
-            target_type.unwrap_or_else(|| "<missing>".to_string())
-        );
+    match target_type.as_deref() {
+        Some("telegram_chat") => {
+            let chat_id = string_field_from_map(delivery_target, &["chat_id", "chatId"])
+                .ok_or_else(|| {
+                    anyhow::anyhow!("monitor task `{}` has no Telegram chat_id", task.task_id)
+                })?;
+            Ok(MonitorReplyTarget::Telegram {
+                connector_slug,
+                connection_slug,
+                chat_id,
+            })
+        }
+        Some("gmail_thread") => {
+            let thread_id = string_field_from_map(delivery_target, &["thread_id", "threadId"])
+                .ok_or_else(|| {
+                    anyhow::anyhow!("monitor task `{}` has no Gmail thread_id", task.task_id)
+                })?;
+            let message_id = string_field_from_map(delivery_target, &["message_id", "messageId"]);
+            let account = string_field_from_map(
+                delivery_target,
+                &["account", "account_id", "accountId"],
+            );
+            Ok(MonitorReplyTarget::Gmail {
+                connector_slug,
+                connection_slug,
+                thread_id,
+                message_id,
+                account,
+            })
+        }
+        other => anyhow::bail!(
+            "ConnectorActionDraft supports telegram_chat and gmail_thread monitor task replies only, got {}",
+            other.unwrap_or("<missing>")
+        ),
     }
-    let chat_id =
-        string_field_from_map(delivery_target, &["chat_id", "chatId"]).ok_or_else(|| {
-            anyhow::anyhow!("monitor task `{}` has no Telegram chat_id", task.task_id)
-        })?;
-    Ok(MonitorReplyTarget {
-        connector_slug,
-        connection_slug,
-        chat_id,
-    })
 }
 
 fn is_monitor_task_metadata(metadata: &serde_json::Map<String, Value>) -> bool {
@@ -1199,6 +1299,51 @@ mod tests {
         fs::write(path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
     }
 
+    fn write_gmail_monitor_task_with_delivery_target(
+        cwd: &Path,
+        task_id: &str,
+        connection_slug: &str,
+        thread_id: &str,
+        message_id: &str,
+        account: &str,
+    ) {
+        let path = ConfigPaths::discover(cwd)
+            .workspace_config_dir
+            .join("runtime/claude_workflow/monitor_tasks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let store = json!({
+            "tasks": [{
+                "task_id": task_id,
+                "subject": "Reply to Gmail",
+                "description": "Draft a reply",
+                "active_form": "Drafting a Gmail reply",
+                "status": "pending",
+                "owner": null,
+                "blocks": [],
+                "blocked_by": [],
+                "metadata": {
+                    "_monitor": true,
+                    "monitor_connection": connection_slug,
+                    "monitor_connector": "gmail-browser",
+                    "source_context": {
+                        "kind": "gmail_message",
+                        "connector_slug": "gmail-browser",
+                        "connection_slug": connection_slug,
+                        "summary": "Gmail message in thread",
+                        "delivery_target": {
+                            "type": "gmail_thread",
+                            "account": account,
+                            "thread_id": thread_id,
+                            "message_id": message_id
+                        }
+                    }
+                },
+                "output": null
+            }]
+        });
+        fs::write(path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
+    }
+
     #[derive(Default)]
     struct RecordingDispatcher {
         calls: Mutex<Vec<String>>,
@@ -1371,16 +1516,19 @@ mod tests {
         let session_id = state.session.id.to_string();
         state.set_monitor_reply_scope_for_turn(task_id.into(), session_id, "turn-1".into());
 
+        // The model passes a wrong connector slug and recipient; the server must
+        // stamp both the connector and the recipient from the task source.
         let raw = execute_connector_action_draft(
             &mut state,
             tmp.path(),
             json!({
-                "connector_slug": "telegram-login",
-                "connection_slug": connection_slug,
-                "action": "send_message",
+                "connector_slug": "gmail-browser",
+                "connection_slug": "some-other-connection",
+                "action": "send_email",
                 "taskId": task_id,
                 "input": {
                     "chat_id": 99,
+                    "to": "attacker@example.com",
                     "message": "deployment is finished"
                 }
             }),
@@ -1391,6 +1539,10 @@ mod tests {
         assert_eq!(payload["draft"]["recipientStableId"], "telegram:42");
         assert_eq!(payload["draft"]["recipientSource"], "stamped");
         assert_eq!(payload["draft"]["taskId"], task_id);
+        // Server-stamped connector/connection/action override the model input.
+        assert_eq!(payload["draft"]["connectorSlug"], "telegram-login");
+        assert_eq!(payload["draft"]["connectionSlug"], connection_slug);
+        assert_eq!(payload["draft"]["action"], "send_message");
     }
 
     #[test]
@@ -1423,5 +1575,135 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("taskId"));
         assert!(message.contains("does not match scoped monitor task"));
+    }
+
+    #[test]
+    fn connector_action_draft_with_gmail_task_id_stamps_thread_from_task() {
+        let home = tempfile::tempdir().unwrap();
+        let _home_override = set_puffer_home_override(home.path());
+        let connection_slug = "gmail-user-task-draft";
+        ensure_connected_test_connection(connection_slug, "gmail-browser");
+        let (mut state, tmp) = make_state();
+        let task_id = "monitor-gmail-1";
+        write_gmail_monitor_task_with_delivery_target(
+            tmp.path(),
+            task_id,
+            connection_slug,
+            "thread-abc",
+            "msg-42",
+            "owner@gmail.com",
+        );
+        let session_id = state.session.id.to_string();
+        state.set_monitor_reply_scope_for_turn(task_id.into(), session_id, "turn-1".into());
+
+        // The model does not know the Gmail reply action or thread; both are
+        // stamped from the task source.
+        let raw = execute_connector_action_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "connector_slug": "gmail-browser",
+                "connection_slug": connection_slug,
+                "action": "send_email",
+                "taskId": task_id,
+                "input": {
+                    "to": "attacker@example.com",
+                    "thread_id": "wrong-thread",
+                    "message": "Thanks, sending the report now."
+                }
+            }),
+        )
+        .expect("gmail task-scoped draft should be saved");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["draft"]["recipientStableId"], "gmail:thread-abc");
+        assert_eq!(payload["draft"]["recipientSource"], "stamped");
+        assert_eq!(payload["draft"]["connectorSlug"], "gmail-browser");
+        assert_eq!(payload["draft"]["connectionSlug"], connection_slug);
+        assert_eq!(payload["draft"]["action"], "draft_reply");
+        assert_eq!(
+            payload["draft"]["message"],
+            "Thanks, sending the report now."
+        );
+
+        // The stored connector action input must carry the Gmail reply intent in
+        // the shape the gmail-browser executor parses (thread_id/message_id), and
+        // the model's forged recipient keys must be stripped.
+        let draft_id = payload["draft"]["id"].as_str().unwrap();
+        let paths = ConfigPaths::discover(tmp.path());
+        let store = OutboundStore::load(outbound_actions_path(&paths)).unwrap();
+        let stored = store.get(draft_id).unwrap().expect("stored draft");
+        assert_eq!(stored.input["thread_id"], "thread-abc");
+        assert_eq!(stored.input["message_id"], "msg-42");
+        assert_eq!(stored.input["account"], "owner@gmail.com");
+        assert_eq!(stored.input["connector_slug"], "gmail-browser");
+        assert_eq!(stored.input["connection_slug"], connection_slug);
+        assert!(stored.input.get("to").is_none());
+    }
+
+    #[test]
+    fn connector_action_draft_without_task_id_in_task_scope_uses_model_recipient() {
+        // Spec test-matrix item 4: a task-session context is active but the model
+        // omits taskId, so the draft is a free-form third-party send with a
+        // model-sourced recipient rather than a stamped one.
+        let home = tempfile::tempdir().unwrap();
+        let _home_override = set_puffer_home_override(home.path());
+        let connection_slug = "telegram-user-no-task-draft";
+        ensure_connected_test_connection(connection_slug, "telegram-login");
+        let (mut state, tmp) = make_state();
+        write_monitor_task_with_delivery_target(tmp.path(), "monitor-1", connection_slug, "42");
+        let session_id = state.session.id.to_string();
+        state.set_monitor_reply_scope_for_turn("monitor-1".into(), session_id, "turn-1".into());
+
+        let raw = execute_connector_action_draft(
+            &mut state,
+            tmp.path(),
+            json!({
+                "connector_slug": "telegram-login",
+                "connection_slug": connection_slug,
+                "action": "send_message",
+                "input": {
+                    "chat_id": 777,
+                    "message": "message to a different person"
+                }
+            }),
+        )
+        .expect("free-form draft should be saved even inside a task scope");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(payload["draft"]["recipientSource"], "model");
+        assert_eq!(payload["draft"]["recipientStableId"], "777");
+        assert_eq!(payload["draft"]["taskId"], Value::Null);
+    }
+
+    #[test]
+    fn monitor_action_prompts_keep_connector_action_draft_tool() {
+        // #634 regression guard: a future prompt edit must not silently re-lock
+        // the draft tool, or every monitor reply turn loses its only send path.
+        for prompt in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../resources/prompts/monitor-telegram-action.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../resources/prompts/monitor-reply-action.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../resources/prompts/monitor-gmail-action.yaml"
+            )),
+        ] {
+            let doc: serde_yaml::Value = serde_yaml::from_str(prompt).unwrap();
+            let allowed = doc["allowed_tools"]
+                .as_sequence()
+                .expect("allowed_tools must be a list");
+            assert!(
+                allowed
+                    .iter()
+                    .any(|tool| tool.as_str() == Some("ConnectorActionDraft")),
+                "monitor action prompt lost ConnectorActionDraft from allowed_tools"
+            );
+        }
     }
 }

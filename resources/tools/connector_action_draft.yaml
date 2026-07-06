@@ -7,7 +7,7 @@ description: |-
   Use this instead of ConnectorAct whenever the action would send, reply,
   forward, post, or otherwise deliver an external message. This tool is
   side-effect free: it stores the proposed action and message for Bobo to show
-  as a review card. Bobo must call connector_action_execute after the human
+  as a review card. Bobo must call outbound_action_execute after the human
   approves the exact recipient and message.
 
   Do not use this for read/list/search actions. Do not call ConnectorAct
@@ -27,6 +27,9 @@ input_schema:
     action:
       type: string
       description: External send action slug, usually send_message.
+    taskId:
+      type: string
+      description: Monitor task id. When set, the server stamps the recipient (and connector/connection) from the task source; omit for free-form sends.
     input:
       type: object
       description: Connector action input containing the resolved recipient and exact message draft.
