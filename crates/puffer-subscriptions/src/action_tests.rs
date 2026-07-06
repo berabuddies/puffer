@@ -398,3 +398,32 @@ fn connector_act_uses_installed_executor() {
     assert_eq!(calls[0].1, "archive");
     assert_eq!(calls[0].2, json!({"message":"saved hello"}));
 }
+
+#[test]
+fn connector_act_send_message_appends_allowed_rule_audit() {
+    let dir = tempdir().unwrap();
+    let dispatcher = BuiltinActionDispatcher::with_storage_root(dir.path());
+    let executor = Arc::new(RecordingConnectorExecutor {
+        calls: StdMutex::new(Vec::new()),
+    });
+    dispatcher.set_connector_action_executor(executor);
+    let action = ActionSpec::ConnectorAct {
+        connector_slug: "telegram-login".into(),
+        action: "send_message".into(),
+        input: json!({"chat_id":"42","message":"saved {{text}}"}),
+    };
+
+    let result = dispatcher.dispatch(&action, &envelope("hello", json!({})));
+
+    assert!(result.success, "{}", result.summary);
+    let text = std::fs::read_to_string(dir.path().join("outbound_audit.ndjson")).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(entry["origin"], "rule");
+    assert_eq!(entry["connector"], "telegram-login");
+    assert_eq!(entry["action"], "send_message");
+    assert_eq!(entry["decision"], "allowed_rule");
+    assert_eq!(entry["rule_id"], "telegram-user");
+    assert!(entry["action_id"].is_null());
+}

@@ -1,6 +1,7 @@
 //! Action dispatchers — what happens to an event after it passes the
 //! prefilter and classifier.
 
+use crate::outbound_audit::{append_gate_audit, AuditEntry, AUDIT_DECISION_ALLOWED_RULE};
 use crate::spec::{render_template, render_value_templates, ActionSpec, FileAppendFormat};
 use anyhow::{Context, Result};
 use puffer_subscriber_runtime::EventEnvelope;
@@ -671,6 +672,7 @@ impl BuiltinActionDispatcher {
     ) -> ActionResult {
         let rendered = render_value_templates(input, &envelope.event.text, &envelope.event.payload);
         let trigger = trigger_payload(envelope);
+        self.append_rule_connector_audit(connector_slug, action, envelope);
         match self.resolved_connector_action_executor() {
             Some(executor) => {
                 match executor.run_connector_action(connector_slug, action, rendered, trigger) {
@@ -684,6 +686,28 @@ impl BuiltinActionDispatcher {
                 ActionResult::failure("connector_act: no connector action executor is installed")
             }
         }
+    }
+
+    fn append_rule_connector_audit(
+        &self,
+        connector_slug: &str,
+        action: &str,
+        envelope: &EventEnvelope,
+    ) {
+        if !connector_action_is_send_class(connector_slug, action) {
+            return;
+        }
+        append_gate_audit(
+            &self.storage_root.join("outbound_audit.ndjson"),
+            &AuditEntry {
+                origin: "rule".to_string(),
+                connector: connector_slug.to_string(),
+                action: action.to_string(),
+                decision: AUDIT_DECISION_ALLOWED_RULE.to_string(),
+                action_id: None,
+                rule_id: Some(envelope.subscriber_id.clone()),
+            },
+        );
     }
 
     fn graph(
@@ -811,6 +835,13 @@ fn merge_action_usage(total: &mut Option<ActionUsage>, next: ActionUsage) {
     current.cache_creation_tokens = current
         .cache_creation_tokens
         .saturating_add(next.cache_creation_tokens);
+}
+
+fn connector_action_is_send_class(connector_slug: &str, action: &str) -> bool {
+    let Some(template) = crate::catalog::builtin_connector_template(connector_slug) else {
+        return false;
+    };
+    crate::outbound_gate::action_requires_human_review(connector_slug, &template, action)
 }
 
 fn trigger_payload(envelope: &EventEnvelope) -> serde_json::Value {
