@@ -116,7 +116,7 @@ fn required_object<'a>(
         .with_context(|| format!("monitor.{key} must be an object"))
 }
 
-/// The chat-level reply target consumed by `monitor_reply_target`; built here
+/// The chat-level reply target consumed by outbound draft stamping; built here
 /// so the single-source and consolidated-burst renderers cannot drift.
 fn telegram_delivery_target(chat_id: &str, chat_kind: &str) -> Value {
     json!({

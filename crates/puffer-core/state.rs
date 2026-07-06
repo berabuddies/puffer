@@ -336,7 +336,7 @@ pub struct AppState {
     /// (`scheme://host:port`). Set by /pentest start/resume; cleared by stop.
     pub pentest_in_scope_origin: Option<String>,
     /// Request-scoped monitor reply binding. Set by daemon-validated monitor
-    /// action turns so `MonitorReplyDraft` cannot write arbitrary tasks.
+    /// action turns so outbound drafts cannot write arbitrary tasks.
     pub(crate) monitor_reply_scope: Option<MonitorReplyScope>,
     /// True while a monitor triage turn is running. Lets the triage agent complete
     /// human-gated monitor tasks from a conversational "done" signal (the message

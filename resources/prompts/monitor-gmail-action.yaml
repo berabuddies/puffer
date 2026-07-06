@@ -1,7 +1,7 @@
 id: monitor-gmail-action
 description: Draft a monitored Gmail task reply without creating or sending email
 allowed_tools:
-  - MonitorActionDraft
+  - ConnectorActionDraft
   - WebSearch
   - WebFetch
   - AskUserQuestion
@@ -25,7 +25,7 @@ template: |
   - Do not include a subject line unless the task explicitly asks for a new
     email rather than a thread reply.
   - If the task needs missing facts, ask the user instead of inventing details.
-  - When the reply body is ready, call MonitorActionDraft with the monitored
+  - When the reply body is ready, call ConnectorActionDraft with the monitored
     task id and the final body. Bobo will ask the user to approve before
     creating a Gmail draft in the source thread.
 

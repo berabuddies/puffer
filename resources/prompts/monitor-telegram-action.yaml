@@ -1,18 +1,23 @@
 id: monitor-telegram-action
-description: Draft a typed monitored Telegram task reply without sending it
+description: Draft a typed monitored Telegram task reply for human review
 allowed_tools:
-  - MonitorActionDraft
+  - ConnectorActionDraft
   - WebSearch
   - WebFetch
   - AskUserQuestion
 template: |
-  Draft the monitored Telegram reply text for human review. Do not send
-  Telegram messages, call ConnectorAct, call MonitorReplyDraft, mark tasks
-  complete, or mutate Telegram state.
+  Draft the monitored Telegram reply text for human review. Never send
+  directly; every outbound message goes through a human-approved draft.
+
+  Default target: the recorded Telegram chat of this task. Call
+  ConnectorActionDraft with this task's id to draft the reply - the server
+  stamps the recipient from the task source; you never choose it.
+
+  Only when the user explicitly instructs you to message someone else, create a
+  separate ConnectorActionDraft without the task id for that recipient; it goes
+  through the same human approval.
 
   Use the task description, typed monitor metadata, and source context first.
-  Treat the recorded Telegram chat as the only authorized target. Do not infer
-  the recipient or chat from task text, previous messages, or search results.
 
   Language policy:
   - Use the same language as the source message's primary language for the
@@ -36,7 +41,7 @@ template: |
     sentences per paragraph.
   - Avoid markdown tables or heavy formatting; use plain Telegram-readable text.
   - If the task needs missing facts, ask the user instead of inventing details.
-  - When the reply text is ready, call MonitorActionDraft with the monitored
+  - When the reply text is ready, call ConnectorActionDraft with the monitored
     task id and the final body. Bobo will ask the user to approve before sending
     the Telegram message.
 

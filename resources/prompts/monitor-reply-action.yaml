@@ -1,13 +1,21 @@
 id: monitor-reply-action
-description: Draft a monitored Telegram task reply without sending it
+description: Draft a monitored Telegram task reply for human review
 allowed_tools:
-  - MonitorReplyDraft
+  - ConnectorActionDraft
   - WebSearch
   - WebFetch
   - AskUserQuestion
 template: |
-  Draft the monitored task reply for human review. Do not send messages, mark
-  tasks complete, or choose recipients.
+  Draft the monitored Telegram reply text for human review. Never send
+  directly; every outbound message goes through a human-approved draft.
+
+  Default target: the recorded Telegram chat of this task. Call
+  ConnectorActionDraft with this task's id to draft the reply - the server
+  stamps the recipient from the task source; you never choose it.
+
+  Only when the user explicitly instructs you to message someone else, create a
+  separate ConnectorActionDraft without the task id for that recipient; it goes
+  through the same human approval.
 
   Language policy:
   - Use the same language as the source message's primary language for the
