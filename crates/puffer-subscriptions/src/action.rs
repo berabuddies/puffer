@@ -1,7 +1,9 @@
 //! Action dispatchers — what happens to an event after it passes the
 //! prefilter and classifier.
 
-use crate::outbound_audit::{append_gate_audit, AuditEntry, AUDIT_DECISION_ALLOWED_RULE};
+use crate::outbound_audit::{
+    append_gate_audit, AuditEntry, AUDIT_DECISION_ALLOWED_RULE, AUDIT_DECISION_DRAFT_REQUIRED,
+};
 use crate::spec::{render_template, render_value_templates, ActionSpec, FileAppendFormat};
 use anyhow::{Context, Result};
 use puffer_subscriber_runtime::EventEnvelope;
@@ -697,13 +699,29 @@ impl BuiltinActionDispatcher {
         if !connector_action_is_send_class(connector_slug, action) {
             return;
         }
+        let Some(template) = crate::catalog::builtin_connector_template(connector_slug) else {
+            return;
+        };
+        // Route the decision through the single gate instead of hardcoding the
+        // string: rule automation is standing approval, so the gate returns
+        // `Allowed`. `subscriber_id` is the id of the user-configured subscription
+        // automation — i.e. the rule that authorized this send — so it is the
+        // honest value for the audit's `rule_id`.
+        let origin = crate::outbound_gate::SendOrigin::RuleAutomation {
+            rule_id: envelope.subscriber_id.clone(),
+        };
+        let decision =
+            match crate::outbound_gate::evaluate(&origin, connector_slug, &template, action) {
+                crate::outbound_gate::GateDecision::Allowed { .. } => AUDIT_DECISION_ALLOWED_RULE,
+                crate::outbound_gate::GateDecision::RequiresDraft => AUDIT_DECISION_DRAFT_REQUIRED,
+            };
         append_gate_audit(
             &self.storage_root.join("outbound_audit.ndjson"),
             &AuditEntry {
                 origin: "rule".to_string(),
                 connector: connector_slug.to_string(),
                 action: action.to_string(),
-                decision: AUDIT_DECISION_ALLOWED_RULE.to_string(),
+                decision: decision.to_string(),
                 action_id: None,
                 rule_id: Some(envelope.subscriber_id.clone()),
             },
@@ -838,6 +856,12 @@ fn merge_action_usage(total: &mut Option<ActionUsage>, next: ActionUsage) {
 }
 
 fn connector_action_is_send_class(connector_slug: &str, action: &str) -> bool {
+    // Use the gate's own effective-permission merge (builtin floor ∪ template)
+    // rather than re-deriving "is this a send" here, so this predicate and the
+    // gate can never drift. This dispatch site has no user-catalog handle, so the
+    // builtin template is both the declared template and the floor; a user
+    // override can only ever *tighten* (the floor forbids weakening), so the
+    // builtin is a sound basis for deciding whether to audit.
     let Some(template) = crate::catalog::builtin_connector_template(connector_slug) else {
         return false;
     };

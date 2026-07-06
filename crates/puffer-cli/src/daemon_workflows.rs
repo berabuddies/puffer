@@ -446,9 +446,12 @@ fn load_monitor_tasks(paths: &ConfigPaths) -> Result<Vec<Value>> {
     let telegram_peer_avatars = crate::daemon_contacts::cached_telegram_peer_avatars(paths);
     let telegram_peer_names = crate::daemon_contacts::cached_telegram_peer_names(paths);
     let mut errors = Vec::new();
+    // Degrade gracefully like `task_snapshot::add_task_context`: a failure to
+    // load the outbound store must not blank the whole monitor feed. Carry the
+    // error, render tasks with a null `outboundAction`.
     let outbound_store = task_snapshot::outbound_store(paths, &mut errors);
-    if let Some(error) = errors.into_iter().next() {
-        return Err(anyhow::anyhow!(error));
+    for error in &errors {
+        eprintln!("monitor feed: outbound action store unavailable: {error}");
     }
     Ok(store
         .tasks

@@ -8807,8 +8807,8 @@ models: []
     // ── #561: monitor-reply scope must not lock unrelated follow-up turns ──────
 
     /// Builds a daemon state whose monitor task store holds one open, human-gated
-    /// (legacy `MonitorReplyDraft`) Telegram task `monitor-16` with a delivery
-    /// target. The returned `TempDir` must outlive the state.
+    /// Telegram reply task `monitor-16` with a delivery target. The returned
+    /// `TempDir` must outlive the state.
     fn monitor_reply_env() -> (tempfile::TempDir, DaemonState) {
         monitor_reply_env_with_metadata(json!({
             "completion_policy": { "mode": "draft_then_approve" },

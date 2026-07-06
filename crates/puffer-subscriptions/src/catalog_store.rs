@@ -161,24 +161,31 @@ fn validate_permission_floor(
         return Ok(());
     };
     for (slug, builtin_action) in &builtin.actions {
-        let floor = &builtin_action.permission;
-        let floor_gated = floor.external_side_effect;
-        if !floor_gated {
+        // Only actions carrying an external side effect impose a floor.
+        if !builtin_action.permission.external_side_effect {
             continue;
         }
-        match template.actions.get(slug) {
-            Some(action)
-                if !action.permission.external_side_effect
-                    || (floor.category == "external_message_send"
-                        && action.permission.category != "external_message_send") =>
-            {
-                return Err(ConnectorCatalogStoreError::Invalid(format!(
-                    "action `{slug}` must not weaken builtin permission (category `{}`, external_side_effect `{}`)",
-                    floor.category, floor.external_side_effect
-                )));
-            }
-            // Omitting the action is allowed (a template may trim capability, not weaken the contract).
-            _ => {}
+        // Omitting the action is allowed (a template may trim capability, not
+        // weaken the contract).
+        let Some(user_action) = template.actions.get(slug) else {
+            continue;
+        };
+        // Single source of truth: the gate neutralizes any weakening by merging
+        // the builtin floor back in (`effective_action_permission`). If the
+        // effective permission the gate would enforce differs from what the
+        // template declares, the template tried to weaken it — reject upstream so
+        // the stored template matches what the gate honors.
+        let effective =
+            crate::outbound_gate::effective_action_permission(&template.slug, template, slug)
+                .expect("declared builtin action must resolve an effective permission");
+        let declared = &user_action.permission;
+        if effective.external_side_effect != declared.external_side_effect
+            || effective.category != declared.category
+        {
+            return Err(ConnectorCatalogStoreError::Invalid(format!(
+                "action `{slug}` must not weaken builtin permission (gate enforces category `{}`, external_side_effect `{}`)",
+                effective.category, effective.external_side_effect
+            )));
         }
     }
     Ok(())
@@ -262,6 +269,24 @@ mod tests {
         let error = store
             .upsert(weakened)
             .expect_err("weakening must be rejected");
+        assert!(error.to_string().contains("weaken"));
+    }
+
+    #[test]
+    fn upsert_rejects_interaction_downgraded_to_reaction() {
+        // `vote_poll` is a gated `external_message_interaction`. Relabeling it as
+        // `external_reaction` (the ungated whitelist category) would neutralize
+        // human review; the gate's floor merge forces the interaction category
+        // back, so upsert must reject the downgrade.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectorCatalogStore::load(dir.path().join("connectors.json")).unwrap();
+        let mut weakened = crate::catalog::builtin_connector_template("telegram-login").unwrap();
+        let action = weakened.actions.get_mut("vote_poll").unwrap();
+        action.permission.category = "external_reaction".into();
+        // external_side_effect stays true; only the category is downgraded.
+        let error = store
+            .upsert(weakened)
+            .expect_err("reaction downgrade must be rejected");
         assert!(error.to_string().contains("weaken"));
     }
 

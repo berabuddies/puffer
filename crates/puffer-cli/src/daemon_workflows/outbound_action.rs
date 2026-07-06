@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use puffer_config::ConfigPaths;
+use puffer_subscriptions::outbound_store::now_ms;
 use puffer_subscriptions::{
     append_gate_audit, installed_connector_action_executor, AuditEntry, OutboundAction,
-    OutboundStore, AUDIT_DECISION_APPROVED_SEND, AUDIT_DECISION_CANCELLED,
+    OutboundStore, AUDIT_DECISION_APPROVED_SEND, AUDIT_DECISION_CANCELLED, AUDIT_DECISION_EXPIRED,
+    OUTBOUND_ACTION_EXPIRED,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -25,6 +27,10 @@ struct OutboundActionExecuteParams {
     approved_message: String,
     #[serde(alias = "clientRequestId")]
     client_request_id: String,
+    /// Set by the client when re-approving an `uncertain` action, acknowledging
+    /// the duplicate-send risk so the store permits `uncertain → sending`.
+    #[serde(default, alias = "duplicateRiskAck")]
+    duplicate_risk_ack: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,11 +93,21 @@ pub(crate) fn handle_outbound_action_cancel(paths: &ConfigPaths, params: &Value)
         .context("missing action_id")?
         .to_string();
     let reason = params.reason.as_deref().and_then(non_empty);
+    // Cancel must take the SAME per-action lock execute uses, or a concurrent
+    // execute's finish_send can clobber the cancel (user told "cancelled" while
+    // the message is sent — #561).
+    let lock = outbound_action_lock(&outbound_actions_path(paths), &action_id);
+    let _guard = lock.lock().unwrap();
     let store = outbound_store(paths)?;
     let action = store.cancel(&action_id, params.version, reason)?;
     append_action_audit(paths, &action, AUDIT_DECISION_CANCELLED);
     if let Some(task_id) = action.origin.task_id.as_deref() {
-        clear_task_outbound_action(paths, task_id, &action.id)?;
+        // Best-effort: the action is already terminally cancelled on disk; a
+        // task-reference cleanup failure must not turn a successful cancel into
+        // an RPC error.
+        if let Err(error) = clear_task_outbound_action(paths, task_id, &action.id) {
+            eprintln!("outbound action cancel task write-back failed for `{task_id}`: {error:#}");
+        }
     }
     Ok(json!({
         "actionId": action.id,
@@ -131,12 +147,25 @@ fn handle_outbound_action_execute_with_executor(
     let lock = outbound_action_lock(&outbound_actions_path(paths), &action_id);
     let _guard = lock.lock().unwrap();
     let store = outbound_store(paths)?;
-    let action = store.begin_send(
+    let action = match store.begin_send(
         &action_id,
         params.version,
         &approved_message,
         &client_request_id,
-    )?;
+        params.duplicate_risk_ack,
+    ) {
+        Ok(action) => action,
+        Err(error) => {
+            // TTL expiry is a gate decision (spec §8): record it before
+            // propagating so the audit log stays consistent.
+            if error.to_string().contains(OUTBOUND_ACTION_EXPIRED) {
+                if let Ok(Some(expired)) = store.get(&action_id) {
+                    append_action_audit(paths, &expired, AUDIT_DECISION_EXPIRED);
+                }
+            }
+            return Err(error);
+        }
+    };
     if action.status == "sent" {
         return Ok(json!({
             "actionId": action.id,
@@ -145,6 +174,10 @@ fn handle_outbound_action_execute_with_executor(
         }));
     }
     append_action_audit(paths, &action, AUDIT_DECISION_APPROVED_SEND);
+    let send_attempt_id = action
+        .send_attempt_id
+        .clone()
+        .context("outbound action missing send attempt id after begin_send")?;
 
     let input = input_with_approved_message(&action, &approved_message)?;
     let trigger = execute_trigger(&action, &input, &approved_message, &client_request_id)?;
@@ -152,9 +185,14 @@ fn handle_outbound_action_execute_with_executor(
         executor.execute_connector_action(&action.connector_slug, &action.action, input, trigger);
     match result {
         Ok(receipt) => {
-            let sent = store.finish_send(&action.id, receipt.clone())?;
+            let sent = store.finish_send(&action.id, &send_attempt_id, receipt.clone())?;
             if let Some(task_id) = sent.origin.task_id.as_deref() {
-                complete_task_with_receipt(paths, task_id, &sent, &receipt)?;
+                // Best-effort: the message IS sent and `sent` is committed on
+                // disk; a task write-back failure must not surface as an RPC
+                // error (which would tell the client the send failed).
+                if let Err(error) = complete_task_with_receipt(paths, task_id, &sent, &receipt) {
+                    eprintln!("outbound action task write-back failed for `{task_id}`: {error:#}");
+                }
             }
             Ok(json!({
                 "actionId": sent.id,
@@ -164,7 +202,7 @@ fn handle_outbound_action_execute_with_executor(
         }
         Err(error) => {
             let message = format!("{error:#}");
-            store.fail_send(&action.id, &message)?;
+            store.fail_send(&action.id, &send_attempt_id, &message)?;
             Err(anyhow!(message))
         }
     }
@@ -364,10 +402,6 @@ fn non_empty(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-fn now_ms() -> u64 {
-    OffsetDateTime::now_utc().unix_timestamp_nanos() as u64 / 1_000_000
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,11 +566,18 @@ mod tests {
         .unwrap();
         let executor = RecordingExecutor::default();
 
+        // Present the live version (cancel bumped it) so the terminal-state guard
+        // is what rejects, not the optimistic-version guard.
+        let live_version = outbound_store(&paths)
+            .get(&action_id)
+            .unwrap()
+            .unwrap()
+            .version;
         let error = handle_outbound_action_execute_with_executor(
             &paths,
             &json!({
                 "action_id": action_id,
-                "version": 1,
+                "version": live_version,
                 "approved_message": "approved body",
                 "client_request_id": "req-1"
             }),
@@ -559,9 +600,16 @@ mod tests {
             &json!({"action_id": action_id, "version": 1, "reason": "user"}),
         )
         .unwrap();
+        // Live version after the first cancel, so the terminal guard is exercised
+        // rather than the version guard.
+        let live_version = outbound_store(&paths)
+            .get(&action_id)
+            .unwrap()
+            .unwrap()
+            .version;
         let error = handle_outbound_action_cancel(
             &paths,
-            &json!({"action_id": action_id, "version": 1, "reason": "again"}),
+            &json!({"action_id": action_id, "version": live_version, "reason": "again"}),
         )
         .unwrap_err();
 
@@ -574,15 +622,22 @@ mod tests {
         let paths = test_paths(temp.path());
         let action_id = create_action(&paths, None, None);
         outbound_store(&paths)
-            .begin_send(&action_id, 1, "approved body", "req-old")
+            .begin_send(&action_id, 1, "approved body", "req-old", false)
             .unwrap();
         let executor = RecordingExecutor::default();
 
+        // A transition bumped the version to 2; the recovering client presents
+        // the live version it read back from status.
+        let live_version = outbound_store(&paths)
+            .get(&action_id)
+            .unwrap()
+            .unwrap()
+            .version;
         let error = handle_outbound_action_execute_with_executor(
             &paths,
             &json!({
                 "action_id": action_id,
-                "version": 1,
+                "version": live_version,
                 "approved_message": "approved body",
                 "client_request_id": "req-1"
             }),
@@ -623,6 +678,13 @@ mod tests {
 
         assert!(error.to_string().contains("outbound_action_expired"));
         assert!(executor.calls.lock().unwrap().is_empty());
+
+        // An `expired` decision must be recorded in the audit log (spec §8).
+        let audit = fs::read_to_string(paths.user_config_dir.join("outbound_audit.ndjson"))
+            .expect("expired execute must write an audit entry");
+        let last: Value = serde_json::from_str(audit.lines().last().unwrap()).unwrap();
+        assert_eq!(last["decision"], "expired");
+        assert_eq!(last["action_id"], action_id);
     }
 
     #[test]
@@ -681,12 +743,18 @@ mod tests {
             "failed"
         );
 
+        // The failed attempt bumped the version; the retry presents the live one.
+        let live_version = outbound_store(&paths)
+            .get(&action_id)
+            .unwrap()
+            .unwrap()
+            .version;
         let executor = RecordingExecutor::default();
         let result = handle_outbound_action_execute_with_executor(
             &paths,
             &json!({
                 "action_id": action_id,
-                "version": 1,
+                "version": live_version,
                 "approved_message": "approved body",
                 "client_request_id": "req-2"
             }),

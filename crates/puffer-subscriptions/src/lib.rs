@@ -90,8 +90,10 @@ pub use outbound_audit::{
     append_gate_audit, AuditEntry, AUDIT_DECISION_ALLOWED_RULE, AUDIT_DECISION_APPROVED_SEND,
     AUDIT_DECISION_CANCELLED, AUDIT_DECISION_DRAFT_REQUIRED, AUDIT_DECISION_EXPIRED,
 };
+// `evaluate` is intentionally NOT re-exported at the crate root: every caller
+// spells it `outbound_gate::evaluate` to keep the single-gate invariant grep-able.
 pub use outbound_gate::{
-    action_requires_human_review, effective_action_permission, evaluate, GateDecision, SendOrigin,
+    action_requires_human_review, effective_action_permission, GateDecision, SendOrigin,
 };
 pub use outbound_store::{
     NewOutboundDraft, OutboundAction, OutboundOrigin, OutboundStore, RecipientSource,
