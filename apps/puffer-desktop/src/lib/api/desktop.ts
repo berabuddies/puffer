@@ -1824,35 +1824,49 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
   });
 }
 
-/** Execute a human-approved outbound connector action draft. */
-export async function executeConnectorActionDraft(params: {
-  draftId: string;
+/** Execute a human-approved outbound action. */
+export async function executeOutboundAction(params: {
+  actionId: string;
   version: number;
   approvedMessage: string;
   clientRequestId: string;
-}): Promise<{ status: string; draftId: string; receipt?: unknown }> {
+}): Promise<{ status: string; actionId: string; receipt?: unknown }> {
   const client = await ensureLocalDaemonClient();
-  return client.request<{ status: string; draftId: string; receipt?: unknown }>("connector_action_execute", {
-    draft_id: params.draftId,
+  return client.request<{ status: string; actionId: string; receipt?: unknown }>("outbound_action_execute", {
+    action_id: params.actionId,
     version: params.version,
     approved_message: params.approvedMessage,
     client_request_id: params.clientRequestId
   });
 }
 
-/** Read the persisted status for an outbound connector action draft. */
-export async function connectorActionDraftStatus(params: {
-  draftId: string;
+/** Read the persisted status for an outbound action. */
+export async function outboundActionStatus(params: {
+  actionId: string;
   version: number;
-}): Promise<{ status: string; draftId: string; version: number; error?: unknown; receipt?: unknown }> {
+}): Promise<{ status: string; actionId: string; version: number; error?: unknown; receipt?: unknown }> {
   const client = await ensureLocalDaemonClient();
-  return client.request<{ status: string; draftId: string; version: number; error?: unknown; receipt?: unknown }>(
-    "connector_action_draft_status",
+  return client.request<{ status: string; actionId: string; version: number; error?: unknown; receipt?: unknown }>(
+    "outbound_action_status",
     {
-      draft_id: params.draftId,
+      action_id: params.actionId,
       version: params.version
     }
   );
+}
+
+/** Cancel a pending outbound action. */
+export async function cancelOutboundAction(params: {
+  actionId: string;
+  version: number;
+  reason?: string;
+}): Promise<{ status: string; actionId: string }> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<{ status: string; actionId: string }>("outbound_action_cancel", {
+    action_id: params.actionId,
+    version: params.version,
+    reason: params.reason?.trim() || undefined
+  });
 }
 
 /** Add one include or exclude monitor rule and return the refreshed workflow snapshot. */

@@ -3,8 +3,9 @@
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
   import {
     browserRecording,
-    connectorActionDraftStatus,
-    executeConnectorActionDraft,
+    cancelOutboundAction,
+    executeOutboundAction,
+    outboundActionStatus,
     type BrowserRecordedFrame
   } from "../../api/desktop";
   import Icon, { type IconName } from "../../design/Icon.svelte";
@@ -45,6 +46,8 @@
     connectionSlug: string;
     action: string;
     recipient: string;
+    recipientSource: string;
+    taskId: string | null;
     message: string;
   };
   type ToolRender = FileRender | BashRender | ListRender | WebRender | McpRender | ConnectorDraftRender;
@@ -825,7 +828,9 @@
       connectorSlug: stringField(draft, ["connectorSlug", "connector_slug"]) ?? "",
       connectionSlug: stringField(draft, ["connectionSlug", "connection_slug"]) ?? "",
       action: stringField(draft, ["action"]) ?? "send_message",
-      recipient: stringField(draft, ["recipientStableId", "recipient_stable_id", "to", "recipient"]) ?? ""
+      recipient: stringField(draft, ["recipientStableId", "recipient_stable_id", "to", "recipient"]) ?? "",
+      recipientSource: stringField(draft, ["recipientSource", "recipient_source"]) ?? "model",
+      taskId: stringField(draft, ["taskId", "task_id"])
     };
   }
 
@@ -869,7 +874,7 @@
   let canvasSpec = $derived(normalizeCanvasSpec(inputJson));
   let isCanvasTool = $derived(isCanvasToolCall(toolName, canvasSpec));
   let canvasId = $derived(stringField(outputJson, ["canvasId", "canvas_id"]));
-  let connectorDraftSendState = $state<"idle" | "sending" | "sent" | "error">("idle");
+  let connectorDraftSendState = $state<"idle" | "sending" | "cancelling" | "sent" | "cancelled" | "expired" | "error">("idle");
   let connectorDraftSendError = $state("");
   let connectorDraftStatusKey = "";
   let recordingFrames = $state<RecordingFrame[]>([]);
@@ -1129,6 +1134,16 @@
       connectorDraftSendError = "";
       return;
     }
+    if (status === "cancelled") {
+      connectorDraftSendState = "cancelled";
+      connectorDraftSendError = "";
+      return;
+    }
+    if (status === "expired") {
+      connectorDraftSendState = "expired";
+      connectorDraftSendError = "";
+      return;
+    }
     if (status === "sending") {
       connectorDraftSendState = "sending";
       connectorDraftSendError = "";
@@ -1139,7 +1154,7 @@
       connectorDraftSendError = "Send status is uncertain. Check Telegram before retrying.";
       return;
     }
-    if (status === "send_failed") {
+    if (status === "send_failed" || status === "failed") {
       connectorDraftSendState = "error";
       connectorDraftSendError = valueText(error) || "Send failed.";
       return;
@@ -1148,10 +1163,33 @@
     connectorDraftSendError = "";
   }
 
+  function connectorDraftIsTerminal(): boolean {
+    return ["sent", "cancelled", "expired"].includes(connectorDraftSendState);
+  }
+
+  function connectorDraftIsBusy(): boolean {
+    return connectorDraftSendState === "sending" || connectorDraftSendState === "cancelling";
+  }
+
+  function connectorDraftPrimaryIcon(): IconName {
+    if (connectorDraftSendState === "sent") return "check";
+    if (connectorDraftSendState === "expired") return "clock";
+    if (connectorDraftSendState === "cancelled") return "x";
+    return "bolt";
+  }
+
+  function connectorDraftPrimaryLabel(): string {
+    if (connectorDraftSendState === "sending") return "Sending";
+    if (connectorDraftSendState === "sent") return "Sent";
+    if (connectorDraftSendState === "cancelled") return "Cancelled";
+    if (connectorDraftSendState === "expired") return "Expired";
+    return "Approve and send";
+  }
+
   async function refreshConnectorDraftStatus(draft: ConnectorDraftRender, expectedKey: string) {
     try {
-      const result = await connectorActionDraftStatus({
-        draftId: draft.draftId,
+      const result = await outboundActionStatus({
+        actionId: draft.draftId,
         version: draft.version
       });
       if (connectorDraftStatusKey !== expectedKey) return;
@@ -1171,21 +1209,38 @@
   });
 
   async function sendConnectorDraft(draft: ConnectorDraftRender) {
-    if (connectorDraftSendState === "sending") return;
+    if (["sending", "cancelling", "sent", "cancelled", "expired"].includes(connectorDraftSendState)) return;
     connectorDraftSendState = "sending";
     connectorDraftSendError = "";
     try {
-      const result = await executeConnectorActionDraft({
-        draftId: draft.draftId,
+      const result = await executeOutboundAction({
+        actionId: draft.draftId,
         version: draft.version,
         approvedMessage: draft.message,
         clientRequestId: clientRequestId(draft.draftId)
       });
-      connectorDraftSendState = result.status === "sent" || result.status === "already_sent" ? "sent" : "idle";
-      if (connectorDraftSendState !== "sent") {
+      applyConnectorDraftStatus(result.status);
+      if (result.status !== "sent" && result.status !== "already_sent") {
         connectorDraftSendError = result.status || "Could not send draft.";
         connectorDraftSendState = "error";
       }
+    } catch (err) {
+      connectorDraftSendError = err instanceof Error ? err.message : String(err);
+      connectorDraftSendState = "error";
+    }
+  }
+
+  async function cancelConnectorDraft(draft: ConnectorDraftRender) {
+    if (["sending", "cancelling", "sent", "cancelled", "expired"].includes(connectorDraftSendState)) return;
+    connectorDraftSendState = "cancelling";
+    connectorDraftSendError = "";
+    try {
+      const result = await cancelOutboundAction({
+        actionId: draft.draftId,
+        version: draft.version,
+        reason: "user"
+      });
+      applyConnectorDraftStatus(result.status);
     } catch (err) {
       connectorDraftSendError = err instanceof Error ? err.message : String(err);
       connectorDraftSendState = "error";
@@ -1254,6 +1309,9 @@
           <div class="pf-connector-draft-head">
             <span class="pf-connector-draft-title">Drafted message</span>
             <span class="pf-connector-draft-recipient">{toolRender.recipient}</span>
+            {#if toolRender.recipientSource === "model"}
+              <span class="pf-connector-draft-source">model-chosen</span>
+            {/if}
           </div>
           <blockquote>{toolRender.message}</blockquote>
           <div class="pf-connector-draft-actions">
@@ -1261,11 +1319,21 @@
               type="button"
               class="sc-btn pf-connector-draft-send"
               data-size="sm"
-              disabled={connectorDraftSendState === "sending" || connectorDraftSendState === "sent"}
+              disabled={connectorDraftIsBusy() || connectorDraftIsTerminal()}
               onclick={() => void sendConnectorDraft(toolRender)}
             >
-              <Icon name={connectorDraftSendState === "sent" ? "check" : "bolt"} size={12} />
-              {connectorDraftSendState === "sending" ? "Sending" : connectorDraftSendState === "sent" ? "Sent" : "Approve and send"}
+              <Icon name={connectorDraftPrimaryIcon()} size={12} />
+              {connectorDraftPrimaryLabel()}
+            </button>
+            <button
+              type="button"
+              class="sc-btn pf-connector-draft-cancel"
+              data-size="sm"
+              disabled={connectorDraftIsBusy() || connectorDraftIsTerminal()}
+              onclick={() => void cancelConnectorDraft(toolRender)}
+            >
+              <Icon name="x" size={12} />
+              {connectorDraftSendState === "cancelling" ? "Cancelling" : "Cancel"}
             </button>
             {#if connectorDraftSendError}
               <span class="pf-connector-draft-error">{connectorDraftSendError}</span>
@@ -1668,6 +1736,15 @@
     font-family: var(--font-mono);
     font-size: var(--pf-chat-code-size);
   }
+  .pf-connector-draft-source {
+    flex-shrink: 0;
+    border: 1px solid color-mix(in oklab, var(--destructive) 32%, var(--border));
+    border-radius: 999px;
+    padding: 1px 6px;
+    color: var(--destructive);
+    font-size: var(--pf-chat-meta-size);
+    line-height: 1.4;
+  }
   .pf-connector-draft blockquote {
     margin: 0;
     padding: 10px 12px;
@@ -1699,6 +1776,13 @@
   }
   .pf-connector-draft-send:disabled {
     opacity: 0.72;
+  }
+  .pf-connector-draft-cancel {
+    color: var(--muted-foreground);
+  }
+  .pf-connector-draft-cancel:hover:not(:disabled) {
+    color: var(--foreground);
+    border-color: color-mix(in oklab, var(--destructive) 32%, var(--border));
   }
   .pf-connector-draft-error {
     color: var(--destructive);
