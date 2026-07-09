@@ -53,6 +53,19 @@ fn gmail_list_emails(
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
     let result = poll_account_at_url(env, &account, handshake_ref, &url)?;
     ensure_gmail_action_ready(&account, &result)?;
+    if let Some(query) = string_input(input, "query").filter(|value| !value.trim().is_empty()) {
+        let fragment = format!("#search/{}", url_fragment(&query));
+        let href = result.get("href").and_then(Value::as_str).unwrap_or("");
+        if !href.contains(&fragment) {
+            return Err(crate::browser_action_verify::verification_failure(
+                action,
+                &format!(
+                    "Gmail search page for `{query}` was not reached (expected URL fragment `{fragment}`)"
+                ),
+                &result,
+            ));
+        }
+    }
     let limit = integer_input(input, "limit").unwrap_or(30).clamp(1, 100) as usize;
     let filters = GmailRowFilters::from_input(input);
     let rows = result
@@ -729,10 +742,7 @@ struct GmailRowFilters {
 
 impl GmailRowFilters {
     fn from_input(input: &Value) -> Self {
-        let mut keywords = keywords_input(input);
-        if let Some(query) = string_input(input, "query") {
-            keywords.push(query);
-        }
+        let keywords = keywords_input(input);
         Self {
             from: string_input(input, "from").map(|value| value.to_ascii_lowercase()),
             subject: string_input(input, "subject").map(|value| value.to_ascii_lowercase()),
@@ -1030,6 +1040,30 @@ mod tests {
         }));
         assert!(filters.matches(&row));
         let filters = GmailRowFilters::from_input(&json!({"keywords": ["missing"]}));
+        assert!(!filters.matches(&row));
+    }
+
+    #[test]
+    fn row_filters_do_not_swallow_query_operators() {
+        // #582: `query` is interpreted server-side via the #search URL; treating
+        // it as a literal client-side keyword made operator queries like
+        // `newer_than:1d` match zero rows.
+        let row = json!({
+            "sender": "Alice",
+            "fromEmail": "alice@example.com",
+            "subject": "Launch plan",
+            "snippet": "Budget attached",
+            "unread": true
+        });
+        let filters = GmailRowFilters::from_input(&json!({ "query": "newer_than:1d" }));
+        assert!(filters.matches(&row));
+        // Explicit `keywords` keep their client-side filter contract.
+        let filters = GmailRowFilters::from_input(&json!({
+            "query": "newer_than:1d",
+            "keywords": ["budget"]
+        }));
+        assert!(filters.matches(&row));
+        let filters = GmailRowFilters::from_input(&json!({ "keywords": ["missing"] }));
         assert!(!filters.matches(&row));
     }
 
