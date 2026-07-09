@@ -17,10 +17,13 @@ use super::{
     GMAIL_LOAD_TIMEOUT,
 };
 
-/// Minimum time to let Gmail replace the transient pre-search inbox rows with
-/// the actual search results before trusting a scrape (see
-/// [`poll_gmail_search_settled`]).
-const GMAIL_SEARCH_SETTLE: Duration = Duration::from_millis(2500);
+/// Network-idle window that marks a Gmail view's XHR burst as finished.
+const GMAIL_NETWORK_IDLE: Duration = Duration::from_millis(600);
+
+/// Upper bound on the network-idle wait. Gmail long-poll heartbeats can keep
+/// the connection busy indefinitely, so idle is a best-effort fast path, not
+/// a required signal (see [`wait_gmail_network_idle`]).
+const GMAIL_NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Executes one Gmail-browser connector action through the managed Chrome profile.
 pub(super) fn handle_action(
@@ -57,35 +60,21 @@ fn gmail_list_emails(
     let account = gmail_action_account(config, input)?;
     let url = gmail_collection_url(&account, input);
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
-    let mut result = poll_account_at_url(env, &account, handshake_ref, &url)?;
-    ensure_gmail_action_ready(&account, &result)?;
-    if let Some(query) = string_input(input, "query").filter(|value| !value.trim().is_empty()) {
-        // A search must clear two async hurdles before its rows can be trusted,
-        // and the first scrape loses both races (#582):
-        //   1. Route: on a cold tab Gmail boots to `#inbox` and only then
-        //      applies the `#search` hash, so the first `href` is `#inbox`.
-        //   2. Rows: even once `#search` commits, Gmail swaps in the real
-        //      results a beat later, so the rows are still the prior inbox.
-        // Reporting either transient state would be a fresh false-success, so
-        // wait for the `#search` route to commit AND the result rows to settle.
-        // We assert the `#search` route rather than the exact encoded fragment:
-        // Gmail re-normalizes the hash (percent-decoding operators like
-        // `newer_than:1d`), so an exact-fragment match would false-fail the very
-        // operator queries #582 enables.
-        // A *cold* tab boots Gmail to `#inbox` and drops the `#search` hash
-        // outright, so a direct open of the search URL never reaches search.
-        // The hash only commits as a *warm* client-side navigation, so if the
-        // first scrape is not yet on `#search`, boot Gmail on the inbox and
-        // re-open the search URL as a warm hash change before settling.
-        if !href_is_search(&result) {
-            let inbox_url = format!("{}#inbox", gmail_base_url(&account));
-            poll_account_at_url(env, &account, handshake_ref, &inbox_url)?;
-            result = poll_account_at_url(env, &account, handshake_ref, &url)?;
-            ensure_gmail_action_not_auth_blocked(&account, &result)?;
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    // All list reads (search included) go through the settled-view primitive;
+    // it owns the cold-boot hash-drop retry and the render-completion wait,
+    // so a stale pre-navigation view can never be reported as results (#777).
+    let result = match open_gmail_view_settled(env, &account, handshake_ref, &url, deadline)? {
+        Ok(result) => result,
+        Err(latest) => {
+            return Err(crate::browser_action_verify::verification_failure(
+                action,
+                &format!("Gmail view for `{url}` did not settle"),
+                &latest,
+            ));
         }
-        result = poll_gmail_search_settled(env, &account, handshake_ref, action, &query, result)?;
-        ensure_gmail_action_ready(&account, &result)?;
-    }
+    };
+    ensure_gmail_action_ready(&account, &result)?;
     let limit = integer_input(input, "limit").unwrap_or(30).clamp(1, 100) as usize;
     let filters = GmailRowFilters::from_input(input);
     let rows = result
@@ -785,6 +774,99 @@ impl GmailComposeFields {
     }
 }
 
+/// Best-effort wait for the tab's network to go idle -- the browser-level
+/// "this view's XHR burst finished" completion signal (#777). A timeout is
+/// not a failure: Gmail heartbeats may never let the network settle, so the
+/// caller merely loses the fast path and falls back to its confirmation
+/// scrapes.
+fn wait_gmail_network_idle(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+) {
+    let result = crate::daemon_browser::send_daemon_request(
+        handshake,
+        "browser_agent",
+        json!({
+            "action": "waitNetworkIdle",
+            "sessionId": format!("gmail-browser-{}", safe_session_part(&env.topic)),
+            "tabId": safe_session_part(account),
+            "width": BROWSER_WIDTH,
+            "height": BROWSER_HEIGHT,
+            "idleMs": GMAIL_NETWORK_IDLE.as_millis() as u64,
+            "timeoutMs": GMAIL_NETWORK_IDLE_TIMEOUT.as_millis() as u64,
+        }),
+    );
+    if result.is_err() {
+        crate::gmail_browser_log::line(format!("gmail_network_idle_timeout topic={}", env.topic));
+    }
+}
+
+/// Opens a Gmail list view and waits until it has verifiably rendered.
+///
+/// This is the sole arbiter of "this list view is ready" for action-path
+/// reads. It replaces per-callsite polling that trusted any visible rows and
+/// could return the pre-navigation inbox as search results (#777, #582):
+///
+/// 1. navigate, then wait for network idle (browser-level completion signal;
+///    best effort -- see [`wait_gmail_network_idle`]),
+/// 2. assert the `href` route matches the URL's fragment route, re-warming
+///    through `#inbox` once for the cold-boot hash drop, and
+/// 3. require the row signature to hold across two consecutive scrapes.
+///
+/// Returns `Ok(Ok(result))` once settled, `Ok(Err(latest))` when `deadline`
+/// passes first (callers attach action-specific diagnostics), and `Err` for
+/// auth or RPC failures. Non-ok/loading statuses (e.g. `temporary_error`)
+/// short-circuit as `Ok(Ok(result))` so callers can report them precisely.
+fn open_gmail_view_settled(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    url: &str,
+    deadline: Instant,
+) -> Result<std::result::Result<Value, Value>> {
+    let route = expected_route_of(url);
+    open_gmail_url(env, account, handshake, url)?;
+    wait_gmail_network_idle(env, account, handshake);
+    let mut warmed = false;
+    let mut prev_sig: Option<String> = None;
+    let mut latest = rescrape_gmail_list(env, account, handshake)?;
+    loop {
+        ensure_gmail_action_not_auth_blocked(account, &latest)?;
+        let status = latest.get("status").and_then(Value::as_str).unwrap_or("ok");
+        if status != "ok" && status != "loading" {
+            return Ok(Ok(latest));
+        }
+        if href_on_route(&latest, &route) {
+            if status == "ok" {
+                let sig = row_signature(&latest);
+                if prev_sig.as_deref() == Some(sig.as_str()) {
+                    return Ok(Ok(latest));
+                }
+                prev_sig = Some(sig);
+            }
+        } else {
+            prev_sig = None;
+            if !warmed && route != "#inbox" {
+                // Cold tab: Gmail boots to `#inbox` and drops the target
+                // hash; it only commits as a warm client-side navigation.
+                // Boot the inbox, then re-open the target URL (#582).
+                warmed = true;
+                let inbox_url = format!("{}#inbox", gmail_base_url(account));
+                open_gmail_url(env, account, handshake, &inbox_url)?;
+                wait_gmail_network_idle(env, account, handshake);
+                open_gmail_url(env, account, handshake, url)?;
+                wait_gmail_network_idle(env, account, handshake);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Ok(Err(latest));
+        }
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+        latest = rescrape_gmail_list(env, account, handshake)?;
+    }
+}
+
 /// Re-scrapes the current Gmail list tab in place (no re-navigation) with the
 /// shared inbox script.
 fn rescrape_gmail_list(
@@ -822,68 +904,6 @@ fn row_signature(result: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
-}
-
-fn href_is_search(result: &Value) -> bool {
-    result
-        .get("href")
-        .and_then(Value::as_str)
-        .is_some_and(|href| href.contains("#search"))
-}
-
-/// Waits for a Gmail search to commit its `#search` route AND for its result
-/// rows to settle before the scrape can be trusted.
-///
-/// `initial` is the first scrape, which loses both races: on a cold tab its
-/// `href` is still `#inbox`, and even on a warm tab the rows are still the
-/// prior inbox until Gmail swaps in the results. Re-scrapes in place until the
-/// `href` is on `#search` AND the row signature is stable across two
-/// consecutive reads AND at least [`GMAIL_SEARCH_SETTLE`] has elapsed since the
-/// route committed. On [`GMAIL_LOAD_TIMEOUT`], returns the last scrape if
-/// `#search` was reached, otherwise a [`verification_failure`] so a dropped
-/// query is reported honestly rather than as stale inbox rows (#582).
-fn poll_gmail_search_settled(
-    env: &SubscriberEnv,
-    account: &str,
-    handshake: &crate::daemon::Handshake,
-    action: &str,
-    query: &str,
-    initial: Value,
-) -> Result<Value> {
-    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
-    let mut latest = initial;
-    let mut prev_sig = row_signature(&latest);
-    // Settle is measured from when `#search` first commits, not from entry, so
-    // the cold-tab `#inbox` boot phase does not eat the settle window.
-    let mut search_committed_at = href_is_search(&latest).then(Instant::now);
-    loop {
-        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
-        let next = rescrape_gmail_list(env, account, handshake)?;
-        ensure_gmail_action_not_auth_blocked(account, &next)?;
-        let on_search = href_is_search(&next);
-        let sig = row_signature(&next);
-        let stable = on_search && sig == prev_sig;
-        if on_search && search_committed_at.is_none() {
-            search_committed_at = Some(Instant::now());
-        }
-        prev_sig = sig;
-        latest = next;
-        if let Some(committed) = search_committed_at {
-            if stable && committed.elapsed() >= GMAIL_SEARCH_SETTLE {
-                return Ok(latest);
-            }
-        }
-        if Instant::now() >= deadline {
-            if href_is_search(&latest) {
-                return Ok(latest);
-            }
-            return Err(crate::browser_action_verify::verification_failure(
-                action,
-                &format!("Gmail search view for `{query}` was not reached"),
-                &latest,
-            ));
-        }
-    }
 }
 
 /// Gmail list-view route prefix (`#search`, `#inbox`, ...) that `url` should
