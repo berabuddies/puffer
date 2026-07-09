@@ -1486,6 +1486,13 @@ mod tests {
     }
 
     #[test]
+    fn inbox_script_recognizes_zero_result_search_as_empty() {
+        // A legitimate zero-hit search must yield `status:"ok", rows:[]`, not an
+        // eternal `loading` (#777 adjacent defect).
+        assert!(GMAIL_INBOX_SCRIPT.contains("no messages matched"));
+    }
+
+    #[test]
     fn action_account_ignores_connector_connection_slug() {
         let config = GmailBrowserConfig {
             accounts: vec!["me@example.com".to_string()],

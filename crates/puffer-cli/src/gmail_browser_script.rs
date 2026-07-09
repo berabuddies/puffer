@@ -110,7 +110,8 @@ pub(crate) const GMAIL_INBOX_SCRIPT: &str = r#"
   const empty =
     /no conversations/i.test(bodyText) ||
     /inbox is empty/i.test(bodyText) ||
-    /no mail/i.test(bodyText);
+    /no mail/i.test(bodyText) ||
+    /no messages matched/i.test(bodyText);
   const status = rows.length > 0 || empty ? "ok" : "loading";
   // Logged-in mailbox identity: `?authuser=` silently falls back to the
   // default session account when the configured address is not signed in,
