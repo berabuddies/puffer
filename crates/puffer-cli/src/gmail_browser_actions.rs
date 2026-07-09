@@ -6,7 +6,7 @@ mod gmail_browser_draft;
 use anyhow::{Context, Result};
 use gmail_browser_draft::{
     draft_rows_contain, gmail_reply_draft_script, gmail_reply_draft_verify_script,
-    gmail_save_draft_script,
+    gmail_save_draft_script, sent_rows_contain,
 };
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -324,7 +324,8 @@ fn gmail_send_email(
         anyhow::bail!("send_email requires `to`");
     }
     let account = gmail_action_account(config, input)?;
-    let url = gmail_compose_url(&account, action, input);
+    let fields = GmailComposeFields::from_input(action, input);
+    let url = gmail_compose_url_for_fields(&account, &fields);
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
     open_gmail_url(env, &account, handshake_ref, &url)?;
     wait_gmail_ready(env, &account, handshake_ref)?;
@@ -338,12 +339,38 @@ fn gmail_send_email(
                 .unwrap_or("unknown")
         );
     }
-    Ok(json!({
-        "action": action,
-        "summary": format!("sent Gmail email for {account}"),
-        "account": account,
-        "url": url,
-    }))
+    // Post-condition: the email must show up in the Sent list before we may
+    // report success. Clicking Send proves nothing (#578).
+    let sent_url = format!("{}#sent", gmail_base_url(&account));
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    loop {
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+        let sent = poll_account_at_url(env, &account, handshake_ref, &sent_url)?;
+        ensure_gmail_action_not_auth_blocked(&account, &sent)?;
+        if sent_rows_contain(&fields, &sent) {
+            return Ok(json!({
+                "action": action,
+                "summary": format!("sent Gmail email for {account}"),
+                "account": account,
+                "url": url,
+                "verification": {
+                    "matched": true,
+                    "method": "sent_list",
+                    "sent_url": sent_url,
+                },
+            }));
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::browser_action_verify::verification_failure(
+                action,
+                &format!(
+                    "email `{}` to {:?} was not visible in Sent after clicking Send",
+                    fields.subject, fields.to
+                ),
+                &sent,
+            ));
+        }
+    }
 }
 
 fn open_gmail_url(
@@ -561,11 +588,6 @@ fn gmail_url_targets_thread(url: &str, thread_id: &str) -> bool {
         || last_segment.starts_with("thread-a:")
         || last_segment.starts_with("thread-f:")
         || (last_segment.len() >= 12 && last_segment.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
-fn gmail_compose_url(account: &str, action: &str, input: &Value) -> String {
-    let fields = GmailComposeFields::from_input(action, input);
-    gmail_compose_url_for_fields(account, &fields)
 }
 
 fn gmail_compose_url_for_fields(account: &str, fields: &GmailComposeFields) -> String {
@@ -977,8 +999,7 @@ mod tests {
 
     #[test]
     fn compose_url_includes_cc_bcc_subject_and_body() {
-        let url = gmail_compose_url(
-            "me@example.com",
+        let fields = GmailComposeFields::from_input(
             "draft_reply",
             &json!({
                 "to": ["alice@example.com"],
@@ -988,6 +1009,7 @@ mod tests {
                 "body": "Looks good",
             }),
         );
+        let url = gmail_compose_url_for_fields("me@example.com", &fields);
         assert!(url.contains("to=alice%40example.com"));
         assert!(url.contains("cc=bob%40example.com"));
         assert!(url.contains("bcc=ops%40example.com"));
@@ -1020,6 +1042,37 @@ mod tests {
         assert!(draft_rows_contain(
             &fields,
             &json!({"rows":[{"subject":"Re: Plan","snippet":"Looks good"}]})
+        ));
+    }
+
+    #[test]
+    fn sent_rows_require_subject_and_recipient_together() {
+        let fields = GmailComposeFields::from_input(
+            "send_email",
+            &json!({ "to": "bob@example.com", "subject": "Quarterly report", "body": "Numbers attached" }),
+        );
+        // Subject AND recipient present in the row: match.
+        assert!(sent_rows_contain(
+            &fields,
+            &json!({"rows":[{"sender":"To: Bob","fromEmail":"bob@example.com","subject":"Quarterly report","snippet":"Numbers attached"}]})
+        ));
+        // Same recipient but a different old email: draft_rows_contain's OR
+        // semantics would match this -- sent verification must not.
+        assert!(!sent_rows_contain(
+            &fields,
+            &json!({"rows":[{"sender":"To: Bob","fromEmail":"bob@example.com","subject":"Lunch","snippet":"See you"}]})
+        ));
+        // Subject matches but recipient absent: no match.
+        assert!(!sent_rows_contain(
+            &fields,
+            &json!({"rows":[{"sender":"To: Carol","fromEmail":"carol@example.com","subject":"Quarterly report","snippet":""}]})
+        ));
+        // Empty rows / fields without any signal never vacuously match.
+        assert!(!sent_rows_contain(&fields, &json!({"rows":[]})));
+        let empty = GmailComposeFields::from_input("send_email", &json!({}));
+        assert!(!sent_rows_contain(
+            &empty,
+            &json!({"rows":[{"subject":"anything","snippet":"x"}]})
         ));
     }
 

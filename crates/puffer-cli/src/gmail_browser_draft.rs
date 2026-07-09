@@ -42,6 +42,47 @@ pub(super) fn draft_rows_contain(fields: &GmailComposeFields, result: &Value) ->
     })
 }
 
+/// Returns true when a Gmail Sent list response contains a row matching the
+/// just-sent email. Unlike [`draft_rows_contain`] (OR semantics, good enough
+/// for drafts), sent verification requires subject AND at least one
+/// recipient to co-occur in the same row, so an unrelated older email to the
+/// same recipient cannot vouch for this send.
+pub(super) fn sent_rows_contain(fields: &GmailComposeFields, result: &Value) -> bool {
+    let rows = result
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let expected_subject = fields.subject.trim().to_ascii_lowercase();
+    let expected_recipients = fields
+        .to
+        .iter()
+        .chain(fields.cc.iter())
+        .chain(fields.bcc.iter())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if expected_subject.is_empty() && expected_recipients.is_empty() {
+        return false;
+    }
+    rows.iter().any(|row| {
+        let haystack = [
+            row.get("sender").and_then(Value::as_str).unwrap_or(""),
+            row.get("fromEmail").and_then(Value::as_str).unwrap_or(""),
+            row.get("subject").and_then(Value::as_str).unwrap_or(""),
+            row.get("snippet").and_then(Value::as_str).unwrap_or(""),
+        ]
+        .join(" ")
+        .to_ascii_lowercase();
+        let subject_ok = expected_subject.is_empty() || haystack.contains(&expected_subject);
+        let recipients_ok = expected_recipients.is_empty()
+            || expected_recipients
+                .iter()
+                .any(|recipient| haystack.contains(recipient));
+        subject_ok && recipients_ok
+    })
+}
+
 /// Builds a Gmail compose autosave script for standalone draft windows.
 pub(super) fn gmail_save_draft_script(fields: &GmailComposeFields) -> String {
     draft_script(fields, false)
