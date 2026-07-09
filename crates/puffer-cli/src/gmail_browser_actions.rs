@@ -771,12 +771,6 @@ fn ensure_gmail_action_not_auth_blocked(account: &str, result: &Value) -> Result
     Ok(())
 }
 
-/// Re-navigates to `url` and polls its list rows until `matched` accepts the
-/// response or [`GMAIL_LOAD_TIMEOUT`] elapses. Change-type actions
-/// (send/delete/mark-read) share this loop to assert their post-condition
-/// against an authoritative view. Returns the satisfying response, or the last
-/// response as `Err` on timeout so the caller can attach action-specific
-/// diagnostics through [`verification_failure`].
 /// Re-opens `url` through [`open_gmail_view_settled`] and polls its rows
 /// until `matched` accepts the listing or [`GMAIL_LOAD_TIMEOUT`] elapses.
 /// Change-type actions (send/delete/mark-read) share this loop to assert
@@ -1109,11 +1103,8 @@ impl GmailComposeFields {
 /// "this view's XHR burst finished" completion signal (#777). A timeout is
 /// not a failure: Gmail heartbeats may never let the network settle, so the
 /// caller merely loses the fast path and falls back to its confirmation
-/// scrapes.
-fn should_wait_network_idle_after_previous_attempt(previous_attempt_succeeded: bool) -> bool {
-    previous_attempt_succeeded
-}
-
+/// scrapes. Returns `true` when idle was observed, `false` on timeout; callers
+/// skip further idle waits once it has proven unreliable for this view.
 fn wait_gmail_network_idle(
     env: &SubscriberEnv,
     account: &str,
@@ -1199,11 +1190,14 @@ fn open_gmail_view_settled(
                 warmed = true;
                 let inbox_url = format!("{}#inbox", gmail_base_url(account));
                 open_gmail_url(env, account, handshake, &inbox_url)?;
-                if should_wait_network_idle_after_previous_attempt(network_idle_reliable) {
+                // Skip idle waits once they have proven unreliable for this
+                // view: a prior timeout means Gmail heartbeats keep the network
+                // busy, so waiting again only burns the shared deadline.
+                if network_idle_reliable {
                     network_idle_reliable = wait_gmail_network_idle(env, account, handshake);
                 }
                 open_gmail_url(env, account, handshake, url)?;
-                if should_wait_network_idle_after_previous_attempt(network_idle_reliable) {
+                if network_idle_reliable {
                     wait_gmail_network_idle(env, account, handshake);
                 }
                 latest = rescrape_gmail_list(env, account, handshake)?;
@@ -2332,12 +2326,6 @@ mod tests {
             worst_case_idle_ms + confirmation_ms < GMAIL_LOAD_TIMEOUT.as_millis(),
             "network idle timeouts can exhaust Gmail list-read deadline before route/signature confirmation"
         );
-    }
-
-    #[test]
-    fn timed_out_network_idle_disables_warm_navigation_idle_waits() {
-        assert!(should_wait_network_idle_after_previous_attempt(true));
-        assert!(!should_wait_network_idle_after_previous_attempt(false));
     }
 
     #[test]
