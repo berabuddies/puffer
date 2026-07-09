@@ -12,9 +12,8 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 use super::{
-    ensure_browser_daemon, poll_account_at_url, safe_session_part, GmailBrowserConfig,
-    SubscriberEnv, BROWSER_HEIGHT, BROWSER_WIDTH, GMAIL_EVALUATE_INTERVAL, GMAIL_INBOX_SCRIPT,
-    GMAIL_LOAD_TIMEOUT,
+    ensure_browser_daemon, safe_session_part, GmailBrowserConfig, SubscriberEnv, BROWSER_HEIGHT,
+    BROWSER_WIDTH, GMAIL_EVALUATE_INTERVAL, GMAIL_INBOX_SCRIPT, GMAIL_LOAD_TIMEOUT,
 };
 
 /// Network-idle window that marks a Gmail view's XHR burst as finished.
@@ -262,8 +261,18 @@ fn gmail_draft(
     }
     std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
     let drafts_url = gmail_drafts_url(&account);
-    let drafts = poll_account_at_url(env, &account, handshake_ref, &drafts_url)?;
-    ensure_gmail_action_not_auth_blocked(&account, &drafts)?;
+    // Best-effort settle: an unsettled Drafts view falls through to the
+    // draft_rows_contain check below, which reports the honest failure.
+    let drafts = match open_gmail_view_settled(
+        env,
+        &account,
+        handshake_ref,
+        &drafts_url,
+        Instant::now() + GMAIL_LOAD_TIMEOUT,
+    )? {
+        Ok(drafts) => drafts,
+        Err(latest) => latest,
+    };
     if !draft_rows_contain(&fields, &drafts) {
         let status = drafts
             .get("status")
@@ -559,6 +568,14 @@ fn ensure_gmail_action_not_auth_blocked(account: &str, result: &Value) -> Result
 /// against an authoritative view. Returns the satisfying response, or the last
 /// response as `Err` on timeout so the caller can attach action-specific
 /// diagnostics through [`verification_failure`].
+/// Re-opens `url` through [`open_gmail_view_settled`] and polls its rows
+/// until `matched` accepts the listing or [`GMAIL_LOAD_TIMEOUT`] elapses.
+/// Change-type actions (send/delete/mark-read) share this loop to assert
+/// their post-condition against an authoritative, settled view -- the settle
+/// step guarantees the rows really belong to `url`'s route (#777). Returns
+/// the satisfying response, or the last response as `Err` on timeout so the
+/// caller can attach action-specific diagnostics through
+/// [`verification_failure`].
 fn poll_gmail_list_until(
     env: &SubscriberEnv,
     account: &str,
@@ -569,8 +586,12 @@ fn poll_gmail_list_until(
     let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
     loop {
         std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
-        let listing = poll_account_at_url(env, account, handshake, url)?;
-        ensure_gmail_action_not_auth_blocked(account, &listing)?;
+        // The shared deadline caps nested settling: iterations never stack
+        // their own timeouts on top of the loop's.
+        let listing = match open_gmail_view_settled(env, account, handshake, url, deadline)? {
+            Ok(listing) => listing,
+            Err(latest) => return Ok(Err(latest)),
+        };
         if matched(&listing) {
             return Ok(Ok(listing));
         }
