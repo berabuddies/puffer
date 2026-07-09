@@ -19,7 +19,7 @@ async function openProviderSetup(page: Page, providerName: string) {
 
 async function openAutomationRuntimeSettings(page: Page) {
   await page.getByRole("button", { name: "Settings" }).click();
-  await page.locator(".pf-settings-nav").getByRole("button", { name: "Automation Runtime" }).click();
+  await page.locator(".pf-settings-nav").getByRole("button", { name: "Automation" }).click();
   return page.locator(".pf-settings-pane");
 }
 
@@ -194,7 +194,7 @@ test("settings exposes automation runtime configuration", async ({ page }) => {
   await daemon.open(page, { allowUnauthenticatedWorkspace: true });
 
   const pane = await openAutomationRuntimeSettings(page);
-  await expect(pane.getByRole("heading", { name: "Automation Runtime" })).toBeVisible();
+  await expect(pane.getByRole("heading", { name: "Automation" })).toBeVisible();
   await expect(pane.getByRole("radiogroup", { name: "Automation runtime mode" })).toBeVisible();
   await expect(pane.getByText("Workflow", { exact: true })).toHaveCount(0);
   await expect(pane.getByText("Local runtime", { exact: true })).toBeVisible();
@@ -215,7 +215,7 @@ test("automation runtime settings switch between Local and Cloud defaults", asyn
 
   await pane.getByRole("radio", { name: /Run on AgentEnv Cloud/ }).check();
   await expect(pane.getByLabel("API URL")).toHaveValue("https://api.agentenv.io");
-  await expect(pane.getByLabel("Automation Console URL")).toHaveValue("https://agentenv.io");
+  await expect(pane.getByLabel("Automation Console URL")).toHaveCount(0);
   expect(daemon.requests.some((request) => request.method === "workflow_list")).toBe(false);
 });
 
@@ -266,11 +266,34 @@ test("automation runtime settings test connection success", async ({ page }) => 
   expect(daemon.requests.some((request) => request.method === "workflow_list")).toBe(false);
 });
 
+test("automation runtime local repair requires confirmation", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const pane = await openAutomationRuntimeSettings(page);
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Repair the Puffer-managed local automation runtime");
+    await dialog.accept();
+  });
+  await pane.getByRole("button", { name: "Repair Runtime" }).click();
+
+  const repair = await daemon.waitForRequest("workflow_backend_repair_local_runtime");
+  expect(repair.params).toMatchObject({ confirm: true });
+  await expect(pane.getByText("Local automation runtime repaired. Previous runtime data was archived.")).toBeVisible();
+  expect(daemon.requests.some((request) => request.method === "workflow_list")).toBe(false);
+});
+
 test("automation runtime settings test connection failure", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.setWorkflowBackendConnection({
     success: false,
-    runtime: { state: "passed", message: "Automation runtime API is reachable." },
+    ready: { state: "passed", message: "Automation runtime readiness endpoint is healthy." },
+    runtime: {
+      state: "failed",
+      message: "invalid token",
+      error: { kind: "invalid_token", message: "invalid token", statusCode: 401 }
+    },
     auth: {
       state: "failed",
       message: "invalid token",
@@ -2045,7 +2068,7 @@ test("settings does not expose legacy Workflows runtime labels", async ({ page }
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(page.locator(".pf-settings-nav").getByRole("button", { name: "Workflows" })).toHaveCount(0);
   await expect(page.getByLabel("Workflow Console URL")).toHaveCount(0);
-  await expect(page.locator(".pf-settings-nav").getByRole("button", { name: "Automation Runtime" })).toBeVisible();
+  await expect(page.locator(".pf-settings-nav").getByRole("button", { name: "Automation" })).toBeVisible();
   expect(daemon.requests.some((request) => request.method.startsWith("workflow_backend_"))).toBe(false);
 });
 

@@ -1559,6 +1559,9 @@ async fn dispatch_request(
         "workflow_backend_test_connection" => respond!(detached!(|s| {
             crate::daemon_workflow_runtime::handle_workflow_backend_test_connection(&s)
         })),
+        "workflow_backend_repair_local_runtime" => respond!(detached!(|s, p| {
+            crate::daemon_workflow_runtime::handle_workflow_backend_repair_local_runtime(&s, &p)
+        })),
         "list_mcp_servers" => respond!(detached!(|s| handle_list_mcp_servers(&s))),
         "add_mcp_server" => respond!(detached!(|s, p| handle_add_mcp_server(&s, &p))),
         "list_lambda_skill_libraries" => {
@@ -1803,6 +1806,22 @@ async fn dispatch_request(
         })),
         "automation_run_history" => respond!(detached!(|s, p| {
             crate::daemon_automation_runtime::handle_automation_run_history(&s, &p)
+        })),
+        "automation_pending_action_list" => respond!(detached!(|s| {
+            crate::daemon_workflows::handle_automation_pending_action_list(
+                s.config_paths(),
+                s.automation_store(),
+            )
+        })),
+        "automation_pending_action_get" => respond!(detached!(|s, p| {
+            crate::daemon_workflows::handle_automation_pending_action_get(
+                s.config_paths(),
+                s.automation_store(),
+                &p,
+            )
+        })),
+        "automation_pending_action_reject" => respond!(detached!(|s, p| {
+            crate::daemon_workflows::handle_automation_pending_action_reject(s.config_paths(), &p)
         })),
         "workflow_open_ui" => respond!(detached!(|s| {
             crate::daemon_workflow_runtime::handle_workflow_open_ui(&s)

@@ -358,8 +358,102 @@ fn api_key_context_rejects_workflow_envelope_response() {
 }
 
 #[test]
+fn gateway_upstream_calls_use_user_scoped_api_without_workspace_header() {
+    let create_request = json!({
+        "name": "Puffer OpenAI",
+        "providerType": "openai-api",
+        "credentials": {
+            "apiKey": "sk-test",
+            "baseUrl": "https://api.openai.com",
+            "defaultModel": "gpt-5.4",
+            "preferredOpenAIEndpoint": "responses",
+            "supportedModels": ["gpt-5.4"]
+        }
+    });
+    let create_body = serde_json::to_string(&create_request).expect("create upstream body");
+    let update_request = json!({
+        "name": "Puffer OpenAI",
+        "providerType": "openai-api",
+        "credentials": {
+            "defaultModel": "gpt-5.4",
+            "supportedModels": ["gpt-5.4"]
+        }
+    });
+    let update_body = serde_json::to_string(&update_request).expect("update upstream body");
+    let transport = MockTransport::new(vec![
+        MockExchange {
+            method: "GET",
+            path: "/v1/ai-gateway/upstreams".to_string(),
+            required_headers: vec![("x-api-key".to_string(), "token-123".to_string())],
+            forbidden_headers: vec!["x-workspace-id".to_string()],
+            expected_body: None,
+            response: MockResponse::Http {
+                status: 200,
+                body: r#"[{"id":"upstream-1","name":"Puffer OpenAI"}]"#.to_string(),
+            },
+        },
+        MockExchange {
+            method: "POST",
+            path: "/v1/ai-gateway/upstreams".to_string(),
+            required_headers: vec![("x-api-key".to_string(), "token-123".to_string())],
+            forbidden_headers: vec!["x-workspace-id".to_string()],
+            expected_body: Some(create_body),
+            response: MockResponse::Http {
+                status: 200,
+                body: r#"{"id":"upstream-1","name":"Puffer OpenAI"}"#.to_string(),
+            },
+        },
+        MockExchange {
+            method: "PUT",
+            path: "/v1/ai-gateway/upstreams/upstream-1".to_string(),
+            required_headers: vec![("x-api-key".to_string(), "token-123".to_string())],
+            forbidden_headers: vec!["x-workspace-id".to_string()],
+            expected_body: Some(update_body),
+            response: MockResponse::Http {
+                status: 200,
+                body: r#"{"success":true}"#.to_string(),
+            },
+        },
+    ]);
+    let client = mock_client("http://runtime.test", transport.clone());
+
+    let upstreams = client
+        .list_gateway_upstreams()
+        .expect("list gateway upstreams");
+    assert_eq!(
+        upstreams[0].get("id").and_then(Value::as_str),
+        Some("upstream-1")
+    );
+
+    let created = client
+        .create_gateway_upstream(&create_request)
+        .expect("create gateway upstream");
+    assert_eq!(
+        created.get("id").and_then(Value::as_str),
+        Some("upstream-1")
+    );
+
+    let updated = client
+        .update_gateway_upstream("upstream-1", &update_request)
+        .expect("update gateway upstream");
+    assert_eq!(updated.get("success").and_then(Value::as_bool), Some(true));
+    transport.assert_drained();
+}
+
+#[test]
 fn test_connection_reports_two_success_steps() {
     let transport = MockTransport::new(vec![
+        MockExchange {
+            method: "GET",
+            path: "/v1/health/ready".to_string(),
+            required_headers: Vec::new(),
+            forbidden_headers: vec!["x-api-key".to_string(), "x-workspace-id".to_string()],
+            expected_body: None,
+            response: MockResponse::Http {
+                status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            },
+        },
         MockExchange {
             method: "GET",
             path: "/v1/workflows/node-definitions".to_string(),
@@ -389,6 +483,10 @@ fn test_connection_reports_two_success_steps() {
 
     assert!(result.is_success());
     assert_eq!(
+        result.ready.state,
+        WorkflowRuntimeConnectionStepState::Passed
+    );
+    assert_eq!(
         result.api_surface.state,
         WorkflowRuntimeConnectionStepState::Passed
     );
@@ -403,17 +501,30 @@ fn test_connection_reports_two_success_steps() {
 
 #[test]
 fn test_connection_maps_401_to_invalid_token_and_skips_workspace_phase() {
-    let transport = MockTransport::new(vec![MockExchange {
-        method: "GET",
-        path: "/v1/workflows/node-definitions".to_string(),
-        required_headers: vec![("x-api-key".to_string(), "token-123".to_string())],
-        forbidden_headers: vec!["x-workspace-id".to_string()],
-        expected_body: None,
-        response: MockResponse::Http {
-            status: 401,
-            body: "nope".to_string(),
+    let transport = MockTransport::new(vec![
+        MockExchange {
+            method: "GET",
+            path: "/v1/health/ready".to_string(),
+            required_headers: Vec::new(),
+            forbidden_headers: vec!["x-api-key".to_string(), "x-workspace-id".to_string()],
+            expected_body: None,
+            response: MockResponse::Http {
+                status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            },
         },
-    }]);
+        MockExchange {
+            method: "GET",
+            path: "/v1/workflows/node-definitions".to_string(),
+            required_headers: vec![("x-api-key".to_string(), "token-123".to_string())],
+            forbidden_headers: vec!["x-workspace-id".to_string()],
+            expected_body: None,
+            response: MockResponse::Http {
+                status: 401,
+                body: "nope".to_string(),
+            },
+        },
+    ]);
     let client = mock_client("http://runtime.test", transport.clone());
 
     let result = client.test_connection();
@@ -457,6 +568,17 @@ fn list_workflows_maps_403_to_permission_denied() {
 #[test]
 fn test_connection_maps_404_to_workspace_inaccessible() {
     let transport = MockTransport::new(vec![
+        MockExchange {
+            method: "GET",
+            path: "/v1/health/ready".to_string(),
+            required_headers: Vec::new(),
+            forbidden_headers: vec!["x-api-key".to_string(), "x-workspace-id".to_string()],
+            expected_body: None,
+            response: MockResponse::Http {
+                status: 200,
+                body: r#"{"status":"ready"}"#.to_string(),
+            },
+        },
         MockExchange {
             method: "GET",
             path: "/v1/workflows/node-definitions".to_string(),

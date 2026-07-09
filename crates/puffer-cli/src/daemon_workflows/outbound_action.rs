@@ -1,10 +1,11 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use puffer_automation::AutomationStore;
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::outbound_store::now_ms;
 use puffer_subscriptions::{
-    append_gate_audit, installed_connector_action_executor, AuditEntry, OutboundAction,
-    OutboundStore, AUDIT_DECISION_APPROVED_SEND, AUDIT_DECISION_CANCELLED, AUDIT_DECISION_EXPIRED,
-    OUTBOUND_ACTION_EXPIRED,
+    append_gate_audit, installed_connector_action_executor, AuditEntry, NewOutboundDraft,
+    OutboundAction, OutboundOrigin, OutboundStore, RecipientSource, AUDIT_DECISION_APPROVED_SEND,
+    AUDIT_DECISION_CANCELLED, AUDIT_DECISION_EXPIRED, OUTBOUND_ACTION_EXPIRED,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -23,8 +24,11 @@ struct OutboundActionExecuteParams {
     #[serde(alias = "actionId")]
     action_id: String,
     version: u64,
+    #[serde(default)]
     #[serde(alias = "approvedMessage")]
-    approved_message: String,
+    approved_message: Option<String>,
+    #[serde(default, alias = "approvedInput")]
+    approved_input: Option<Value>,
     #[serde(alias = "clientRequestId")]
     client_request_id: String,
     /// Set by the client when re-approving an `uncertain` action, acknowledging
@@ -47,6 +51,71 @@ struct OutboundActionStatusParams {
     #[serde(alias = "actionId")]
     action_id: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct AutomationPendingActionGetParams {
+    #[serde(alias = "draftId")]
+    draft_id: String,
+    version: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutomationPendingActionRejectParams {
+    #[serde(alias = "draftId")]
+    draft_id: String,
+    version: u64,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct AutomationDraftJoinFields {
+    automation_id: String,
+    automation_run_id: String,
+    step_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AutomationConnectorActionDraftParams {
+    pub(crate) automation_id: String,
+    pub(crate) automation_run_id: String,
+    pub(crate) step_id: String,
+    pub(crate) connector_slug: String,
+    pub(crate) connection_slug: String,
+    pub(crate) action: String,
+    pub(crate) input: Value,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CreatedAutomationConnectorActionDraft {
+    pub(crate) draft_id: String,
+    pub(crate) version: u64,
+    pub(crate) status: String,
+    pub(crate) connector_slug: String,
+    pub(crate) connection_slug: String,
+    pub(crate) action: String,
+    pub(crate) recipient_stable_id: String,
+    pub(crate) message: String,
+    pub(crate) content_hash: String,
+}
+
+const AUTOMATION_METADATA_KEY: &str = "__automation";
+const RECIPIENT_KEYS: &[&str] = &[
+    "to",
+    "target",
+    "channel",
+    "chat_id",
+    "open_id",
+    "user",
+    "receive_id",
+];
+const MESSAGE_KEYS: &[&str] = &[
+    "message",
+    "text",
+    "caption",
+    "body",
+    "summary",
+    "description",
+];
 
 pub(crate) trait OutboundActionExecutor: Send + Sync {
     fn execute_connector_action(
@@ -84,6 +153,162 @@ static ACTION_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock
 
 pub(crate) fn handle_outbound_action_execute(paths: &ConfigPaths, params: &Value) -> Result<Value> {
     handle_outbound_action_execute_with_executor(paths, params, &InstalledOutboundActionExecutor)
+}
+
+pub(crate) fn handle_automation_pending_action_list(
+    paths: &ConfigPaths,
+    automations: &AutomationStore,
+) -> Result<Value> {
+    let mut drafts = outbound_store(paths)?
+        .list()?
+        .into_iter()
+        .filter(is_pending_automation_action)
+        .map(|action| automation_pending_action_row(&action, automations))
+        .collect::<Result<Vec<_>>>()?;
+    drafts.sort_by(|left, right| {
+        right["created_at_ms"]
+            .as_u64()
+            .cmp(&left["created_at_ms"].as_u64())
+            .then_with(|| right["draft_id"].as_str().cmp(&left["draft_id"].as_str()))
+    });
+    Ok(json!({ "drafts": drafts }))
+}
+
+pub(crate) fn handle_automation_pending_action_get(
+    paths: &ConfigPaths,
+    automations: &AutomationStore,
+    params: &Value,
+) -> Result<Value> {
+    let params: AutomationPendingActionGetParams = serde_json::from_value(params.clone())
+        .context("invalid automation pending action get params")?;
+    let draft_id = non_empty(&params.draft_id)
+        .context("missing draft_id")?
+        .to_string();
+    let action = outbound_store(paths)?
+        .get(&draft_id)?
+        .with_context(|| format!("automation pending action `{draft_id}` not found"))?;
+    ensure_action_version(&action, params.version)?;
+    validate_pending_action_status(&action)?;
+    automation_join_fields(&action)?;
+    Ok(json!({
+        "draft": automation_pending_action_detail(&action, automations)?,
+    }))
+}
+
+pub(crate) fn handle_automation_pending_action_reject(
+    paths: &ConfigPaths,
+    params: &Value,
+) -> Result<Value> {
+    let params: AutomationPendingActionRejectParams = serde_json::from_value(params.clone())
+        .context("invalid automation pending action reject params")?;
+    let draft_id = non_empty(&params.draft_id)
+        .context("missing draft_id")?
+        .to_string();
+    let reason = non_empty(&params.reason)
+        .context("missing rejection reason")?
+        .to_string();
+    let store = outbound_store(paths)?;
+    let action = store
+        .get(&draft_id)?
+        .with_context(|| format!("automation pending action `{draft_id}` not found"))?;
+    ensure_action_version(&action, params.version)?;
+    validate_pending_action_status(&action)?;
+    let join = automation_join_fields(&action)?;
+    crate::daemon_automation_runtime::mark_automation_run_rejected(
+        paths,
+        &join.automation_id,
+        &join.automation_run_id,
+        &reason,
+    )?;
+    let cancelled = store.cancel(&draft_id, params.version, Some(&reason))?;
+    Ok(json!({
+        "draft_id": cancelled.id,
+        "version": cancelled.version,
+        "status": "rejected",
+        "automation_id": join.automation_id,
+        "automation_run_id": join.automation_run_id,
+        "step_id": join.step_id,
+    }))
+}
+
+pub(crate) fn create_automation_connector_action_draft(
+    paths: &ConfigPaths,
+    params: AutomationConnectorActionDraftParams,
+) -> Result<CreatedAutomationConnectorActionDraft> {
+    let automation_id = non_empty(&params.automation_id)
+        .context("missing automation_id")?
+        .to_string();
+    let automation_run_id = non_empty(&params.automation_run_id)
+        .context("missing automation_run_id")?
+        .to_string();
+    let step_id = non_empty(&params.step_id)
+        .context("missing step_id")?
+        .to_string();
+    let connector_slug = non_empty(&params.connector_slug)
+        .context("missing connector_slug")?
+        .to_string();
+    let connection_slug = non_empty(&params.connection_slug)
+        .context("missing connection_slug")?
+        .to_string();
+    let action = non_empty(&params.action)
+        .context("missing action")?
+        .to_string();
+    let mut input = params.input;
+    let object = input
+        .as_object_mut()
+        .context("Automation connector action draft input must be an object")?;
+    object
+        .entry("connection_slug".to_string())
+        .or_insert_with(|| Value::String(connection_slug.clone()));
+    object
+        .entry("connector_slug".to_string())
+        .or_insert_with(|| Value::String(connector_slug.clone()));
+    object
+        .entry("action".to_string())
+        .or_insert_with(|| Value::String(action.clone()));
+    object.insert(
+        AUTOMATION_METADATA_KEY.to_string(),
+        json!({
+            "automation_id": automation_id,
+            "automation_run_id": automation_run_id,
+            "step_id": step_id,
+        }),
+    );
+
+    let store = outbound_store(paths)?;
+    if let Some(existing) = store.list()?.into_iter().find(|candidate| {
+        matches!(candidate.status.as_str(), "draft_ready" | "failed")
+            && automation_join_fields(candidate)
+                .map(|join| {
+                    join.automation_id == automation_id
+                        && join.automation_run_id == automation_run_id
+                        && join.step_id == step_id
+                })
+                .unwrap_or(false)
+    }) {
+        return created_automation_draft_from_action(&existing);
+    }
+
+    let recipient_stable_id =
+        first_string_value(&input, RECIPIENT_KEYS).unwrap_or_else(|| connection_slug.clone());
+    let message = first_string_value(&input, MESSAGE_KEYS)
+        .unwrap_or_else(|| format!("{connector_slug}.{action}"));
+    let created = store.create_draft(NewOutboundDraft {
+        connector_slug,
+        connection_slug,
+        action,
+        input,
+        recipient_stable_id,
+        recipient_source: RecipientSource::Stamped,
+        message,
+        origin: OutboundOrigin {
+            session_id: format!("automation:{automation_id}"),
+            turn_id: Some(automation_run_id),
+            task_id: None,
+        },
+        ttl_ms: None,
+    })?;
+    created_automation_draft_from_action(&created)
 }
 
 pub(crate) fn handle_outbound_action_cancel(paths: &ConfigPaths, params: &Value) -> Result<Value> {
@@ -137,9 +362,6 @@ fn handle_outbound_action_execute_with_executor(
     let action_id = non_empty(&params.action_id)
         .context("missing action_id")?
         .to_string();
-    let approved_message = non_empty(&params.approved_message)
-        .context("missing approved_message")?
-        .to_string();
     let client_request_id = non_empty(&params.client_request_id)
         .context("missing client_request_id")?
         .to_string();
@@ -147,6 +369,15 @@ fn handle_outbound_action_execute_with_executor(
     let lock = outbound_action_lock(&outbound_actions_path(paths), &action_id);
     let _guard = lock.lock().unwrap();
     let store = outbound_store(paths)?;
+    let live_action = store
+        .get(&action_id)?
+        .with_context(|| format!("outbound action `{action_id}` not found"))?;
+    let approved_message = params
+        .approved_message
+        .as_deref()
+        .and_then(non_empty)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| live_action.message.clone());
     let action = match store.begin_send(
         &action_id,
         params.version,
@@ -400,6 +631,176 @@ fn task_metadata(task: &mut Map<String, Value>) -> Result<&mut Map<String, Value
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn ensure_action_version(action: &OutboundAction, version: u64) -> Result<()> {
+    if action.version != version {
+        bail!("outbound_action_version_mismatch");
+    }
+    Ok(())
+}
+
+fn validate_pending_action_status(action: &OutboundAction) -> Result<()> {
+    match action.status.as_str() {
+        "draft_ready" | "failed" => Ok(()),
+        other => bail!("automation pending action state `{other}` cannot be reviewed"),
+    }
+}
+
+fn is_pending_automation_action(action: &OutboundAction) -> bool {
+    matches!(action.status.as_str(), "draft_ready" | "failed")
+        && automation_join_fields(action).is_ok()
+}
+
+fn automation_join_fields(action: &OutboundAction) -> Result<AutomationDraftJoinFields> {
+    let metadata = action
+        .input
+        .get(AUTOMATION_METADATA_KEY)
+        .and_then(Value::as_object)
+        .context("outbound action missing automation metadata")?;
+    Ok(AutomationDraftJoinFields {
+        automation_id: string_field(metadata, &["automation_id", "automationId"])
+            .context("automation metadata missing automation_id")?
+            .to_string(),
+        automation_run_id: string_field(metadata, &["automation_run_id", "automationRunId"])
+            .context("automation metadata missing automation_run_id")?
+            .to_string(),
+        step_id: string_field(metadata, &["step_id", "stepId"])
+            .context("automation metadata missing step_id")?
+            .to_string(),
+    })
+}
+
+fn created_automation_draft_from_action(
+    action: &OutboundAction,
+) -> Result<CreatedAutomationConnectorActionDraft> {
+    automation_join_fields(action)?;
+    Ok(CreatedAutomationConnectorActionDraft {
+        draft_id: action.id.clone(),
+        version: action.version,
+        status: action.status.clone(),
+        connector_slug: action.connector_slug.clone(),
+        connection_slug: action.connection_slug.clone(),
+        action: action.action.clone(),
+        recipient_stable_id: action.recipient_stable_id.clone(),
+        message: action.message.clone(),
+        content_hash: action.content_hash.clone(),
+    })
+}
+
+fn automation_pending_action_row(
+    action: &OutboundAction,
+    automations: &AutomationStore,
+) -> Result<Value> {
+    let join = automation_join_fields(action)?;
+    let message_editable = action.action == "send_message";
+    Ok(json!({
+        "draft_id": action.id,
+        "version": action.version,
+        "status": action.status,
+        "automation_id": join.automation_id,
+        "automation_name": automation_name(automations, &join.automation_id),
+        "automation_run_id": join.automation_run_id,
+        "step_id": join.step_id,
+        "connector_slug": action.connector_slug,
+        "connection_slug": action.connection_slug,
+        "action": action.action,
+        "recipient": action.recipient_stable_id,
+        "recipient_label": Value::Null,
+        "recipient_stable_id": action.recipient_stable_id,
+        "created_at": Value::Null,
+        "created_at_ms": action.created_at_ms,
+        "updated_at": Value::Null,
+        "updated_at_ms": action_updated_at_ms(action),
+        "preview": action.message,
+        "message_editable": message_editable,
+        "approval_kind": if message_editable { "editable_message" } else { "exact_action" },
+    }))
+}
+
+fn automation_pending_action_detail(
+    action: &OutboundAction,
+    automations: &AutomationStore,
+) -> Result<Value> {
+    let mut row = automation_pending_action_row(action, automations)?;
+    let object = row
+        .as_object_mut()
+        .context("automation pending action row must be an object")?;
+    let message_field = message_field(&action.input);
+    object.insert("message".to_string(), Value::String(action.message.clone()));
+    object.insert("input".to_string(), action.input.clone());
+    object.insert(
+        "message_field".to_string(),
+        message_field
+            .map(|field| Value::String(field.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "destination_metadata".to_string(),
+        destination_metadata(action),
+    );
+    object.insert(
+        "content_hash".to_string(),
+        Value::String(action.content_hash.clone()),
+    );
+    object.insert(
+        "error".to_string(),
+        action
+            .error
+            .as_ref()
+            .map(|error| Value::String(error.clone()))
+            .unwrap_or(Value::Null),
+    );
+    Ok(row)
+}
+
+fn automation_name(automations: &AutomationStore, automation_id: &str) -> String {
+    automations
+        .get(automation_id)
+        .map(|record| record.spec.name)
+        .unwrap_or_else(|_| automation_id.to_string())
+}
+
+fn destination_metadata(action: &OutboundAction) -> Value {
+    let mut metadata = Map::new();
+    metadata.insert(
+        "recipient_stable_id".to_string(),
+        Value::String(action.recipient_stable_id.clone()),
+    );
+    if let Some(object) = action.input.as_object() {
+        for key in RECIPIENT_KEYS {
+            if let Some(value) = object.get(*key) {
+                metadata.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(metadata)
+}
+
+fn first_string_value(value: &Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    keys.iter().find_map(|key| {
+        object.get(*key).and_then(|value| match value {
+            Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            _ => None,
+        })
+    })
+}
+
+fn message_field(value: &Value) -> Option<&'static str> {
+    let object = value.as_object()?;
+    MESSAGE_KEYS
+        .iter()
+        .copied()
+        .find(|key| object.contains_key(*key))
+}
+
+fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .and_then(non_empty)
 }
 
 #[cfg(test)]

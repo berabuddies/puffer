@@ -219,6 +219,15 @@ pub type WorkflowRuntimeNodeDefinition = WorkflowRuntimeRecord;
 /// API key context returned by `GET /v1/auth/api-key-context`.
 pub type WorkflowRuntimeApiKeyContext = WorkflowRuntimeRecord;
 
+/// AI Gateway upstream returned by `GET /v1/ai-gateway/upstreams`.
+pub type WorkflowRuntimeGatewayUpstream = WorkflowRuntimeRecord;
+
+/// Request payload sent to `POST /v1/ai-gateway/upstreams`.
+pub type WorkflowRuntimeCreateGatewayUpstreamRequest = Value;
+
+/// Request payload sent to `PUT /v1/ai-gateway/upstreams/:id`.
+pub type WorkflowRuntimeUpdateGatewayUpstreamRequest = Value;
+
 /// Request payload sent to `POST /v1/workflows`.
 pub type WorkflowRuntimeCreateWorkflowRequest = AgentEnvCreateWorkflowRequest;
 
@@ -319,16 +328,19 @@ impl WorkflowRuntimeConnectionStep {
 /// Two-phase connectivity report for the workflow runtime UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowRuntimeConnectionTest {
-    /// Phase 1: validates the token and workflow API surface.
+    /// Phase 1: validates the runtime readiness endpoint.
+    pub ready: WorkflowRuntimeConnectionStep,
+    /// Phase 2: validates the token and workflow API surface.
     pub api_surface: WorkflowRuntimeConnectionStep,
-    /// Phase 2: validates workspace access with `X-Workspace-ID`.
+    /// Phase 3: validates workspace access with `X-Workspace-ID`.
     pub workspace_access: WorkflowRuntimeConnectionStep,
 }
 
 impl WorkflowRuntimeConnectionTest {
     /// Returns true when both phases passed.
     pub fn is_success(&self) -> bool {
-        self.api_surface.state == WorkflowRuntimeConnectionStepState::Passed
+        self.ready.state == WorkflowRuntimeConnectionStepState::Passed
+            && self.api_surface.state == WorkflowRuntimeConnectionStepState::Passed
             && self.workspace_access.state == WorkflowRuntimeConnectionStepState::Passed
     }
 }
@@ -384,6 +396,11 @@ impl WorkflowRuntimeClient {
         })
     }
 
+    /// Returns the workspace id resolved for workspace-scoped runtime calls.
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
     /// Returns API key context from `GET /v1/auth/api-key-context`.
     pub fn api_key_context(&self) -> WorkflowRuntimeResult<WorkflowRuntimeApiKeyContext> {
         let payload = self.send_request(Method::GET, &["auth", "api-key-context"], false, None)?;
@@ -417,6 +434,42 @@ impl WorkflowRuntimeClient {
     pub fn list_workflows(&self) -> WorkflowRuntimeResult<Vec<WorkflowRuntimeWorkflow>> {
         let payload = self.send_request(Method::GET, &["workflows"], true, None)?;
         parse_record_list(payload, "/v1/workflows")
+    }
+
+    /// Lists AI Gateway upstreams visible to the authenticated runtime user.
+    ///
+    /// This endpoint is user-scoped in AgentEnv and intentionally does not
+    /// receive `X-Workspace-ID`; workspace API keys are rejected by AgentEnv.
+    pub fn list_gateway_upstreams(
+        &self,
+    ) -> WorkflowRuntimeResult<Vec<WorkflowRuntimeGatewayUpstream>> {
+        let payload = self.send_request(Method::GET, &["ai-gateway", "upstreams"], false, None)?;
+        parse_bare_record_list(payload, "/v1/ai-gateway/upstreams")
+    }
+
+    /// Creates an AI Gateway upstream for the authenticated runtime user.
+    pub fn create_gateway_upstream(
+        &self,
+        request: &WorkflowRuntimeCreateGatewayUpstreamRequest,
+    ) -> WorkflowRuntimeResult<WorkflowRuntimeGatewayUpstream> {
+        let payload =
+            self.send_json_request(Method::POST, &["ai-gateway", "upstreams"], false, request)?;
+        parse_bare_record(payload, "/v1/ai-gateway/upstreams")
+    }
+
+    /// Updates an AI Gateway upstream for the authenticated runtime user.
+    pub fn update_gateway_upstream(
+        &self,
+        upstream_id: &str,
+        request: &WorkflowRuntimeUpdateGatewayUpstreamRequest,
+    ) -> WorkflowRuntimeResult<WorkflowRuntimeRecord> {
+        let payload = self.send_json_request(
+            Method::PUT,
+            &["ai-gateway", "upstreams", upstream_id],
+            false,
+            request,
+        )?;
+        parse_bare_record(payload, "/v1/ai-gateway/upstreams/:id")
     }
 
     /// Creates a workflow with `POST /v1/workflows`.
@@ -534,12 +587,38 @@ impl WorkflowRuntimeClient {
         parse_record(payload, "/v1/workflows/execute-in-memory")
     }
 
+    /// Checks `GET /v1/health/ready` without workspace scope.
+    pub fn health_ready(&self) -> WorkflowRuntimeResult<()> {
+        self.send_request_for_status(Method::GET, &["health", "ready"], false, false)
+    }
+
     /// Runs the two-step runtime connectivity check used by the UI.
     pub fn test_connection(&self) -> WorkflowRuntimeConnectionTest {
+        let ready_method = "GET";
+        let ready_path = "/v1/health/ready";
         let api_method = "GET";
         let api_path = "/v1/workflows/node-definitions";
         let workspace_method = "GET";
         let workspace_path = "/v1/workflows";
+
+        let ready = match self.health_ready() {
+            Ok(()) => WorkflowRuntimeConnectionStep::passed(ready_method, ready_path, 0),
+            Err(error) => {
+                return WorkflowRuntimeConnectionTest {
+                    ready: WorkflowRuntimeConnectionStep::failed(ready_method, ready_path, error),
+                    api_surface: WorkflowRuntimeConnectionStep::skipped(
+                        api_method,
+                        api_path,
+                        "skipped because runtime readiness validation failed",
+                    ),
+                    workspace_access: WorkflowRuntimeConnectionStep::skipped(
+                        workspace_method,
+                        workspace_path,
+                        "skipped because runtime readiness validation failed",
+                    ),
+                };
+            }
+        };
 
         match self.list_node_definitions() {
             Ok(records) => {
@@ -547,6 +626,7 @@ impl WorkflowRuntimeClient {
                     WorkflowRuntimeConnectionStep::passed(api_method, api_path, records.len());
                 match self.list_workflows() {
                     Ok(records) => WorkflowRuntimeConnectionTest {
+                        ready,
                         api_surface,
                         workspace_access: WorkflowRuntimeConnectionStep::passed(
                             workspace_method,
@@ -555,6 +635,7 @@ impl WorkflowRuntimeClient {
                         ),
                     },
                     Err(error) => WorkflowRuntimeConnectionTest {
+                        ready,
                         api_surface,
                         workspace_access: WorkflowRuntimeConnectionStep::failed(
                             workspace_method,
@@ -565,6 +646,7 @@ impl WorkflowRuntimeClient {
                 }
             }
             Err(error) => WorkflowRuntimeConnectionTest {
+                ready,
                 api_surface: WorkflowRuntimeConnectionStep::failed(api_method, api_path, error),
                 workspace_access: WorkflowRuntimeConnectionStep::skipped(
                     workspace_method,
@@ -582,15 +664,45 @@ impl WorkflowRuntimeClient {
         include_workspace_id: bool,
         body: Option<String>,
     ) -> WorkflowRuntimeResult<Value> {
+        self.send_request_with_headers(method, path_segments, true, include_workspace_id, body)
+    }
+
+    fn send_request_for_status(
+        &self,
+        method: Method,
+        path_segments: &[&str],
+        include_api_key: bool,
+        include_workspace_id: bool,
+    ) -> WorkflowRuntimeResult<()> {
         let url = self.endpoint_url(path_segments);
-        let mut headers = vec![("X-API-Key".to_string(), self.api_key.clone())];
-        if include_workspace_id {
-            headers.push(("X-Workspace-ID".to_string(), self.workspace_id.clone()));
+        let response = self.transport.send(WorkflowRuntimePreparedRequest {
+            method,
+            url: url.clone(),
+            headers: self.request_headers(include_api_key, include_workspace_id),
+            body: None,
+        })?;
+        if response.status.is_success() {
+            return Ok(());
         }
+        match map_http_response(url, response.status, &response.body_text) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn send_request_with_headers(
+        &self,
+        method: Method,
+        path_segments: &[&str],
+        include_api_key: bool,
+        include_workspace_id: bool,
+        body: Option<String>,
+    ) -> WorkflowRuntimeResult<Value> {
+        let url = self.endpoint_url(path_segments);
         let request = WorkflowRuntimePreparedRequest {
             method,
             url: url.clone(),
-            headers,
+            headers: self.request_headers(include_api_key, include_workspace_id),
             body,
         };
         let response = self.transport.send(request)?;
@@ -607,6 +719,21 @@ impl WorkflowRuntimeClient {
         let body_text =
             serde_json::to_string(body).map_err(WorkflowRuntimeError::incompatible_runtime)?;
         self.send_request(method, path_segments, include_workspace_id, Some(body_text))
+    }
+
+    fn request_headers(
+        &self,
+        include_api_key: bool,
+        include_workspace_id: bool,
+    ) -> Vec<(String, String)> {
+        let mut headers = Vec::new();
+        if include_api_key {
+            headers.push(("X-API-Key".to_string(), self.api_key.clone()));
+        }
+        if include_workspace_id {
+            headers.push(("X-Workspace-ID".to_string(), self.workspace_id.clone()));
+        }
+        headers
     }
 
     fn endpoint_url(&self, path_segments: &[&str]) -> Url {
@@ -775,6 +902,17 @@ fn parse_record_list(
     endpoint: &str,
 ) -> WorkflowRuntimeResult<Vec<WorkflowRuntimeRecord>> {
     serde_json::from_value(enveloped_data(payload, endpoint)?).map_err(|error| {
+        WorkflowRuntimeError::incompatible_runtime(format!(
+            "{endpoint} returned an unexpected schema: {error}"
+        ))
+    })
+}
+
+fn parse_bare_record_list(
+    payload: Value,
+    endpoint: &str,
+) -> WorkflowRuntimeResult<Vec<WorkflowRuntimeRecord>> {
+    serde_json::from_value(payload).map_err(|error| {
         WorkflowRuntimeError::incompatible_runtime(format!(
             "{endpoint} returned an unexpected schema: {error}"
         ))

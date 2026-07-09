@@ -154,7 +154,7 @@ ON CONFLICT ("userId", "workspaceId") DO UPDATE SET
   role = EXCLUDED.role;
 
 INSERT INTO api_keys (id, "userId", type, "workspaceId", name, "keyHash", "revokedAt")
-VALUES ({api_key_id}, {user_id}, 'workspace', {workspace_id}, 'Puffer Local', {key_hash}, NULL)
+VALUES ({api_key_id}, {user_id}, 'user', NULL, 'Puffer Local', {key_hash}, NULL)
 ON CONFLICT (id) DO UPDATE SET
   "userId" = EXCLUDED."userId",
   type = EXCLUDED.type,

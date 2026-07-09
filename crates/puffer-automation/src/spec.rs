@@ -48,7 +48,7 @@ pub struct AutomationSpec {
     /// bootstrapped by Puffer rather than configured through user credentials.
     #[serde(default)]
     pub run_location: AutomationRunLocation,
-    /// Events or manual actions that start the Automation.
+    /// Events that start the Automation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<AutomationTriggerSpec>,
     /// Linear flow shown in the UI. Loops are Puffer syntax, not AgentEnv graph
@@ -149,14 +149,6 @@ pub enum AutomationTriggerSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
-    /// Manual or preview-only trigger. It does not imply deployed ingress.
-    Manual {
-        /// Stable trigger id inside the Automation.
-        id: String,
-        /// Optional UI summary.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        summary: Option<String>,
-    },
 }
 
 /// A reference to one AgentEnv workflow node.
@@ -201,8 +193,35 @@ pub enum AutomationStepSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
-    /// Puffer-owned loop syntax. The loop body compiles to AgentEnv workflow
-    /// artifact(s), and the Puffer Automation runner invokes them repeatedly.
+    /// First-class iterative agent step. The loop is the agent's run strategy,
+    /// not a hand-authored control-flow node: the Puffer runner observes state,
+    /// runs one agent turn, dispatches any tools the agent requests, feeds the
+    /// results back, and repeats until the agent reports done or the iteration
+    /// cap is reached. The agent is executed by the Puffer daemon and is never
+    /// emitted as an AgentEnv node.
+    Agent {
+        /// Stable step id inside the Automation.
+        id: String,
+        /// Agent instructions for this step.
+        instructions: String,
+        /// Whether the agent runs a single turn or loops until done.
+        #[serde(default)]
+        mode: AutomationAgentMode,
+        /// Hard iteration cap for `until_done` mode so a stored agent step can
+        /// never run forever. Ignored for `once` mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_iterations: Option<u32>,
+        /// Tools the agent may invoke between turns. Each tool is a Puffer-owned
+        /// runtime action dispatched by the daemon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<AutomationAgentToolSpec>,
+        /// Optional UI summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    /// Puffer-owned loop syntax for deterministic iteration over a finite
+    /// collection. Iterative agent behavior belongs on [`AutomationStepSpec::Agent`];
+    /// this step exists only for bounded `for_each` fan-out.
     Loop {
         /// Stable step id inside the Automation.
         id: String,
@@ -217,20 +236,40 @@ pub enum AutomationStepSpec {
     },
 }
 
-/// Loop shape. Repeat loops must carry an explicit stop condition and bounded
-/// max iteration count so persisted Automations cannot run forever.
+/// Run strategy for an [`AutomationStepSpec::Agent`] step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationAgentMode {
+    /// Run exactly one agent turn.
+    #[default]
+    Once,
+    /// Loop the agent until it reports done or the iteration cap is reached.
+    UntilDone,
+}
+
+/// One tool available to an [`AutomationStepSpec::Agent`] step.
+///
+/// The tool references a Puffer-owned runtime action (currently a
+/// `puffer_connector_action` node). The agent decides when to call it; the
+/// daemon executes it and feeds the result back into the next turn.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AutomationAgentToolSpec {
+    /// Stable tool id the agent references when requesting a call. Unique within
+    /// the owning agent step.
+    pub id: String,
+    /// Puffer-owned node backing this tool.
+    pub node: AgentEnvNodeRef,
+    /// Optional UI summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// Loop shape. The only supported loop is deterministic `for_each` iteration
+/// over a finite collection; open-ended "repeat until" behavior is owned by the
+/// iterative agent step ([`AutomationStepSpec::Agent`]), not by loop syntax.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AutomationLoopSpec {
-    /// Repeat until the stop condition passes or the iteration cap is reached.
-    Repeat {
-        /// Input passed to the loop body.
-        input: AutomationLoopInput,
-        /// Explicit loop stop condition.
-        stop_when: AutomationLoopStopSpec,
-        /// Required cap for stored repeat loops.
-        max_iterations: u32,
-    },
     /// Run the body once for each item in the input collection.
     ForEach {
         /// Input collection.
@@ -261,31 +300,6 @@ pub enum AutomationLoopInput {
     Static {
         /// Literal loop input.
         value: Value,
-    },
-}
-
-/// Stop condition for a repeat loop.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AutomationLoopStopSpec {
-    /// Stop when a JSON path in the latest body output equals `value`.
-    OutputEquals {
-        /// JSON path in the latest body output.
-        path: String,
-        /// Expected value.
-        value: Value,
-    },
-    /// Stop when a JSON path in the latest body output matches `pattern`.
-    OutputMatches {
-        /// JSON path in the latest body output.
-        path: String,
-        /// Rust regex pattern.
-        pattern: String,
-    },
-    /// Stop decision delegated to an AgentEnv node.
-    AgentEnvNode {
-        /// AgentEnv node reference selected from runtime node definitions.
-        node: AgentEnvNodeRef,
     },
 }
 

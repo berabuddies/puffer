@@ -22,7 +22,9 @@ pub(crate) fn handle_workflow_create(paths: &ConfigPaths, params: &Value) -> Res
         "workflow",
         "workflow_create",
     )?;
-    Ok(serde_json::to_value(client.create_workflow(&request)?)?)
+    Ok(serde_json::to_value(runtime_call(
+        client.create_workflow(&request),
+    )?)?)
 }
 
 /// Updates one workflow draft in the configured runtime.
@@ -34,31 +36,35 @@ pub(crate) fn handle_workflow_update(paths: &ConfigPaths, params: &Value) -> Res
         "workflow",
         "workflow_update",
     )?;
-    Ok(serde_json::to_value(
-        client.update_workflow(&workflow_id, &request)?,
-    )?)
+    Ok(serde_json::to_value(runtime_call(
+        client.update_workflow(&workflow_id, &request),
+    )?)?)
 }
 
 /// Deploys one workflow in the configured runtime.
 pub(crate) fn handle_workflow_deploy(paths: &ConfigPaths, params: &Value) -> Result<Value> {
     let client = workflow_runtime_client(paths)?;
     let workflow_id = required_string(params, WORKFLOW_ID_KEYS, "workflow id")?;
-    Ok(serde_json::to_value(client.deploy_workflow(&workflow_id)?)?)
+    Ok(serde_json::to_value(runtime_call(
+        client.deploy_workflow(&workflow_id),
+    )?)?)
 }
 
 /// Undeploys one workflow in the configured runtime.
 pub(crate) fn handle_workflow_undeploy(paths: &ConfigPaths, params: &Value) -> Result<Value> {
     let client = workflow_runtime_client(paths)?;
     let workflow_id = required_string(params, WORKFLOW_ID_KEYS, "workflow id")?;
-    Ok(serde_json::to_value(
-        client.undeploy_workflow(&workflow_id)?,
-    )?)
+    Ok(serde_json::to_value(runtime_call(
+        client.undeploy_workflow(&workflow_id),
+    )?)?)
 }
 
 /// Lists AgentEnv node definitions from the configured runtime.
 pub(crate) fn handle_workflow_node_definitions(paths: &ConfigPaths) -> Result<Value> {
     let client = workflow_runtime_client(paths)?;
-    Ok(serde_json::to_value(client.list_node_definitions()?)?)
+    Ok(serde_json::to_value(runtime_call(
+        client.list_node_definitions(),
+    )?)?)
 }
 
 /// Fetches one AgentEnv node definition from the configured runtime.
@@ -68,9 +74,9 @@ pub(crate) fn handle_workflow_node_definition(
 ) -> Result<Value> {
     let client = workflow_runtime_client(paths)?;
     let node_type = required_string(params, &["type", "nodeType", "node_type"], "node type")?;
-    Ok(serde_json::to_value(
-        client.get_node_definition(&node_type)?,
-    )?)
+    Ok(serde_json::to_value(runtime_call(
+        client.get_node_definition(&node_type),
+    )?)?)
 }
 
 /// Executes one workflow in the configured runtime.
@@ -78,9 +84,9 @@ pub(crate) fn handle_workflow_execute(paths: &ConfigPaths, params: &Value) -> Re
     let client = workflow_runtime_client(paths)?;
     let workflow_id = required_string(params, WORKFLOW_ID_KEYS, "workflow id")?;
     let request = workflow_execute_request(params)?;
-    Ok(serde_json::to_value(
-        client.execute_workflow(&workflow_id, &request)?,
-    )?)
+    Ok(serde_json::to_value(runtime_call(
+        client.execute_workflow(&workflow_id, &request),
+    )?)?)
 }
 
 /// Executes an in-memory workflow definition in the configured runtime.
@@ -94,7 +100,9 @@ pub(crate) fn handle_workflow_execute_in_memory(
         "request",
         "workflow_execute_in_memory",
     )?;
-    Ok(serde_json::to_value(client.execute_in_memory(&request)?)?)
+    Ok(serde_json::to_value(runtime_call(
+        client.execute_in_memory(&request),
+    )?)?)
 }
 
 /// Lists executions for one workflow from the configured runtime.
@@ -104,7 +112,9 @@ pub(crate) fn handle_workflow_list_executions(
 ) -> Result<Value> {
     let client = workflow_runtime_client(paths)?;
     let workflow_id = required_string(params, WORKFLOW_ID_KEYS, "workflow id")?;
-    Ok(serde_json::to_value(client.list_executions(&workflow_id)?)?)
+    Ok(serde_json::to_value(runtime_call(
+        client.list_executions(&workflow_id),
+    )?)?)
 }
 
 /// Fetches one workflow execution from the configured runtime.
@@ -116,15 +126,28 @@ pub(crate) fn handle_workflow_get_execution(paths: &ConfigPaths, params: &Value)
         &["executionId", "execution_id", "runId", "run_id"],
         "execution id",
     )?;
-    Ok(serde_json::to_value(
-        client.get_execution(&workflow_id, &execution_id)?,
-    )?)
+    Ok(serde_json::to_value(runtime_call(
+        client.get_execution(&workflow_id, &execution_id),
+    )?)?)
 }
 
 fn workflow_runtime_client(paths: &ConfigPaths) -> Result<puffer_workflow::WorkflowRuntimeClient> {
     let config = load_config(paths).context("load workflow backend config")?;
-    crate::daemon_workflow_runtime::workflow_runtime_client(paths, &config)
-        .context("create workflow runtime client")
+    crate::daemon_workflow_runtime::workflow_runtime_client(paths, &config).map_err(|error| {
+        let detail = format!("{error:#}");
+        tracing::warn!(error = %detail, "workflow runtime client setup failed");
+        anyhow::anyhow!(
+            crate::daemon_workflow_runtime::public_workflow_runtime_error_message(&error)
+        )
+    })
+}
+
+fn runtime_call<T>(result: puffer_workflow::WorkflowRuntimeResult<T>) -> Result<T> {
+    result.map_err(|error| {
+        let detail = error.to_string();
+        tracing::warn!(error = %detail, "workflow runtime request failed");
+        anyhow::anyhow!(crate::daemon_workflow_runtime::public_workflow_runtime_error(&error))
+    })
 }
 
 fn workflow_execute_request(params: &Value) -> Result<WorkflowRuntimeRecord> {

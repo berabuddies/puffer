@@ -7,11 +7,15 @@ use puffer_workflow::{
     WorkflowRuntimeConnectionStepState, WorkflowRuntimeConnectionTest, WorkflowRuntimeError,
     WorkflowRuntimeErrorKind,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 use url::Url;
 
+use crate::automation_runtime_errors::{
+    public_automation_runtime_detail_message, public_automation_runtime_error,
+    public_automation_runtime_error_message, AutomationRuntimeErrorContext,
+};
 use crate::daemon::DaemonState;
 use crate::daemon_workflow_backend_settings::save_workflow_backend_settings;
 use crate::desktop_api::workflow_backend_settings_dto;
@@ -21,7 +25,7 @@ use crate::desktop_api_types::SaveWorkflowBackendSettingsParams;
 #[path = "workflow_local_runtime.rs"]
 mod workflow_local_runtime;
 
-const WORKFLOW_RUNTIME_TIMEOUT: Duration = Duration::from_secs(15);
+const WORKFLOW_RUNTIME_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Returns the redacted workflow backend config for desktop callers.
 pub(crate) fn handle_workflow_backend_get_config(state: &DaemonState) -> Result<Value> {
@@ -48,6 +52,20 @@ pub(crate) fn handle_workflow_backend_test_connection(state: &DaemonState) -> Re
     workflow_backend_test_connection_value(state.config_paths(), &config)
 }
 
+/// Rebuilds the Puffer-managed local runtime data after explicit confirmation.
+pub(crate) fn handle_workflow_backend_repair_local_runtime(
+    state: &DaemonState,
+    params: &Value,
+) -> Result<Value> {
+    let input: WorkflowBackendRepairLocalRuntimeParams =
+        serde_json::from_value(params.clone()).context("parse workflow backend repair params")?;
+    if !input.confirm {
+        anyhow::bail!("Local automation runtime repair requires confirmation.");
+    }
+    let mut config = state.config_snapshot();
+    workflow_backend_repair_local_runtime_value(state.config_paths(), &mut config)
+}
+
 /// Opens the configured workflow runtime console in the system browser.
 pub(crate) fn handle_workflow_open_ui(state: &DaemonState) -> Result<Value> {
     let config = state.config_snapshot();
@@ -65,6 +83,7 @@ struct ResolvedWorkflowRuntimeConfig {
 #[serde(rename_all = "camelCase")]
 struct WorkflowBackendConnectionTestDto {
     success: bool,
+    ready: WorkflowBackendConnectionCheckDto,
     runtime: WorkflowBackendConnectionCheckDto,
     auth: WorkflowBackendConnectionCheckDto,
     workspace: WorkflowBackendConnectionCheckDto,
@@ -88,15 +107,35 @@ struct WorkflowRuntimeErrorDto {
     status_code: Option<u16>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowBackendRepairLocalRuntimeParams {
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowBackendRepairLocalRuntimeDto {
+    success: bool,
+    state: workflow_local_runtime::LocalWorkflowRuntimeState,
+    message: Option<String>,
+    archived_data_dirs: Vec<String>,
+    data_dir: Option<String>,
+}
+
 impl From<WorkflowRuntimeConnectionTest> for WorkflowBackendConnectionTestDto {
     fn from(value: WorkflowRuntimeConnectionTest) -> Self {
+        let ready = ready_check(&value.ready);
         let runtime = runtime_check(&value.api_surface);
         let auth = auth_check(&value.api_surface);
         let workspace = workspace_check(&value.workspace_access);
         Self {
-            success: runtime.state == WorkflowRuntimeConnectionStepState::Passed
+            success: ready.state == WorkflowRuntimeConnectionStepState::Passed
+                && runtime.state == WorkflowRuntimeConnectionStepState::Passed
                 && auth.state == WorkflowRuntimeConnectionStepState::Passed
                 && workspace.state == WorkflowRuntimeConnectionStepState::Passed,
+            ready,
             runtime,
             auth,
             workspace,
@@ -108,9 +147,27 @@ impl From<WorkflowRuntimeError> for WorkflowRuntimeErrorDto {
     fn from(value: WorkflowRuntimeError) -> Self {
         Self {
             kind: value.kind,
-            message: value.message,
+            message: public_workflow_runtime_error(&value),
             status_code: value.status_code,
         }
+    }
+}
+
+fn ready_check(step: &WorkflowRuntimeConnectionStep) -> WorkflowBackendConnectionCheckDto {
+    match step.state {
+        WorkflowRuntimeConnectionStepState::Passed => WorkflowBackendConnectionCheckDto {
+            state: WorkflowRuntimeConnectionStepState::Passed,
+            message: "Automation runtime readiness endpoint is healthy.".to_string(),
+            error: None,
+        },
+        WorkflowRuntimeConnectionStepState::Failed => {
+            failed_check("Automation runtime readiness check failed.", step)
+        }
+        WorkflowRuntimeConnectionStepState::Skipped => skipped_check(
+            step.message
+                .as_deref()
+                .unwrap_or("Skipped because automation runtime was not checked."),
+        ),
     }
 }
 
@@ -118,24 +175,13 @@ fn runtime_check(step: &WorkflowRuntimeConnectionStep) -> WorkflowBackendConnect
     match step.state {
         WorkflowRuntimeConnectionStepState::Passed => WorkflowBackendConnectionCheckDto {
             state: WorkflowRuntimeConnectionStepState::Passed,
-            message: "Automation runtime API is reachable.".to_string(),
+            message: "Automation runtime schema and token are accepted.".to_string(),
             error: None,
         },
-        WorkflowRuntimeConnectionStepState::Failed => {
-            let auth_failure = step
-                .error
-                .as_ref()
-                .is_some_and(|error| auth_error_kind(error.kind));
-            if auth_failure {
-                WorkflowBackendConnectionCheckDto {
-                    state: WorkflowRuntimeConnectionStepState::Passed,
-                    message: "Automation runtime API is reachable.".to_string(),
-                    error: None,
-                }
-            } else {
-                failed_check("Unable to reach automation runtime.", step)
-            }
-        }
+        WorkflowRuntimeConnectionStepState::Failed => failed_check(
+            "Automation runtime schema or token validation failed.",
+            step,
+        ),
         WorkflowRuntimeConnectionStepState::Skipped => skipped_check(
             step.message
                 .as_deref()
@@ -197,7 +243,7 @@ fn failed_check(
         message: step
             .error
             .as_ref()
-            .map(|error| error.message.clone())
+            .map(public_workflow_runtime_error)
             .unwrap_or_else(|| fallback.to_string()),
         error: step.error.clone().map(Into::into),
     }
@@ -216,6 +262,18 @@ fn auth_error_kind(kind: WorkflowRuntimeErrorKind) -> bool {
         kind,
         WorkflowRuntimeErrorKind::InvalidToken | WorkflowRuntimeErrorKind::PermissionDenied
     )
+}
+
+pub(crate) fn public_workflow_runtime_error_message(error: &anyhow::Error) -> String {
+    public_automation_runtime_error_message(error, AutomationRuntimeErrorContext::Request)
+}
+
+pub(crate) fn public_workflow_runtime_error(error: &WorkflowRuntimeError) -> String {
+    public_automation_runtime_error(error, AutomationRuntimeErrorContext::Request)
+}
+
+pub(crate) fn public_workflow_runtime_detail_message(detail: &str) -> String {
+    public_automation_runtime_detail_message(detail, AutomationRuntimeErrorContext::Request)
 }
 
 fn workflow_backend_config_value(paths: &ConfigPaths, config: &PufferConfig) -> Result<Value> {
@@ -237,11 +295,66 @@ fn workflow_backend_test_connection_value(
     paths: &ConfigPaths,
     config: &PufferConfig,
 ) -> Result<Value> {
-    let client = workflow_runtime_client(paths, config)?;
+    let client = workflow_runtime_client(paths, config).map_err(|error| {
+        let detail = format!("{error:#}");
+        tracing::warn!(error = %detail, "automation runtime connection test setup failed");
+        anyhow::anyhow!(public_workflow_runtime_error_message(&error))
+    })?;
     let report = client.test_connection();
     Ok(serde_json::to_value(
         WorkflowBackendConnectionTestDto::from(report),
     )?)
+}
+
+fn workflow_backend_repair_local_runtime_value(
+    paths: &ConfigPaths,
+    config: &mut PufferConfig,
+) -> Result<Value> {
+    if config.workflow_backend.mode != WorkflowBackendMode::Local {
+        anyhow::bail!(
+            "Local automation runtime repair is only available when Automation Runtime is set to Run locally."
+        );
+    }
+    let result = workflow_local_runtime::repair(paths, config).map_err(|error| {
+        let detail = format!("{error:#}");
+        tracing::warn!(error = %detail, "local automation runtime repair failed");
+        anyhow::anyhow!(public_workflow_runtime_error_message(&error))
+    })?;
+    Ok(serde_json::to_value(local_runtime_repair_dto(result))?)
+}
+
+fn local_runtime_repair_dto(
+    result: workflow_local_runtime::LocalWorkflowRuntimeRepairResult,
+) -> WorkflowBackendRepairLocalRuntimeDto {
+    let status = result.status;
+    let success = status.state == workflow_local_runtime::LocalWorkflowRuntimeState::Ready;
+    WorkflowBackendRepairLocalRuntimeDto {
+        success,
+        state: status.state,
+        message: status
+            .message
+            .as_deref()
+            .map(|message| public_local_runtime_status_message(status.state, message)),
+        archived_data_dirs: result
+            .archived_data_dirs
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        data_dir: status
+            .data_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+    }
+}
+
+fn public_local_runtime_status_message(
+    state: workflow_local_runtime::LocalWorkflowRuntimeState,
+    message: &str,
+) -> String {
+    if state == workflow_local_runtime::LocalWorkflowRuntimeState::Ready {
+        return message.to_string();
+    }
+    public_workflow_runtime_detail_message(message)
 }
 
 fn workflow_open_ui_value(config: &PufferConfig, open_in_browser: bool) -> Result<Value> {
@@ -522,11 +635,13 @@ mod tests {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let handle = thread::spawn(move || {
-            for (index, stream) in listener.incoming().take(2).enumerate() {
+            for (index, stream) in listener.incoming().take(3).enumerate() {
                 let mut stream = stream.expect("accept connection");
                 let request = read_request(&mut stream);
                 captured.lock().expect("requests lock").push(request);
                 let body = if index == 0 {
+                    r#"{"status":"ready"}"#
+                } else if index == 1 {
                     r#"{"data":[{"id":"node-a"},{"id":"node-b"}]}"#
                 } else {
                     r#"{"data":[{"id":"workflow-a"}]}"#
@@ -568,24 +683,27 @@ mod tests {
         handle.join().expect("runtime server joined");
 
         assert_eq!(response["success"], true);
+        assert_eq!(response["ready"]["state"], "passed");
         assert_eq!(response["runtime"]["state"], "passed");
         assert_eq!(response["auth"]["state"], "passed");
         assert_eq!(response["workspace"]["state"], "passed");
 
         let captured = requests.lock().expect("requests lock");
-        assert_eq!(captured.len(), 2);
-        assert!(captured[0].starts_with("GET /v1/workflows/node-definitions "));
-        assert!(captured[0]
+        assert_eq!(captured.len(), 3);
+        assert!(captured[0].starts_with("GET /v1/health/ready "));
+        assert!(!captured[0].to_ascii_lowercase().contains("x-api-key"));
+        assert!(captured[1].starts_with("GET /v1/workflows/node-definitions "));
+        assert!(captured[1]
             .to_ascii_lowercase()
             .contains("x-api-key: runtime-token"));
-        assert!(!captured[0].to_ascii_lowercase().contains("x-workspace-id"));
-        assert!(captured[1].starts_with("GET /v1/workflows "));
-        assert!(captured[1]
+        assert!(!captured[1].to_ascii_lowercase().contains("x-workspace-id"));
+        assert!(captured[2].starts_with("GET /v1/workflows "));
+        assert!(captured[2]
             .to_ascii_lowercase()
             .contains("x-workspace-id: workspace-local"));
     }
 
-    // A missing token surfaces a clear, mode-named error instead of falling back
+    // A missing token surfaces a clear product error instead of falling back
     // to any default or environment value.
     #[test]
     fn missing_token_reports_clear_error_without_fallback() {
@@ -607,7 +725,43 @@ mod tests {
             .expect_err("missing token should error");
         assert!(error
             .to_string()
-            .contains("AgentEnv Cloud automation runtime token is not configured"));
+            .contains("Automation runtime token is not configured"));
+    }
+
+    #[test]
+    fn public_runtime_error_hides_local_migration_diagnostics() {
+        let raw = r#"local workflow runtime is incompatible_runtime: docker compose run --rm migrate failed: Container puffer-workflow-runtime-postgres-1 Healthy Database migration failed: error: could not open file "global/pg_filenode.map": No such file or directory at Parser.parseErrorMessage (/app/node_modules/pg-protocol/dist/parser.js:285:98) at TCP.onStreamRead (node:internal/stream_base_commons:191:23); could not refresh agentenv/api-server:local"#;
+
+        let message = public_workflow_runtime_detail_message(raw);
+
+        assert_eq!(
+            message,
+            "The Puffer-managed local automation runtime database could not be prepared. Puffer needs to rebuild the local runtime data before automations can run."
+        );
+        assert!(!message.contains("global/pg_filenode.map"));
+        assert!(!message.contains("Parser.parseErrorMessage"));
+        assert!(!message.contains("node_modules"));
+        assert!(!message.contains("agentenv/api-server"));
+    }
+
+    #[test]
+    fn connection_error_dto_uses_public_runtime_message() {
+        let error = WorkflowRuntimeError {
+            kind: WorkflowRuntimeErrorKind::IncompatibleRuntime,
+            message:
+                "incompatible workflow runtime: invalid JSON from http://127.0.0.1:3000/v1/workflows"
+                    .to_string(),
+            status_code: None,
+        };
+
+        let dto = WorkflowRuntimeErrorDto::from(error);
+
+        assert_eq!(
+            dto.message,
+            "The Puffer-managed local automation runtime is not compatible with this Puffer build. Puffer could not update it automatically; try again after Docker is ready."
+        );
+        assert!(!dto.message.contains("127.0.0.1"));
+        assert!(!dto.message.contains("/v1/"));
     }
 
     #[test]

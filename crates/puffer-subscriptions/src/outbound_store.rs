@@ -185,6 +185,10 @@ impl OutboundStore {
             .find(|action| action.id == action_id))
     }
 
+    pub fn list(&self) -> Result<Vec<OutboundAction>> {
+        read_actions(&self.path)
+    }
+
     pub fn cancel(
         &self,
         action_id: &str,

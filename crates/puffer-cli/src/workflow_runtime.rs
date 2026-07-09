@@ -96,11 +96,17 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
         let _guard = workflow_runner_lock(&self.lock);
         let automation_store = AutomationStore::load(&self.automation_store_path)
             .context("reload automation store")?;
-        crate::daemon_automation_runtime::run_automation_with_store(
+        let provider_context = crate::daemon_automation_runtime::AutomationProviderContext {
+            providers: &self.providers,
+            auth_store: &self.auth_store,
+            resources: Some(&self.resources),
+        };
+        crate::daemon_automation_runtime::run_automation_with_context(
             &self.paths,
             &automation_store,
             automation_id,
             trigger,
+            Some(&provider_context),
         )
     }
 

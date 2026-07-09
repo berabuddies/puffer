@@ -7,8 +7,8 @@ use puffer_automation::{
 };
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
-    connector_workflow_trigger_supported, suggested_connection_slug, ConnectionState,
-    ConnectorTemplate, SubscriberManifestRoots,
+    builtin_connector_templates, connector_workflow_trigger_supported, suggested_connection_slug,
+    ConnectionState, ConnectorActionDefinition, ConnectorTemplate, SubscriberManifestRoots,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -44,6 +44,9 @@ pub(crate) fn handle_automation_save(store: &AutomationStore, params: &Value) ->
     let id = required_automation_id(params)?;
     let expected_revision = optional_expected_revision(params)?;
     let status = optional_status(params)?;
+    if matches!(status, Some(AutomationStatus::Enabled)) {
+        anyhow::bail!("automation_save cannot enable automations; use automation_compile_deploy");
+    }
     let spec = params
         .get("spec")
         .cloned()
@@ -60,7 +63,12 @@ pub(crate) fn handle_automation_save(store: &AutomationStore, params: &Value) ->
         Ok(_) => {
             let expected_revision =
                 expected_revision.context("automation_save update requires expected_revision")?;
-            let saved = store.save_spec(&id, expected_revision, spec)?;
+            let mut saved = store.save_spec(&id, expected_revision, spec)?;
+            if saved.status == AutomationStatus::Enabled
+                && saved.runtime.status == puffer_automation::AutomationRuntimeStatus::Stale
+            {
+                saved = store.set_status(&id, AutomationStatus::Paused)?;
+            }
             if let Some(status) = status {
                 store.set_status(&id, status)?
             } else {
@@ -95,23 +103,34 @@ pub(crate) fn handle_automation_delete(store: &AutomationStore, params: &Value) 
 /// Returns the real trigger/action catalog used by the desktop Automation UI.
 pub(crate) fn handle_automation_catalog(paths: &ConfigPaths) -> Result<Value> {
     let mut trigger_error = None::<String>;
-    let mut action_error = None::<String>;
     let mut triggers = Vec::new();
     let mut actions = Vec::new();
 
     triggers.push(json!({
-        "id": "manual",
-        "kind": "manual",
-        "label": "Manual run",
-        "summary": "Run from the Automation screen or another explicit user action.",
+        "id": "webhook",
+        "kind": "webhook",
+        "label": "Webhook",
+        "summary": "Run when the Automation runtime receives an HTTP POST.",
         "icon": "bolt",
         "connection_state": "ready",
         "permission_state": "ready",
-        "required_inputs": [],
+        "required_inputs": [
+            {"id": "path", "label": "Path", "kind": "text", "required": true, "default": "puffer-automation-webhook"}
+        ],
         "spec_template": {
-            "type": "manual",
-            "id": "manual",
-            "summary": "Manual run"
+            "type": "agent_env_node",
+            "id": "trigger-1",
+            "node": {
+                "node_type": "webhook",
+                "name": "Webhook",
+                "trusted": false,
+                "config": {
+                    "path": "puffer-automation-webhook",
+                    "methods": ["POST"],
+                    "authentication": "none"
+                }
+            },
+            "summary": "Webhook"
         }
     }));
     triggers.push(json!({
@@ -164,6 +183,7 @@ pub(crate) fn handle_automation_catalog(paths: &ConfigPaths) -> Result<Value> {
             "summary": "Custom schedule 0 9 * * 1-5"
         }
     }));
+    actions.push(local_transform_action_json());
 
     match puffer_core::subscription_manager() {
         Ok(manager) => {
@@ -194,51 +214,34 @@ pub(crate) fn handle_automation_catalog(paths: &ConfigPaths) -> Result<Value> {
                         }
                     }
                 }
-
-                for action in template.actions.values() {
-                    let connection_slug = matching_connections
-                        .first()
-                        .map(|connection| connection.slug.clone())
-                        .unwrap_or_else(|| suggested_connection_slug(&template.slug));
-                    let connection_state = matching_connections
-                        .first()
-                        .map(|connection| connection_state_slug(connection.state).to_string())
-                        .unwrap_or_else(|| "not_connected".to_string());
-                    actions.push(json!({
-                        "id": format!("connector:{}:{}", template.slug, action.slug),
-                        "kind": "connector_action",
-                        "connector_slug": template.slug,
-                        "connection_slug": connection_slug,
-                        "action": action.slug,
-                        "label": action_label(&template.slug, &action.slug),
-                        "summary": action.description,
-                        "icon": icon_for_connector(&template.slug),
-                        "connection_state": connection_state,
-                        "permission_state": action.permission.category,
-                        "permission_summary": action.permission.summary,
-                        "external_side_effect": action.permission.external_side_effect,
-                        "required_inputs": schema_required_inputs(&action.input_schema),
-                        "input_schema": action.input_schema,
-                        "output_schema": action.output_schema,
-                        "node_ref": {
-                            "node_type": "puffer_connector_action",
-                            "name": action_label(&template.slug, &action.slug),
-                            "trusted": true,
-                            "config": {
-                                "kind": "connector_action",
-                                "connector_slug": template.slug,
-                                "connection_slug": connection_slug,
-                                "action": action.slug,
-                                "draft_only": action.permission.external_side_effect
-                            }
-                        }
-                    }));
+                if matching_connections.is_empty() {
+                    let connection_slug = suggested_connection_slug(&template.slug);
+                    actions.extend(connector_action_jsons(
+                        template,
+                        &connection_slug,
+                        "not_connected",
+                    ));
+                } else {
+                    for connection in &matching_connections {
+                        actions.extend(connector_action_jsons(
+                            template,
+                            &connection.slug,
+                            connection_state_slug(connection.state),
+                        ));
+                    }
                 }
             }
         }
         Err(error) => {
             trigger_error = Some(error.to_string());
-            action_error = Some(error.to_string());
+            for template in builtin_connector_templates() {
+                let connection_slug = suggested_connection_slug(&template.slug);
+                actions.extend(connector_action_jsons(
+                    &template,
+                    &connection_slug,
+                    "not_connected",
+                ));
+            }
         }
     }
 
@@ -246,9 +249,56 @@ pub(crate) fn handle_automation_catalog(paths: &ConfigPaths) -> Result<Value> {
         "triggers": triggers,
         "actions": actions,
         "trigger_error": trigger_error,
-        "action_error": action_error,
+        "action_error": null,
         "agentenv_error": null,
     }))
+}
+
+fn local_transform_action_json() -> Value {
+    json!({
+        "id": "agentenv:transform_js:local-transform",
+        "runtime_owner": "agentenv",
+        "kind": "agentenv_node",
+        "label": "Local JavaScript Transform",
+        "summary": "Run JavaScript in the selected Automation runtime and return a structured result.",
+        "icon": "bolt",
+        "connection_state": "ready",
+        "permission_state": "ready",
+        "permission_summary": "Runs inside the configured Automation runtime.",
+        "external_side_effect": false,
+        "required_inputs": [],
+        "input_schema": {
+            "type": "object",
+            "description": "Automation preview or trigger input."
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "kind": {"type": "string"},
+                "input": {"type": "object"}
+            }
+        },
+        "node_ref": {
+            "node_type": "transform_js",
+            "name": "Local JavaScript Transform",
+            "trusted": false,
+            "config": {
+                "code": local_transform_code()
+            }
+        }
+    })
+}
+
+fn local_transform_code() -> &'static str {
+    r#"const trigger = input && typeof input === "object" ? input.trigger ?? input : input;
+return {
+  kind: "local_transform_result",
+  trigger,
+  input,
+  ok: true,
+  message: "Local AgentEnv transform executed."
+};"#
 }
 
 fn connector_trigger_json(
@@ -278,32 +328,92 @@ fn connector_trigger_json(
     })
 }
 
-fn schema_required_inputs(schema: &Value) -> Vec<Value> {
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>();
-    let properties = schema.get("properties").and_then(Value::as_object);
-    required
-        .into_iter()
-        .map(|name| {
-            let property = properties.and_then(|properties| properties.get(name));
-            json!({
-                "id": name,
-                "label": field_label(name),
-                "kind": property.and_then(|value| value.get("type")).and_then(Value::as_str).unwrap_or("text"),
-                "required": true,
-                "summary": property.and_then(|value| value.get("description")).and_then(Value::as_str),
-            })
-        })
+fn connector_required_inputs(_connector_slug: &str) -> Vec<Value> {
+    vec![json!({"id": "filter", "label": "Filter", "kind": "text", "required": false})]
+}
+
+fn connector_action_jsons(
+    template: &ConnectorTemplate,
+    connection_slug: &str,
+    connection_state: &str,
+) -> Vec<Value> {
+    template
+        .actions
+        .values()
+        .map(|action| connector_action_json(template, connection_slug, connection_state, action))
         .collect()
 }
 
-fn connector_required_inputs(_connector_slug: &str) -> Vec<Value> {
-    vec![json!({"id": "filter", "label": "Filter", "kind": "text", "required": false})]
+fn connector_action_json(
+    template: &ConnectorTemplate,
+    connection_slug: &str,
+    connection_state: &str,
+    action: &ConnectorActionDefinition,
+) -> Value {
+    let ready = matches!(connection_state, "authenticated" | "active" | "ready");
+    json!({
+        "id": format!("connector:{}:{}:{}", template.slug, connection_slug, action.slug),
+        "runtime_owner": "puffer",
+        "kind": "connector_action",
+        "connector_slug": template.slug,
+        "connection_slug": connection_slug,
+        "action": action.slug,
+        "label": field_label(&action.slug),
+        "summary": action.description,
+        "icon": icon_for_connector(&template.slug),
+        "connection_state": connection_state,
+        "permission_state": if ready { "ready" } else { "needs_connection" },
+        "permission_summary": action.permission.summary,
+        "external_side_effect": action.permission.external_side_effect,
+        "required_inputs": connector_action_required_inputs(action),
+        "input_schema": action.input_schema,
+        "output_schema": action.output_schema,
+        "node_ref": {
+            "node_type": "puffer_connector_action",
+            "name": field_label(&action.slug),
+            "trusted": false,
+            "config": {
+                "connector_slug": template.slug,
+                "connection_slug": connection_slug,
+                "action": action.slug,
+                "input": {},
+                "external_side_effect": action.permission.external_side_effect,
+                "human_approval_required": action.permission.external_side_effect,
+                "draft_only": action.permission.external_side_effect
+            }
+        }
+    })
+}
+
+fn connector_action_required_inputs(action: &ConnectorActionDefinition) -> Vec<Value> {
+    let required = action
+        .input_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let properties = action
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object);
+    required
+        .into_iter()
+        .map(|id| {
+            let description = properties
+                .and_then(|props| props.get(id))
+                .and_then(|property| property.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            json!({
+                "id": id,
+                "label": field_label(id),
+                "kind": "text",
+                "required": true,
+                "default": "",
+                "description": description
+            })
+        })
+        .collect()
 }
 
 fn icon_for_connector(slug: &str) -> &'static str {
@@ -335,17 +445,6 @@ fn connector_trigger_label(slug: &str) -> String {
         "Email arrives".to_string()
     } else {
         format!("{} event", field_label(slug))
-    }
-}
-
-fn action_label(connector_slug: &str, action: &str) -> String {
-    let action = field_label(action);
-    if connector_slug.contains("gcal") {
-        format!("Calendar {action}")
-    } else if connector_slug.contains("gmail") {
-        format!("Gmail {action}")
-    } else {
-        action
     }
 }
 
@@ -426,7 +525,10 @@ impl From<AutomationRuntimeState> for AutomationRuntimeSummaryDto {
             compiled_revision: runtime.compiled_revision,
             agentenv_workflow_count: runtime.agentenv_workflows.len(),
             puffer_binding_count: runtime.puffer_bindings.len(),
-            last_error: runtime.last_error,
+            last_error: runtime
+                .last_error
+                .as_deref()
+                .map(crate::daemon_automation_runtime::public_automation_error_detail_message),
         }
     }
 }
@@ -499,7 +601,7 @@ mod tests {
         CompiledAgentEnvWorkflow, CompiledPufferBinding, CompiledWorkflowRole,
         AUTOMATION_SPEC_VERSION,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn store() -> (tempfile::TempDir, AutomationStore) {
         let tempdir = tempfile::tempdir().unwrap();
@@ -573,6 +675,54 @@ mod tests {
     }
 
     #[test]
+    fn automation_dto_maps_runtime_last_error_for_display() {
+        let (_tempdir, store) = store();
+        let record = store
+            .create(
+                "reply-helper",
+                sample_spec("Draft a reply for review."),
+                AutomationStatus::Paused,
+            )
+            .unwrap();
+        store
+            .replace_runtime_error(
+                "reply-helper",
+                record.revision,
+                "create workflow artifact: runtime unreachable: error sending request for url (http://127.0.0.1:3000/v1/workflows)".to_string(),
+            )
+            .unwrap();
+
+        let value = handle_automation_get(&store, &json!({"id": "reply-helper"})).unwrap();
+
+        assert_eq!(
+            value["runtime"]["last_error"],
+            "Automation runtime is unreachable. Check Docker or the selected runtime settings, then try again."
+        );
+        assert!(!value["runtime"]["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("127.0.0.1"));
+        assert!(!value["runtime"]["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("/v1/"));
+    }
+
+    #[test]
+    fn automation_save_rejects_enabled_status() {
+        let (_tempdir, store) = store();
+        let mut params = save_create_params();
+        params
+            .as_object_mut()
+            .unwrap()
+            .insert("status".into(), json!("enabled"));
+
+        let error = handle_automation_save(&store, &params).unwrap_err();
+
+        assert!(error.to_string().contains("cannot enable automations"));
+    }
+
+    #[test]
     fn automation_get_returns_saved_dto() {
         let (_tempdir, store) = store();
         handle_automation_save(&store, &save_create_params()).unwrap();
@@ -634,6 +784,50 @@ mod tests {
     }
 
     #[test]
+    fn automation_save_spec_change_pauses_deployed_enabled_record() {
+        let (_tempdir, store) = store();
+        let record = store
+            .create(
+                "reply-helper",
+                sample_spec("Draft a reply for review."),
+                AutomationStatus::Enabled,
+            )
+            .unwrap();
+        store
+            .replace_runtime(
+                "reply-helper",
+                record.revision,
+                AutomationRuntimeState {
+                    spec_hash: Some(automation_spec_hash(&record.spec).unwrap()),
+                    compiled_revision: Some(record.revision),
+                    status: AutomationRuntimeStatus::Deployed,
+                    agentenv_workflows: vec![CompiledAgentEnvWorkflow {
+                        role: CompiledWorkflowRole::Root,
+                        workflow_id: Some("wf-root".into()),
+                        definition_hash: None,
+                        deployed: true,
+                    }],
+                    puffer_bindings: Vec::new(),
+                    last_error: None,
+                },
+            )
+            .unwrap();
+
+        let value = handle_automation_save(
+            &store,
+            &json!({
+                "id": "reply-helper",
+                "expectedRevision": 1,
+                "spec": sample_spec("Draft a shorter reply for review."),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(value["status"], "paused");
+        assert_eq!(value["runtime"]["status"], "stale");
+    }
+
+    #[test]
     fn automation_catalog_connector_trigger_inputs_are_persisted_fields_only() {
         let github_inputs = connector_required_inputs("github");
 
@@ -647,19 +841,113 @@ mod tests {
     }
 
     #[test]
-    fn automation_catalog_includes_manual_trigger() {
+    fn automation_catalog_includes_webhook_trigger() {
         let tempdir = tempfile::tempdir().unwrap();
         let paths = ConfigPaths::discover(tempdir.path());
         let catalog = handle_automation_catalog(&paths).unwrap();
         let triggers = catalog["triggers"].as_array().unwrap();
-        let manual = triggers
+        let webhook = triggers
             .iter()
-            .find(|trigger| trigger["id"] == "manual")
-            .expect("manual trigger");
+            .find(|trigger| trigger["id"] == "webhook")
+            .expect("webhook trigger");
 
-        assert_eq!(manual["kind"], "manual");
-        assert_eq!(manual["label"], "Manual run");
-        assert_eq!(manual["spec_template"]["type"], "manual");
+        assert_eq!(webhook["kind"], "webhook");
+        assert_eq!(webhook["label"], "Webhook");
+        assert_eq!(webhook["spec_template"]["type"], "agent_env_node");
+        assert_eq!(webhook["spec_template"]["node"]["node_type"], "webhook");
+    }
+
+    #[test]
+    fn automation_catalog_includes_local_transform_action() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let catalog = handle_automation_catalog(&paths).unwrap();
+        let actions = catalog["actions"].as_array().unwrap();
+        let action = actions
+            .iter()
+            .find(|action| action["id"] == "agentenv:transform_js:local-transform")
+            .expect("local transform action");
+
+        assert_eq!(action["kind"], "agentenv_node");
+        assert_eq!(action["runtime_owner"], "agentenv");
+        assert_eq!(action["label"], "Local JavaScript Transform");
+        assert_eq!(action["node_ref"]["node_type"], "transform_js");
+        assert!(action["node_ref"]["config"]["code"]
+            .as_str()
+            .unwrap()
+            .contains("local_transform_result"));
+    }
+
+    #[test]
+    fn automation_catalog_actions_include_connector_actions() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let catalog = handle_automation_catalog(&paths).unwrap();
+        let actions = catalog["actions"].as_array().unwrap();
+
+        assert!(actions.iter().any(|action| {
+            action["kind"] == "connector_action"
+                && action["runtime_owner"] == "puffer"
+                && action["node_ref"]["node_type"] == "puffer_connector_action"
+                && action["connector_slug"].as_str().is_some()
+                && action["action"].as_str().is_some()
+        }));
+        assert!(actions
+            .iter()
+            .any(|action| action["label"] == "Local JavaScript Transform"));
+    }
+
+    #[test]
+    fn automation_catalog_exposes_supported_telegram_connector_actions() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let catalog = handle_automation_catalog(&paths).unwrap();
+        let actions = catalog["actions"].as_array().unwrap();
+        let telegram_actions = actions
+            .iter()
+            .filter(|action| action["connector_slug"] == "telegram-login")
+            .filter_map(|action| {
+                Some((
+                    action["action"].as_str()?,
+                    action["runtime_owner"].as_str()?,
+                    action["node_ref"]["node_type"].as_str()?,
+                    action["node_ref"]["config"]["action"].as_str()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let slugs = telegram_actions
+            .iter()
+            .map(|(slug, _, _, _)| *slug)
+            .collect::<BTreeSet<_>>();
+
+        for expected in [
+            "send_message",
+            "vote_poll",
+            "edit_message",
+            "delete_messages",
+            "forward_messages",
+            "pin_message",
+            "react",
+            "mark_read",
+            "update_group_title",
+            "send_story",
+        ] {
+            assert!(
+                slugs.contains(expected),
+                "automation catalog should expose Telegram connector action `{expected}`"
+            );
+        }
+        for unsupported in ["list_messages", "search_messages", "get_chat_info"] {
+            assert!(
+                !slugs.contains(unsupported),
+                "internal Telegram read command `{unsupported}` must not be advertised as a connector action"
+            );
+        }
+        for (slug, runtime_owner, node_type, config_action) in telegram_actions {
+            assert_eq!(runtime_owner, "puffer");
+            assert_eq!(node_type, "puffer_connector_action");
+            assert_eq!(config_action, slug);
+        }
     }
 
     #[test]
@@ -679,6 +967,39 @@ mod tests {
 
             assert!(error.to_string().contains("does not accept"));
         }
+    }
+
+    #[test]
+    fn automation_save_rejects_puffer_agent_runtime_config_fields() {
+        let (_tempdir, store) = store();
+        let mut spec = sample_spec("Draft a reply for review.");
+        let mut config = BTreeMap::new();
+        config.insert("content".into(), json!("runtime prompt"));
+        spec.flow.steps = vec![AutomationStepSpec::AgentEnvNode {
+            id: "agent".into(),
+            node: AgentEnvNodeRef {
+                node_type: "puffer_agent".into(),
+                name: Some("Agent".into()),
+                trusted: Some(true),
+                config,
+            },
+            summary: Some("Run the Agent".into()),
+        }];
+
+        let error = handle_automation_save(
+            &store,
+            &json!({
+                "id": "reply-helper",
+                "status": "paused",
+                "spec": spec,
+            }),
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("puffer_agent"));
+        assert!(message.contains("content"));
+        assert!(message.contains("persisted product semantics"));
     }
 
     #[test]

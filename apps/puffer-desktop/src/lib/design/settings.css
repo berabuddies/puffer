@@ -204,6 +204,7 @@
 }
 .pf-workflow-backend-mode,
 .pf-workflow-backend-token,
+.pf-workflow-backend-local-summary,
 .pf-workflow-backend-actions {
   justify-self: end;
   width: min(420px, 100%);
@@ -254,6 +255,16 @@
 }
 .pf-workflow-backend-token .pf-workflow-backend-input {
   width: 100%;
+}
+.pf-workflow-backend-local-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 17px;
 }
 .pf-workflow-backend-actions {
   display: flex;
@@ -889,6 +900,7 @@
   .pf-connector-form,
   .pf-workflow-backend-mode,
   .pf-workflow-backend-token,
+  .pf-workflow-backend-local-summary,
   .pf-workflow-backend-actions,
   .pf-workflow-backend-input {
     justify-self: stretch;

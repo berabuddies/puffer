@@ -4,6 +4,9 @@ import type {
   AutomationCatalogResult,
   AutomationDeleteResult,
   AutomationListResult,
+  AutomationPendingActionDetailResult,
+  AutomationPendingActionListResult,
+  AutomationPendingActionRejectResult,
   AutomationPreviewResult,
   AutomationRecordDto,
   AutomationRuntimeSyncResult,
@@ -55,6 +58,7 @@ import type {
   TimelineItem,
   WorkflowBindingCreateRequest,
   WorkflowBackendConnectionTest,
+  WorkflowBackendLocalRepairResult,
   WorkflowBackendSettings,
   WorkflowCreateRequest,
   WorkflowExecutionListResult,
@@ -349,8 +353,11 @@ type BackendChromeSecretsImportResult = ChromeSecretsImportResult;
 
 type BackendRemoteOperation = RemoteOperation;
 
-const WORKFLOW_DAEMON_OPTIONS = { requireWebSocket: true, timeoutMs: 15000 } as const;
-const AUTOMATION_DAEMON_OPTIONS = { requireWebSocket: true, timeoutMs: 15000 } as const;
+// Local workflow runtime startup can pull/recreate containers, run migrations,
+// seed credentials, and then wait up to 30s for health checks.
+const WORKFLOW_RUNTIME_TIMEOUT_MS = 120_000;
+const WORKFLOW_DAEMON_OPTIONS = { requireWebSocket: true, timeoutMs: WORKFLOW_RUNTIME_TIMEOUT_MS } as const;
+const AUTOMATION_DAEMON_OPTIONS = { requireWebSocket: true, timeoutMs: WORKFLOW_RUNTIME_TIMEOUT_MS } as const;
 
 type StageChatAttachmentHook = (
   sessionId: string,
@@ -1089,6 +1096,13 @@ export async function testWorkflowBackendConnection(): Promise<WorkflowBackendCo
   return workflowRequest<WorkflowBackendConnectionTest>("workflow_backend_test_connection");
 }
 
+/** Rebuild the Puffer-managed local workflow runtime after user confirmation. */
+export async function repairWorkflowBackendLocalRuntime(): Promise<WorkflowBackendLocalRepairResult> {
+  return workflowRequest<WorkflowBackendLocalRepairResult>("workflow_backend_repair_local_runtime", {
+    confirm: true
+  });
+}
+
 export async function saveRemoteSettings(
   input: SaveRemoteSettingsInput
 ): Promise<SettingsSnapshot> {
@@ -1762,9 +1776,11 @@ export async function saveAutomationRecord(
 ): Promise<AutomationRecordDto> {
   const params: Record<string, unknown> = {
     id: input.id,
-    status: input.status,
     spec: input.spec
   };
+  if (input.status !== undefined) {
+    params.status = input.status;
+  }
   if (input.expectedRevision !== undefined) {
     params.expectedRevision = input.expectedRevision;
   }
@@ -1793,6 +1809,18 @@ export async function syncAutomationPreview(
   return automationRequest<AutomationRuntimeSyncResult>("automation_sync_preview", params);
 }
 
+/** Activate an Automation by compiling/deploying its live runtime artifacts. */
+export async function activateAutomationRecord(
+  id: string,
+  expectedRevision?: number
+): Promise<AutomationRuntimeSyncResult> {
+  const params: Record<string, unknown> = { id };
+  if (expectedRevision !== undefined) {
+    params.expectedRevision = expectedRevision;
+  }
+  return automationRequest<AutomationRuntimeSyncResult>("automation_compile_deploy", params);
+}
+
 /** Execute a daemon-backed Automation preview run. */
 export async function runAutomationPreview(
   id: string,
@@ -1804,6 +1832,35 @@ export async function runAutomationPreview(
 /** Load daemon-backed preview/run history for one Automation. */
 export async function loadAutomationRunHistory(id: string): Promise<AutomationRunHistoryResult> {
   return automationRequest<AutomationRunHistoryResult>("automation_run_history", { id });
+}
+
+/** Load Automation-originated connector drafts waiting for review. */
+export async function listAutomationPendingActions(): Promise<AutomationPendingActionListResult> {
+  return automationRequest<AutomationPendingActionListResult>("automation_pending_action_list");
+}
+
+/** Load one Automation-originated connector draft body for review/edit. */
+export async function getAutomationPendingAction(
+  draftId: string,
+  version: number
+): Promise<AutomationPendingActionDetailResult> {
+  return automationRequest<AutomationPendingActionDetailResult>("automation_pending_action_get", {
+    draft_id: draftId,
+    version
+  });
+}
+
+/** Reject one Automation-originated connector draft without sending it. */
+export async function rejectAutomationPendingAction(params: {
+  draftId: string;
+  version: number;
+  reason: string;
+}): Promise<AutomationPendingActionRejectResult> {
+  return automationRequest<AutomationPendingActionRejectResult>("automation_pending_action_reject", {
+    draft_id: params.draftId,
+    version: params.version,
+    reason: params.reason
+  });
 }
 
 /** Load registered workflows from the daemon. */
@@ -1968,7 +2025,8 @@ export async function saveMonitorMemory(connectionSlug: string, content: string)
 export async function executeOutboundAction(params: {
   actionId: string;
   version: number;
-  approvedMessage: string;
+  approvedMessage?: string;
+  approvedInput?: Record<string, unknown>;
   clientRequestId: string;
   duplicateRiskAck?: boolean;
 }): Promise<{ status: string; actionId: string; receipt?: unknown }> {
@@ -1976,13 +2034,36 @@ export async function executeOutboundAction(params: {
   const payload: Record<string, unknown> = {
     action_id: params.actionId,
     version: params.version,
-    approved_message: params.approvedMessage,
     client_request_id: params.clientRequestId
   };
+  if (params.approvedMessage !== undefined) {
+    payload.approved_message = params.approvedMessage;
+  }
+  if (params.approvedInput !== undefined) {
+    payload.approved_input = params.approvedInput;
+  }
   if (params.duplicateRiskAck === true) {
     payload.duplicate_risk_ack = true;
   }
   return client.request<{ status: string; actionId: string; receipt?: unknown }>("outbound_action_execute", payload);
+}
+
+/** Compatibility wrapper for Automation review drafts, now backed by outbound actions. */
+export async function executeConnectorActionDraft(params: {
+  draftId: string;
+  version: number;
+  approvedMessage?: string;
+  approvedInput?: Record<string, unknown>;
+  clientRequestId: string;
+}): Promise<{ status: string; draftId: string; receipt?: unknown }> {
+  const result = await executeOutboundAction({
+    actionId: params.draftId,
+    version: params.version,
+    approvedMessage: params.approvedMessage,
+    approvedInput: params.approvedInput,
+    clientRequestId: params.clientRequestId
+  });
+  return { status: result.status, draftId: params.draftId, receipt: result.receipt };
 }
 
 /** Read the persisted status for an outbound action. */

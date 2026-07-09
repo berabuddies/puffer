@@ -31,6 +31,7 @@
     listPermissions,
     listProviderModels,
     loadWorkflowSnapshot,
+    repairWorkflowBackendLocalRuntime,
     saveWorkflowBackendConfig,
     removeLambdaSkillLibrary,
     resolveUserQuestion,
@@ -133,7 +134,7 @@
     { id: "network",     label: "Network",    icon: "globe" },
     { id: "remote",      label: "Remote",     icon: "server" },
     { id: "browser",     label: "Browser",    icon: "globe" },
-    { id: "workflow-backend", label: "Automation Runtime", icon: "bolt" },
+    { id: "workflow-backend", label: "Automation", icon: "bolt" },
     { id: "connectors",  label: "Connectors", icon: "server" },
     { id: "permissions", label: "Permissions", icon: "bolt" },
     { id: "skills",      label: "Verified Skills", icon: "shield" },
@@ -269,6 +270,7 @@
   let workflowBackendToken = $state("");
   let workflowBackendSaving = $state(false);
   let workflowBackendTesting = $state(false);
+  let workflowBackendRepairing = $state(false);
   let workflowBackendError = $state<string | null>(null);
   let workflowBackendSaved = $state<string | null>(null);
   let workflowBackendTestResult = $state<WorkflowBackendConnectionTest | null>(null);
@@ -1318,7 +1320,7 @@
   }
 
   async function saveWorkflowBackend() {
-    if (workflowBackendSaving || workflowBackendTesting || !daemonReachable) return;
+    if (workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing || !daemonReachable) return;
     workflowBackendSaving = true;
     workflowBackendError = null;
     workflowBackendSaved = null;
@@ -1340,7 +1342,7 @@
   }
 
   async function testWorkflowBackend() {
-    if (workflowBackendSaving || workflowBackendTesting || !daemonReachable) return;
+    if (workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing || !daemonReachable) return;
     workflowBackendTesting = true;
     workflowBackendError = null;
     workflowBackendSaved = null;
@@ -1353,6 +1355,43 @@
       workflowBackendError = (e as Error).message ?? String(e);
     } finally {
       workflowBackendTesting = false;
+    }
+  }
+
+  async function repairLocalWorkflowRuntime() {
+    if (
+      workflowBackendForm.mode !== "local" ||
+      workflowBackendSaving ||
+      workflowBackendTesting ||
+      workflowBackendRepairing ||
+      !daemonReachable
+    ) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Repair the Puffer-managed local automation runtime? Puffer will stop the local runtime, archive its current database files, and rebuild a fresh local runtime."
+    );
+    if (!confirmed) return;
+
+    workflowBackendRepairing = true;
+    workflowBackendError = null;
+    workflowBackendSaved = null;
+    workflowBackendTestResult = null;
+    try {
+      await persistWorkflowBackend();
+      const result = await repairWorkflowBackendLocalRuntime();
+      if (result.success) {
+        workflowBackendSaved = result.archivedDataDirs.length
+          ? "Local automation runtime repaired. Previous runtime data was archived."
+          : "Local automation runtime repaired.";
+      } else {
+        workflowBackendError = result.message || "Local automation runtime repair did not finish.";
+      }
+      props.onRefresh();
+    } catch (e) {
+      workflowBackendError = (e as Error).message ?? String(e);
+    } finally {
+      workflowBackendRepairing = false;
     }
   }
 
@@ -1481,6 +1520,7 @@
     workflowBackendToken = "";
     workflowBackendSaving = false;
     workflowBackendTesting = false;
+    workflowBackendRepairing = false;
     workflowBackendError = null;
 
     providerModels = {};
@@ -1864,11 +1904,11 @@
       />
 
     {:else if section === "workflow-backend"}
-      <h2>Automation Runtime</h2>
+      <h2>Automation</h2>
       <p class="lead">Choose the default runtime used by new automations and preview runs.</p>
 
       {#if !daemonReachable}
-        <div class="pf-settings-note">Preview mode - launch Puffer in the desktop app to configure Automation Runtime.</div>
+        <div class="pf-settings-note">Preview mode - launch Puffer in the desktop app to configure Automation.</div>
       {/if}
       {#if workflowBackendError}
         <div class="pf-settings-note warn" role="alert">{workflowBackendError}</div>
@@ -1921,6 +1961,16 @@
           <div class="pf-workflow-backend-local-summary">
             <span class="pf-status-pill ready">Managed</span>
             <span>Image, env, workspace, and token are prepared on first run.</span>
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="outline"
+              data-size="sm"
+              disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing}
+              onclick={() => void repairLocalWorkflowRuntime()}
+            >
+              <Icon name="wrench" size={13} />{workflowBackendRepairing ? "Repairing..." : "Repair Runtime"}
+            </button>
           </div>
         </div>
       {:else}
@@ -1933,22 +1983,8 @@
             class="sc-input pf-workflow-backend-input"
             aria-label="API URL"
             value={workflowBackendForm.apiUrl}
-            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting}
+            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing}
             oninput={(e) => (workflowBackendForm = { ...workflowBackendForm, apiUrl: (e.currentTarget as HTMLInputElement).value })}
-          />
-        </div>
-
-        <div class="pf-settings-row">
-          <div class="meta">
-            <div class="label">Automation Console URL</div>
-            <div class="desc">External UI opened for automation runtime management.</div>
-          </div>
-          <input
-            class="sc-input pf-workflow-backend-input"
-            aria-label="Automation Console URL"
-            value={workflowBackendForm.uiUrl}
-            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting}
-            oninput={(e) => (workflowBackendForm = { ...workflowBackendForm, uiUrl: (e.currentTarget as HTMLInputElement).value })}
           />
         </div>
 
@@ -1961,7 +1997,7 @@
             class="sc-input pf-workflow-backend-input"
             aria-label="Workspace ID"
             value={workflowBackendForm.workspaceId}
-            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting}
+            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing}
             oninput={(e) => (workflowBackendForm = { ...workflowBackendForm, workspaceId: (e.currentTarget as HTMLInputElement).value })}
           />
         </div>
@@ -1978,7 +2014,7 @@
               type="password"
               value={workflowBackendToken}
               placeholder={workflowBackendSnapshot.hasToken ? "Configured - enter a new token to replace" : "Not configured"}
-              disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting}
+              disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing}
               oninput={(e) => (workflowBackendToken = (e.currentTarget as HTMLInputElement).value)}
             />
             <span class="pf-status-pill" class:ready={workflowBackendSnapshot.hasToken}>
@@ -1999,7 +2035,7 @@
             class="sc-btn"
             data-variant="outline"
             data-size="sm"
-            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting}
+            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing}
             onclick={() => void testWorkflowBackend()}
           >
             <Icon name="bolt" size={13} />{workflowBackendTesting ? "Testing..." : "Test Connection"}
@@ -2009,7 +2045,7 @@
             class="sc-btn"
             data-variant="default"
             data-size="sm"
-            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting}
+            disabled={!daemonReachable || workflowBackendSaving || workflowBackendTesting || workflowBackendRepairing}
             onclick={() => void saveWorkflowBackend()}
           >
             <Icon name="check" size={13} />{workflowBackendSaving ? "Saving..." : "Save"}
@@ -2026,12 +2062,12 @@
         >
           <strong>{workflowBackendTestResult.success ? "Connection succeeded." : "Unable to connect to automation runtime."}</strong>
           <div>
-            <span>Runtime</span>
-            <small>{workflowBackendCheckText(workflowBackendTestResult.runtime)}</small>
+            <span>API Ready</span>
+            <small>{workflowBackendCheckText(workflowBackendTestResult.ready)}</small>
           </div>
           <div>
-            <span>Auth</span>
-            <small>{workflowBackendCheckText(workflowBackendTestResult.auth)}</small>
+            <span>Runtime</span>
+            <small>{workflowBackendCheckText(workflowBackendTestResult.runtime)}</small>
           </div>
           <div>
             <span>Workspace</span>

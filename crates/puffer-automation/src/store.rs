@@ -328,6 +328,7 @@ mod tests {
         AutomationSource, AutomationStepSpec, AutomationTriggerSpec, CompiledAgentEnvWorkflow,
         CompiledPufferBinding, CompiledWorkflowRole, AUTOMATION_SPEC_VERSION,
     };
+    use serde_json::Value;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
@@ -368,6 +369,20 @@ mod tests {
         }
     }
 
+    fn puffer_agent_spec_with_runtime_config(key: &str) -> AutomationSpec {
+        let mut agent = agentenv_node("puffer_agent");
+        agent
+            .config
+            .insert(key.into(), Value::String("runtime-value".into()));
+        let mut spec = sample_spec();
+        spec.flow.steps = vec![AutomationStepSpec::AgentEnvNode {
+            id: "agent".into(),
+            node: agent,
+            summary: Some("Run the Agent".into()),
+        }];
+        spec
+    }
+
     fn load_store(path: &Path) -> AutomationStore {
         AutomationStore::load(path).unwrap()
     }
@@ -405,6 +420,64 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, AutomationStoreError::Conflict(_)));
+    }
+
+    #[test]
+    fn create_rejects_puffer_agent_runtime_config() {
+        let dir = tempdir().unwrap();
+        let store = load_store(&dir.path().join("automations.json"));
+
+        let error = store
+            .create(
+                "reply-helper",
+                puffer_agent_spec_with_runtime_config("content"),
+                AutomationStatus::Paused,
+            )
+            .unwrap_err();
+
+        match error {
+            AutomationStoreError::Invalid(message) => {
+                assert!(message.contains("puffer_agent"));
+                assert!(message.contains("content"));
+                assert!(message.contains("persisted product semantics"));
+            }
+            other => panic!("expected invalid automation record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_legacy_puffer_agent_runtime_config() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("automations.json");
+        let record = AutomationRecord {
+            id: "reply-helper".into(),
+            status: AutomationStatus::Paused,
+            revision: 1,
+            spec: puffer_agent_spec_with_runtime_config("agentId"),
+            runtime: AutomationRuntimeState::default(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let body = serde_json::to_vec_pretty(&StoreFile {
+            version: 0,
+            records: vec![record],
+        })
+        .unwrap();
+        std::fs::write(&path, body).unwrap();
+
+        let error = match AutomationStore::load(&path) {
+            Ok(_) => panic!("expected invalid puffer_agent runtime config load failure"),
+            Err(error) => error,
+        };
+
+        match error {
+            AutomationStoreError::Invalid(message) => {
+                assert!(message.contains("puffer_agent"));
+                assert!(message.contains("agentId"));
+                assert!(message.contains("persisted product semantics"));
+            }
+            other => panic!("expected invalid automation record, got {other:?}"),
+        }
     }
 
     #[test]
@@ -513,6 +586,32 @@ mod tests {
     }
 
     #[test]
+    fn save_spec_rejects_puffer_agent_runtime_config() {
+        let dir = tempdir().unwrap();
+        let store = load_store(&dir.path().join("automations.json"));
+        let record = store
+            .create("reply-helper", sample_spec(), AutomationStatus::Paused)
+            .unwrap();
+
+        let error = store
+            .save_spec(
+                "reply-helper",
+                record.revision,
+                puffer_agent_spec_with_runtime_config("timeoutSeconds"),
+            )
+            .unwrap_err();
+
+        match error {
+            AutomationStoreError::Invalid(message) => {
+                assert!(message.contains("puffer_agent"));
+                assert!(message.contains("timeoutSeconds"));
+                assert!(message.contains("persisted product semantics"));
+            }
+            other => panic!("expected invalid automation record, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn save_spec_can_delete_referenced_trigger_without_persisting_orphan_bindings() {
         let dir = tempdir().unwrap();
         let store = load_store(&dir.path().join("automations.json"));
@@ -535,8 +634,9 @@ mod tests {
             .unwrap();
 
         let mut updated_spec = sample_spec();
-        updated_spec.triggers = vec![AutomationTriggerSpec::Manual {
-            id: "manual".into(),
+        updated_spec.triggers = vec![AutomationTriggerSpec::AgentEnvNode {
+            id: "webhook".into(),
+            node: agentenv_node("webhook"),
             summary: None,
         }];
         let updated = store
@@ -545,6 +645,34 @@ mod tests {
 
         assert_eq!(updated.runtime.status, AutomationRuntimeStatus::Stale);
         assert!(updated.runtime.puffer_bindings.is_empty());
+    }
+
+    #[test]
+    fn save_spec_rejects_puffer_agent_trigger() {
+        let dir = tempdir().unwrap();
+        let store = load_store(&dir.path().join("automations.json"));
+        let record = store
+            .create("reply-helper", sample_spec(), AutomationStatus::Paused)
+            .unwrap();
+
+        let mut updated_spec = sample_spec();
+        updated_spec.triggers = vec![AutomationTriggerSpec::AgentEnvNode {
+            id: "agent".into(),
+            node: agentenv_node("puffer_agent"),
+            summary: Some("Run the Agent".into()),
+        }];
+
+        let error = store
+            .save_spec("reply-helper", record.revision, updated_spec)
+            .unwrap_err();
+
+        match error {
+            AutomationStoreError::Invalid(message) => {
+                assert!(message.contains("puffer_agent"));
+                assert!(message.contains("execution step"));
+            }
+            other => panic!("expected invalid automation record, got {other:?}"),
+        }
     }
 
     #[test]

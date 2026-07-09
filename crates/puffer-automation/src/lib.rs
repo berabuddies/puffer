@@ -17,11 +17,11 @@ pub use compiler::{
 };
 pub use hash::automation_spec_hash;
 pub use spec::{
-    AgentEnvNodeRef, AutomationFlowSpec, AutomationLoopInput, AutomationLoopSpec,
-    AutomationLoopStopSpec, AutomationRecord, AutomationReviewSpec, AutomationRunLocation,
-    AutomationRuntimeState, AutomationRuntimeStatus, AutomationSource, AutomationSpec,
-    AutomationStatus, AutomationStepSpec, AutomationTriggerSpec, CompiledAgentEnvWorkflow,
-    CompiledPufferBinding, CompiledWorkflowRole, AUTOMATION_SPEC_VERSION,
+    AgentEnvNodeRef, AutomationAgentMode, AutomationAgentToolSpec, AutomationFlowSpec,
+    AutomationLoopInput, AutomationLoopSpec, AutomationRecord, AutomationReviewSpec,
+    AutomationRunLocation, AutomationRuntimeState, AutomationRuntimeStatus, AutomationSource,
+    AutomationSpec, AutomationStatus, AutomationStepSpec, AutomationTriggerSpec,
+    CompiledAgentEnvWorkflow, CompiledPufferBinding, CompiledWorkflowRole, AUTOMATION_SPEC_VERSION,
 };
 pub use store::{AutomationStore, AutomationStoreError};
 pub use validation::{

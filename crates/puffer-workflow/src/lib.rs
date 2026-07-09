@@ -11,10 +11,12 @@ pub use agentenv_definition::{
 pub use runtime_client::{
     WorkflowRuntimeApiKeyContext, WorkflowRuntimeClient, WorkflowRuntimeClientConfig,
     WorkflowRuntimeConnectionStep, WorkflowRuntimeConnectionStepState,
-    WorkflowRuntimeConnectionTest, WorkflowRuntimeCreateWorkflowRequest,
-    WorkflowRuntimeDeployResponse, WorkflowRuntimeError, WorkflowRuntimeErrorKind,
-    WorkflowRuntimeExecuteRequest, WorkflowRuntimeExecuteResponse, WorkflowRuntimeExecution,
+    WorkflowRuntimeConnectionTest, WorkflowRuntimeCreateGatewayUpstreamRequest,
+    WorkflowRuntimeCreateWorkflowRequest, WorkflowRuntimeDeployResponse, WorkflowRuntimeError,
+    WorkflowRuntimeErrorKind, WorkflowRuntimeExecuteRequest, WorkflowRuntimeExecuteResponse,
+    WorkflowRuntimeExecution, WorkflowRuntimeGatewayUpstream,
     WorkflowRuntimeInMemoryExecuteRequest, WorkflowRuntimeInMemoryExecuteResponse,
     WorkflowRuntimeNodeDefinition, WorkflowRuntimeRecord, WorkflowRuntimeResult,
-    WorkflowRuntimeUndeployResponse, WorkflowRuntimeUpdateWorkflowRequest, WorkflowRuntimeWorkflow,
+    WorkflowRuntimeUndeployResponse, WorkflowRuntimeUpdateGatewayUpstreamRequest,
+    WorkflowRuntimeUpdateWorkflowRequest, WorkflowRuntimeWorkflow,
 };

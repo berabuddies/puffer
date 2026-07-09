@@ -599,9 +599,18 @@ export type WorkflowBackendConnectionCheck = {
 
 export type WorkflowBackendConnectionTest = {
   success: boolean;
+  ready: WorkflowBackendConnectionCheck;
   runtime: WorkflowBackendConnectionCheck;
-  auth: WorkflowBackendConnectionCheck;
+  auth?: WorkflowBackendConnectionCheck;
   workspace: WorkflowBackendConnectionCheck;
+};
+
+export type WorkflowBackendLocalRepairResult = {
+  success: boolean;
+  state: string;
+  message?: string | null;
+  archivedDataDirs: string[];
+  dataDir?: string | null;
 };
 
 export type SaveBrowserExtensionInput = {
@@ -1144,11 +1153,6 @@ export type AutomationTriggerSpec =
       ignore_filters?: Record<string, unknown>[];
       contact_ids?: string[];
       summary?: string | null;
-    }
-  | {
-      type: "manual";
-      id: string;
-      summary?: string | null;
     };
 
 export type AutomationStepSpec =
@@ -1223,6 +1227,7 @@ export type AutomationDeleteResult = {
 
 export type AutomationRuntimeSyncResult = {
   id: string;
+  status?: AutomationStatus;
   revision: number;
   runtime: AutomationRuntimeSummary;
 };
@@ -1253,6 +1258,11 @@ export type AutomationCatalogTrigger = {
 
 export type AutomationCatalogAction = {
   id: string;
+  /** User-facing "tool" capability owner. AgentEnv only runs AgentEnv nodes:
+   * AgentEnv-owned tools compile into those nodes; Puffer owns connector
+   * triggers/actions and passes action output back into AgentEnv continuation
+   * workflows. */
+  runtime_owner?: "agentenv" | "puffer" | string;
   kind: "connector_action" | "agentenv_node" | string;
   label: string;
   summary: string;
@@ -1309,6 +1319,58 @@ export type AutomationRunHistoryRecord = {
 export type AutomationRunHistoryResult = {
   automation_id: string;
   runs: AutomationRunHistoryRecord[];
+};
+
+export type AutomationPendingActionListItem = {
+  draft_id: string;
+  version: number;
+  status: string;
+  automation_id: string;
+  automation_name: string;
+  automation_run_id: string;
+  step_id: string;
+  connector_slug: string;
+  connection_slug: string;
+  action: string;
+  recipient: string;
+  recipient_label?: string | null;
+  recipient_stable_id?: string | null;
+  created_at?: string | null;
+  created_at_ms?: number | null;
+  updated_at?: string | null;
+  updated_at_ms?: number | null;
+  preview: string;
+  message_editable: boolean;
+  approval_kind: "editable_message" | "exact_action" | string;
+};
+
+export type AutomationPendingActionListResult = {
+  drafts: AutomationPendingActionListItem[];
+};
+
+export type AutomationPendingActionDetail = AutomationPendingActionListItem & {
+  message: string;
+  // Full action input plus the input field the editable body maps to, so an
+  // exact_action draft can be edited before approval. `message_field` is null
+  // when the action has no editable body field.
+  input: Record<string, unknown> | null;
+  message_field: string | null;
+  destination_metadata: Record<string, unknown>;
+  content_hash?: unknown;
+  error?: unknown;
+};
+
+export type AutomationPendingActionDetailResult = {
+  draft: AutomationPendingActionDetail;
+};
+
+export type AutomationPendingActionRejectResult = {
+  draft_id: string;
+  version: number;
+  status: string;
+  automation_id: string;
+  automation_run_id: string;
+  step_id: string;
 };
 
 export type WorkflowMonitorMemory = {

@@ -16,6 +16,17 @@ const MODE_ENV: &str = "PUFFER_AUTOMATION_E2E_MODE";
 const RUNTIME_PROJECT_ENV: &str = "PUFFER_WORKFLOW_RUNTIME_PROJECT";
 const TEST_SECRET_STORE_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
+// Connector-trigger + agent-loop + connector-action e2e knobs. The loop body
+// runs a real daemon-owned `puffer_agent`, so this scenario is gated on an
+// agent credential in addition to Docker.
+const AGENT_API_KEY_ENV: &str = "PUFFER_AUTOMATION_E2E_AGENT_API_KEY";
+const AGENT_PROVIDER_ENV: &str = "PUFFER_AUTOMATION_E2E_AGENT_PROVIDER";
+const AGENT_MODEL_ENV: &str = "PUFFER_AUTOMATION_E2E_AGENT_MODEL";
+const AGENT_BASE_URL_ENV: &str = "PUFFER_AUTOMATION_E2E_AGENT_BASE_URL";
+const READONLY_CONNECTOR_SLUG: &str = "e2e-readonly";
+const READONLY_CONNECTION_SLUG: &str = "e2e-readonly-account";
+const READONLY_ACTION: &str = "read_status";
+
 #[test]
 #[ignore = "requires local Docker runtime or real AgentEnv Cloud credentials"]
 fn automation_real_e2e_compile_deploy_execute_preview() {
@@ -48,29 +59,7 @@ fn automation_real_e2e_compile_deploy_execute_preview() {
         DaemonProcess::start_with_env(&workspace, &puffer_home, &discovery_cache, &extra_env);
     let mut client = DaemonClient::connect(&daemon.handshake);
 
-    match &mode {
-        AutomationE2eMode::Local => {
-            let config = client.rpc("workflow_backend_get_config", json!({}));
-            assert_eq!(config["mode"], "local");
-        }
-        AutomationE2eMode::Cloud(env) => {
-            let saved_backend = client.rpc(
-                "workflow_backend_save_config",
-                json!({
-                    "mode": "agent_env_cloud",
-                    "apiUrl": env.api_url,
-                    "uiUrl": "https://agentenv.io",
-                    "workspaceId": env.workspace_id,
-                    "apiToken": env.api_token,
-                    "keepToken": false,
-                }),
-            );
-            assert_eq!(saved_backend["hasToken"], true);
-            let saved_backend_text = saved_backend.to_string();
-            assert!(!saved_backend_text.contains("apiToken"));
-            assert!(!saved_backend_text.contains("api_token"));
-        }
-    }
+    configure_workflow_backend_for_mode(&mut client, &mode);
 
     let automation_id = format!("automation-real-e2e-{}", unix_timestamp_ms());
     let spec = automation_spec(&automation_id);
@@ -78,7 +67,7 @@ fn automation_real_e2e_compile_deploy_execute_preview() {
         "automation_save",
         json!({
             "id": automation_id,
-            "status": "enabled",
+            "status": "paused",
             "spec": spec,
         }),
     );
@@ -131,6 +120,153 @@ fn automation_real_e2e_compile_deploy_execute_preview() {
     daemon.stop();
 }
 
+/// Full-chain e2e for a realistic user Automation: a connector *event* trigger
+/// (not a webhook) drives a loop whose body runs a daemon-owned `puffer_agent`
+/// (agent-in-the-loop) and then executes a read-only connector *action*. It runs
+/// against the selected real runtime and a real provider credential, exercising
+/// trigger compilation, the Puffer-side loop runner, the Puffer agent boundary,
+/// and the daemon connector-action executor together.
+///
+/// Loop Automations only support `puffer_connection` triggers (Puffer owns the
+/// loop; AgentEnv ingress does not bridge back into the runner), so the trigger
+/// here is a connector connection rather than a webhook. It is driven through
+/// `automation_compile_deploy` + `automation_run_preview`: deploy compiles and
+/// deploys the workflow artifacts (warming the runtime sandbox), then the preview
+/// executes the whole group in-memory. No authorized connection is required
+/// because the read-only connector action runs through the daemon executor.
+///
+/// Prerequisites to pass:
+/// - `PUFFER_AUTOMATION_E2E_AGENT_API_KEY` (provider key for the agent).
+/// - `PUFFER_AUTOMATION_E2E_MODE=cloud` plus AgentEnv Cloud credentials, or a
+///   local runtime whose node-execution sandbox is reachable. The default
+///   `agentenv/api-server:local` compose (api + postgres + redis) does NOT run
+///   the code-execution sandbox on `127.0.0.1:50052`, so executor nodes such as
+///   `transform_js` fail with `ECONNREFUSED 50052`.
+///   Until that service is provisioned, this test surfaces that gap rather than
+///   passing.
+#[test]
+#[ignore = "requires local Docker runtime or real AgentEnv Cloud credentials plus an agent provider credential"]
+fn automation_real_e2e_connection_trigger_agent_loop_connector_action() {
+    let mode = AutomationE2eMode::from_env();
+    let agent = AutomationAgentEnv::from_env();
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    let runtime_project = format!(
+        "puffer-workflow-runtime-e2e-{}-{}",
+        std::process::id(),
+        unix_timestamp_ms()
+    );
+    let _local_runtime_cleanup = LocalRuntimeCleanup::new(
+        matches!(mode, AutomationE2eMode::Local),
+        &puffer_config,
+        &runtime_project,
+    );
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    // A read-only connector whose `act` command shells out to a trivial script
+    // that always returns a side-effect-free success. This lets the connector
+    // action step run through the real daemon executor without any external
+    // credentials or outward effects.
+    write_readonly_connector_catalog(&puffer_config);
+    // A provider API key so the loop's puffer_agent can run through the daemon
+    // provider loop.
+    write_agent_api_key(&puffer_config, &agent);
+
+    let mut extra_env = vec![("PUFFER_SECRET_STORE_KEY", TEST_SECRET_STORE_KEY)];
+    if matches!(mode, AutomationE2eMode::Local) {
+        extra_env.push((RUNTIME_PROJECT_ENV, runtime_project.as_str()));
+    }
+    let mut daemon =
+        DaemonProcess::start_with_env(&workspace, &puffer_home, &discovery_cache, &extra_env);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+
+    configure_workflow_backend_for_mode(&mut client, &mode);
+
+    // Select the provider/model used by the daemon-owned puffer_agent. This
+    // persists to the user config that preview execution reads.
+    let mut config_patch = json!({
+        "defaultProvider": agent.provider,
+        "defaultModel": format!("{}/{}", agent.provider, agent.model),
+    });
+    if let Some(base_url) = &agent.base_url {
+        config_patch["openaiBaseUrl"] = json!(base_url);
+    }
+    client.rpc("update_config", config_patch);
+
+    let automation_id = format!("automation-agent-loop-e2e-{}", unix_timestamp_ms());
+    let spec = connection_trigger_agent_loop_spec(&automation_id, mode.run_location());
+    let saved = client.rpc(
+        "automation_save",
+        json!({
+            "id": automation_id,
+            "status": "paused",
+            "spec": spec,
+        }),
+    );
+    let revision = saved["revision"].as_u64().expect("saved revision");
+
+    // Compile + deploy compiles the AgentEnv-owned automation segments and
+    // deploys the workflow artifacts to the runtime. Deploying warms the
+    // runtime execution sandbox so the subsequent in-memory preview can run its
+    // transform nodes; puffer_agent runs later inside the daemon.
+    let deployed = client.rpc_with_mode(
+        &mode,
+        "automation_compile_deploy",
+        json!({
+            "id": saved["id"],
+            "expectedRevision": revision,
+        }),
+    );
+    assert_eq!(deployed["runtime"]["status"], "deployed");
+    assert_eq!(deployed["runtime"]["compiled_revision"], revision);
+    assert!(
+        deployed["runtime"]["agentenv_workflow_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 2,
+        "expected root plus loop-body workflows: {deployed:#}"
+    );
+
+    let preview = client.rpc_slow_with_mode(
+        &mode,
+        "automation_run_preview",
+        json!({
+            "id": saved["id"],
+            "input": {
+                "source": "automation-agent-loop-e2e",
+                "text": "hello from a connector event",
+                "timestamp_ms": unix_timestamp_ms()
+            }
+        }),
+    );
+    assert_eq!(preview["status"], "completed");
+    let preview_text = preview.to_string();
+    assert!(
+        preview_text.contains("connector_action_result"),
+        "preview result should include the connector action output: {preview:#}"
+    );
+    assert!(
+        preview_text.contains("read-only status ok"),
+        "preview result should include the read-only connector summary: {preview:#}"
+    );
+    assert_public_preview_response(&preview);
+
+    let history = client.rpc("automation_run_history", json!({ "id": saved["id"] }));
+    let runs = history["runs"].as_array().expect("run history runs array");
+    assert!(
+        runs.iter().any(|run| run["status"] == "completed"),
+        "expected a completed preview run in history: {history:#}"
+    );
+
+    daemon.stop();
+}
+
 enum AutomationE2eMode {
     Local,
     Cloud(AutomationE2eCloudEnv),
@@ -149,6 +285,39 @@ impl AutomationE2eMode {
         match self {
             Self::Local => "local",
             Self::Cloud(_) => "cloud",
+        }
+    }
+
+    fn run_location(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Cloud(_) => "agent_env_cloud",
+        }
+    }
+}
+
+fn configure_workflow_backend_for_mode(client: &mut DaemonClient, mode: &AutomationE2eMode) {
+    match mode {
+        AutomationE2eMode::Local => {
+            let config = client.rpc("workflow_backend_get_config", json!({}));
+            assert_eq!(config["mode"], "local");
+        }
+        AutomationE2eMode::Cloud(env) => {
+            let saved_backend = client.rpc(
+                "workflow_backend_save_config",
+                json!({
+                    "mode": "agent_env_cloud",
+                    "apiUrl": env.api_url,
+                    "uiUrl": "https://agentenv.io",
+                    "workspaceId": env.workspace_id,
+                    "apiToken": env.api_token,
+                    "keepToken": false,
+                }),
+            );
+            assert_eq!(saved_backend["hasToken"], true);
+            let saved_backend_text = saved_backend.to_string();
+            assert!(!saved_backend_text.contains("apiToken"));
+            assert!(!saved_backend_text.contains("api_token"));
         }
     }
 }
@@ -230,6 +399,180 @@ fn automation_spec(automation_id: &str) -> Value {
 
 fn transform_config() -> Value {
     json!({ "code": "return { ok: true, input };" })
+}
+
+/// Provider credential used by the loop's `puffer_agent`.
+struct AutomationAgentEnv {
+    provider: String,
+    model: String,
+    api_key: String,
+    base_url: Option<String>,
+}
+
+impl AutomationAgentEnv {
+    fn from_env() -> Self {
+        let api_key = env_trimmed(AGENT_API_KEY_ENV).unwrap_or_else(|| {
+            panic!(
+                "connector-trigger agent-loop e2e requires {AGENT_API_KEY_ENV} (a provider API key for the loop agent)"
+            )
+        });
+        Self {
+            provider: env_trimmed(AGENT_PROVIDER_ENV).unwrap_or_else(|| "openai".to_string()),
+            model: env_trimmed(AGENT_MODEL_ENV).unwrap_or_else(|| "gpt-4o-mini".to_string()),
+            api_key,
+            base_url: env_trimmed(AGENT_BASE_URL_ENV),
+        }
+    }
+}
+
+/// Writes a user connector catalog with a single read-only connector whose
+/// `act` command is a trivial shell script. The daemon's connector store reads
+/// this file on startup and resolves the connector for the automation action.
+fn write_readonly_connector_catalog(puffer_config: &Path) {
+    // Extra argv (`act <connection> <action>`) is appended by the runtime and
+    // ignored here; the script drains stdin so the writer never sees a broken
+    // pipe, then emits a fixed read-only action response on stdout.
+    let script =
+        "cat >/dev/null 2>&1; printf '%s' '{\"success\":true,\"summary\":\"read-only status ok\",\"output\":{\"status\":\"green\"}}'";
+
+    let mut permission = serde_json::Map::new();
+    permission.insert("category".into(), json!("read"));
+    permission.insert("summary".into(), json!("Read status"));
+    permission.insert("external_side_effect".into(), json!(false));
+
+    let mut action = serde_json::Map::new();
+    action.insert("slug".into(), json!(READONLY_ACTION));
+    action.insert(
+        "description".into(),
+        json!("Return a read-only status snapshot"),
+    );
+    action.insert("permission".into(), Value::Object(permission));
+
+    let mut actions = serde_json::Map::new();
+    actions.insert(READONLY_ACTION.to_string(), Value::Object(action));
+
+    let catalog = json!({
+        "version": 1,
+        "connectors": [
+            {
+                "slug": READONLY_CONNECTOR_SLUG,
+                "description": "E2E read-only connector used to verify Automation connector actions",
+                "skill": "none",
+                "binary": "/bin/sh",
+                "command": ["/bin/sh", "-c", script],
+                "requires_auth": false,
+                "can_subscribe": false,
+                "can_proxy_agent": false,
+                "actions": Value::Object(actions),
+            }
+        ]
+    });
+    std::fs::write(
+        puffer_config.join("connectors.json"),
+        serde_json::to_vec_pretty(&catalog).expect("serialize connector catalog"),
+    )
+    .expect("write connectors.json");
+}
+
+/// Writes an auth store containing an API key for the agent provider. API keys
+/// are persisted in plaintext (only OAuth secrets are encrypted), so the file
+/// can be written directly without the secret store key.
+fn write_agent_api_key(puffer_config: &Path, agent: &AutomationAgentEnv) {
+    let mut providers = serde_json::Map::new();
+    providers.insert(
+        agent.provider.clone(),
+        json!({ "kind": "api_key", "key": agent.api_key }),
+    );
+    let auth = json!({
+        "format_version": 1,
+        "providers": Value::Object(providers),
+    });
+    std::fs::write(
+        puffer_config.join("auth.json"),
+        serde_json::to_vec_pretty(&auth).expect("serialize auth store"),
+    )
+    .expect("write auth.json");
+}
+
+/// A connector-event-triggered Automation whose loop body runs a Puffer agent
+/// per item and then executes a read-only connector action as the terminal
+/// loop-body suffix.
+fn connection_trigger_agent_loop_spec(automation_id: &str, run_location: &str) -> Value {
+    let mut connector_config = serde_json::Map::new();
+    connector_config.insert("connector_slug".into(), json!(READONLY_CONNECTOR_SLUG));
+    connector_config.insert("connection_slug".into(), json!(READONLY_CONNECTION_SLUG));
+    connector_config.insert("action".into(), json!(READONLY_ACTION));
+    connector_config.insert("input".into(), json!({ "query": "status" }));
+    // Read-only: none of the approval-gating flags are set, so the preview is
+    // allowed to actually execute the connector action.
+    connector_config.insert("external_side_effect".into(), json!(false));
+    connector_config.insert("draft_only".into(), json!(false));
+    connector_config.insert("human_approval_required".into(), json!(false));
+
+    json!({
+        "spec_version": 1,
+        "name": format!("Automation agent-loop e2e {automation_id}"),
+        "source": { "type": "blank" },
+        "instructions": "When a connector event arrives, review each item and record a read-only status check.",
+        "run_location": run_location,
+        "triggers": [
+            {
+                "type": "puffer_connection",
+                "id": "incoming",
+                "connection_slug": READONLY_CONNECTION_SLUG,
+                "connector_slug": READONLY_CONNECTOR_SLUG
+            }
+        ],
+        "flow": {
+            "steps": [
+                {
+                    "type": "agent_env_node",
+                    "id": "seed",
+                    "node": {
+                        "node_type": "transform_js",
+                        "name": "Seed",
+                        "trusted": true,
+                        "config": transform_config()
+                    }
+                },
+                {
+                    "type": "loop",
+                    "id": "per-item",
+                    "loop": {
+                        "mode": "for_each",
+                        "input": { "type": "static", "value": ["only"] },
+                        "item_alias": "item"
+                    },
+                    "body": {
+                        "steps": [
+                            {
+                                "type": "agent_env_node",
+                                "id": "agent",
+                                "node": {
+                                    "node_type": "puffer_agent",
+                                    "name": "Loop agent",
+                                    "config": {
+                                        "instructions": "Summarize the current item in one short sentence."
+                                    }
+                                }
+                            },
+                            {
+                                "type": "agent_env_node",
+                                "id": "record-status",
+                                "node": {
+                                    "node_type": "puffer_connector_action",
+                                    "name": "Record status",
+                                    "trusted": true,
+                                    "config": Value::Object(connector_config)
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        "review": { "human_approval_required": true }
+    })
 }
 
 fn assert_public_preview_response(value: &Value) {
@@ -394,11 +737,22 @@ impl DaemonClient {
     }
 
     fn rpc(&mut self, method: &str, params: Value) -> Value {
-        self.rpc_with_context(method, params, None)
+        self.rpc_with_context(method, params, None, Duration::from_secs(90))
     }
 
     fn rpc_with_mode(&mut self, mode: &AutomationE2eMode, method: &str, params: Value) -> Value {
-        self.rpc_with_context(method, params, Some(mode))
+        self.rpc_with_context(method, params, Some(mode), Duration::from_secs(90))
+    }
+
+    /// RPC variant with a longer deadline for calls that run real Puffer agents
+    /// through the provider loop on a cold runtime.
+    fn rpc_slow_with_mode(
+        &mut self,
+        mode: &AutomationE2eMode,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        self.rpc_with_context(method, params, Some(mode), Duration::from_secs(300))
     }
 
     fn rpc_with_context(
@@ -406,8 +760,9 @@ impl DaemonClient {
         method: &str,
         params: Value,
         mode: Option<&AutomationE2eMode>,
+        timeout: Duration,
     ) -> Value {
-        let message = self.rpc_response(method, params);
+        let message = self.rpc_response(method, params, timeout);
         if message["error"].is_null() {
             message["result"].clone()
         } else {
@@ -422,7 +777,7 @@ impl DaemonClient {
         }
     }
 
-    fn rpc_response(&mut self, method: &str, params: Value) -> Value {
+    fn rpc_response(&mut self, method: &str, params: Value, timeout: Duration) -> Value {
         let id = self.next_id.to_string();
         self.next_id += 1;
         self.socket
@@ -432,7 +787,7 @@ impl DaemonClient {
                     .into(),
             ))
             .expect("send daemon request");
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now() + timeout;
         loop {
             assert!(Instant::now() < deadline, "{method} timed out");
             let message = self.read_message_until(deadline);

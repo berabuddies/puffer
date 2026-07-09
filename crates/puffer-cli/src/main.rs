@@ -2,6 +2,7 @@ mod attachment_bridge;
 mod auth_credentials;
 mod auth_provider;
 mod authflow;
+mod automation_runtime_errors;
 mod basic_commands;
 mod benchmark_reflection;
 mod benchmark_run;

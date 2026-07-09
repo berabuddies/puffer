@@ -1,10 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
+    activateAutomationRecord,
     deleteAutomationRecord,
+    executeConnectorActionDraft,
+    getAutomationPendingAction,
     loadAutomationCatalog,
     loadAutomationRunHistory,
+    listAutomationPendingActions,
     listAutomations,
+    rejectAutomationPendingAction,
     runAutomationPreview,
     saveAutomationRecord,
     syncAutomationPreview
@@ -15,6 +20,8 @@
     AutomationCatalogResult,
     AutomationCatalogTrigger,
     AutomationNodeRef,
+    AutomationPendingActionDetail,
+    AutomationPendingActionListItem,
     AutomationRecordDto,
     AutomationRunLocation,
     AutomationRuntimeSyncResult,
@@ -61,6 +68,8 @@
     error?: string | null;
     compiled?: boolean;
     runtimeStatus?: string;
+    input?: unknown;
+    result?: unknown;
   };
 
   type AutomationStarter = {
@@ -98,13 +107,15 @@
     targetLabel?: string;
     targetOptions?: string[];
     defaultTarget?: string;
-    action?: AutomationCatalogAction;
+    action: AutomationCatalogAction;
   };
 
   type VisibleAutomationApp = AutomationApp & {
     visibleCapabilities: AutomationCapability[];
   };
 
+  // "Tool" is the user-facing umbrella. A selected tool can be backed by an
+  // AgentEnv node or by a Puffer-owned connector action step.
   type SelectedAutomationTool = {
     id: string;
     appId: string;
@@ -114,7 +125,7 @@
     targetLabel?: string;
     targetOptions: string[];
     target: string | null;
-    action?: AutomationCatalogAction;
+    action: AutomationCatalogAction;
   };
 
   type AutomationDraft = {
@@ -306,7 +317,15 @@
   let savedRunSequence = $state(0);
   let automationLoadError = $state<string | null>(null);
   let automationCatalogError = $state<string | null>(null);
+  let automationReviewError = $state<string | null>(null);
+  let automationPendingActions = $state<AutomationPendingActionListItem[]>([]);
+  let selectedPendingAction = $state<AutomationPendingActionDetail | null>(null);
+  let pendingActionMessage = $state("");
+  let pendingActionRejectReason = $state("");
+  let pendingActionLoading = $state(false);
+  let pendingActionSubmitting = $state(false);
   let automationSaving = $state(false);
+  let automationStatusChanging = $state(false);
   let automationRunning = $state(false);
   let triggerCatalog = $state<AutomationCatalogTrigger[]>([]);
   let commonApps = $state<AutomationApp[]>([]);
@@ -320,7 +339,8 @@
   let automationRunLocation = $state<AutomationRunLocation>(defaultAutomationRunLocation());
   let automationTrigger = $state<AutomationTrigger | null>(null);
   let selectedTools = $state<SelectedAutomationTool[]>([]);
-  let automationEnabled = $state(true);
+  let automationEnabled = $state(false);
+  let automationTestInputText = $state(defaultAutomationTestInputText(""));
   let triggerMenuOpen = $state(false);
   let toolMenuOpen = $state(false);
   let automationActionMenuOpen = $state(false);
@@ -339,6 +359,7 @@
   onMount(() => {
     void refreshAutomations();
     void refreshAutomationCatalog();
+    void refreshAutomationPendingActions();
   });
 
   async function refreshAutomations() {
@@ -368,6 +389,107 @@
     }
   }
 
+  async function refreshAutomationPendingActions() {
+    try {
+      const result = await listAutomationPendingActions();
+      automationPendingActions = result.drafts;
+      automationReviewError = null;
+      if (
+        selectedPendingAction &&
+        !result.drafts.some((draft) => draft.draft_id === selectedPendingAction?.draft_id)
+      ) {
+        snoozePendingAction();
+      }
+    } catch (error) {
+      automationPendingActions = [];
+      automationReviewError = errorMessage(error);
+    }
+  }
+
+  async function openPendingAction(action: AutomationPendingActionListItem) {
+    pendingActionLoading = true;
+    automationReviewError = null;
+    try {
+      const result = await getAutomationPendingAction(action.draft_id, action.version);
+      selectedPendingAction = result.draft;
+      pendingActionMessage = result.draft.message;
+      pendingActionRejectReason = "";
+    } catch (error) {
+      automationReviewError = errorMessage(error);
+    } finally {
+      pendingActionLoading = false;
+    }
+  }
+
+  async function approvePendingAction() {
+    if (!selectedPendingAction || pendingActionSubmitting) return;
+    pendingActionSubmitting = true;
+    automationReviewError = null;
+    try {
+      // send_message drafts approve an edited message; exact_action drafts with
+      // an editable body field approve an edited input (body only — the daemon
+      // pins the destination). Otherwise the exact action is approved as-is.
+      let approvedMessage: string | undefined;
+      let approvedInput: Record<string, unknown> | undefined;
+      if (selectedPendingAction.message_editable) {
+        approvedMessage = pendingActionMessage;
+      } else if (selectedPendingAction.message_field) {
+        approvedInput = {
+          ...(selectedPendingAction.input ?? {}),
+          [selectedPendingAction.message_field]: pendingActionMessage
+        };
+      }
+      await executeConnectorActionDraft({
+        draftId: selectedPendingAction.draft_id,
+        version: selectedPendingAction.version,
+        approvedMessage,
+        approvedInput,
+        clientRequestId: pendingActionClientRequestId(selectedPendingAction)
+      });
+      snoozePendingAction();
+      await refreshAutomationPendingActions();
+    } catch (error) {
+      automationReviewError = errorMessage(error);
+    } finally {
+      pendingActionSubmitting = false;
+    }
+  }
+
+  async function rejectPendingAction() {
+    if (!selectedPendingAction || pendingActionSubmitting) return;
+    const reason = pendingActionRejectReason.trim();
+    if (!reason) {
+      automationReviewError = "Add a short rejection reason.";
+      return;
+    }
+    pendingActionSubmitting = true;
+    automationReviewError = null;
+    try {
+      await rejectAutomationPendingAction({
+        draftId: selectedPendingAction.draft_id,
+        version: selectedPendingAction.version,
+        reason
+      });
+      snoozePendingAction();
+      await refreshAutomationPendingActions();
+    } catch (error) {
+      automationReviewError = errorMessage(error);
+    } finally {
+      pendingActionSubmitting = false;
+    }
+  }
+
+  function snoozePendingAction() {
+    selectedPendingAction = null;
+    pendingActionMessage = "";
+    pendingActionRejectReason = "";
+  }
+
+  function pendingActionClientRequestId(action: AutomationPendingActionDetail): string {
+    const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    return `automation-review-${action.draft_id}-${action.version}-${random}`;
+  }
+
   function applyStarter(starter: AutomationStarter) {
     automationName = starter.name;
     automationPrompt = starter.prompt;
@@ -375,7 +497,7 @@
     automationRunLocation = defaultAutomationRunLocation();
     automationTrigger = copyTrigger(starter.trigger);
     selectedTools = [];
-    automationEnabled = true;
+    automationEnabled = false;
     selectedAutomationId = null;
     triggerMenuOpen = false;
     toolMenuOpen = false;
@@ -391,7 +513,7 @@
     automationRunLocation = defaultAutomationRunLocation();
     automationTrigger = null;
     selectedTools = [];
-    automationEnabled = true;
+    automationEnabled = false;
     selectedAutomationId = null;
     triggerMenuOpen = false;
     toolMenuOpen = false;
@@ -403,24 +525,24 @@
 
   function appsFromCatalog(catalog: AutomationCatalogResult): AutomationApp[] {
     const groups = new Map<string, AutomationApp>();
-    for (const action of catalog.actions) {
-      if (action.kind === "agentenv_node") continue;
+    for (const action of catalog.actions.filter(isSupportedAutomationToolAction)) {
       const appId = action.connector_slug ?? action.kind;
       const title = appTitle(appId);
       const group = groups.get(appId) ?? {
         id: appId,
         title,
-        description: "Connector actions and tools.",
+        description: action.kind === "agentenv_node" ? "Local runtime tools." : "Connector actions and tools.",
         icon: iconName(action.icon),
         capabilities: []
       };
+      const targetOptions = targetOptionsFromCatalogInputs(action);
       group.capabilities.push({
         id: action.id,
         title: action.label,
         description: actionSummary(action),
         targetLabel: targetLabelForAction(action),
-        targetOptions: targetOptionsForAction(action),
-        defaultTarget: targetOptionsForAction(action)[0],
+        targetOptions,
+        defaultTarget: targetOptions[0],
         action
       });
       groups.set(appId, group);
@@ -428,10 +550,15 @@
     return Array.from(groups.values()).sort((a, b) => a.title.localeCompare(b.title));
   }
 
+  function isSupportedAutomationToolAction(action: AutomationCatalogAction): boolean {
+    return action.node_ref.node_type !== "tool_capability";
+  }
+
   function appTitle(id: string): string {
     if (id === "github") return "GitHub";
     if (id === "gmail") return "Gmail";
     if (id === "google-calendar" || id === "gcal-browser") return "Google Calendar";
+    if (id === "agentenv_node") return "Local Runtime";
     return id
       .split(/[-_]/)
       .filter(Boolean)
@@ -451,14 +578,9 @@
     return undefined;
   }
 
-  function targetOptionsForAction(action: AutomationCatalogAction): string[] {
-    if (action.action === "comment-on-pull-request") return ["Allow PR Approval", "Comment only", "Request changes"];
-    if (action.action === "send-to-slack") return ["#teams", "#engineering", "#release"];
-    if (action.action === "create-gmail-draft") return ["Primary inbox", "Support inbox", "Sales inbox"];
-    if (action.action === "draft-rsvp") return ["Tentative", "Accept", "Decline"];
-    if (action.external_side_effect) return ["Draft for review"];
-    if (action.connection_slug) return [action.connection_slug];
-    return [];
+  function targetOptionsFromCatalogInputs(action: AutomationCatalogAction): string[] {
+    const targetInput = action.required_inputs.find((input) => input.id === "target" && input.options?.length);
+    return targetInput?.options ?? [];
   }
 
   function iconName(value: string | null | undefined): IconName {
@@ -546,6 +668,14 @@
     return selectedToolFrom(app, capability);
   }
 
+  function toolBySelectedId(toolId: string): SelectedAutomationTool | null {
+    for (const app of commonApps) {
+      const capability = app.capabilities.find((candidate) => toolIdFor(app, candidate) === toolId);
+      if (capability) return selectedToolFrom(app, capability);
+    }
+    return null;
+  }
+
   function toolsById(ids: Array<[string, string]>): SelectedAutomationTool[] {
     return ids
       .map(([appId, capabilityId]) => toolById(appId, capabilityId))
@@ -567,9 +697,13 @@
     return error instanceof Error ? error.message : String(error);
   }
 
-  function statusLabel(status: AutomationStatus): string {
-    if (status === "enabled") return "Active";
-    if (status === "archived") return "Archived";
+  function automationIsActive(record: AutomationRecordDto): boolean {
+    return record.status === "enabled" && record.runtime.status === "deployed";
+  }
+
+  function statusLabel(record: AutomationRecordDto): string {
+    if (record.status === "archived") return "Archived";
+    if (automationIsActive(record)) return "Active";
     return "Paused";
   }
 
@@ -579,12 +713,6 @@
 
   function triggerFromSpec(trigger: AutomationTriggerSpec | undefined): AutomationTrigger | null {
     if (!trigger) return null;
-    if (trigger.type === "manual") {
-      return {
-        icon: "bolt",
-        leading: trigger.summary ?? "Manual run"
-      };
-    }
     if (trigger.type === "agent_env_node") {
       const target =
         typeof trigger.node.config?.time === "string"
@@ -623,12 +751,21 @@
     const connectorSlug = typeof step.node.config?.connector_slug === "string" ? step.node.config.connector_slug : null;
     const connectorAction = typeof step.node.config?.action === "string" ? step.node.config.action : null;
     if (connectorSlug && connectorAction) {
-      const tool = toolById(connectorSlug, `connector:${connectorSlug}:${connectorAction}`);
+      const connectionSlug = typeof step.node.config?.connection_slug === "string" ? step.node.config.connection_slug : null;
+      const app = appById(connectorSlug);
+      const capability = app?.capabilities.find((candidate) => {
+        const action = candidate.action;
+        return (
+          action.connector_slug === connectorSlug &&
+          action.action === connectorAction &&
+          (connectionSlug == null || action.connection_slug === connectionSlug)
+        );
+      });
+      const tool = app && capability ? selectedToolFrom(app, capability) : null;
       if (tool) return tool;
     }
-    const [appId, capabilityId] = String(step.node.config?.tool_id ?? "").split(":");
-    if (!appId || !capabilityId) return null;
-    const tool = toolById(appId, capabilityId);
+    const toolId = typeof step.node.config?.tool_id === "string" ? step.node.config.tool_id : "";
+    const tool = toolBySelectedId(toolId);
     if (!tool) return null;
     const target = typeof step.node.config?.target === "string" ? step.node.config.target : tool.target;
     return { ...tool, target };
@@ -654,7 +791,7 @@
       id: record.id,
       title,
       description,
-      status: statusLabel(record.status),
+      status: statusLabel(record),
       source: "Puffer",
       updated: formatUpdated(record.updated_at_ms),
       when: triggerSummary(trigger),
@@ -667,12 +804,26 @@
       prompt: record.spec.instructions,
       trigger,
       tools,
-      enabled: record.status === "enabled",
+      enabled: automationIsActive(record),
       owner: "You",
       history: [],
       revision: record.revision,
       record
     };
+  }
+
+  function defaultAutomationTestInputText(instructions: string, trigger: AutomationTrigger | null = null): string {
+    const text =
+      instructions.trim() ||
+      "Alice says checkout rollout is blocked because Stripe webhooks are intermittently failing in staging. Bob suspects a recent env var change. They need a decision before tomorrow's launch freeze. Lunch plans are unrelated.";
+    return JSON.stringify(
+      {
+        text,
+        trigger: triggerSummary(trigger)
+      },
+      null,
+      2
+    );
   }
 
   function runtimeStatusLabel(status: string): string {
@@ -699,6 +850,54 @@
     return new Date(value).toLocaleDateString();
   }
 
+  function pendingActionTimeLabel(action: AutomationPendingActionListItem | AutomationPendingActionDetail): string {
+    if (typeof action.created_at_ms === "number") return formatUpdated(action.created_at_ms);
+    if (action.created_at) {
+      const parsed = Date.parse(action.created_at);
+      if (Number.isFinite(parsed)) return formatUpdated(parsed);
+      return action.created_at;
+    }
+    return "Queued";
+  }
+
+  function pendingActionConnectorLabel(action: AutomationPendingActionListItem | AutomationPendingActionDetail): string {
+    return [appTitle(action.connector_slug), actionLabel(action.action)].filter(Boolean).join(" / ");
+  }
+
+  function actionLabel(value: string): string {
+    if (!value) return "";
+    return value
+      .split(/[-_]/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  }
+
+  function pendingActionRecipientLabel(action: AutomationPendingActionListItem | AutomationPendingActionDetail): string {
+    return action.recipient_label ?? action.recipient ?? action.recipient_stable_id ?? "Destination";
+  }
+
+  function pendingActionApprovalLabel(action: AutomationPendingActionListItem | AutomationPendingActionDetail): string {
+    return action.message_editable ? "Editable message" : "Exact action";
+  }
+
+  function pendingActionDestinationEntries(action: AutomationPendingActionDetail): { key: string; value: string }[] {
+    return Object.entries(action.destination_metadata ?? {})
+      .filter(([, value]) => value !== null && value !== undefined)
+      .slice(0, 8)
+      .map(([key, value]) => ({ key: actionLabel(key), value: pendingActionMetadataValue(value) }));
+  }
+
+  function pendingActionMetadataValue(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
   function slugifyAutomationName(name: string): string {
     const base = name
       .toLowerCase()
@@ -719,11 +918,7 @@
   function triggerSpecFromUi(trigger: AutomationTrigger | null): AutomationTriggerSpec {
     const summary = triggerSummary(trigger);
     if (!trigger) {
-      return {
-        type: "manual",
-        id: "manual",
-        summary: "Manual run"
-      };
+      throw new Error("Choose a trigger before saving the automation.");
     }
     if (trigger.catalog) {
       const spec = JSON.parse(JSON.stringify(trigger.catalog.spec_template)) as AutomationTriggerSpec;
@@ -743,8 +938,6 @@
         if (filter) {
           spec.filter = { type: "regex", pattern: filter, case_insensitive: true };
         }
-      } else if (spec.type === "manual") {
-        spec.summary = summary;
       }
       return spec;
     }
@@ -778,9 +971,8 @@
   }
 
   function isGeneratedTrigger(trigger: AutomationTriggerSpec): boolean {
-    if (trigger.type === "manual") return true;
     if (trigger.type === "agent_env_node") {
-      return trigger.id === "trigger-1" && ["schedule", "event"].includes(trigger.node.node_type);
+      return trigger.id === "trigger-1" && ["schedule", "event", "webhook"].includes(trigger.node.node_type);
     }
     return (
       trigger.id === "trigger-1" &&
@@ -794,8 +986,7 @@
 
   function isGeneratedStep(step: AutomationStepSpec, index: number): boolean {
     if (step.type !== "agent_env_node") return false;
-    if (index === 0) return step.id === "agent" && step.node.node_type === "puffer_agent";
-    if (!["tool_capability", "puffer_connector_action"].includes(step.node.node_type)) return false;
+    if (index === 0) return step.id === "agent" && ["puffer_agent", "transform_js"].includes(step.node.node_type);
     return toolFromStep(step) !== null;
   }
 
@@ -844,11 +1035,15 @@
             id: "agent",
             node: {
               node_type: "puffer_agent",
-              name: "Puffer agent",
+              name: "Agent",
               trusted: true,
-              config: {}
+              config: {
+                instructions: description,
+                tools: selectedTools.map(productToolConfig),
+                permissions: {}
+              }
             },
-            summary: "Run the Automation instructions"
+            summary: "Run the Agent"
           },
           ...selectedTools.map((tool, index): AutomationStepSpec => ({
             type: "agent_env_node",
@@ -864,29 +1059,28 @@
     };
   }
 
-  function nodeRefForTool(tool: SelectedAutomationTool): AutomationNodeRef {
-    if (tool.action?.node_ref) {
-      return {
-        ...tool.action.node_ref,
-        config: {
-          ...(tool.action.node_ref.config ?? {}),
-          tool_id: tool.id,
-          app_id: tool.appId,
-          capability: tool.title,
-          target: tool.target,
-          human_approval_required: Boolean(tool.action.external_side_effect)
-        }
-      };
-    }
+  function productToolConfig(tool: SelectedAutomationTool): Record<string, unknown> {
     return {
-      node_type: "tool_capability",
-      name: tool.title,
-      trusted: true,
+      id: tool.id,
+      app_id: tool.appId,
+      title: tool.title,
+      target: tool.target,
+      action: tool.action.action ?? null,
+      connector_slug: tool.action.connector_slug ?? null,
+      connection_slug: tool.action.connection_slug ?? null
+    };
+  }
+
+  function nodeRefForTool(tool: SelectedAutomationTool): AutomationNodeRef {
+    return {
+      ...tool.action.node_ref,
       config: {
+        ...(tool.action.node_ref.config ?? {}),
         tool_id: tool.id,
         app_id: tool.appId,
         capability: tool.title,
-        target: tool.target
+        target: tool.target,
+        human_approval_required: Boolean(tool.action.external_side_effect)
       }
     };
   }
@@ -927,14 +1121,6 @@
   function draftFromPrompt(prompt: string): AutomationDraft {
     const trimmedPrompt = prompt.trim();
     const lowerPrompt = trimmedPrompt.toLowerCase();
-    if (prefersManualLocalDraft(lowerPrompt)) {
-      return {
-        name: "Manual automation",
-        prompt: trimmedPrompt,
-        trigger: firstTriggerMatch((trigger) => trigger.kind === "manual" || trigger.id === "manual") ?? null,
-        tools: []
-      };
-    }
     if (/\bpr\b|pull request/.test(lowerPrompt)) {
       return {
         name: "PR review draft",
@@ -987,17 +1173,6 @@
     };
   }
 
-  function prefersManualLocalDraft(lowerPrompt: string): boolean {
-    const asksManual = /\bmanual\b|手动|手工/.test(lowerPrompt);
-    const asksLocal = /\blocal(?:-only)?\b|本地/.test(lowerPrompt);
-    const rejectsExternal =
-      /no external|without external|do not use external|不要外部|不连外部|不使用外部/.test(lowerPrompt) ||
-      /no connectors?|without connectors?|do not use connectors?|不要连接器|不使用连接器/.test(lowerPrompt) ||
-      /no tools?|without tools?|do not use tools?|不要工具|不使用工具/.test(lowerPrompt);
-    const isSmokeOrTest = /\bsmoke\b|\btest\b|测试|验证/.test(lowerPrompt);
-    return asksManual || (asksLocal && (rejectsExternal || isSmokeOrTest));
-  }
-
   function firstToolsByAction(match: (action: AutomationCatalogAction) => boolean, limit: number): SelectedAutomationTool[] {
     const selected: SelectedAutomationTool[] = [];
     for (const app of commonApps) {
@@ -1024,7 +1199,7 @@
     automationRunLocation = defaultAutomationRunLocation();
     automationTrigger = copyTrigger(draft.trigger);
     selectedTools = copySelectedTools(draft.tools);
-    automationEnabled = true;
+    automationEnabled = false;
     selectedAutomationId = null;
     triggerMenuOpen = false;
     toolMenuOpen = false;
@@ -1051,6 +1226,7 @@
     });
     selectedTools = copySelectedTools(item.tools ?? []);
     automationEnabled = item.enabled ?? item.status !== "Paused";
+    automationTestInputText = defaultAutomationTestInputText(item.prompt ?? item.description, item.trigger ?? null);
     activeAutomationDetailTab = "settings";
     triggerMenuOpen = false;
     toolMenuOpen = false;
@@ -1127,7 +1303,6 @@
     try {
       const record = await saveAutomationRecord({
         id: nextAutomationId(title),
-        status: "enabled",
         spec: automationSpecFromUi(title, description, automationSource)
       });
       upsertAutomationRecord(record);
@@ -1159,7 +1334,7 @@
     }
   }
 
-  async function persistSelectedAutomationDetail(): Promise<AutomationRecordDto> {
+  async function persistSelectedAutomationDetail(options: { status?: AutomationStatus } = {}): Promise<AutomationRecordDto> {
     const id = selectedAutomationId;
     if (!id) throw new Error("Automation is no longer selected; refresh before saving.");
     const title = automationName.trim() || blankAutomationName;
@@ -1174,16 +1349,25 @@
     }
     automationSaving = true;
     try {
-      const record = await saveAutomationRecord({
+      const status = options.status ?? (automationEnabled ? undefined : "paused");
+      const request = {
         id,
         expectedRevision,
-        status: automationEnabled ? "enabled" : "paused",
         spec: detailSpecForSave(selected, title, description)
-      });
+      };
+      const record = await saveAutomationRecord(
+        status === undefined
+          ? request
+          : {
+              ...request,
+              status
+            }
+      );
       upsertAutomationRecord(record);
       automationLoadError = null;
       automationName = title;
       automationPrompt = description;
+      automationEnabled = automationIsActive(record);
       triggerMenuOpen = false;
       toolMenuOpen = false;
       automationActionMenuOpen = false;
@@ -1201,17 +1385,28 @@
       const record = item.record
         ? {
             ...item.record,
+            status: sync.status ?? item.record.status,
             revision: sync.revision,
             runtime: sync.runtime
           }
         : item.record;
+      const active = record ? automationIsActive(record) : sync.status === "enabled" && sync.runtime.status === "deployed";
       return {
         ...item,
+        status: active ? "Active" : "Paused",
+        enabled: active,
         revision: sync.revision,
         record,
         recent: [`Revision ${sync.revision}`, runtimeStatusLabel(sync.runtime.status)]
       };
     });
+    if (selectedAutomationId === sync.id) {
+      if (sync.status !== undefined) {
+        automationEnabled = sync.status === "enabled" && sync.runtime.status === "deployed";
+      } else if (sync.runtime.status !== "deployed") {
+        automationEnabled = false;
+      }
+    }
   }
 
   async function runTestAutomation() {
@@ -1245,12 +1440,13 @@
     editingToolId = null;
     toolSearchQuery = "";
     let previewRequested = false;
+    const testInput = previewInput();
     try {
       const saved = await persistSelectedAutomationDetail();
       const sync = await syncAutomationPreview(saved.id, saved.revision);
       applyAutomationRuntimeSync(sync);
       previewRequested = true;
-      const preview = await runAutomationPreview(saved.id, previewInput());
+      const preview = await runAutomationPreview(saved.id, testInput);
       const run: AutomationRun = {
         id: `test-${nextRunSequence}`,
         title: "Test run",
@@ -1259,7 +1455,9 @@
         duration: "-",
         summary: preview.summary || summarizePreviewResult(preview.result),
         compiled: preview.compiled,
-        runtimeStatus: preview.runtime.status
+        runtimeStatus: preview.runtime.status,
+        input: testInput,
+        result: preview.result
       };
       applyRunToSelected(run);
       automationLoadError = null;
@@ -1271,7 +1469,8 @@
         started: "Just now",
         duration: "-",
         summary: errorMessage(error),
-        error: errorMessage(error)
+        error: errorMessage(error),
+        input: testInput
       };
       applyRunToSelected(run);
       automationLoadError = errorMessage(error);
@@ -1284,15 +1483,31 @@
   }
 
   function previewInput(): Record<string, unknown> {
-    return {
-      source: "desktop_preview",
-      preview: true,
-      trigger: automationTrigger ? triggerSummary(automationTrigger) : "Manual preview",
-      instructions: automationPrompt.trim(),
-      sample: {
-        text: automationPrompt.trim() || "Preview Automation run"
+    return parsePreviewInputText(automationTestInputText);
+  }
+
+  function parsePreviewInputText(value: string): Record<string, unknown> {
+    const trimmed = value.trim();
+    if (!trimmed) return {};
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
       }
-    };
+      return { value: parsed };
+    } catch {
+      return { text: trimmed };
+    }
+  }
+
+  function previewValueText(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (value == null) return "";
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
   }
 
   function summarizePreviewResult(result: unknown): string {
@@ -1342,7 +1557,8 @@
       summary: record.error || record.summary,
       error: record.error,
       compiled: record.compiled,
-      runtimeStatus: record.runtime_status
+      runtimeStatus: record.runtime_status,
+      result: record.result
     };
   }
 
@@ -1390,6 +1606,28 @@
     savedAutomations = savedAutomations.filter((item) => item.id !== selectedAutomationId);
     activeAutomationLibraryTab = "your";
     returnToAutomationHome();
+  }
+
+  async function setSelectedAutomationActive(active: boolean) {
+    if (!selectedAutomationId || automationSaving || automationRunning || automationStatusChanging) return;
+    const previous = automationEnabled;
+    automationEnabled = active;
+    automationStatusChanging = true;
+    try {
+      const saved = await persistSelectedAutomationDetail({ status: "paused" });
+      if (active) {
+        const activated = await activateAutomationRecord(saved.id, saved.revision);
+        applyAutomationRuntimeSync(activated);
+      } else {
+        automationEnabled = false;
+      }
+      automationLoadError = null;
+    } catch (error) {
+      automationEnabled = previous;
+      automationLoadError = errorMessage(error);
+    } finally {
+      automationStatusChanging = false;
+    }
   }
 
   function closeFloatingMenusFromOutside(event: MouseEvent) {
@@ -1855,7 +2093,18 @@
           />
           <div class="pf-automation-detail-status">
             <label class="pf-automation-switch">
-              <input type="checkbox" aria-label="Active" bind:checked={automationEnabled} />
+              <input
+                type="checkbox"
+                aria-label="Active"
+                checked={automationEnabled}
+                disabled={automationSaving || automationRunning || automationStatusChanging}
+                onchange={(event) => {
+                  const target = event.currentTarget;
+                  if (target instanceof HTMLInputElement) {
+                    void setSelectedAutomationActive(target.checked);
+                  }
+                }}
+              />
               <span></span>
             </label>
             <span>{automationEnabled ? "Active" : "Paused"} | {selectedAutomation?.owner ?? "You"}</span>
@@ -2140,6 +2389,50 @@
             role="tabpanel"
             aria-labelledby="automation-history-tab"
           >
+            <section class="pf-automation-test-panel" aria-label="Test run input">
+              <div class="pf-automation-test-head">
+                <h2>Test input</h2>
+                <span>{automationRunning ? "Running" : "Ready"}</span>
+              </div>
+              <textarea
+                aria-label="Test input"
+                rows="7"
+                spellcheck="false"
+                disabled={automationRunning}
+                bind:value={automationTestInputText}
+              ></textarea>
+            </section>
+
+            <section class="pf-automation-result-preview" aria-label="Test run result preview">
+              <div class="pf-automation-test-head">
+                <h2>Result preview</h2>
+                {#if selectedAutomation?.history?.[0]}
+                  <span>{selectedAutomation.history[0].status}</span>
+                {:else}
+                  <span>Idle</span>
+                {/if}
+              </div>
+              {#if selectedAutomation?.history?.[0]}
+                {@const latestRun = selectedAutomation.history[0]}
+                <div class="pf-automation-result-summary">
+                  <strong>{latestRun.title}</strong>
+                  <span>{latestRun.summary}</span>
+                </div>
+                {#if latestRun.error}
+                  <pre class="pf-automation-result-error">{latestRun.error}</pre>
+                {:else if latestRun.result !== undefined}
+                  <pre>{previewValueText(latestRun.result)}</pre>
+                {:else}
+                  <pre>{latestRun.summary}</pre>
+                {/if}
+              {:else}
+                <div class="pf-automation-result-empty">
+                  <span><Icon name="test" size={14} /></span>
+                  <strong>No result yet</strong>
+                </div>
+              {/if}
+            </section>
+
             {#if selectedAutomation && selectedAutomation.history && selectedAutomation.history.length > 0}
               <ul class="pf-automation-history-list" aria-label="Run history">
                 {#each selectedAutomation.history as run (run.id)}
@@ -2241,6 +2534,163 @@
       </div>
     </section>
 
+    <section class="pf-automation-review" aria-label="Review inbox">
+      <div class="pf-automation-review-head">
+        <div>
+          <h2>Review inbox</h2>
+          <span>{automationPendingActions.length === 1 ? "1 pending draft" : `${automationPendingActions.length} pending drafts`}</span>
+        </div>
+        <button type="button" class="sc-btn" data-variant="outline" data-size="sm" onclick={refreshAutomationPendingActions}>
+          <Icon name="refresh" size={13} />
+          <span>Refresh</span>
+        </button>
+      </div>
+
+      {#if automationReviewError}
+        <div class="pf-automation-error" role="alert">{automationReviewError}</div>
+      {/if}
+
+      <div class="pf-automation-review-body">
+        <div class="pf-automation-review-list-wrap">
+          {#if automationPendingActions.length > 0}
+            <ul class="pf-automation-review-list" aria-label="Pending automation drafts">
+              {#each automationPendingActions as action (action.draft_id)}
+                <li>
+                  <button
+                    type="button"
+                    class="pf-automation-review-row"
+                    data-selected={selectedPendingAction?.draft_id === action.draft_id}
+                    onclick={() => openPendingAction(action)}
+                  >
+                    <span class="pf-automation-row-icon"><Icon name="listTodo" size={14} /></span>
+                    <span class="pf-automation-review-row-main">
+                      <strong>{action.automation_name}</strong>
+                      <small>{pendingActionConnectorLabel(action)} | {pendingActionRecipientLabel(action)}</small>
+                      <em>{action.preview}</em>
+                    </span>
+                    <span class="pf-automation-review-row-meta">
+                      <small>{pendingActionApprovalLabel(action)}</small>
+                      <span>{action.status.replace(/_/g, " ")}</span>
+                      <small>{pendingActionTimeLabel(action)}</small>
+                    </span>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <div class="pf-automation-review-empty">
+              <span><Icon name="listTodo" size={14} /></span>
+              <strong>No pending review</strong>
+            </div>
+          {/if}
+        </div>
+
+        <aside class="pf-automation-review-detail" aria-label="Automation draft detail">
+          {#if pendingActionLoading}
+            <div class="pf-automation-review-empty">
+              <span><Icon name="clock" size={14} /></span>
+              <strong>Loading draft</strong>
+            </div>
+          {:else if selectedPendingAction}
+            <div class="pf-automation-review-detail-head">
+              <div>
+                <strong>{selectedPendingAction.automation_name}</strong>
+                <span>{pendingActionConnectorLabel(selectedPendingAction)} | {pendingActionRecipientLabel(selectedPendingAction)}</span>
+              </div>
+              <small>{pendingActionApprovalLabel(selectedPendingAction)}</small>
+            </div>
+
+            {#if selectedPendingAction.message_editable}
+              <textarea
+                aria-label="Draft message"
+                rows="8"
+                bind:value={pendingActionMessage}
+                disabled={pendingActionSubmitting}
+              ></textarea>
+            {:else}
+              <div class="pf-automation-action-review" role="region" aria-label="Action review">
+                <div>
+                  <span>Action</span>
+                  <strong>{pendingActionConnectorLabel(selectedPendingAction)}</strong>
+                </div>
+                <div>
+                  <span>Destination</span>
+                  <strong>{pendingActionRecipientLabel(selectedPendingAction)}</strong>
+                </div>
+                {#if selectedPendingAction.message_field}
+                  <textarea
+                    aria-label="Draft body"
+                    rows="6"
+                    bind:value={pendingActionMessage}
+                    disabled={pendingActionSubmitting}
+                  ></textarea>
+                {:else if selectedPendingAction.message}
+                  <p>{selectedPendingAction.message}</p>
+                {/if}
+                {#if pendingActionDestinationEntries(selectedPendingAction).length > 0}
+                  <dl>
+                    {#each pendingActionDestinationEntries(selectedPendingAction) as item}
+                      <div>
+                        <dt>{item.key}</dt>
+                        <dd>{item.value}</dd>
+                      </div>
+                    {/each}
+                  </dl>
+                {/if}
+              </div>
+            {/if}
+
+            <label class="pf-automation-review-reason">
+              <span>Rejection reason</span>
+              <input
+                aria-label="Rejection reason"
+                bind:value={pendingActionRejectReason}
+                disabled={pendingActionSubmitting}
+              />
+            </label>
+
+            <div class="pf-automation-review-actions">
+              <button
+                type="button"
+                class="sc-btn"
+                data-variant="default"
+                data-size="sm"
+                disabled={pendingActionSubmitting}
+                onclick={approvePendingAction}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                class="sc-btn"
+                data-variant="outline"
+                data-size="sm"
+                disabled={pendingActionSubmitting}
+                onclick={rejectPendingAction}
+              >
+                Reject
+              </button>
+              <button
+                type="button"
+                class="sc-btn"
+                data-variant="ghost"
+                data-size="sm"
+                disabled={pendingActionSubmitting}
+                onclick={snoozePendingAction}
+              >
+                Snooze
+              </button>
+            </div>
+          {:else}
+            <div class="pf-automation-review-empty">
+              <span><Icon name="edit" size={14} /></span>
+              <strong>Select a draft</strong>
+            </div>
+          {/if}
+        </aside>
+      </div>
+    </section>
+
     <section class="pf-automations-section" aria-label="Automation library">
       {#if automationLoadError}
         <div class="pf-automation-error" role="alert">{automationLoadError}</div>
@@ -2315,7 +2765,7 @@
               <div class="pf-automation-empty" aria-label="Your automations empty state">
                 <span class="pf-automation-empty-icon"><Icon name="bolt" size={16} /></span>
                 <strong>No automations yet</strong>
-                <p>创建你的第一个automation，处理重复的工作流</p>
+                <p>Create your first automation to handle repetitive workflows</p>
                 <button type="button" class="sc-btn" data-variant="outline" data-size="sm" onclick={() => openBlankAutomation()}>
                   <Icon name="plus" size={13} />
                   <span>create automation</span>
@@ -2369,6 +2819,7 @@
   }
 
   .pf-automation-compose,
+  .pf-automation-review,
   .pf-automations-section,
   .pf-automation-builder-page-head {
     width: min(100%, 980px);
@@ -2409,6 +2860,7 @@
   .pf-automation-add-row:focus-visible,
   .pf-automation-model-row:focus-visible,
   .pf-automation-card:focus-visible,
+  .pf-automation-review-row:focus-visible,
   .pf-automation-icon-action:focus-visible {
     border-color: color-mix(in oklab, var(--puffer-accent) 55%, var(--border));
     box-shadow: 0 0 0 2px color-mix(in oklab, var(--puffer-accent) 14%, transparent);
@@ -2569,6 +3021,293 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .pf-automation-review {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .pf-automation-review-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .pf-automation-review-head > div {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .pf-automation-review-head h2 {
+    margin: 0;
+    color: var(--foreground);
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 650;
+    letter-spacing: 0;
+  }
+
+  .pf-automation-review-head span,
+  .pf-automation-review-detail-head span,
+  .pf-automation-review-row-main small,
+  .pf-automation-review-row-main em,
+  .pf-automation-review-row-meta,
+  .pf-automation-review-reason span {
+    color: var(--muted-foreground);
+    font-size: 11.5px;
+    line-height: 16px;
+  }
+
+  .pf-automation-review-head .sc-btn {
+    flex: 0 0 auto;
+    gap: 6px;
+  }
+
+  .pf-automation-review-body {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+    gap: 10px;
+  }
+
+  .pf-automation-review-list-wrap,
+  .pf-automation-review-detail {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--background) 98%, var(--muted));
+    overflow: hidden;
+  }
+
+  .pf-automation-review-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .pf-automation-review-list li + li {
+    border-top: 1px solid var(--border);
+  }
+
+  .pf-automation-review-row {
+    width: 100%;
+    min-width: 0;
+    min-height: 76px;
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--foreground);
+    padding: 10px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .pf-automation-review-row:hover,
+  .pf-automation-review-row[data-selected="true"] {
+    background: var(--pf-selected-bg-hover);
+  }
+
+  .pf-automation-review-row-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .pf-automation-review-row-main strong,
+  .pf-automation-review-detail-head strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--foreground);
+    font-size: 12.5px;
+    line-height: 17px;
+    font-weight: 650;
+  }
+
+  .pf-automation-review-row-main small,
+  .pf-automation-review-row-main em {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-style: normal;
+  }
+
+  .pf-automation-review-row-meta {
+    min-width: 96px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+    text-align: right;
+  }
+
+  .pf-automation-review-row-meta span {
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 650;
+  }
+
+  .pf-automation-review-row-meta small {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 15px;
+  }
+
+  .pf-automation-review-detail {
+    min-height: 188px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 10px;
+  }
+
+  .pf-automation-review-detail-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .pf-automation-review-detail-head > div {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .pf-automation-review-detail-head small {
+    flex: 0 0 auto;
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 650;
+    line-height: 16px;
+  }
+
+  .pf-automation-review-detail textarea,
+  .pf-automation-review-reason input {
+    width: 100%;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--foreground);
+    font: inherit;
+    font-size: 12px;
+    line-height: 17px;
+    padding: 8px;
+    outline: none;
+  }
+
+  .pf-automation-review-detail textarea {
+    min-height: 130px;
+    resize: vertical;
+  }
+
+  .pf-automation-action-review {
+    min-height: 130px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    padding: 9px;
+  }
+
+  .pf-automation-action-review > div {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .pf-automation-action-review span,
+  .pf-automation-action-review dt {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 15px;
+  }
+
+  .pf-automation-action-review strong,
+  .pf-automation-action-review dd,
+  .pf-automation-action-review p {
+    margin: 0;
+    color: var(--foreground);
+    font-size: 12px;
+    line-height: 17px;
+    overflow-wrap: anywhere;
+  }
+
+  .pf-automation-action-review dl {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    margin: 0;
+  }
+
+  .pf-automation-review-detail textarea:focus,
+  .pf-automation-review-reason input:focus {
+    border-color: color-mix(in oklab, var(--puffer-accent) 42%, var(--border));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--puffer-accent) 12%, transparent);
+  }
+
+  .pf-automation-review-reason {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .pf-automation-review-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 7px;
+    flex-wrap: wrap;
+  }
+
+  .pf-automation-review-empty {
+    min-height: 170px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--muted-foreground);
+    padding: 18px;
+    text-align: center;
+  }
+
+  .pf-automation-review-empty span {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+  }
+
+  .pf-automation-review-empty strong {
+    color: var(--foreground);
+    font-size: 12px;
+    line-height: 17px;
+    font-weight: 650;
   }
 
   .pf-automation-error {
@@ -3602,6 +4341,134 @@
 
   .pf-automation-history-panel {
     min-height: 220px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .pf-automation-test-panel,
+  .pf-automation-result-preview {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: color-mix(in oklab, var(--background) 98%, var(--muted));
+    padding: 10px;
+  }
+
+  .pf-automation-test-head {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .pf-automation-test-head h2 {
+    margin: 0;
+    color: var(--foreground);
+    font-size: 12px;
+    line-height: 17px;
+    font-weight: 650;
+  }
+
+  .pf-automation-test-head span {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 15px;
+    white-space: nowrap;
+  }
+
+  .pf-automation-test-panel textarea {
+    width: 100%;
+    min-width: 0;
+    resize: vertical;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--foreground);
+    font: 12px/17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 9px;
+    outline: none;
+  }
+
+  .pf-automation-test-panel textarea:focus {
+    border-color: color-mix(in oklab, var(--puffer-accent) 42%, var(--border));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--puffer-accent) 12%, transparent);
+  }
+
+  .pf-automation-test-panel textarea:disabled {
+    opacity: 0.65;
+  }
+
+  .pf-automation-result-summary {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .pf-automation-result-summary strong {
+    color: var(--foreground);
+    font-size: 12px;
+    line-height: 17px;
+    font-weight: 650;
+  }
+
+  .pf-automation-result-summary span {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 15px;
+  }
+
+  .pf-automation-result-preview pre {
+    max-height: 220px;
+    overflow: auto;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--foreground);
+    font: 11.5px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 9px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .pf-automation-result-preview .pf-automation-result-error {
+    border-color: color-mix(in oklab, var(--destructive) 32%, var(--border));
+    color: var(--destructive);
+  }
+
+  .pf-automation-result-empty {
+    min-height: 72px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    color: var(--muted-foreground);
+  }
+
+  .pf-automation-result-empty span {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+  }
+
+  .pf-automation-result-empty strong {
+    color: var(--foreground);
+    font-size: 12px;
+    line-height: 17px;
+    font-weight: 650;
   }
 
   .pf-automation-history-list {
@@ -3793,6 +4660,30 @@
     .pf-automation-new-button {
       justify-content: center;
       width: 100%;
+    }
+
+    .pf-automation-review-head {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .pf-automation-review-head .sc-btn {
+      justify-content: center;
+      width: 100%;
+    }
+
+    .pf-automation-review-body {
+      grid-template-columns: 1fr;
+    }
+
+    .pf-automation-review-row {
+      grid-template-columns: 30px minmax(0, 1fr);
+    }
+
+    .pf-automation-review-row-meta {
+      grid-column: 2;
+      align-items: flex-start;
+      text-align: left;
     }
 
     .pf-automation-grid {

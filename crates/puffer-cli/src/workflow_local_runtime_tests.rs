@@ -160,6 +160,10 @@ fn fail(stderr: &str) -> io::Result<CommandOutput> {
     Ok(CommandOutput::failure(stderr))
 }
 
+fn no_api_container() -> io::Result<CommandOutput> {
+    ok("")
+}
+
 fn available() -> Vec<io::Result<CommandOutput>> {
     vec![ok("Docker version 1\n"), ok("Docker Compose version 2\n")]
 }
@@ -289,6 +293,7 @@ fn start_generates_compose_env_seed_and_runs_fixed_sequence() {
     let mut responses = Vec::new();
     responses.extend(available());
     responses.push(ok("image"));
+    responses.push(no_api_container());
     responses.push(ok("postgres redis"));
     responses.push(ok("migrated"));
     responses.push(ok("seeded"));
@@ -363,6 +368,8 @@ fn start_generates_compose_env_seed_and_runs_fixed_sequence() {
     assert!(seed.contains("INSERT INTO workspaces"));
     assert!(seed.contains("INSERT INTO user_workspaces"));
     assert!(seed.contains("INSERT INTO api_keys"));
+    assert!(seed.contains("'user', NULL, 'Puffer Local'"));
+    assert!(!seed.contains("'workspace',"));
     assert_eq!(seed.matches("ON CONFLICT").count(), 4);
     assert!(seed.contains("\"keyHash\""));
     assert!(!seed.contains(&token));
@@ -415,6 +422,71 @@ fn start_generates_compose_env_seed_and_runs_fixed_sequence() {
 }
 
 #[test]
+fn stale_api_container_forces_api_recreate() {
+    let _guard = lock_secret_store();
+    let _secret_store_key = ScopedSecretStoreKey::set();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let mut config = PufferConfig::default();
+    let stale_inspect = r#"[
+      {
+        "Config": {
+          "Labels": {
+            "com.docker.compose.project.config_files": "/tmp/old/docker-compose.yml"
+          }
+        },
+        "NetworkSettings": {
+          "Ports": {
+            "3000/tcp": [
+              { "HostIp": "127.0.0.1", "HostPort": "3000" }
+            ]
+          }
+        }
+      }
+    ]"#;
+    let mut responses = Vec::new();
+    responses.extend(available());
+    responses.push(ok("image"));
+    responses.push(ok("api-container-id\n"));
+    responses.push(ok(stale_inspect));
+    responses.push(ok(
+        "api-container-id\npostgres-container-id\nredis-container-id\n",
+    ));
+    responses.push(ok("removed\n"));
+    responses.push(ok("postgres redis"));
+    responses.push(ok("migrated"));
+    responses.push(ok("seeded"));
+    responses.push(ok("api recreated"));
+    let runner = FakeCommandRunner::new(responses);
+    let health = FakeHealthChecker::ready();
+
+    let status = start_with(
+        &runner,
+        &health,
+        &paths,
+        &mut config,
+        true,
+        WaitPolicy::new(1, Duration::ZERO),
+    )
+    .expect("start");
+
+    assert_eq!(status.state, LocalWorkflowRuntimeState::Ready);
+    assert!(runner.calls().iter().any(|call| call.program == "docker"
+        && call.args.as_slice()
+            == [
+                "rm",
+                "-f",
+                "api-container-id",
+                "postgres-container-id",
+                "redis-container-id"
+            ]));
+    assert!(runner
+        .calls()
+        .iter()
+        .any(|call| is_compose_command(call, &["up", "-d", "--force-recreate", "api"])));
+}
+
+#[test]
 fn start_regenerates_unreadable_local_runtime_token() {
     let _guard = lock_secret_store();
     let _secret_store_key = ScopedSecretStoreKey::set();
@@ -443,6 +515,7 @@ fn start_regenerates_unreadable_local_runtime_token() {
     let mut responses = Vec::new();
     responses.extend(available());
     responses.push(ok("image"));
+    responses.push(no_api_container());
     responses.push(ok("postgres redis"));
     responses.push(ok("migrated"));
     responses.push(ok("seeded"));
@@ -475,6 +548,77 @@ fn start_regenerates_unreadable_local_runtime_token() {
 }
 
 #[test]
+fn repair_archives_runtime_data_and_rebuilds_stack() {
+    let _guard = lock_secret_store();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(&temp);
+    let mut config = configured_local_runtime(&paths);
+    let data_dir = local_runtime_stack_dir(&paths).join(LOCAL_WORKFLOW_RUNTIME_DATA_DIR);
+    fs::create_dir_all(data_dir.join("postgres")).unwrap();
+    fs::create_dir_all(data_dir.join("redis")).unwrap();
+    fs::write(data_dir.join("postgres").join("PG_VERSION"), "14").unwrap();
+    fs::write(data_dir.join("redis").join("appendonly.aof"), "redis").unwrap();
+
+    let mut responses = available();
+    responses.push(ok("image\n"));
+    responses.push(no_api_container());
+    responses.push(ok("down\n"));
+    responses.extend(available());
+    responses.push(ok("image\n"));
+    responses.push(no_api_container());
+    responses.push(ok("postgres\nredis\n"));
+    responses.push(ok("migrated\n"));
+    responses.push(ok("seeded\n"));
+    responses.push(ok("api\n"));
+    let runner = FakeCommandRunner::new(responses);
+    let health = FakeHealthChecker::ready();
+
+    let result = repair_with(
+        &runner,
+        &health,
+        &paths,
+        &mut config,
+        WaitPolicy::new(1, Duration::ZERO),
+    )
+    .unwrap();
+
+    assert_eq!(result.status.state, LocalWorkflowRuntimeState::Ready);
+    assert_eq!(result.archived_data_dirs.len(), 2);
+    assert!(data_dir.join("postgres").is_dir());
+    assert!(data_dir.join("redis").is_dir());
+    assert!(result.archived_data_dirs.iter().any(|path| {
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("postgres.repair-")
+    }));
+    assert!(result.archived_data_dirs.iter().any(|path| {
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("redis.repair-")
+    }));
+    assert!(result
+        .archived_data_dirs
+        .iter()
+        .any(|path| path.join("PG_VERSION").exists()));
+
+    let calls = runner.calls();
+    assert!(calls.iter().any(|call| {
+        call.program == "docker"
+            && call
+                .args
+                .ends_with(&["down".to_string(), "--remove-orphans".to_string()])
+    }));
+    assert!(calls.iter().any(|call| {
+        call.program == "docker"
+            && call
+                .args
+                .ends_with(&["run".to_string(), "--rm".to_string(), "migrate".to_string()])
+    }));
+}
+
+#[test]
 fn transient_start_from_cloud_config_preserves_user_workflow_backend() {
     let _guard = lock_secret_store();
     let _secret_store_key = ScopedSecretStoreKey::set();
@@ -504,6 +648,7 @@ fn transient_start_from_cloud_config_preserves_user_workflow_backend() {
     let mut responses = Vec::new();
     responses.extend(available());
     responses.push(ok("image"));
+    responses.push(no_api_container());
     responses.push(ok("postgres redis"));
     responses.push(ok("migrated"));
     responses.push(ok("seeded"));
@@ -556,6 +701,7 @@ fn migrate_failure_reports_incompatible_runtime() {
     let mut responses = Vec::new();
     responses.extend(available());
     responses.push(ok("image"));
+    responses.push(no_api_container());
     responses.push(ok("postgres redis"));
     responses.push(fail("missing migration"));
     responses.push(fail("pull failed"));
@@ -589,6 +735,7 @@ fn seed_failure_reports_incompatible_runtime() {
     let mut responses = Vec::new();
     responses.extend(available());
     responses.push(ok("image"));
+    responses.push(no_api_container());
     responses.push(ok("postgres redis"));
     responses.push(ok("migrated"));
     responses.push(fail("bad sql"));
@@ -623,6 +770,7 @@ fn ready_without_node_definitions_reports_incompatible_runtime() {
     let mut responses = Vec::new();
     responses.extend(available());
     responses.push(ok("image"));
+    responses.push(no_api_container());
     responses.push(ok("postgres redis"));
     responses.push(ok("migrated"));
     responses.push(ok("seeded"));
@@ -655,6 +803,7 @@ fn incompatible_runtime_refreshes_image_and_retries_with_recreated_api() {
     let mut responses = Vec::new();
     responses.extend(available());
     responses.push(ok("image"));
+    responses.push(no_api_container());
     responses.push(ok("postgres redis"));
     responses.push(ok("migrated"));
     responses.push(ok("seeded"));

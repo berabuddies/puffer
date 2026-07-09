@@ -97,13 +97,24 @@ test("marks automation and workflow runtime API calls as daemon-only", async () 
     name: "Automation 1",
     source: { type: "blank" as const },
     instructions: "Run the automation.",
-    triggers: [{ type: "manual" as const, id: "manual" }],
+    triggers: [
+      {
+        type: "agent_env_node" as const,
+        id: "trigger-1",
+        node: {
+          node_type: "webhook",
+          name: "Webhook",
+          trusted: false,
+          config: { path: "automation-1", methods: ["POST"], authentication: "none" }
+        }
+      }
+    ],
     flow: {
       steps: [
         {
           type: "agent_env_node" as const,
           id: "agent",
-          node: { node_type: "puffer_agent" }
+          node: { node_type: "transform_js", config: { code: "return input;" } }
         }
       ]
     },
@@ -115,10 +126,14 @@ test("marks automation and workflow runtime API calls as daemon-only", async () 
   await api.saveAutomationRecord({
     id: "automation-1",
     expectedRevision: 1,
-    status: "enabled",
+    status: "paused",
     spec: automationSpec
   });
+  await api.activateAutomationRecord("automation-1", 1);
   await api.deleteAutomationRecord("automation-1");
+  await api.listAutomationPendingActions();
+  await api.getAutomationPendingAction("draft-1", 1);
+  await api.rejectAutomationPendingAction({ draftId: "draft-1", version: 1, reason: "No longer needed" });
   await api.loadWorkflowBackendConfig();
   await api.saveWorkflowBackendConfig({
     mode: "agent_env_cloud",
@@ -128,6 +143,7 @@ test("marks automation and workflow runtime API calls as daemon-only", async () 
     keepToken: true
   });
   await api.testWorkflowBackendConnection();
+  await api.repairWorkflowBackendLocalRuntime();
   await api.loadWorkflowSnapshot();
   await api.openWorkflowConsole();
   await api.listWorkflowNodeDefinitions();
@@ -167,15 +183,20 @@ test("marks automation and workflow runtime API calls as daemon-only", async () 
   await api.deleteWorkflowConnection("telegram-user");
   await api.toggleWorkflow("monitor-telegram-user", false);
 
-  const workflowOptions = { requireWebSocket: true, timeoutMs: 15000 };
+  const workflowOptions = { requireWebSocket: true, timeoutMs: 120000 };
   expect(request.mock.calls.map(([method, _params, options]) => [method, options])).toEqual([
     ["automation_list", workflowOptions],
     ["automation_get", workflowOptions],
     ["automation_save", workflowOptions],
+    ["automation_compile_deploy", workflowOptions],
     ["automation_delete", workflowOptions],
+    ["automation_pending_action_list", workflowOptions],
+    ["automation_pending_action_get", workflowOptions],
+    ["automation_pending_action_reject", workflowOptions],
     ["workflow_backend_get_config", workflowOptions],
     ["workflow_backend_save_config", workflowOptions],
     ["workflow_backend_test_connection", workflowOptions],
+    ["workflow_backend_repair_local_runtime", workflowOptions],
     ["workflow_list", workflowOptions],
     ["workflow_open_ui", workflowOptions],
     ["workflow_node_definitions", workflowOptions],

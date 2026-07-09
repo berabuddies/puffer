@@ -45,14 +45,18 @@ pub enum AutomationCompileError {
     Serialize(String),
 }
 
-/// Compiles a persisted Automation into internal AgentEnv workflow artifacts
-/// plus Puffer-owned connector binding plans.
+/// Compiles a persisted Automation into AgentEnv workflow artifacts plus
+/// Puffer-owned binding plans. User-facing Puffer-owned steps such as
+/// `puffer_agent` and `puffer_connector_action` are runtime boundaries; they
+/// split the AgentEnv graph into supported node segments plus daemon-executed
+/// steps.
 pub fn compile_automation(
     record: &AutomationRecord,
 ) -> Result<AutomationCompilePlan, AutomationCompileError> {
     let spec_hash = automation_spec_hash(&record.spec).map_err(AutomationCompileError::Hash)?;
     let mut workflows = Vec::new();
     workflows.push(compile_root_workflow(record)?);
+    workflows.extend(compile_connector_continuation_workflows(&record.spec.flow)?);
     workflows.extend(compile_loop_body_workflows(&record.spec.flow)?);
 
     let puffer_bindings = record
@@ -71,9 +75,7 @@ pub fn compile_automation(
                 connection_slug: connection_slug.clone(),
                 connector_slug: connector_slug.clone(),
             }),
-            AutomationTriggerSpec::AgentEnvNode { .. } | AutomationTriggerSpec::Manual { .. } => {
-                None
-            }
+            AutomationTriggerSpec::AgentEnvNode { .. } => None,
         })
         .collect();
 
@@ -96,37 +98,49 @@ fn compile_root_workflow(
     for trigger in &record.spec.triggers {
         match trigger {
             AutomationTriggerSpec::AgentEnvNode { id, node, .. } => {
-                nodes.push(agentenv_node(id, node));
-                previous_ids.push(id.clone());
+                let span = append_agentenv_nodes_for_automation(&mut nodes, id, node)?;
+                edges.extend(span.internal_edges);
+                previous_ids.extend(span.exit_ids);
             }
-            AutomationTriggerSpec::Manual { id, .. }
-            | AutomationTriggerSpec::PufferConnection { id, .. } => {
-                nodes.push(puffer_ingress_node(&record.id, id));
-                previous_ids.push(id.clone());
-            }
+            AutomationTriggerSpec::PufferConnection { .. } => {}
         }
     }
 
     let mut seen_loop = None::<String>;
+    let mut seen_boundary = None::<String>;
     for step in &record.spec.flow.steps {
         match step {
             AutomationStepSpec::AgentEnvNode { id, node, .. } => {
+                if is_puffer_runtime_boundary(node) {
+                    seen_boundary = Some(id.clone());
+                    continue;
+                }
+                if seen_boundary.is_some() {
+                    continue;
+                }
                 if let Some(loop_id) = seen_loop {
                     return Err(AutomationCompileError::Unsupported(format!(
                         "loop continuation compilation is not implemented yet; step `{id}` follows loop `{loop_id}`"
                     )));
                 }
-                nodes.push(agentenv_node(id, node));
+                let span = append_agentenv_nodes_for_automation(&mut nodes, id, node)?;
                 for previous_id in &previous_ids {
-                    edges.push(AgentEnvWorkflowEdge {
-                        source: previous_id.clone(),
-                        target: id.clone(),
-                        condition_script: None,
-                    });
+                    for entry_id in &span.entry_ids {
+                        edges.push(workflow_edge(previous_id, entry_id));
+                    }
                 }
-                previous_ids = vec![id.clone()];
+                edges.extend(span.internal_edges);
+                previous_ids = span.exit_ids;
+            }
+            AutomationStepSpec::Agent { id, .. } => {
+                // The iterative agent runs entirely in the Puffer daemon. It is a
+                // runtime boundary: nothing after it belongs in the root workflow.
+                seen_boundary = Some(id.clone());
             }
             AutomationStepSpec::Loop { id, .. } => {
+                if seen_boundary.is_some() {
+                    continue;
+                }
                 if seen_loop.is_some() {
                     return Err(AutomationCompileError::Unsupported(
                         "multiple loop steps in one Automation are not implemented yet".into(),
@@ -143,38 +157,179 @@ fn compile_root_workflow(
     )
 }
 
+fn compile_connector_continuation_workflows(
+    flow: &AutomationFlowSpec,
+) -> Result<Vec<CompiledWorkflowDefinition>, AutomationCompileError> {
+    // Puffer-owned steps are runtime boundaries. The compiler emits AgentEnv
+    // workflows only for the segments that run after each boundary.
+    let mut workflows = Vec::new();
+    let mut current_boundary_id = None::<String>;
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut previous_ids = Vec::new();
+
+    for step in &flow.steps {
+        match step {
+            AutomationStepSpec::AgentEnvNode { id, node, .. }
+                if is_puffer_runtime_boundary(node) =>
+            {
+                push_connector_continuation_workflow(
+                    &mut workflows,
+                    &mut current_boundary_id,
+                    &mut nodes,
+                    &mut edges,
+                    &mut previous_ids,
+                )?;
+                current_boundary_id = Some(id.clone());
+            }
+            AutomationStepSpec::AgentEnvNode { id, node, .. } => {
+                if current_boundary_id.is_none() {
+                    continue;
+                }
+                let span = append_agentenv_nodes_for_automation(&mut nodes, id, node)?;
+                for previous_id in &previous_ids {
+                    for entry_id in &span.entry_ids {
+                        edges.push(workflow_edge(previous_id, entry_id));
+                    }
+                }
+                edges.extend(span.internal_edges);
+                previous_ids = span.exit_ids;
+            }
+            AutomationStepSpec::Agent { id, .. } => {
+                // Close any open continuation segment; the agent boundary starts a
+                // fresh segment for whatever AgentEnv nodes follow it.
+                push_connector_continuation_workflow(
+                    &mut workflows,
+                    &mut current_boundary_id,
+                    &mut nodes,
+                    &mut edges,
+                    &mut previous_ids,
+                )?;
+                current_boundary_id = Some(id.clone());
+            }
+            AutomationStepSpec::Loop { .. } => {
+                push_connector_continuation_workflow(
+                    &mut workflows,
+                    &mut current_boundary_id,
+                    &mut nodes,
+                    &mut edges,
+                    &mut previous_ids,
+                )?;
+            }
+        }
+    }
+    push_connector_continuation_workflow(
+        &mut workflows,
+        &mut current_boundary_id,
+        &mut nodes,
+        &mut edges,
+        &mut previous_ids,
+    )?;
+    Ok(workflows)
+}
+
+fn push_connector_continuation_workflow(
+    workflows: &mut Vec<CompiledWorkflowDefinition>,
+    current_connector_id: &mut Option<String>,
+    nodes: &mut Vec<AgentEnvWorkflowNode>,
+    edges: &mut Vec<AgentEnvWorkflowEdge>,
+    previous_ids: &mut Vec<String>,
+) -> Result<(), AutomationCompileError> {
+    let Some(step_id) = current_connector_id.take() else {
+        return Ok(());
+    };
+    if nodes.is_empty() {
+        edges.clear();
+        previous_ids.clear();
+        return Ok(());
+    }
+    workflows.push(compiled_workflow(
+        CompiledWorkflowRole::Continuation { step_id },
+        AgentEnvWorkflowDefinition {
+            nodes: std::mem::take(nodes),
+            edges: std::mem::take(edges),
+        },
+    )?);
+    previous_ids.clear();
+    Ok(())
+}
+
 fn compile_loop_body_workflows(
     flow: &AutomationFlowSpec,
 ) -> Result<Vec<CompiledWorkflowDefinition>, AutomationCompileError> {
     let mut workflows = Vec::new();
     for step in &flow.steps {
         if let AutomationStepSpec::Loop { id, body, .. } = step {
+            validate_loop_body_connector_terminal_suffix(id, body)?;
             workflows.push(compile_loop_body_workflow(id, body)?);
         }
     }
     Ok(workflows)
 }
 
+fn validate_loop_body_connector_terminal_suffix(
+    loop_id: &str,
+    body: &AutomationFlowSpec,
+) -> Result<(), AutomationCompileError> {
+    let mut terminal_connector_suffix = None::<String>;
+    for step in &body.steps {
+        match step {
+            AutomationStepSpec::AgentEnvNode { id, node, .. } => {
+                if is_puffer_connector_action(node) {
+                    terminal_connector_suffix.get_or_insert_with(|| id.clone());
+                } else if let Some(connector_id) = &terminal_connector_suffix {
+                    return Err(AutomationCompileError::Unsupported(format!(
+                        "automation loop `{loop_id}` body step `{id}` cannot follow connector action `{connector_id}`; connector actions run as the terminal loop-body suffix"
+                    )));
+                }
+            }
+            AutomationStepSpec::Agent { id, .. } => {
+                return Err(AutomationCompileError::Unsupported(format!(
+                    "automation loop `{loop_id}` body agent step `{id}` is not supported; the iterative agent owns its own loop"
+                )));
+            }
+            AutomationStepSpec::Loop { id, .. } => {
+                if let Some(connector_id) = &terminal_connector_suffix {
+                    return Err(AutomationCompileError::Unsupported(format!(
+                        "automation loop `{loop_id}` body loop `{id}` cannot follow connector action `{connector_id}`; connector actions run as the terminal loop-body suffix"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn compile_loop_body_workflow(
     step_id: &str,
     body: &AutomationFlowSpec,
 ) -> Result<CompiledWorkflowDefinition, AutomationCompileError> {
+    validate_loop_body_connector_terminal_suffix(step_id, body)?;
+
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
-    let mut previous_id = None::<String>;
+    let mut previous_ids = Vec::<String>::new();
 
     for step in &body.steps {
         match step {
             AutomationStepSpec::AgentEnvNode { id, node, .. } => {
-                nodes.push(agentenv_node(id, node));
-                if let Some(source) = previous_id {
-                    edges.push(AgentEnvWorkflowEdge {
-                        source,
-                        target: id.clone(),
-                        condition_script: None,
-                    });
+                if is_puffer_runtime_boundary(node) {
+                    previous_ids.clear();
+                    continue;
                 }
-                previous_id = Some(id.clone());
+                let span = append_loop_body_agentenv_nodes_for_automation(&mut nodes, id, node)?;
+                for previous_id in &previous_ids {
+                    for entry_id in &span.entry_ids {
+                        edges.push(workflow_edge(previous_id, entry_id));
+                    }
+                }
+                edges.extend(span.internal_edges);
+                previous_ids = span.exit_ids;
+            }
+            AutomationStepSpec::Agent { id, .. } => {
+                return Err(AutomationCompileError::Unsupported(format!(
+                    "automation loop `{step_id}` body agent step `{id}` is not supported; the iterative agent owns its own loop"
+                )));
             }
             AutomationStepSpec::Loop { id, .. } => {
                 return Err(AutomationCompileError::Unsupported(format!(
@@ -203,27 +358,95 @@ fn agentenv_node(id: &str, node: &AgentEnvNodeRef) -> AgentEnvWorkflowNode {
     }
 }
 
-fn puffer_ingress_node(automation_id: &str, trigger_id: &str) -> AgentEnvWorkflowNode {
-    let mut config = std::collections::BTreeMap::new();
-    config.insert(
-        "path".to_string(),
-        Value::String(format!("puffer-automation-{automation_id}-{trigger_id}")),
-    );
-    config.insert(
-        "methods".to_string(),
-        Value::Array(vec![Value::String("POST".to_string())]),
-    );
-    config.insert(
-        "authentication".to_string(),
-        Value::String("none".to_string()),
-    );
-    AgentEnvWorkflowNode {
-        id: trigger_id.to_string(),
-        node_type: "webhook".to_string(),
-        name: Some("Puffer trigger".to_string()),
-        config,
-        trusted: Some(false),
-        position: None,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentEnvNodeSpan {
+    entry_ids: Vec<String>,
+    exit_ids: Vec<String>,
+    internal_edges: Vec<AgentEnvWorkflowEdge>,
+}
+
+fn append_agentenv_nodes_for_automation(
+    nodes: &mut Vec<AgentEnvWorkflowNode>,
+    id: &str,
+    node: &AgentEnvNodeRef,
+) -> Result<AgentEnvNodeSpan, AutomationCompileError> {
+    match node.node_type.as_str() {
+        "puffer_agent" => Ok(AgentEnvNodeSpan {
+            entry_ids: Vec::new(),
+            exit_ids: Vec::new(),
+            internal_edges: Vec::new(),
+        }),
+        "tool_capability" => {
+            Err(AutomationCompileError::Unsupported(format!(
+                "Automation step `{id}` uses Puffer-only node `{}`; compile it to an AgentEnv-supported node such as `transform_js` before preparing the runtime",
+                node.node_type
+            )))
+        }
+        "puffer_connector_action" => Ok(AgentEnvNodeSpan {
+            entry_ids: Vec::new(),
+            exit_ids: Vec::new(),
+            internal_edges: Vec::new(),
+        }),
+        _ => {
+            nodes.push(agentenv_node(id, node));
+            Ok(AgentEnvNodeSpan {
+                entry_ids: vec![id.to_string()],
+                exit_ids: vec![id.to_string()],
+                internal_edges: Vec::new(),
+            })
+        }
+    }
+}
+
+fn is_puffer_connector_action(node: &AgentEnvNodeRef) -> bool {
+    node.node_type == "puffer_connector_action"
+}
+
+fn is_puffer_runtime_boundary(node: &AgentEnvNodeRef) -> bool {
+    matches!(
+        node.node_type.as_str(),
+        "puffer_agent" | "puffer_connector_action"
+    )
+}
+
+fn append_loop_body_agentenv_nodes_for_automation(
+    nodes: &mut Vec<AgentEnvWorkflowNode>,
+    id: &str,
+    node: &AgentEnvNodeRef,
+) -> Result<AgentEnvNodeSpan, AutomationCompileError> {
+    match node.node_type.as_str() {
+        "puffer_agent" => Ok(AgentEnvNodeSpan {
+            entry_ids: Vec::new(),
+            exit_ids: Vec::new(),
+            internal_edges: Vec::new(),
+        }),
+        "tool_capability" => {
+            Err(AutomationCompileError::Unsupported(format!(
+                "Automation step `{id}` uses Puffer-only node `{}`; compile it to an AgentEnv-supported node such as `transform_js` before preparing the runtime",
+                node.node_type
+            )))
+        }
+        "puffer_connector_action" => Ok(AgentEnvNodeSpan {
+            entry_ids: Vec::new(),
+            exit_ids: Vec::new(),
+            internal_edges: Vec::new(),
+        }),
+        _ => {
+            nodes.push(agentenv_node(id, node));
+            Ok(AgentEnvNodeSpan {
+                entry_ids: vec![id.to_string()],
+                exit_ids: vec![id.to_string()],
+                internal_edges: Vec::new(),
+            })
+        }
+    }
+}
+
+fn workflow_edge(source: &str, target: &str) -> AgentEnvWorkflowEdge {
+    AgentEnvWorkflowEdge {
+        source: source.to_string(),
+        target: target.to_string(),
+        condition_script: None,
     }
 }
 
@@ -257,9 +480,8 @@ fn automation_binding_slug(automation_id: &str, trigger_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        AutomationFlowSpec, AutomationLoopInput, AutomationLoopSpec, AutomationLoopStopSpec,
-        AutomationReviewSpec, AutomationSource, AutomationSpec, AutomationStatus,
-        AUTOMATION_SPEC_VERSION,
+        AutomationFlowSpec, AutomationLoopInput, AutomationLoopSpec, AutomationReviewSpec,
+        AutomationSource, AutomationSpec, AutomationStatus, AUTOMATION_SPEC_VERSION,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -295,10 +517,27 @@ mod tests {
         }
     }
 
-    fn manual_trigger() -> AutomationTriggerSpec {
-        AutomationTriggerSpec::Manual {
-            id: "manual".into(),
+    fn puffer_connection_trigger() -> AutomationTriggerSpec {
+        AutomationTriggerSpec::PufferConnection {
+            id: "incoming".into(),
+            connection_slug: "telegram-user".into(),
+            connector_slug: Some("telegram-login".into()),
+            filter: None,
+            ignore_filters: Vec::new(),
+            contact_ids: Vec::new(),
             summary: None,
+        }
+    }
+
+    fn assert_no_agentenv_managed_agent_nodes(plan: &AutomationCompilePlan) {
+        for workflow in &plan.workflows {
+            let nodes = workflow.definition["nodes"].as_array().unwrap();
+            assert!(nodes.iter().all(|node| {
+                !matches!(
+                    node.get("type").and_then(Value::as_str),
+                    Some("managed_agent_create" | "managed_agent_call")
+                )
+            }));
         }
     }
 
@@ -319,7 +558,7 @@ mod tests {
                     },
                 ],
             },
-            vec![manual_trigger()],
+            vec![puffer_connection_trigger()],
         );
 
         let plan = compile_automation(&record).unwrap();
@@ -331,12 +570,11 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            3
+            2
         );
         assert_eq!(
             plan.workflows[0].definition["edges"],
             json!([
-                {"source": "manual", "target": "draft"},
                 {"source": "draft", "target": "format"}
             ])
         );
@@ -359,7 +597,7 @@ mod tests {
                     },
                 ],
             },
-            vec![manual_trigger()],
+            vec![puffer_connection_trigger()],
         );
 
         let plan = compile_automation(&record).unwrap();
@@ -397,14 +635,14 @@ mod tests {
             "automation-reply-helper-incoming"
         );
         assert_eq!(plan.puffer_bindings[0].connection_slug, "telegram-user");
-        assert_eq!(plan.workflows[0].definition["nodes"][0]["id"], "incoming");
-        assert_eq!(plan.workflows[0].definition["nodes"][0]["type"], "webhook");
-        assert_eq!(
-            plan.workflows[0].definition["edges"],
-            json!([
-                {"source": "incoming", "target": "draft"}
-            ])
-        );
+        assert_eq!(plan.workflows[0].definition["nodes"][0]["id"], "draft");
+        assert_eq!(plan.workflows[0].definition["nodes"][0]["type"], "llm");
+        assert!(plan.workflows[0].definition["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["type"] != "webhook"));
+        assert_eq!(plan.workflows[0].definition["edges"], json!([]));
     }
 
     #[test]
@@ -442,6 +680,329 @@ mod tests {
     }
 
     #[test]
+    fn puffer_agent_is_left_for_puffer_runner() {
+        let mut agent = node("puffer_agent");
+        agent.name = Some("Workflow Agent".into());
+        agent.config.insert(
+            "instructions".into(),
+            json!("Use these product-level agent instructions."),
+        );
+
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![AutomationStepSpec::AgentEnvNode {
+                    id: "agent".into(),
+                    node: agent,
+                    summary: None,
+                }],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let plan = compile_automation(&record).unwrap();
+        let root = plan
+            .workflows
+            .iter()
+            .find(|workflow| workflow.role == CompiledWorkflowRole::Root)
+            .expect("root workflow");
+
+        assert!(root.definition["nodes"].as_array().unwrap().is_empty());
+        assert_no_agentenv_managed_agent_nodes(&plan);
+    }
+
+    #[test]
+    fn puffer_agent_splits_agentenv_continuation() {
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "prepare".into(),
+                        node: node("transform_js"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "agent".into(),
+                        node: node("puffer_agent"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "format".into(),
+                        node: node("transform_js"),
+                        summary: None,
+                    },
+                ],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let plan = compile_automation(&record).unwrap();
+        let root = plan
+            .workflows
+            .iter()
+            .find(|workflow| workflow.role == CompiledWorkflowRole::Root)
+            .expect("root workflow");
+        let continuation = plan
+            .workflows
+            .iter()
+            .find(|workflow| {
+                workflow.role
+                    == (CompiledWorkflowRole::Continuation {
+                        step_id: "agent".into(),
+                    })
+            })
+            .expect("agent continuation workflow");
+
+        assert_eq!(root.definition["nodes"][0]["id"], "prepare");
+        assert_eq!(root.definition["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(continuation.definition["nodes"][0]["id"], "format");
+        assert_no_agentenv_managed_agent_nodes(&plan);
+    }
+
+    #[test]
+    fn loop_body_puffer_agent_does_not_emit_helper_or_template_call() {
+        let mut agent = node("puffer_agent");
+        agent.config.insert("agentId".into(), json!("agent-1"));
+        agent.config.insert("content".into(), json!("Continue."));
+
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![AutomationStepSpec::Loop {
+                    id: "retry".into(),
+                    loop_spec: AutomationLoopSpec::ForEach {
+                        input: AutomationLoopInput::Trigger,
+                        item_alias: "item".into(),
+                        max_iterations: Some(3),
+                    },
+                    body: AutomationFlowSpec {
+                        steps: vec![AutomationStepSpec::AgentEnvNode {
+                            id: "agent".into(),
+                            node: agent,
+                            summary: None,
+                        }],
+                    },
+                    summary: None,
+                }],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let plan = compile_automation(&record).unwrap();
+        let loop_body = plan
+            .workflows
+            .iter()
+            .find(|workflow| {
+                workflow.role
+                    == (CompiledWorkflowRole::LoopBody {
+                        step_id: "retry".into(),
+                    })
+            })
+            .expect("loop body workflow");
+
+        assert!(!plan
+            .workflows
+            .iter()
+            .any(|workflow| matches!(workflow.role, CompiledWorkflowRole::Helper { .. })));
+        assert!(loop_body.definition["nodes"].as_array().unwrap().is_empty());
+        assert_no_agentenv_managed_agent_nodes(&plan);
+    }
+
+    #[test]
+    fn unsupported_tool_capability_fails_before_runtime_submission() {
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![AutomationStepSpec::AgentEnvNode {
+                    id: "agent".into(),
+                    node: node("tool_capability"),
+                    summary: None,
+                }],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let error = compile_automation(&record).unwrap_err();
+
+        assert!(error.to_string().contains("Puffer-only node"));
+        assert!(error.to_string().contains("tool_capability"));
+    }
+
+    #[test]
+    fn puffer_connector_action_is_left_for_puffer_runner() {
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "agent".into(),
+                        node: node("transform_js"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "connector".into(),
+                        node: node("puffer_connector_action"),
+                        summary: None,
+                    },
+                ],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let plan = compile_automation(&record).unwrap();
+        let root = plan
+            .workflows
+            .iter()
+            .find(|workflow| matches!(workflow.role, CompiledWorkflowRole::Root))
+            .expect("root workflow");
+
+        assert_eq!(root.definition["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(root.definition["nodes"][0]["id"], "agent");
+    }
+
+    #[test]
+    fn agentenv_steps_after_connector_action_compile_as_continuation() {
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "before".into(),
+                        node: node("transform_js"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "connector".into(),
+                        node: node("puffer_connector_action"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "after".into(),
+                        node: node("transform_js"),
+                        summary: None,
+                    },
+                ],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let plan = compile_automation(&record).unwrap();
+        let root = plan
+            .workflows
+            .iter()
+            .find(|workflow| matches!(workflow.role, CompiledWorkflowRole::Root))
+            .expect("root workflow");
+        let continuation = plan
+            .workflows
+            .iter()
+            .find(|workflow| {
+                matches!(
+                    &workflow.role,
+                    CompiledWorkflowRole::Continuation { step_id } if step_id == "connector"
+                )
+            })
+            .expect("connector continuation");
+
+        assert_eq!(root.definition["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(root.definition["nodes"][0]["id"], "before");
+        assert_eq!(
+            continuation.definition["nodes"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(continuation.definition["nodes"][0]["id"], "after");
+    }
+
+    #[test]
+    fn loop_body_puffer_connector_action_is_left_for_puffer_runner() {
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![AutomationStepSpec::Loop {
+                    id: "retry".into(),
+                    loop_spec: AutomationLoopSpec::ForEach {
+                        input: AutomationLoopInput::Trigger,
+                        item_alias: "item".into(),
+                        max_iterations: Some(3),
+                    },
+                    body: AutomationFlowSpec {
+                        steps: vec![
+                            AutomationStepSpec::AgentEnvNode {
+                                id: "attempt".into(),
+                                node: node("transform_js"),
+                                summary: None,
+                            },
+                            AutomationStepSpec::AgentEnvNode {
+                                id: "connector".into(),
+                                node: node("puffer_connector_action"),
+                                summary: None,
+                            },
+                            AutomationStepSpec::AgentEnvNode {
+                                id: "notify".into(),
+                                node: node("puffer_connector_action"),
+                                summary: None,
+                            },
+                        ],
+                    },
+                    summary: None,
+                }],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let plan = compile_automation(&record).unwrap();
+        let loop_body = plan
+            .workflows
+            .iter()
+            .find(|workflow| {
+                workflow.role
+                    == (CompiledWorkflowRole::LoopBody {
+                        step_id: "retry".into(),
+                    })
+            })
+            .expect("loop body workflow");
+
+        assert_eq!(loop_body.definition["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(loop_body.definition["nodes"][0]["id"], "attempt");
+    }
+
+    #[test]
+    fn loop_body_agentenv_step_after_puffer_connector_action_fails_before_compile() {
+        let record = record(
+            AutomationFlowSpec {
+                steps: vec![AutomationStepSpec::Loop {
+                    id: "retry".into(),
+                    loop_spec: AutomationLoopSpec::ForEach {
+                        input: AutomationLoopInput::Trigger,
+                        item_alias: "item".into(),
+                        max_iterations: Some(3),
+                    },
+                    body: AutomationFlowSpec {
+                        steps: vec![
+                            AutomationStepSpec::AgentEnvNode {
+                                id: "attempt".into(),
+                                node: node("transform_js"),
+                                summary: None,
+                            },
+                            AutomationStepSpec::AgentEnvNode {
+                                id: "connector".into(),
+                                node: node("puffer_connector_action"),
+                                summary: None,
+                            },
+                            AutomationStepSpec::AgentEnvNode {
+                                id: "after".into(),
+                                node: node("transform_js"),
+                                summary: None,
+                            },
+                        ],
+                    },
+                    summary: None,
+                }],
+            },
+            vec![puffer_connection_trigger()],
+        );
+
+        let error = compile_automation(&record).unwrap_err();
+
+        assert!(error.to_string().contains("after"));
+        assert!(error.to_string().contains("connector"));
+        assert!(error.to_string().contains("terminal loop-body suffix"));
+    }
+
+    #[test]
     fn loop_compiles_root_and_loop_body_without_backedge() {
         let record = record(
             AutomationFlowSpec {
@@ -453,13 +1014,10 @@ mod tests {
                     },
                     AutomationStepSpec::Loop {
                         id: "retry".into(),
-                        loop_spec: AutomationLoopSpec::Repeat {
+                        loop_spec: AutomationLoopSpec::ForEach {
                             input: AutomationLoopInput::Trigger,
-                            stop_when: AutomationLoopStopSpec::OutputEquals {
-                                path: "$.done".into(),
-                                value: json!(true),
-                            },
-                            max_iterations: 3,
+                            item_alias: "item".into(),
+                            max_iterations: Some(3),
                         },
                         body: AutomationFlowSpec {
                             steps: vec![AutomationStepSpec::AgentEnvNode {
@@ -472,7 +1030,7 @@ mod tests {
                     },
                 ],
             },
-            vec![manual_trigger()],
+            vec![puffer_connection_trigger()],
         );
 
         let plan = compile_automation(&record).unwrap();
@@ -501,7 +1059,7 @@ mod tests {
                     summary: None,
                 }],
             },
-            vec![manual_trigger()],
+            vec![puffer_connection_trigger()],
         );
 
         let first = compile_automation(&record).unwrap();
@@ -520,13 +1078,10 @@ mod tests {
                 steps: vec![
                     AutomationStepSpec::Loop {
                         id: "retry".into(),
-                        loop_spec: AutomationLoopSpec::Repeat {
+                        loop_spec: AutomationLoopSpec::ForEach {
                             input: AutomationLoopInput::Trigger,
-                            stop_when: AutomationLoopStopSpec::OutputEquals {
-                                path: "$.done".into(),
-                                value: json!(true),
-                            },
-                            max_iterations: 3,
+                            item_alias: "item".into(),
+                            max_iterations: Some(3),
                         },
                         body: AutomationFlowSpec {
                             steps: vec![AutomationStepSpec::AgentEnvNode {
@@ -544,7 +1099,7 @@ mod tests {
                     },
                 ],
             },
-            vec![manual_trigger()],
+            vec![puffer_connection_trigger()],
         );
 
         let error = compile_automation(&record).unwrap_err();

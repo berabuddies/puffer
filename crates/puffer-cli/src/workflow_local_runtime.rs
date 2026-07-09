@@ -7,6 +7,7 @@ use puffer_config::{
 use puffer_secrets::{SecretUpsert, SecretVault};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -14,7 +15,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
@@ -107,6 +108,15 @@ pub(crate) struct LocalWorkflowRuntimeStatus {
     pub(crate) message: Option<String>,
 }
 
+/// Result of a user-confirmed local runtime data repair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalWorkflowRuntimeRepairResult {
+    /// Runtime status after Puffer attempted to rebuild the local stack.
+    pub(crate) status: LocalWorkflowRuntimeStatus,
+    /// Previous local runtime data directories moved aside before rebuild.
+    pub(crate) archived_data_dirs: Vec<PathBuf>,
+}
+
 /// Returns the current local workflow runtime status without changing config.
 pub(crate) fn status(
     paths: &ConfigPaths,
@@ -159,6 +169,22 @@ pub(crate) fn start(
     )
 }
 
+/// Rebuilds the Puffer-managed local runtime data after explicit user confirmation.
+pub(crate) fn repair(
+    paths: &ConfigPaths,
+    config: &mut PufferConfig,
+) -> Result<LocalWorkflowRuntimeRepairResult> {
+    let runner = SystemCommandRunner;
+    let health = ReqwestHealthChecker::new()?;
+    repair_with(
+        &runner,
+        &health,
+        paths,
+        config,
+        WaitPolicy::new(READY_WAIT_ATTEMPTS, READY_WAIT_DELAY),
+    )
+}
+
 fn start_transient_with<R, H>(
     runner: &R,
     health: &H,
@@ -171,6 +197,77 @@ where
     H: HealthChecker,
 {
     start_with(runner, health, paths, config, false, wait)
+}
+
+fn repair_with<R, H>(
+    runner: &R,
+    health: &H,
+    paths: &ConfigPaths,
+    config: &mut PufferConfig,
+    wait: WaitPolicy,
+) -> Result<LocalWorkflowRuntimeRepairResult>
+where
+    R: CommandRunner,
+    H: HealthChecker,
+{
+    if config.workflow_backend.mode != WorkflowBackendMode::Local {
+        return Ok(LocalWorkflowRuntimeRepairResult {
+            status: base_status(LocalWorkflowRuntimeState::Failed).with_message(
+                "local workflow runtime repair requires workflow_backend.mode = local",
+            ),
+            archived_data_dirs: Vec::new(),
+        });
+    }
+
+    let runtime = bootstrap_runtime_config(paths, config, true)?;
+    if !docker_available(runner) {
+        return Ok(LocalWorkflowRuntimeRepairResult {
+            status: status_for_runtime(LocalWorkflowRuntimeState::DockerMissing, Some(&runtime)),
+            archived_data_dirs: Vec::new(),
+        });
+    }
+    if !image_exists(runner)? && !pull_image(runner)? {
+        return Ok(LocalWorkflowRuntimeRepairResult {
+            status: status_for_runtime(LocalWorkflowRuntimeState::ImageMissing, Some(&runtime))
+                .with_message(
+                    "local AgentEnv runtime image is not installed or could not be downloaded",
+                ),
+            archived_data_dirs: Vec::new(),
+        });
+    }
+
+    if let Some(reason) = stale_api_container_reason(runner, &runtime)? {
+        remove_stale_project_containers(runner, &runtime, &reason)?;
+    }
+
+    let down = compose(runner, &runtime, &["down", "--remove-orphans"])?;
+    if !down.is_success() {
+        return Ok(LocalWorkflowRuntimeRepairResult {
+            status: status_for_runtime(LocalWorkflowRuntimeState::Failed, Some(&runtime))
+                .with_message(format!(
+                    "docker compose down --remove-orphans failed: {}",
+                    trim_diagnostic(&down.stderr)
+                )),
+            archived_data_dirs: Vec::new(),
+        });
+    }
+
+    let archived_data_dirs = archive_runtime_data_dirs(&runtime.data_dir)?;
+    let mut status = start_with(runner, health, paths, config, true, wait)?;
+    if status.state == LocalWorkflowRuntimeState::Ready && !archived_data_dirs.is_empty() {
+        status = status.with_message(format!(
+            "Archived previous local runtime data at {}.",
+            archived_data_dirs
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(LocalWorkflowRuntimeRepairResult {
+        status,
+        archived_data_dirs,
+    })
 }
 
 /// Stops the Puffer-managed local workflow runtime stack containers.
@@ -401,7 +498,17 @@ where
         );
     }
 
-    let status = start_runtime_sequence(runner, health, &runtime, wait, false)?;
+    let stale_api_container = stale_api_container_reason(runner, &runtime)?;
+    if let Some(reason) = stale_api_container.as_deref() {
+        remove_stale_project_containers(runner, &runtime, reason)?;
+    }
+    let status = start_runtime_sequence(
+        runner,
+        health,
+        &runtime,
+        wait,
+        stale_api_container.is_some(),
+    )?;
     if status.state == LocalWorkflowRuntimeState::IncompatibleRuntime {
         match pull_image(runner) {
             Ok(true) => {
@@ -725,6 +832,247 @@ where
     Ok(docker(runner, &["pull", AGENTENV_LOCAL_RUNTIME_IMAGE])?.is_success())
 }
 
+fn archive_runtime_data_dirs(data_dir: &Path) -> Result<Vec<PathBuf>> {
+    fs::create_dir_all(data_dir).with_context(|| {
+        format!(
+            "create local workflow runtime data dir {}",
+            data_dir.display()
+        )
+    })?;
+
+    let stamp = repair_archive_stamp();
+    let mut archived = Vec::new();
+    for name in ["postgres", "redis"] {
+        let path = data_dir.join(name);
+        if !runtime_data_dir_has_entries(&path)? {
+            continue;
+        }
+        let archive_path = unique_runtime_data_archive_path(data_dir, name, &stamp);
+        fs::rename(&path, &archive_path).with_context(|| {
+            format!(
+                "archive local workflow runtime data dir {} to {}",
+                path.display(),
+                archive_path.display()
+            )
+        })?;
+        archived.push(archive_path);
+    }
+
+    for name in ["postgres", "redis"] {
+        let path = data_dir.join(name);
+        fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "create fresh local workflow runtime data dir {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(archived)
+}
+
+fn runtime_data_dir_has_entries(path: &Path) -> Result<bool> {
+    match fs::read_dir(path) {
+        Ok(mut entries) => Ok(entries.next().transpose()?.is_some()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect local workflow runtime data dir {}", path.display())),
+    }
+}
+
+fn unique_runtime_data_archive_path(data_dir: &Path, name: &str, stamp: &str) -> PathBuf {
+    let base = data_dir.join(format!("{name}.repair-{stamp}"));
+    if !base.exists() {
+        return base;
+    }
+    for index in 1.. {
+        let candidate = data_dir.join(format!("{name}.repair-{stamp}.{index}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded archive path suffix search")
+}
+
+fn repair_archive_stamp() -> String {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{:09}", duration.as_secs(), duration.subsec_nanos())
+}
+
+fn stale_api_container_reason<R>(runner: &R, runtime: &RuntimeContext) -> Result<Option<String>>
+where
+    R: CommandRunner,
+{
+    let ids_output = docker_owned_api_containers(runner, runtime)?;
+    if !ids_output.is_success() {
+        return Ok(None);
+    }
+    let ids = ids_output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(None);
+    }
+
+    let mut inspect_args = vec!["inspect".to_string()];
+    inspect_args.extend(ids.iter().map(|id| (*id).to_string()));
+    let output = docker_strings(runner, &inspect_args)?;
+    if !output.is_success() {
+        return Ok(Some(format!(
+            "stale local runtime container could not be inspected: {}",
+            trim_diagnostic(&output.stderr)
+        )));
+    }
+    let inspected: Value = match serde_json::from_str(&output.stdout) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(Some(format!(
+                "stale local runtime container inspect output was invalid: {error}"
+            )));
+        }
+    };
+    let Some(containers) = inspected.as_array() else {
+        return Ok(Some(
+            "stale local runtime container inspect output was not a list".to_string(),
+        ));
+    };
+
+    for container in containers {
+        if let Some(reason) = stale_api_container_mismatch(container, runtime) {
+            return Ok(Some(reason));
+        }
+    }
+    Ok(None)
+}
+
+fn remove_stale_project_containers<R>(
+    runner: &R,
+    runtime: &RuntimeContext,
+    reason: &str,
+) -> Result<bool>
+where
+    R: CommandRunner,
+{
+    let ids_output = docker_project_containers(runner, runtime)?;
+    if !ids_output.is_success() {
+        anyhow::bail!(
+            "stale local runtime container detected ({reason}), but docker ps failed: {}",
+            trim_diagnostic(&ids_output.stderr)
+        );
+    }
+    let ids = ids_output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(false);
+    }
+
+    let mut args = vec!["rm".to_string(), "-f".to_string()];
+    args.extend(ids);
+    let output = docker_strings(runner, &args)?;
+    if !output.is_success() {
+        anyhow::bail!(
+            "stale local runtime container detected ({reason}), but docker rm -f failed: {}",
+            trim_diagnostic(&output.stderr)
+        );
+    }
+    Ok(true)
+}
+
+fn stale_api_container_mismatch(container: &Value, runtime: &RuntimeContext) -> Option<String> {
+    let labels = container
+        .get("Config")
+        .and_then(|value| value.get("Labels"))
+        .and_then(Value::as_object);
+    let compose_files = labels
+        .and_then(|labels| labels.get("com.docker.compose.project.config_files"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !compose_files
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .any(|value| same_path_label(value, &runtime.compose_file))
+    {
+        return Some(format!(
+            "stale local runtime container was created from `{compose_files}`, expected `{}`",
+            runtime.compose_file.display()
+        ));
+    }
+
+    let api_port_key = format!("{LOCAL_WORKFLOW_RUNTIME_API_PORT}/tcp");
+    let actual_port = container
+        .get("NetworkSettings")
+        .and_then(|value| value.get("Ports"))
+        .and_then(|value| value.get(api_port_key.as_str()))
+        .and_then(Value::as_array)
+        .and_then(|bindings| bindings.iter().find_map(container_host_port));
+    if actual_port != Some(runtime.host_port) {
+        return Some(format!(
+            "stale local runtime container exposes port {:?}, expected {}",
+            actual_port, runtime.host_port
+        ));
+    }
+    None
+}
+
+fn container_host_port(binding: &Value) -> Option<u16> {
+    binding
+        .get("HostPort")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u16>().ok())
+}
+
+fn same_path_label(label: &str, expected: &Path) -> bool {
+    let label_path = Path::new(label);
+    if label_path == expected {
+        return true;
+    }
+    let expected_canonical = fs::canonicalize(expected).unwrap_or_else(|_| expected.to_path_buf());
+    let label_canonical = fs::canonicalize(label_path).unwrap_or_else(|_| label_path.to_path_buf());
+    label_canonical == expected_canonical
+}
+
+fn docker_project_containers<R>(runner: &R, runtime: &RuntimeContext) -> io::Result<CommandOutput>
+where
+    R: CommandRunner,
+{
+    docker_strings(
+        runner,
+        &[
+            "ps".to_string(),
+            "-aq".to_string(),
+            "--filter".to_string(),
+            format!("label=com.docker.compose.project={}", runtime.stack_name),
+        ],
+    )
+}
+
+fn docker_owned_api_containers<R>(runner: &R, runtime: &RuntimeContext) -> io::Result<CommandOutput>
+where
+    R: CommandRunner,
+{
+    docker_strings(
+        runner,
+        &[
+            "ps".to_string(),
+            "-aq".to_string(),
+            "--filter".to_string(),
+            format!("label=com.docker.compose.project={}", runtime.stack_name),
+            "--filter".to_string(),
+            "label=com.docker.compose.service=api".to_string(),
+        ],
+    )
+}
+
 fn compose<R>(
     runner: &R,
     runtime: &RuntimeContext,
@@ -769,6 +1117,13 @@ where
         .iter()
         .map(|arg| (*arg).to_string())
         .collect::<Vec<_>>();
+    docker_strings(runner, &args)
+}
+
+fn docker_strings<R>(runner: &R, args: &[String]) -> io::Result<CommandOutput>
+where
+    R: CommandRunner,
+{
     runner.run("docker", &args, &[])
 }
 

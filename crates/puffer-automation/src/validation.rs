@@ -1,12 +1,12 @@
 use crate::spec::{
-    AgentEnvNodeRef, AutomationFlowSpec, AutomationLoopInput, AutomationLoopSpec,
-    AutomationLoopStopSpec, AutomationRecord, AutomationRuntimeState, AutomationSource,
-    AutomationSpec, AutomationStepSpec, AutomationTriggerSpec, CompiledAgentEnvWorkflow,
-    CompiledWorkflowRole, AUTOMATION_SPEC_VERSION,
+    AgentEnvNodeRef, AutomationAgentMode, AutomationAgentToolSpec, AutomationFlowSpec,
+    AutomationLoopInput, AutomationLoopSpec, AutomationRecord, AutomationRuntimeState,
+    AutomationSource, AutomationSpec, AutomationStepSpec, AutomationTriggerSpec,
+    CompiledAgentEnvWorkflow, CompiledWorkflowRole, AUTOMATION_SPEC_VERSION,
 };
 use puffer_subscriptions::{normalize_contact_id, FilterSpec, TaggedFilterSpec};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Validates one persisted Automation record.
 pub fn validate_automation_record(record: &AutomationRecord) -> Result<(), String> {
@@ -39,16 +39,14 @@ pub fn validate_automation_spec(spec: &AutomationSpec) -> Result<(), String> {
         return Err("automation.flow.steps must contain at least one step".into());
     }
     let mut step_ids = BTreeSet::new();
-    validate_automation_flow(&spec.flow, &mut step_ids)?;
+    validate_automation_flow(&spec.flow, &mut step_ids, false)?;
     if automation_flow_contains_loop(&spec.flow)
         && spec
             .triggers
             .iter()
             .any(|trigger| matches!(trigger, AutomationTriggerSpec::AgentEnvNode { .. }))
     {
-        return Err(
-            "loop automations currently support only puffer_connection or manual triggers".into(),
-        );
+        return Err("loop automations currently support only puffer_connection triggers".into());
     }
     Ok(())
 }
@@ -139,6 +137,12 @@ impl AutomationSpecIndex {
                 AutomationStepSpec::AgentEnvNode { id, .. } => {
                     self.step_ids.insert(id.clone());
                 }
+                AutomationStepSpec::Agent { id, tools, .. } => {
+                    self.step_ids.insert(id.clone());
+                    for tool in tools {
+                        self.step_ids.insert(tool.id.clone());
+                    }
+                }
                 AutomationStepSpec::Loop { id, body, .. } => {
                     self.step_ids.insert(id.clone());
                     self.loop_step_ids.insert(id.clone());
@@ -180,6 +184,11 @@ fn validate_automation_triggers(triggers: &[AutomationTriggerSpec]) -> Result<()
         let id = match trigger {
             AutomationTriggerSpec::AgentEnvNode { id, node, .. } => {
                 validate_agentenv_node_ref(node)?;
+                if node.node_type == "puffer_agent" {
+                    return Err(format!(
+                        "automation trigger `{id}` cannot use puffer_agent; puffer_agent is valid only as an execution step"
+                    ));
+                }
                 id
             }
             AutomationTriggerSpec::PufferConnection {
@@ -204,7 +213,6 @@ fn validate_automation_triggers(triggers: &[AutomationTriggerSpec]) -> Result<()
                 validate_contact_ids(contact_ids)?;
                 id
             }
-            AutomationTriggerSpec::Manual { id, .. } => id,
         };
         validate_local_id("automation trigger id", id)?;
         if !ids.insert(id.as_str()) {
@@ -217,10 +225,12 @@ fn validate_automation_triggers(triggers: &[AutomationTriggerSpec]) -> Result<()
 fn validate_automation_flow(
     flow: &AutomationFlowSpec,
     step_ids: &mut BTreeSet<String>,
+    loop_body: bool,
 ) -> Result<(), String> {
     if flow.steps.is_empty() {
         return Err("automation loop body must contain at least one step".into());
     }
+    let mut terminal_connector_suffix = None::<String>;
     for step in &flow.steps {
         match step {
             AutomationStepSpec::AgentEnvNode { id, node, .. } => {
@@ -229,6 +239,39 @@ fn validate_automation_flow(
                     return Err(format!("duplicate automation step id `{id}`"));
                 }
                 validate_agentenv_node_ref(node)?;
+                if loop_body {
+                    if is_puffer_connector_action(node) {
+                        terminal_connector_suffix.get_or_insert_with(|| id.clone());
+                    } else if let Some(connector_id) = &terminal_connector_suffix {
+                        return Err(format!(
+                            "automation loop body step `{id}` cannot follow connector action `{connector_id}`; connector actions run as the terminal loop-body suffix"
+                        ));
+                    }
+                }
+            }
+            AutomationStepSpec::Agent {
+                id,
+                instructions,
+                mode,
+                max_iterations,
+                tools,
+                ..
+            } => {
+                validate_local_id("automation step id", id)?;
+                if !step_ids.insert(id.clone()) {
+                    return Err(format!("duplicate automation step id `{id}`"));
+                }
+                if loop_body {
+                    return Err(format!(
+                        "automation agent step `{id}` is not supported inside a loop body; the iterative agent owns its own loop"
+                    ));
+                }
+                if let Some(connector_id) = &terminal_connector_suffix {
+                    return Err(format!(
+                        "automation loop body agent step `{id}` cannot follow connector action `{connector_id}`; connector actions run as the terminal loop-body suffix"
+                    ));
+                }
+                validate_agent_step(id, instructions, *mode, max_iterations, tools, step_ids)?;
             }
             AutomationStepSpec::Loop {
                 id,
@@ -240,9 +283,77 @@ fn validate_automation_flow(
                 if !step_ids.insert(id.clone()) {
                     return Err(format!("duplicate automation step id `{id}`"));
                 }
+                if let Some(connector_id) = &terminal_connector_suffix {
+                    return Err(format!(
+                        "automation loop body loop `{id}` cannot follow connector action `{connector_id}`; connector actions run as the terminal loop-body suffix"
+                    ));
+                }
                 validate_loop_spec(loop_spec)?;
-                validate_automation_flow(body, step_ids)?;
+                validate_automation_flow(body, step_ids, true)?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_step(
+    id: &str,
+    instructions: &str,
+    mode: AutomationAgentMode,
+    max_iterations: &Option<u32>,
+    tools: &[AutomationAgentToolSpec],
+    step_ids: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    if instructions.trim().is_empty() {
+        return Err(format!(
+            "automation agent step `{id}` instructions must not be empty"
+        ));
+    }
+    match mode {
+        AutomationAgentMode::UntilDone => match max_iterations {
+            Some(0) => {
+                return Err(format!(
+                    "automation agent step `{id}` max_iterations must be greater than zero"
+                ));
+            }
+            Some(_) => {}
+            None => {
+                return Err(format!(
+                    "automation agent step `{id}` in until_done mode requires max_iterations"
+                ));
+            }
+        },
+        AutomationAgentMode::Once => {
+            if max_iterations.is_some_and(|value| value != 1) {
+                return Err(format!(
+                    "automation agent step `{id}` in once mode must not set max_iterations other than 1"
+                ));
+            }
+        }
+    }
+    let mut tool_ids = BTreeSet::new();
+    for tool in tools {
+        validate_local_id("automation agent tool id", &tool.id)?;
+        if !tool_ids.insert(tool.id.as_str()) {
+            return Err(format!(
+                "automation agent step `{id}` has duplicate tool id `{}`",
+                tool.id
+            ));
+        }
+        // Tool ids share the Automation step id namespace so agent tool calls,
+        // step outputs, and continuations never collide.
+        if !step_ids.insert(tool.id.clone()) {
+            return Err(format!(
+                "automation agent tool id `{}` collides with an existing step id",
+                tool.id
+            ));
+        }
+        validate_agentenv_node_ref(&tool.node)?;
+        if tool.node.node_type != "puffer_connector_action" {
+            return Err(format!(
+                "automation agent step `{id}` tool `{}` must be a `puffer_connector_action` node; got `{}`",
+                tool.id, tool.node.node_type
+            ));
         }
     }
     Ok(())
@@ -256,19 +367,6 @@ fn automation_flow_contains_loop(flow: &AutomationFlowSpec) -> bool {
 
 fn validate_loop_spec(loop_spec: &AutomationLoopSpec) -> Result<(), String> {
     match loop_spec {
-        AutomationLoopSpec::Repeat {
-            input,
-            stop_when,
-            max_iterations,
-        } => {
-            validate_loop_input(input)?;
-            validate_loop_stop(stop_when)?;
-            if *max_iterations == 0 {
-                return Err(
-                    "automation repeat loop max_iterations must be greater than zero".into(),
-                );
-            }
-        }
         AutomationLoopSpec::ForEach {
             input,
             item_alias,
@@ -297,21 +395,6 @@ fn validate_loop_input(input: &AutomationLoopInput) -> Result<(), String> {
     }
 }
 
-fn validate_loop_stop(stop: &AutomationLoopStopSpec) -> Result<(), String> {
-    match stop {
-        AutomationLoopStopSpec::OutputEquals { path, .. } => {
-            validate_json_path("loop stop path", path)
-        }
-        AutomationLoopStopSpec::OutputMatches { path, pattern } => {
-            validate_json_path("loop stop path", path)?;
-            regex::Regex::new(pattern)
-                .map_err(|error| format!("loop stop regex invalid: {error}"))?;
-            Ok(())
-        }
-        AutomationLoopStopSpec::AgentEnvNode { node } => validate_agentenv_node_ref(node),
-    }
-}
-
 fn validate_agentenv_node_ref(node: &AgentEnvNodeRef) -> Result<(), String> {
     if node.node_type.trim().is_empty() {
         return Err("agentenv node_type must not be empty".into());
@@ -330,6 +413,42 @@ fn validate_agentenv_node_ref(node: &AgentEnvNodeRef) -> Result<(), String> {
         .is_some_and(|value| value.trim().is_empty())
     {
         return Err("agentenv node name must not be empty".into());
+    }
+    if node.node_type == "puffer_agent" {
+        validate_puffer_agent_product_config(&node.config)?;
+    }
+    Ok(())
+}
+
+fn is_puffer_connector_action(node: &AgentEnvNodeRef) -> bool {
+    node.node_type == "puffer_connector_action"
+}
+
+fn validate_puffer_agent_product_config(config: &BTreeMap<String, Value>) -> Result<(), String> {
+    for key in config.keys() {
+        if !matches!(key.as_str(), "instructions" | "tools" | "permissions") {
+            return Err(format!(
+                "puffer_agent config field `{key}` is not persisted product semantics; allowed fields are `instructions`, `tools`, and `permissions`"
+            ));
+        }
+    }
+    if let Some(value) = config.get("instructions") {
+        match value {
+            Value::String(value) if !value.trim().is_empty() => {}
+            Value::String(_) => {
+                return Err("puffer_agent config.instructions must not be empty".into());
+            }
+            _ => return Err("puffer_agent config.instructions must be a string".into()),
+        }
+    }
+    if config.get("tools").is_some_and(|value| !value.is_array()) {
+        return Err("puffer_agent config.tools must be an array".into());
+    }
+    if config
+        .get("permissions")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err("puffer_agent config.permissions must be an object".into());
     }
     Ok(())
 }
@@ -373,16 +492,6 @@ fn validate_local_id(label: &str, id: &str) -> Result<(), String> {
         return Err(format!(
             "{label} must contain only ASCII letters, digits, `_`, or `-`"
         ));
-    }
-    Ok(())
-}
-
-fn validate_json_path(label: &str, path: &str) -> Result<(), String> {
-    if path.trim().is_empty() {
-        return Err(format!("{label} must not be empty"));
-    }
-    if path.split('.').any(|part| part.trim().is_empty()) {
-        return Err(format!("{label} must not contain empty path segments"));
     }
     Ok(())
 }
@@ -566,17 +675,14 @@ mod tests {
     }
 
     #[test]
-    fn automation_spec_accepts_repeat_loop_with_stop_condition() {
+    fn automation_spec_accepts_foreach_loop() {
         let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
         spec.flow.steps = vec![AutomationStepSpec::Loop {
             id: "retry-until-done".into(),
-            loop_spec: AutomationLoopSpec::Repeat {
+            loop_spec: AutomationLoopSpec::ForEach {
                 input: AutomationLoopInput::Trigger,
-                stop_when: AutomationLoopStopSpec::OutputEquals {
-                    path: "done".into(),
-                    value: Value::Bool(true),
-                },
-                max_iterations: 3,
+                item_alias: "item".into(),
+                max_iterations: Some(3),
             },
             body: AutomationFlowSpec {
                 steps: vec![AutomationStepSpec::AgentEnvNode {
@@ -592,17 +698,133 @@ mod tests {
     }
 
     #[test]
-    fn automation_repeat_loop_requires_bounded_iterations() {
+    fn automation_loop_body_accepts_terminal_connector_suffix() {
         let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
         spec.flow.steps = vec![AutomationStepSpec::Loop {
             id: "retry".into(),
-            loop_spec: AutomationLoopSpec::Repeat {
+            loop_spec: AutomationLoopSpec::ForEach {
                 input: AutomationLoopInput::Trigger,
-                stop_when: AutomationLoopStopSpec::OutputEquals {
-                    path: "done".into(),
-                    value: Value::Bool(true),
-                },
-                max_iterations: 0,
+                item_alias: "item".into(),
+                max_iterations: Some(3),
+            },
+            body: AutomationFlowSpec {
+                steps: vec![
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "agent".into(),
+                        node: agentenv_node("transform_js"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "gmail_draft".into(),
+                        node: agentenv_node("puffer_connector_action"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "github_comment".into(),
+                        node: agentenv_node("puffer_connector_action"),
+                        summary: None,
+                    },
+                ],
+            },
+            summary: None,
+        }];
+
+        validate_automation_spec(&spec).unwrap();
+    }
+
+    #[test]
+    fn automation_loop_body_rejects_agentenv_step_after_connector_action() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Loop {
+            id: "retry".into(),
+            loop_spec: AutomationLoopSpec::ForEach {
+                input: AutomationLoopInput::Trigger,
+                item_alias: "item".into(),
+                max_iterations: Some(3),
+            },
+            body: AutomationFlowSpec {
+                steps: vec![
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "agent".into(),
+                        node: agentenv_node("transform_js"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "gmail_draft".into(),
+                        node: agentenv_node("puffer_connector_action"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "extract_draft_url".into(),
+                        node: agentenv_node("transform_js"),
+                        summary: None,
+                    },
+                ],
+            },
+            summary: None,
+        }];
+
+        let error = validate_automation_spec(&spec).unwrap_err();
+
+        assert!(error.contains("extract_draft_url"));
+        assert!(error.contains("gmail_draft"));
+        assert!(error.contains("terminal loop-body suffix"));
+    }
+
+    #[test]
+    fn automation_loop_body_rejects_nested_loop_after_connector_action() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Loop {
+            id: "retry".into(),
+            loop_spec: AutomationLoopSpec::ForEach {
+                input: AutomationLoopInput::Trigger,
+                item_alias: "item".into(),
+                max_iterations: Some(3),
+            },
+            body: AutomationFlowSpec {
+                steps: vec![
+                    AutomationStepSpec::AgentEnvNode {
+                        id: "gmail_draft".into(),
+                        node: agentenv_node("puffer_connector_action"),
+                        summary: None,
+                    },
+                    AutomationStepSpec::Loop {
+                        id: "nested".into(),
+                        loop_spec: AutomationLoopSpec::ForEach {
+                            input: AutomationLoopInput::Trigger,
+                            item_alias: "item".into(),
+                            max_iterations: Some(2),
+                        },
+                        body: AutomationFlowSpec {
+                            steps: vec![AutomationStepSpec::AgentEnvNode {
+                                id: "nested_body".into(),
+                                node: agentenv_node("transform_js"),
+                                summary: None,
+                            }],
+                        },
+                        summary: None,
+                    },
+                ],
+            },
+            summary: None,
+        }];
+
+        let error = validate_automation_spec(&spec).unwrap_err();
+
+        assert!(error.contains("nested"));
+        assert!(error.contains("gmail_draft"));
+        assert!(error.contains("terminal loop-body suffix"));
+    }
+
+    #[test]
+    fn automation_foreach_loop_requires_bounded_iterations() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Loop {
+            id: "retry".into(),
+            loop_spec: AutomationLoopSpec::ForEach {
+                input: AutomationLoopInput::Trigger,
+                item_alias: "item".into(),
+                max_iterations: Some(0),
             },
             body: AutomationFlowSpec {
                 steps: vec![AutomationStepSpec::AgentEnvNode {
@@ -628,13 +850,10 @@ mod tests {
         }]);
         spec.flow.steps = vec![AutomationStepSpec::Loop {
             id: "retry".into(),
-            loop_spec: AutomationLoopSpec::Repeat {
+            loop_spec: AutomationLoopSpec::ForEach {
                 input: AutomationLoopInput::Trigger,
-                stop_when: AutomationLoopStopSpec::OutputEquals {
-                    path: "done".into(),
-                    value: Value::Bool(true),
-                },
-                max_iterations: 2,
+                item_alias: "item".into(),
+                max_iterations: Some(2),
             },
             body: AutomationFlowSpec {
                 steps: vec![AutomationStepSpec::AgentEnvNode {
@@ -649,6 +868,98 @@ mod tests {
         let error = validate_automation_spec(&spec).unwrap_err();
 
         assert!(error.contains("loop automations"));
+    }
+
+    #[test]
+    fn automation_trigger_rejects_puffer_agent_node() {
+        let spec = automation_spec_with_triggers(vec![AutomationTriggerSpec::AgentEnvNode {
+            id: "agent".into(),
+            node: agentenv_node("puffer_agent"),
+            summary: Some("Run the Agent".into()),
+        }]);
+
+        let error = validate_automation_spec(&spec).unwrap_err();
+
+        assert!(error.contains("puffer_agent"));
+        assert!(error.contains("execution step"));
+    }
+
+    #[test]
+    fn automation_step_accepts_puffer_agent_node() {
+        let mut agent = agentenv_node("puffer_agent");
+        agent.config.insert(
+            "instructions".into(),
+            Value::String("Use the product instructions.".into()),
+        );
+        agent
+            .config
+            .insert("tools".into(), json!([{ "id": "memories" }]));
+        agent
+            .config
+            .insert("permissions".into(), json!({ "filesystem": "read-only" }));
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::AgentEnvNode {
+            id: "agent".into(),
+            node: agent,
+            summary: Some("Run the Agent".into()),
+        }];
+
+        validate_automation_spec(&spec).unwrap();
+    }
+
+    #[test]
+    fn automation_step_rejects_puffer_agent_runtime_config_fields() {
+        for key in [
+            "agentId",
+            "backend",
+            "content",
+            "enabledSkillIds",
+            "includeEvents",
+            "prompt",
+            "timeoutSeconds",
+            "upstreamId",
+            "workspaceId",
+        ] {
+            let mut agent = agentenv_node("puffer_agent");
+            agent
+                .config
+                .insert(key.into(), Value::String("runtime-value".into()));
+            let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+            spec.flow.steps = vec![AutomationStepSpec::AgentEnvNode {
+                id: "agent".into(),
+                node: agent,
+                summary: Some("Run the Agent".into()),
+            }];
+
+            let error = validate_automation_spec(&spec).unwrap_err();
+
+            assert!(error.contains("puffer_agent"));
+            assert!(error.contains(key));
+            assert!(error.contains("persisted product semantics"));
+        }
+    }
+
+    #[test]
+    fn automation_step_rejects_mistyped_puffer_agent_product_config() {
+        for (key, value, expected) in [
+            ("instructions", json!(""), "instructions"),
+            ("instructions", json!(["nope"]), "instructions"),
+            ("tools", json!({ "id": "memories" }), "tools"),
+            ("permissions", json!(["read-only"]), "permissions"),
+        ] {
+            let mut agent = agentenv_node("puffer_agent");
+            agent.config.insert(key.into(), value);
+            let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+            spec.flow.steps = vec![AutomationStepSpec::AgentEnvNode {
+                id: "agent".into(),
+                node: agent,
+                summary: Some("Run the Agent".into()),
+            }];
+
+            let error = validate_automation_spec(&spec).unwrap_err();
+
+            assert!(error.contains(expected));
+        }
     }
 
     #[test]
@@ -731,13 +1042,10 @@ mod tests {
         let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
         spec.flow.steps = vec![AutomationStepSpec::Loop {
             id: "retry".into(),
-            loop_spec: AutomationLoopSpec::Repeat {
+            loop_spec: AutomationLoopSpec::ForEach {
                 input: AutomationLoopInput::Trigger,
-                stop_when: AutomationLoopStopSpec::OutputEquals {
-                    path: "done".into(),
-                    value: Value::Bool(true),
-                },
-                max_iterations: 2,
+                item_alias: "item".into(),
+                max_iterations: Some(2),
             },
             body: AutomationFlowSpec {
                 steps: vec![AutomationStepSpec::AgentEnvNode {
@@ -860,8 +1168,9 @@ mod tests {
 
     #[test]
     fn compiled_puffer_bindings_must_reference_puffer_connection_triggers() {
-        let spec = automation_spec_with_triggers(vec![AutomationTriggerSpec::Manual {
-            id: "manual".into(),
+        let spec = automation_spec_with_triggers(vec![AutomationTriggerSpec::AgentEnvNode {
+            id: "webhook".into(),
+            node: agentenv_node("webhook"),
             summary: None,
         }]);
         let record = AutomationRecord {
@@ -875,8 +1184,8 @@ mod tests {
                 status: AutomationRuntimeStatus::DraftSynced,
                 agentenv_workflows: Vec::new(),
                 puffer_bindings: vec![CompiledPufferBinding {
-                    trigger_id: "manual".into(),
-                    binding_slug: "manual-binding".into(),
+                    trigger_id: "webhook".into(),
+                    binding_slug: "webhook-binding".into(),
                 }],
                 last_error: None,
             },
@@ -913,5 +1222,111 @@ mod tests {
         let error = validate_automation_spec(&spec).unwrap_err();
 
         assert!(error.contains("json filter"));
+    }
+
+    fn connector_tool(id: &str) -> AutomationAgentToolSpec {
+        AutomationAgentToolSpec {
+            id: id.into(),
+            node: agentenv_node("puffer_connector_action"),
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn automation_spec_accepts_until_done_agent_step_with_tools() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Agent {
+            id: "agent".into(),
+            instructions: "Work the ticket until resolved.".into(),
+            mode: AutomationAgentMode::UntilDone,
+            max_iterations: Some(5),
+            tools: vec![connector_tool("lookup")],
+            summary: None,
+        }];
+
+        validate_automation_spec(&spec).unwrap();
+    }
+
+    #[test]
+    fn automation_agent_step_until_done_requires_max_iterations() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Agent {
+            id: "agent".into(),
+            instructions: "Loop forever.".into(),
+            mode: AutomationAgentMode::UntilDone,
+            max_iterations: None,
+            tools: Vec::new(),
+            summary: None,
+        }];
+
+        let error = validate_automation_spec(&spec).unwrap_err();
+
+        assert!(error.contains("max_iterations"));
+    }
+
+    #[test]
+    fn automation_agent_step_rejects_empty_instructions() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Agent {
+            id: "agent".into(),
+            instructions: "   ".into(),
+            mode: AutomationAgentMode::Once,
+            max_iterations: None,
+            tools: Vec::new(),
+            summary: None,
+        }];
+
+        let error = validate_automation_spec(&spec).unwrap_err();
+
+        assert!(error.contains("instructions must not be empty"));
+    }
+
+    #[test]
+    fn automation_agent_step_rejects_non_connector_tool() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Agent {
+            id: "agent".into(),
+            instructions: "Do work.".into(),
+            mode: AutomationAgentMode::Once,
+            max_iterations: None,
+            tools: vec![AutomationAgentToolSpec {
+                id: "transform".into(),
+                node: agentenv_node("transform_js"),
+                summary: None,
+            }],
+            summary: None,
+        }];
+
+        let error = validate_automation_spec(&spec).unwrap_err();
+
+        assert!(error.contains("puffer_connector_action"));
+    }
+
+    #[test]
+    fn automation_agent_step_rejected_inside_loop_body() {
+        let mut spec = automation_spec_with_triggers(vec![puffer_connection_trigger()]);
+        spec.flow.steps = vec![AutomationStepSpec::Loop {
+            id: "fanout".into(),
+            loop_spec: AutomationLoopSpec::ForEach {
+                input: AutomationLoopInput::Trigger,
+                item_alias: "item".into(),
+                max_iterations: Some(3),
+            },
+            body: AutomationFlowSpec {
+                steps: vec![AutomationStepSpec::Agent {
+                    id: "agent".into(),
+                    instructions: "Nested agent.".into(),
+                    mode: AutomationAgentMode::Once,
+                    max_iterations: None,
+                    tools: Vec::new(),
+                    summary: None,
+                }],
+            },
+            summary: None,
+        }];
+
+        let error = validate_automation_spec(&spec).unwrap_err();
+
+        assert!(error.contains("not supported inside a loop body"));
     }
 }

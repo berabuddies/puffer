@@ -3,10 +3,11 @@
 ## Purpose
 
 The desktop Automation tab is a prompt-first place for users to create and
-manage simple automations without a canvas. The current implementation is UI
-only. It uses local Svelte state to model creation, saved automations, editable
-settings, and run history so that the product shape can be reviewed before
-backend contracts are added.
+manage simple automations without a canvas. The current implementation is now
+connected to daemon Automation contracts for persisted records, catalog loading,
+runtime sync, preview runs, activation, deletion, and run history. Svelte state
+still owns the in-progress builder/detail editing model and optimistic screen
+state.
 
 The design intent is:
 
@@ -14,6 +15,25 @@ The design intent is:
 - Match Puffer's compact desktop visual style.
 - Use user-facing automation language.
 - Avoid node graphs, infinite canvas controls, and internal status copy.
+
+## Runtime Terminology Boundary
+
+The UI may call selectable capabilities `tools` because that is the user-facing
+automation language. Internally, a tool is only an umbrella term:
+
+- `AgentEnv` tools have `runtime_owner: "agentenv"` and compile directly into
+  AgentEnv workflow nodes.
+- Connector-backed tools have `runtime_owner: "puffer"` and persist as
+  `puffer_connector_action` steps. They are Puffer-owned runtime boundaries:
+  the daemon executes the connector action through the connector/subscription
+  stack, then passes the bridge result into any AgentEnv continuation workflow.
+- Connector event triggers are also Puffer-owned. They create automation input
+  from a current connector event envelope; AgentEnv sees that event as workflow
+  input, not as a connector schema.
+
+Do not treat `puffer_connector_action` as an AgentEnv node type. It is a stable
+wire marker for splitting the Automation flow around a Puffer-executed
+connector action.
 
 ## Current Entry Points
 
@@ -36,7 +56,9 @@ structure:
 
 The placeholder asks users to describe what to automate in natural language.
 Submitting the prompt opens the full-page builder and pre-fills configuration
-when the prompt matches known patterns.
+when the prompt matches known patterns. Where the daemon catalog is available,
+prefill chooses catalog-backed triggers and tools; otherwise it falls back to
+local starter shapes.
 
 ### Library Area
 
@@ -45,7 +67,8 @@ Below the prompt, the library is a segmented control:
 - `Your automations`
 - `Template Library`
 
-`Your automations` starts empty. The empty state says
+`Your automations` starts from the daemon `automation_list` result. It is empty
+when no saved daemon records exist. The empty state says
 `创建你的第一个automation，处理重复的工作流` and has a `create automation`
 action. The toolbar action is `new`.
 
@@ -69,10 +92,11 @@ Body sections:
 - `Triggers`
 - `Instructions`
 - `Tools`
-- `Cloud Agent Environment`
+- `Run location`
 
-Saving creates a local automation card and returns to the home screen. Cancel
-returns to the home screen without creating a card.
+Saving calls the daemon `automation_save` RPC, upserts the returned record into
+the local list, and returns to the home screen. Cancel returns to the home
+screen without creating a record.
 
 ### Natural-Language Prefill
 
@@ -84,8 +108,9 @@ The prompt parser currently recognizes broad keyword groups:
 - Slack, message, or reply prompts become `Reply draft`.
 - Daily, weekday, morning, digest, or every prompts become `Morning digest`.
 
-The prefill is intentionally local and heuristic. It is only used to make the UI
-review path feel real.
+The prefill remains heuristic, but it now prefers daemon catalog entries for
+matched triggers and actions. It is still used only to seed a reviewable draft;
+the saved record is the daemon `AutomationSpec`, not the prompt parser output.
 
 ### Template Starters
 
@@ -100,7 +125,8 @@ Each template maps to a name, instructions, icon, and initial trigger.
 
 ## Current Trigger Model
 
-Triggers are shown as compact sentence rows. The current trigger options are:
+Triggers are shown as compact sentence rows. The design target for the trigger
+picker remains:
 
 - `Every day at` `09:00`
 - `Custom schedule` `Cron`
@@ -112,20 +138,37 @@ Triggers are shown as compact sentence rows. The current trigger options are:
 Added triggers can be edited through the trigger picker or removed from the row.
 The trigger picker closes when users click outside the picker.
 
+Implementation progress:
+
+- The primary trigger menu is now loaded from the daemon `automation_catalog`
+  result.
+- Catalog-backed families currently include `Webhook`, schedule triggers
+  (`Every day at`, `Custom schedule`), and connector event triggers for
+  connector templates that support workflow triggers.
+- Catalog triggers with required inputs render inline configuration fields below
+  the row.
+- If the catalog cannot be loaded, the UI falls back to the local starter
+  triggers listed above.
+
 Current limitations:
 
-- Only one trigger is represented in state at a time, even though the UI says
+- Only one trigger is represented in the UI state at a time, even though
+  `AutomationSpec.triggers` supports multiple triggers and the UI says
   `Add Trigger`.
-- Trigger labels and targets are mock copy. They still need to be replaced with
-  real trigger names, source apps, event types, and required inputs from the
-  existing connector catalog.
+- Existing multi-trigger or rich trigger specs are not fully editable in the UI.
+  Rich specs are preserved on save when they are not UI-round-trippable.
+- Connector trigger labels and inputs are catalog-backed but still coarse. They
+  need richer source app names, event names, app-specific required inputs, and
+  configuration state beyond the current generic filter input.
+- The trigger search box is visible but does not yet filter the catalog or show
+  an empty search result state.
 
 ## Current Tool And MCP Model
 
 Tools are selected at the app API capability level. One app can contribute
 multiple selectable items, and each capability becomes its own row.
 
-Current apps and capabilities:
+The design target for app groups and capabilities remains:
 
 - GitHub: `Watch Pull Requests`, `Comment on Pull Request`, `Update Commit Status`
 - Slack: `Read Slack Channels`, `Send to Slack`, `Reply in Slack Thread`
@@ -142,10 +185,36 @@ outside the picker.
 
 `Memories` is always shown as a built-in context tool.
 
-Current limitation: app names and API capability labels are mock copy. They
-still need to be replaced with the real actions exposed by existing connectors
-and MCP servers, including required inputs, optional targets, permission
-requirements, and connection readiness states.
+Implementation progress:
+
+- The picker now uses daemon catalog actions instead of hardcoded app mocks.
+- The current catalog-backed capability exposed by the daemon is Local Runtime:
+  `Local JavaScript Transform`.
+- The tool picker search filters app groups and capabilities.
+- Catalog-backed rows show connection, permission, and approval-required state
+  when the action includes that metadata.
+
+Current limitations:
+
+- Connector actions and MCP tools are not broadly surfaced yet; the daemon
+  catalog currently exposes the local transform action and connector-backed
+  triggers.
+- Required action inputs are represented in the catalog type but do not yet have
+  full UI editors.
+- Optional targets for some side-effect actions are still local UI choices until
+  real connector/MCP target discovery is exposed.
+
+## Current Runtime Model
+
+The builder and detail page include a `Run location` section:
+
+- `Local`
+- `AgentEnv Cloud`
+
+New automations default to the configured workflow backend mode. `Configure
+Runtime` opens the Automation Runtime settings pane. Saving stores
+`run_location` in `AutomationSpec`; active automations compile and deploy through
+the selected runtime path.
 
 ## Current Detail Page
 
@@ -177,15 +246,20 @@ Settings reuses the builder controls:
 - Instructions box.
 - Tool rows and tool picker.
 
-Changes are local until the user clicks `Save`. Save updates the local card,
-including title, description, status, trigger summary, selected tools, enabled
-state, and icon.
+Changes are local until the user clicks `Save`. Save calls `automation_save`
+with the current record revision, updates the returned daemon record in the
+local list, and refreshes title, description, status, trigger summary, selected
+tools, enabled state, runtime state, and icon.
 
 ### Run History Tab
 
 Before a run, the tab shows `No runs yet`.
 
-Clicking `Test Run` creates a local history row:
+The tab includes a `Test input` editor. Users can paste a JSON event object or
+plain text before running a preview. JSON objects are sent as the preview input;
+plain text is wrapped as a text payload.
+
+The design target for a review-oriented run row remains:
 
 - Title: `Test run`
 - Status: `Waiting for review`
@@ -193,16 +267,34 @@ Clicking `Test Run` creates a local history row:
 - Duration: `-`
 - Summary: `Puffer is checking the current configuration.`
 
-The button also switches the detail page to `Run History`.
+Implementation progress:
+
+- Clicking `Test Run` first creates a local `Running` row and switches the
+  detail page to `Run History`.
+- It saves the current detail edits, calls `automation_sync_preview`, and runs
+  `automation_run_preview` with the parsed test input.
+- The local running row uses summary
+  `Puffer is running the current configuration through daemon preview.`
+
+When the daemon preview completes, the local row is replaced with the preview
+result or error. The daemon also appends durable run-history records to
+`automation_runs.json`, including status, source event, duration, runtime status,
+structured result or error, and preview approval metadata. Opening a detail page
+or completing a preview refreshes run history through `automation_run_history`.
+
+After a run, `Result preview` shows the latest run summary, structured output,
+or error before the full run-history list.
 
 ### Delete
 
-The overflow menu opens a compact action menu. `Delete` removes the selected
-local automation and returns to the home screen.
+The overflow menu opens a compact action menu. `Delete` calls
+`automation_delete`, removes the selected automation from the local list, and
+returns to the home screen.
 
 ## State Boundaries
 
-Current implementation lives in `apps/puffer-desktop/src/lib/screens/Automation.svelte`.
+Current UI implementation lives in
+`apps/puffer-desktop/src/lib/screens/Automation.svelte`.
 
 Important local state:
 
@@ -214,9 +306,26 @@ Important local state:
 - `activeAutomationLibraryTab`: home library tab.
 - `activeAutomationDetailTab`: detail tab.
 - `triggerMenuOpen`, `toolMenuOpen`, and `automationActionMenuOpen`: popup state.
+- `automationLoadError`, `automationCatalogError`, `automationSaving`,
+  `automationStatusChanging`, and `automationRunning`: daemon interaction state.
+- `triggerCatalog` and `commonApps`: daemon catalog state.
+- `automationRunLocation`: selected runtime location.
 
-No backend persistence, daemon RPC, connector execution, or real scheduling is
-connected yet.
+Backend implementation now includes:
+
+- `crates/puffer-automation`: typed `AutomationSpec`, `AutomationRecord`,
+  validation, hashing, storage, and compiler support.
+- `crates/puffer-cli/src/daemon_automations.rs`: `automation_list`,
+  `automation_get`, `automation_save`, `automation_delete`, and
+  `automation_catalog`.
+- `crates/puffer-cli/src/daemon_automation_runtime.rs`:
+  `automation_compile_deploy`, `automation_sync_preview`,
+  `automation_run_preview`, `automation_run_history`, runtime compilation,
+  local/cloud execution, generated workflow bindings, and run-history storage.
+
+The remaining backend gaps are primarily broader connector/MCP action catalog
+coverage, richer trigger/action configuration, approval UI integration, and
+production hardening for deployed scheduling across all trigger kinds.
 
 ## Interaction Coverage Added
 
@@ -226,42 +335,51 @@ Implemented interactions:
 - Create from the home prompt.
 - Create from `new`.
 - Create from a template card.
-- Save a local automation.
+- Save an automation through daemon RPCs.
 - Cancel creation.
 - Open saved automation detail.
 - Rename automation in detail.
 - Edit instructions in detail.
 - Toggle active state in detail.
-- Save detail edits.
-- Add, edit, and remove trigger rows.
+- Save detail edits with revision checks.
+- Add, edit, and remove the UI trigger row.
+- Render catalog-backed trigger configuration fields.
 - Add, edit, remove, and retarget tool rows.
 - Select app API capabilities inside the tool picker.
+- Search and filter tool picker capabilities.
 - Close trigger and tool pickers by clicking outside.
 - Switch between `Settings` and `Run History`.
-- Create a local test-run history item.
-- Open overflow menu and delete a local automation.
+- Sync and execute daemon test-run previews.
+- Edit test-run input and preview the latest run result.
+- Load durable daemon run history.
+- Activate automations through compile/deploy and pause via saved status.
+- Open overflow menu and delete a daemon-backed automation.
+- Preserve unsupported rich Automation specs while allowing title/instruction
+  edits.
+- Choose local or AgentEnv Cloud run location and link to runtime settings.
 - Keep automation terminology out of visible UI where this screen owns the copy.
 
 ## Interactions Not Yet Added
 
 ### Creation And Editing
 
-- Multiple triggers in one automation.
-- Replace mock trigger copy with real connector-backed trigger options,
-  including source app, event name, required inputs, and configuration state.
-- Replace mock tool and MCP copy with real connector actions and MCP tools,
-  including capability names, required inputs, optional targets, and permission
-  requirements.
-- Trigger-specific configuration panels, such as repo picker, cron editor,
-  contact picker, calendar picker, and label picker.
+- Full UI editing for multiple triggers in one automation.
+- Richer connector-backed trigger options, including precise source app, event
+  name, required inputs, and configuration state.
+- Real connector actions and MCP tools beyond the current local transform
+  catalog action, including capability names, required inputs, optional targets,
+  and permission requirements.
+- Trigger-specific configuration panels beyond generic catalog inputs, such as
+  repo picker, cron editor, contact picker, calendar picker, and label picker.
 - Manual editing for trigger target chips.
 - Dedicated model picker inside the builder and detail page.
-- Environment details beyond the static `Use Configured Environment` row.
+- Runtime health, credential, and workspace detail beyond the current run
+  location picker and settings link.
 - Dirty state, unsaved-change warning, and save confirmation feedback.
 - Keyboard support for closing popups with Escape.
 - Keyboard navigation inside trigger and tool menus beyond native button focus.
 - Click-outside handling for the overflow action menu.
-- Search filtering for triggers.
+- Wired search filtering for triggers.
 - Empty result state for trigger search.
 - More explicit distinction between adding a new tool and editing an existing
   tool when the picker is open.
@@ -280,13 +398,12 @@ Implemented interactions:
 
 ### Detail Page
 
-- Real run history rows with outcome, source event, duration, and approval
-  metadata.
 - Run history filters.
 - Run history detail drawer or timeline.
-- Test run input, such as selecting a sample event or past message.
-- Test run result preview with generated draft, context, and errors.
-- Active toggle save behavior and pending state.
+- Test run input sources, such as selecting a sample event or past message.
+- Test run result preview with generated draft, context, and errors beyond the
+  current summary and structured result preview.
+- More explicit active-toggle success, failure, and pending feedback.
 - Delete confirmation.
 - Disabled state for destructive or unavailable actions.
 - Owner selector or sharing metadata.
@@ -304,25 +421,20 @@ Implemented interactions:
 
 ### Backend And Contracts
 
-- Durable automation storage.
-- Daemon RPCs for create, update, delete, test run, run history, and enable or
-  pause.
-- Connector-backed trigger discovery.
-- Connector-backed tool capability discovery.
-- Permission and credential readiness states.
-- Validation errors from backend contracts.
-- Real execution scheduling.
-- Real dry-run execution.
+- Broader connector-backed tool capability discovery.
+- Full permission and credential readiness states across all triggers and tools.
+- Field-level validation errors from backend contracts.
+- Real execution scheduling hardened across all trigger kinds.
 - Workspace or team policy constraints.
 
 ## Suggested Next Design Steps
 
 1. Add dirty-state and save feedback to creation and detail pages.
 2. Add trigger-specific configuration controls for GitHub repos and schedules.
-3. Add a test-run preview path with sample input and generated output.
+3. Expand test-run previews with saved sample events and past connector messages.
 4. Design the review inbox and approval detail page.
-5. Define backend contracts for saved automations, trigger configs, tool configs,
-   test runs, and run history.
+5. Extend backend contracts for richer connector actions, MCP tools, trigger
+   configs, field-level validation, and approval metadata.
 6. Add delete confirmation and duplicate/archive actions.
 
 ## Verification Assets
@@ -338,7 +450,10 @@ The test suite covers:
 - Trigger and tool picker behavior.
 - Capability-level tool selection.
 - Saved-card creation.
+- Daemon-backed save/update/delete and activation flow.
+- Runtime location defaults and runtime settings link.
 - Detail page settings.
-- Run history empty and test-run state.
+- Run history empty state, test-run input, daemon preview, and result preview.
+- Preservation of unsupported rich Automation specs during UI edits.
 - Overflow delete menu visibility.
 - Segmented-control background contrast.

@@ -112,8 +112,9 @@ type WorkflowBackendFixture = {
 
 type WorkflowBackendConnectionFixture = {
   success: boolean;
+  ready: JsonRecord;
   runtime: JsonRecord;
-  auth: JsonRecord;
+  auth?: JsonRecord;
   workspace: JsonRecord;
 };
 
@@ -124,6 +125,7 @@ type MonitorHistoryFixture = {
 };
 
 type AutomationRecordFixture = JsonRecord;
+type AutomationPendingActionFixture = JsonRecord;
 
 type ContactsSnapshotFixture = {
   contacts: JsonRecord[];
@@ -375,44 +377,35 @@ function defaultAutomationCatalog(): JsonRecord {
     },
     summary: "Every day at 09:00"
   };
-  const connectorAction = (
-    connector: string,
-    action: string,
-    label: string,
-    summary: string,
-    external = false
-  ) => ({
-    id: `connector:${connector}:${action}`,
-    kind: "connector_action",
-    connector_slug: connector,
-    connection_slug: connector,
-    action,
-    label,
-    summary,
-    icon: connector.includes("github") ? "git" : connector.includes("calendar") ? "clock" : connector.includes("gmail") ? "edit" : "logs",
-    connection_state: "authenticated",
-    permission_state: external ? "external_side_effect" : "read",
-    permission_summary: external ? "Creates a draft for human approval." : "Reads context for the run.",
-    external_side_effect: external,
-    required_inputs: [],
-    input_schema: { type: "object", properties: {} },
-    output_schema: { type: "object", properties: { completed: { type: "boolean" }, summary: { type: "string" } } },
-    node_ref: {
-      node_type: "puffer_connector_action",
-      name: label,
-      trusted: true,
-      config: {
-        kind: "connector_action",
-        connector_slug: connector,
-        connection_slug: connector,
-        action,
-        draft_only: external
-      }
-    }
-  });
-
   return {
     triggers: [
+      {
+        id: "webhook",
+        kind: "webhook",
+        label: "Webhook",
+        summary: "Run when the Automation runtime receives an HTTP POST.",
+        icon: "bolt",
+        connection_state: "ready",
+        permission_state: "ready",
+        required_inputs: [
+          { id: "path", label: "Path", kind: "text", required: true, default: "puffer-automation-webhook" }
+        ],
+        spec_template: {
+          type: "agent_env_node",
+          id: "trigger-1",
+          node: {
+            node_type: "webhook",
+            name: "Webhook",
+            trusted: false,
+            config: {
+              path: "puffer-automation-webhook",
+              methods: ["POST"],
+              authentication: "none"
+            }
+          },
+          summary: "Webhook"
+        }
+      },
       {
         id: "schedule:daily",
         kind: "schedule",
@@ -474,48 +467,65 @@ function defaultAutomationCatalog(): JsonRecord {
       }
     ],
     actions: [
-      connectorAction("github", "watch-pull-requests", "Watch Pull Requests", "Read PR titles, diffs, status, and review activity."),
-      connectorAction("github", "comment-on-pull-request", "Comment on Pull Request", "Prepare a pull request comment for review.", true),
-      connectorAction("github", "update-commit-status", "Update Commit Status", "Prepare a commit status update for review.", true),
-      connectorAction("slack", "read-slack-channels", "Read Slack Channels", "Use Slack channels as context."),
-      connectorAction("slack", "send-to-slack", "Send to Slack", "Draft a Slack message for review.", true),
-      connectorAction("slack", "reply-in-thread", "Reply in Slack Thread", "Draft a Slack thread reply.", true),
-      connectorAction("gmail", "read-gmail-threads", "Read Gmail Threads", "Use Gmail threads as context."),
-      connectorAction("gmail", "create-gmail-draft", "Create Gmail Draft", "Create a Gmail draft for review.", true),
-      connectorAction("gmail", "apply-gmail-label", "Apply Gmail Label", "Prepare a label change.", true),
-      connectorAction("google-calendar", "read-calendar-events", "Read Calendar Events", "Use calendar events as context."),
-      connectorAction("google-calendar", "check-availability", "Check Availability", "Check free/busy context."),
-      connectorAction("google-calendar", "draft-rsvp", "Draft RSVP", "Draft an RSVP for review.", true),
-      connectorAction("linear", "read-linear-issues", "Read Linear Issues", "Use Linear issues as context."),
-      connectorAction("linear", "create-linear-issue", "Create Linear Issue", "Draft a Linear issue for review.", true),
-      connectorAction("linear", "comment-on-linear", "Comment on Linear Issue", "Draft a Linear comment.", true),
-      connectorAction("notion", "search-notion", "Search Notion", "Search Notion as context."),
-      connectorAction("notion", "create-notion-page", "Create Notion Page", "Draft a Notion page.", true),
-      connectorAction("notion", "update-notion-page", "Update Notion Page", "Draft a Notion page update.", true),
       {
-        id: "agentenv:raw-node",
+        id: "agentenv:transform_js:local-transform",
+        runtime_owner: "agentenv",
         kind: "agentenv_node",
-        label: "Raw AgentEnv Node",
-        summary: "Internal runtime node definition.",
+        label: "Local JavaScript Transform",
+        summary: "Run JavaScript in the selected Automation runtime and return a structured result.",
         icon: "bolt",
         connection_state: "ready",
-        permission_state: "review",
-        permission_summary: "Review before running",
+        permission_state: "ready",
+        permission_summary: "Runs inside the configured Automation runtime.",
         external_side_effect: false,
         required_inputs: [],
         input_schema: { type: "object", properties: {} },
         output_schema: { type: "object", properties: {} },
         node_ref: {
-          node_type: "raw-node",
-          name: "Raw AgentEnv Node",
+          node_type: "transform_js",
+          name: "Local JavaScript Transform",
           trusted: false,
-          config: {}
+          config: {
+            code: "return { kind: \"local_transform_result\", input, ok: true };"
+          }
+        }
+      },
+      {
+        id: "connector:telegram-login:telegram-user:mark-read",
+        runtime_owner: "puffer",
+        kind: "connector_action",
+        connector_slug: "telegram-login",
+        connection_slug: "telegram-user",
+        action: "mark_read",
+        label: "Mark Read",
+        summary: "Mark a Telegram chat as read through the Telegram connector.",
+        icon: "message",
+        connection_state: "authenticated",
+        permission_state: "ready",
+        permission_summary: "Marks an external Telegram chat as read.",
+        external_side_effect: true,
+        required_inputs: [],
+        input_schema: { type: "object", properties: {} },
+        output_schema: { type: "object", properties: {} },
+        node_ref: {
+          node_type: "puffer_connector_action",
+          name: "Mark Read",
+          trusted: false,
+          config: {
+            connector_slug: "telegram-login",
+            connection_slug: "telegram-user",
+            action: "mark_read",
+            input: {},
+            external_side_effect: true,
+            human_approval_required: true,
+            draft_only: true
+          }
         }
       }
     ],
     trigger_error: null,
     action_error: null,
-    agentenv_error: "list AgentEnv node definitions"
+    agentenv_error: null
   };
 }
 
@@ -766,7 +776,8 @@ function defaultWorkflowBackend(): WorkflowBackendFixture {
 function defaultWorkflowBackendConnection(): WorkflowBackendConnectionFixture {
   return {
     success: true,
-    runtime: { state: "passed", message: "Automation runtime API is reachable." },
+    ready: { state: "passed", message: "Automation runtime readiness endpoint is healthy." },
+    runtime: { state: "passed", message: "Automation runtime schema and token are accepted." },
     auth: { state: "passed", message: "Automation runtime token is accepted." },
     workspace: { state: "passed", message: "Automation workspace is accessible." }
   };
@@ -885,6 +896,7 @@ export class FakeDaemon {
   private readonly workflowExecutions = new Map<string, JsonRecord[]>();
   private readonly automationRecords = new Map<string, AutomationRecordFixture>();
   private readonly automationRuns = new Map<string, JsonRecord[]>();
+  private readonly automationPendingActions = new Map<string, AutomationPendingActionFixture>();
   private readonly outboundActions = new Map<string, {
     version: number;
     status: string;
@@ -1354,6 +1366,7 @@ export class FakeDaemon {
     auth?: JsonRecord[];
     externalCredentials?: JsonRecord[];
     automations?: JsonRecord[];
+    automationPendingActions?: JsonRecord[];
     url?: string;
     emitBrowserOpenFrame?: boolean;
     emitBrowserResizeFrame?: boolean;
@@ -1366,6 +1379,12 @@ export class FakeDaemon {
     for (const automation of options.automations ?? []) {
       const id = this.recordString(automation, ["id", "automation_id", "automationId"]);
       if (id) this.automationRecords.set(id, this.cloneAutomationRecord(automation));
+    }
+    for (const action of options.automationPendingActions ?? []) {
+      const draftId = this.recordString(action, ["draft_id", "draftId", "id"]);
+      if (draftId) {
+        this.automationPendingActions.set(draftId, this.cloneAutomationPendingAction(action));
+      }
     }
     this.permissions = {
       ...this.permissions,
@@ -1422,9 +1441,10 @@ export class FakeDaemon {
   setWorkflowBackendConnection(result: WorkflowBackendConnectionFixture): void {
     this.workflowBackendConnection = {
       success: result.success,
+      ready: { ...result.ready },
       runtime: { ...result.runtime },
-      auth: { ...result.auth },
-      workspace: { ...result.workspace }
+      workspace: { ...result.workspace },
+      ...(result.auth ? { auth: { ...result.auth } } : {})
     };
   }
 
@@ -2009,6 +2029,8 @@ export class FakeDaemon {
         return this.saveWorkflowBackendConfig(request.params);
       case "workflow_backend_test_connection":
         return this.workflowBackendConnectionResult();
+      case "workflow_backend_repair_local_runtime":
+        return this.repairLocalWorkflowRuntime(request.params);
       case "workflow_open_ui":
         return {
           url: this.workflowUiUrl(),
@@ -2052,6 +2074,14 @@ export class FakeDaemon {
         return this.runAutomationPreview(request.params);
       case "automation_run_history":
         return this.listAutomationRunHistory(request.params);
+      case "automation_pending_action_list":
+        return this.listAutomationPendingActions();
+      case "automation_pending_action_get":
+        return this.getAutomationPendingAction(request.params);
+      case "automation_pending_action_reject":
+        return this.rejectAutomationPendingAction(request.params);
+      case "connector_action_execute":
+        return this.executeConnectorActionDraft(request.params);
       case "outbound_action_execute":
         return this.handleOutboundExecute(request.params);
       case "outbound_action_cancel":
@@ -2524,6 +2554,26 @@ export class FakeDaemon {
     return JSON.parse(JSON.stringify(record)) as AutomationRecordFixture;
   }
 
+  private cloneAutomationPendingAction(record: JsonRecord): AutomationPendingActionFixture {
+    const cloned = JSON.parse(JSON.stringify(record)) as AutomationPendingActionFixture;
+    const action = String(cloned.action ?? "");
+    const isSendMessage = action === "send_message";
+    if (typeof cloned.message_editable !== "boolean") cloned.message_editable = isSendMessage;
+    if (typeof cloned.approval_kind !== "string") {
+      cloned.approval_kind = isSendMessage ? "editable_message" : "exact_action";
+    }
+    if (typeof cloned.message !== "string") {
+      cloned.message = isSendMessage ? "" : `${String(cloned.connector_slug ?? "connector")}.${action || "action"}`;
+    }
+    if (!isJsonRecord(cloned.destination_metadata)) {
+      cloned.destination_metadata = {
+        recipient_stable_id: cloned.recipient_stable_id ?? null,
+        connection_slug: cloned.connection_slug ?? null
+      };
+    }
+    return cloned;
+  }
+
   private stableJson(value: unknown): string {
     if (Array.isArray(value)) return `[${value.map((item) => this.stableJson(item)).join(",")}]`;
     if (isJsonRecord(value)) {
@@ -2617,9 +2667,13 @@ export class FakeDaemon {
       throw new Error("automation trigger id must not be empty");
     }
     const type = String(value.type ?? "");
-    if (type === "manual") return;
     if (type === "agent_env_node") {
       this.validateAutomationNode(value.node);
+      if (isJsonRecord(value.node) && value.node.node_type === "puffer_agent") {
+        throw new Error(
+          `automation trigger \`${String(value.id)}\` cannot use puffer_agent; puffer_agent is valid only as an execution step`
+        );
+      }
       return;
     }
     if (type === "puffer_connection") {
@@ -2661,12 +2715,43 @@ export class FakeDaemon {
     if (typeof value.node_type !== "string" || value.node_type.trim() === "") {
       throw new Error("automation node_type must not be empty");
     }
+    if (value.config !== undefined && !isJsonRecord(value.config)) {
+      throw new Error("automation node config must be an object");
+    }
+    if (value.node_type === "puffer_agent") {
+      const config = isJsonRecord(value.config) ? value.config : {};
+      for (const key of Object.keys(config)) {
+        if (!["instructions", "tools", "permissions"].includes(key)) {
+          throw new Error(
+            `puffer_agent config field \`${key}\` is not persisted product semantics; allowed fields are \`instructions\`, \`tools\`, and \`permissions\``
+          );
+        }
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(config, "instructions") &&
+        (typeof config.instructions !== "string" || config.instructions.trim() === "")
+      ) {
+        throw new Error("puffer_agent config.instructions must be a non-empty string");
+      }
+      if (Object.prototype.hasOwnProperty.call(config, "tools") && !Array.isArray(config.tools)) {
+        throw new Error("puffer_agent config.tools must be an array");
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(config, "permissions") &&
+        !isJsonRecord(config.permissions)
+      ) {
+        throw new Error("puffer_agent config.permissions must be an object");
+      }
+    }
   }
 
   private saveAutomation(params: JsonRecord): AutomationRecordFixture {
     const id = this.automationId(params);
     if (!isJsonRecord(params.spec)) throw new Error("automation_save requires spec");
     this.validateAutomationSpec(params.spec);
+    if (this.recordString(params, ["status"]) === "enabled") {
+      throw new Error("automation_save cannot enable automations; use automation_compile_deploy");
+    }
     const existing = this.automationRecords.get(id);
     const timestamp = Date.now();
     if (!existing) {
@@ -2700,9 +2785,12 @@ export class FakeDaemon {
 
     const specChanged = this.stableJson(existing.spec) !== this.stableJson(params.spec);
     const nextRevision = specChanged ? currentRevision + 1 : currentRevision;
+    const requestedStatus = this.recordString(params, ["status"]);
+    const existingStatus = this.recordString(existing, ["status"]) ?? "paused";
+    const nextStatus = requestedStatus ?? (specChanged && existingStatus === "enabled" ? "paused" : existingStatus);
     const record = {
       ...existing,
-      status: this.recordString(params, ["status"]) ?? this.recordString(existing, ["status"]) ?? "paused",
+      status: nextStatus,
       revision: nextRevision,
       spec: specChanged ? JSON.parse(JSON.stringify(params.spec)) : existing.spec,
       runtime: specChanged ? this.automationRuntimeSummary() : this.automationRuntimeSummary(existing),
@@ -2740,9 +2828,11 @@ export class FakeDaemon {
       puffer_binding_count: 0,
       last_error: null
     };
+    record.status = "enabled";
     this.automationRecords.set(id, record);
     return {
       id,
+      status: this.recordString(record, ["status"]) ?? "enabled",
       revision,
       runtime: this.automationRuntimeSummary(record)
     };
@@ -2770,6 +2860,7 @@ export class FakeDaemon {
     ) {
       return {
         id,
+        status: this.recordString(record, ["status"]) ?? "paused",
         revision,
         runtime: currentRuntime
       };
@@ -2785,6 +2876,7 @@ export class FakeDaemon {
     this.automationRecords.set(id, record);
     return {
       id,
+      status: this.recordString(record, ["status"]) ?? "paused",
       revision,
       runtime: this.automationRuntimeSummary(record)
     };
@@ -2806,6 +2898,11 @@ export class FakeDaemon {
       );
     }
     const timestamp = Date.now();
+    const previewInput = isJsonRecord(params.input) ? JSON.parse(JSON.stringify(params.input)) : {};
+    const previewText =
+      typeof previewInput.text === "string"
+        ? previewInput.text
+        : JSON.stringify(previewInput).slice(0, 180);
     const run = {
       id: `preview-${id}-${timestamp}`,
       automation_id: id,
@@ -2814,11 +2911,15 @@ export class FakeDaemon {
       started_at_ms: timestamp,
       duration_ms: 12,
       summary: "Preview completed with a reviewable draft.",
-      source_event: "manual_preview",
+      source_event: "preview_run",
       compiled: true,
       runtime_status: runtime.status,
       result: {
         summary: "Preview completed with a reviewable draft.",
+        generated_draft: `Draft based on: ${previewText}`,
+        context: {
+          input: previewInput
+        },
         pending_action: {
           state: "draft",
           approval_required: true
@@ -2847,6 +2948,103 @@ export class FakeDaemon {
       automation_id: id,
       runs: (this.automationRuns.get(id) ?? []).map((run) => JSON.parse(JSON.stringify(run)))
     };
+  }
+
+  private listAutomationPendingActions(): JsonRecord {
+    const drafts = Array.from(this.automationPendingActions.values())
+      .filter((draft) => ["draft_ready", "send_failed"].includes(String(draft.status ?? "")))
+      .map((draft) => {
+        const cloned = this.cloneAutomationPendingAction(draft);
+        delete cloned.message;
+        return cloned;
+      })
+      .sort((left, right) => {
+        const leftMs = typeof left.created_at_ms === "number" ? left.created_at_ms : 0;
+        const rightMs = typeof right.created_at_ms === "number" ? right.created_at_ms : 0;
+        return rightMs - leftMs;
+      });
+    return { drafts };
+  }
+
+  private getAutomationPendingAction(params: JsonRecord): JsonRecord {
+    const draft = this.pendingAutomationAction(params);
+    this.validatePendingActionVersion(draft, params);
+    if (!["draft_ready", "send_failed"].includes(String(draft.status ?? ""))) {
+      throw new Error(`automation pending action draft state \`${String(draft.status ?? "")}\` cannot be reviewed`);
+    }
+    return { draft: this.cloneAutomationPendingAction(draft) };
+  }
+
+  private rejectAutomationPendingAction(params: JsonRecord): JsonRecord {
+    const draft = this.pendingAutomationAction(params);
+    this.validatePendingActionVersion(draft, params);
+    if (!["draft_ready", "send_failed"].includes(String(draft.status ?? ""))) {
+      throw new Error(`automation pending action draft state \`${String(draft.status ?? "")}\` cannot be rejected`);
+    }
+    const reason = this.recordString(params, ["reason"]);
+    if (!reason) throw new Error("missing rejection reason");
+    draft.status = "rejected";
+    draft.rejected_reason = reason;
+    draft.rejected_at = new Date().toISOString();
+    draft.updated_at_ms = Date.now();
+    this.automationPendingActions.set(String(draft.draft_id), draft);
+    return {
+      draft_id: draft.draft_id,
+      version: draft.version,
+      status: "rejected",
+      automation_id: draft.automation_id,
+      automation_run_id: draft.automation_run_id,
+      step_id: draft.step_id
+    };
+  }
+
+  private executeConnectorActionDraft(params: JsonRecord): JsonRecord {
+    const draft = this.pendingAutomationAction(params);
+    this.validatePendingActionVersion(draft, params);
+    if (!["draft_ready", "send_failed"].includes(String(draft.status ?? ""))) {
+      throw new Error(`connector action draft state \`${String(draft.status ?? "")}\` cannot be executed`);
+    }
+    const approvedMessage = this.recordString(params, ["approved_message", "approvedMessage"]);
+    const clientRequestId = this.recordString(params, ["client_request_id", "clientRequestId"]);
+    if (!clientRequestId) throw new Error("missing client request id");
+    const messageEditable = typeof draft.message_editable === "boolean"
+      ? draft.message_editable
+      : String(draft.action ?? "") === "send_message";
+    if (messageEditable && !approvedMessage) throw new Error("missing approved message");
+    if (!messageEditable && approvedMessage) throw new Error("exact action approval cannot include approved message");
+    draft.status = "sent";
+    draft.approved_message = approvedMessage ?? null;
+    draft.client_request_id = clientRequestId;
+    draft.receipt = {
+      ok: true,
+      connector_slug: draft.connector_slug,
+      action: draft.action,
+      message: approvedMessage ?? null
+    };
+    draft.updated_at_ms = Date.now();
+    this.automationPendingActions.set(String(draft.draft_id), draft);
+    return {
+      status: "sent",
+      draftId: draft.draft_id,
+      receipt: draft.receipt
+    };
+  }
+
+  private pendingAutomationAction(params: JsonRecord): AutomationPendingActionFixture {
+    const draftId = this.recordString(params, ["draft_id", "draftId", "id"]);
+    if (!draftId) throw new Error("missing draft id");
+    const draft = this.automationPendingActions.get(draftId);
+    if (!draft) throw new Error(`automation pending action ${draftId} not found`);
+    return draft;
+  }
+
+  private validatePendingActionVersion(draft: JsonRecord, params: JsonRecord): void {
+    const expected = typeof params.version === "number" ? params.version : null;
+    if (expected === null) throw new Error("missing draft version");
+    const actual = typeof draft.version === "number" ? draft.version : null;
+    if (actual !== expected) {
+      throw new Error(`draft version conflict: expected ${expected}, found ${actual}`);
+    }
   }
 
   private workflowListResponse(): JsonRecord {
@@ -3656,9 +3854,23 @@ export class FakeDaemon {
   private workflowBackendConnectionResult(): JsonRecord {
     return {
       success: this.workflowBackendConnection.success,
+      ready: { ...this.workflowBackendConnection.ready },
       runtime: { ...this.workflowBackendConnection.runtime },
-      auth: { ...this.workflowBackendConnection.auth },
+      ...(this.workflowBackendConnection.auth ? { auth: { ...this.workflowBackendConnection.auth } } : {}),
       workspace: { ...this.workflowBackendConnection.workspace }
+    };
+  }
+
+  private repairLocalWorkflowRuntime(params: JsonRecord): JsonRecord {
+    if (params.confirm !== true) {
+      throw new Error("Local automation runtime repair requires confirmation.");
+    }
+    return {
+      success: true,
+      state: "ready",
+      message: "Archived previous local runtime data.",
+      archivedDataDirs: ["/tmp/puffer/workflow-runtime/data/postgres.repair-test"],
+      dataDir: "/tmp/puffer/workflow-runtime/data"
     };
   }
 
