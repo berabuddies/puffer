@@ -54,14 +54,17 @@ fn gmail_list_emails(
     let result = poll_account_at_url(env, &account, handshake_ref, &url)?;
     ensure_gmail_action_ready(&account, &result)?;
     if let Some(query) = string_input(input, "query").filter(|value| !value.trim().is_empty()) {
-        let fragment = format!("#search/{}", url_fragment(&query));
+        // Confirm Gmail actually switched to a search view. We assert the
+        // `#search` route rather than the exact encoded query fragment: Gmail
+        // re-normalizes the hash (percent-decoding operators like
+        // `newer_than:1d`), so an exact-fragment match would false-fail the very
+        // operator queries #582 enables. A missing `#search` route means the
+        // query was dropped and we are still on the inbox/auth page.
         let href = result.get("href").and_then(Value::as_str).unwrap_or("");
-        if !href.contains(&fragment) {
+        if !href.contains("#search") {
             return Err(crate::browser_action_verify::verification_failure(
                 action,
-                &format!(
-                    "Gmail search page for `{query}` was not reached (expected URL fragment `{fragment}`)"
-                ),
+                &format!("Gmail search view for `{query}` was not reached"),
                 &result,
             ));
         }
@@ -103,34 +106,30 @@ fn gmail_mark_read(
     open_gmail_url(env, &account, handshake_ref, &url)?;
     wait_gmail_thread_ready(env, &account, handshake_ref, &thread_id)?;
     let collection_url = gmail_collection_url(&account, input);
-    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
-    loop {
-        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
-        let listing = poll_account_at_url(env, &account, handshake_ref, &collection_url)?;
-        ensure_gmail_action_not_auth_blocked(&account, &listing)?;
-        let rows = listing
-            .get("rows")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let state = mark_read_verification_state(&rows, &thread_id);
-        if state == MarkReadVerification::Read {
-            return Ok(json!({
-                "action": action,
-                "summary": format!("marked Gmail thread {thread_id} read for {account}"),
-                "account": account,
-                "thread_id": thread_id,
-                "url": url,
-                "verification": {
-                    "matched": true,
-                    "method": "collection_unread_flag",
-                    "collection_url": collection_url,
-                },
-            }));
-        }
-        if Instant::now() >= deadline {
-            let expectation = match state {
-                MarkReadVerification::Read => unreachable!("read state returned before timeout"),
+    let outcome =
+        poll_gmail_list_until(env, &account, handshake_ref, &collection_url, |listing| {
+            mark_read_verification_state(listing_rows(listing).as_slice(), &thread_id)
+                == MarkReadVerification::Read
+        })?;
+    match outcome {
+        Ok(_) => Ok(json!({
+            "action": action,
+            "summary": format!("marked Gmail thread {thread_id} read for {account}"),
+            "account": account,
+            "thread_id": thread_id,
+            "url": url,
+            "verification": {
+                "matched": true,
+                "method": "collection_unread_flag",
+                "collection_url": collection_url,
+            },
+        })),
+        Err(listing) => {
+            let expectation = match mark_read_verification_state(
+                listing_rows(&listing).as_slice(),
+                &thread_id,
+            ) {
+                MarkReadVerification::Read => unreachable!("read state matched before timeout"),
                 MarkReadVerification::StillUnread => {
                     format!("thread `{thread_id}` still shows as unread in the list")
                 }
@@ -138,11 +137,11 @@ fn gmail_mark_read(
                     "thread `{thread_id}` was not visible in the first page of the list, so the read state could not be verified"
                 ),
             };
-            return Err(crate::browser_action_verify::verification_failure(
+            Err(crate::browser_action_verify::verification_failure(
                 action,
                 &expectation,
                 &listing,
-            ));
+            ))
         }
     }
 }
@@ -194,40 +193,26 @@ fn gmail_delete(
     // assertion beats "absent from inbox" -- the thread may simply be outside
     // the first page window, which would pass vacuously (#588).
     let trash_url = format!("{}#trash", gmail_base_url(&account));
-    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
-    loop {
-        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
-        let trash = poll_account_at_url(env, &account, handshake_ref, &trash_url)?;
-        ensure_gmail_action_not_auth_blocked(&account, &trash)?;
-        let in_trash = trash
-            .get("rows")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .any(|row| crate::browser_action_verify::row_matches_thread(row, &thread_id))
-            })
-            .unwrap_or(false);
-        if in_trash {
-            return Ok(json!({
-                "action": action,
-                "summary": format!("deleted Gmail thread {thread_id} for {account}"),
-                "account": account,
-                "thread_id": thread_id,
-                "url": url,
-                "verification": {
-                    "matched": true,
-                    "method": "trash_list",
-                    "trash_url": trash_url,
-                },
-            }));
-        }
-        if Instant::now() >= deadline {
-            return Err(crate::browser_action_verify::verification_failure(
-                action,
-                &format!("thread `{thread_id}` was not visible in Trash after clicking Delete"),
-                &trash,
-            ));
-        }
+    match poll_gmail_list_until(env, &account, handshake_ref, &trash_url, |listing| {
+        listing_contains_thread(listing, &thread_id)
+    })? {
+        Ok(_) => Ok(json!({
+            "action": action,
+            "summary": format!("deleted Gmail thread {thread_id} for {account}"),
+            "account": account,
+            "thread_id": thread_id,
+            "url": url,
+            "verification": {
+                "matched": true,
+                "method": "trash_list",
+                "trash_url": trash_url,
+            },
+        })),
+        Err(trash) => Err(crate::browser_action_verify::verification_failure(
+            action,
+            &format!("thread `{thread_id}` was not visible in Trash after clicking Delete"),
+            &trash,
+        )),
     }
 }
 
@@ -433,34 +418,28 @@ fn gmail_send_email(
     // Post-condition: the email must show up in the Sent list before we may
     // report success. Clicking Send proves nothing (#578).
     let sent_url = format!("{}#sent", gmail_base_url(&account));
-    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
-    loop {
-        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
-        let sent = poll_account_at_url(env, &account, handshake_ref, &sent_url)?;
-        ensure_gmail_action_not_auth_blocked(&account, &sent)?;
-        if sent_rows_contain(&fields, &sent) {
-            return Ok(json!({
-                "action": action,
-                "summary": format!("sent Gmail email for {account}"),
-                "account": account,
-                "url": url,
-                "verification": {
-                    "matched": true,
-                    "method": "sent_list",
-                    "sent_url": sent_url,
-                },
-            }));
-        }
-        if Instant::now() >= deadline {
-            return Err(crate::browser_action_verify::verification_failure(
-                action,
-                &format!(
-                    "email `{}` to {:?} was not visible in Sent after clicking Send",
-                    fields.subject, fields.to
-                ),
-                &sent,
-            ));
-        }
+    match poll_gmail_list_until(env, &account, handshake_ref, &sent_url, |listing| {
+        sent_rows_contain(&fields, listing)
+    })? {
+        Ok(_) => Ok(json!({
+            "action": action,
+            "summary": format!("sent Gmail email for {account}"),
+            "account": account,
+            "url": url,
+            "verification": {
+                "matched": true,
+                "method": "sent_list",
+                "sent_url": sent_url,
+            },
+        })),
+        Err(sent) => Err(crate::browser_action_verify::verification_failure(
+            action,
+            &format!(
+                "email `{}` to {:?} was not visible in Sent after clicking Send",
+                fields.subject, fields.to
+            ),
+            &sent,
+        )),
     }
 }
 
@@ -566,6 +545,49 @@ fn ensure_gmail_action_not_auth_blocked(account: &str, result: &Value) -> Result
         );
     }
     Ok(())
+}
+
+/// Re-navigates to `url` and polls its list rows until `matched` accepts the
+/// response or [`GMAIL_LOAD_TIMEOUT`] elapses. Change-type actions
+/// (send/delete/mark-read) share this loop to assert their post-condition
+/// against an authoritative view. Returns the satisfying response, or the last
+/// response as `Err` on timeout so the caller can attach action-specific
+/// diagnostics through [`verification_failure`].
+fn poll_gmail_list_until(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    url: &str,
+    matched: impl Fn(&Value) -> bool,
+) -> Result<std::result::Result<Value, Value>> {
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    loop {
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+        let listing = poll_account_at_url(env, account, handshake, url)?;
+        ensure_gmail_action_not_auth_blocked(account, &listing)?;
+        if matched(&listing) {
+            return Ok(Ok(listing));
+        }
+        if Instant::now() >= deadline {
+            return Ok(Err(listing));
+        }
+    }
+}
+
+/// Extracts the `rows` array from a Gmail list response, defaulting to empty.
+fn listing_rows(listing: &Value) -> Vec<Value> {
+    listing
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Returns true when any row in a Gmail list response refers to `thread_id`.
+fn listing_contains_thread(listing: &Value, thread_id: &str) -> bool {
+    listing_rows(listing)
+        .iter()
+        .any(|row| crate::browser_action_verify::row_matches_thread(row, thread_id))
 }
 
 fn gmail_action_account(config: &GmailBrowserConfig, input: &Value) -> Result<String> {

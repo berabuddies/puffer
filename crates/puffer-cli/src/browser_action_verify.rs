@@ -18,7 +18,7 @@ pub(crate) fn verification_failure(
 ) -> anyhow::Error {
     let field = |key: &str| result.get(key).and_then(Value::as_str).unwrap_or("unknown");
     anyhow::anyhow!(
-        "Gmail/GCal action `{action}` could not be verified: {expectation}; last URL `{}`, title `{}`, status `{}`, reason `{}`",
+        "Browser action `{action}` could not be verified: {expectation}; last URL `{}`, title `{}`, status `{}`, reason `{}`",
         field("href"),
         field("title"),
         field("status"),
