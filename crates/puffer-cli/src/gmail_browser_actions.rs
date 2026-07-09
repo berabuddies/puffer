@@ -108,8 +108,7 @@ fn gmail_mark_read(
     // Opening the thread IS Gmail's native mark-as-read mechanism; the defect
     // was reporting success without checking the unread marker actually
     // cleared (#591).
-    open_gmail_url(env, &account, handshake_ref, &url)?;
-    wait_gmail_thread_ready(env, &account, handshake_ref, &thread_id)?;
+    open_gmail_thread_for_action(env, &account, handshake_ref, input, &url, &thread_id)?;
     let collection_url = gmail_collection_url(&account, input);
     let outcome =
         poll_gmail_list_until(env, &account, handshake_ref, &collection_url, |listing| {
@@ -180,26 +179,36 @@ fn gmail_delete(
 ) -> Result<Value> {
     let account = gmail_action_account(config, input)?;
     let thread_id = gmail_thread_id(input)?;
+    let navigation_thread_id = gmail_thread_navigation_id(input, &thread_id);
     let url = gmail_thread_url(&account, input, &thread_id);
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
-    open_gmail_url(env, &account, handshake_ref, &url)?;
-    wait_gmail_thread_ready(env, &account, handshake_ref, &thread_id)?;
-    let click = evaluate_gmail_script(env, &account, handshake_ref, GMAIL_DELETE_SCRIPT)?;
-    if !click.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        anyhow::bail!(
-            "Gmail delete button was not found for thread `{thread_id}`: {}",
-            click
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        );
+    let ready =
+        open_gmail_thread_for_action(env, &account, handshake_ref, input, &url, &thread_id)?;
+    let ready_route_id = gmail_thread_ready_route_id(&ready);
+    let delete_route_ids =
+        gmail_delete_route_ids(&thread_id, &navigation_thread_id, ready_route_id.as_deref());
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    loop {
+        let click = evaluate_gmail_script(
+            env,
+            &account,
+            handshake_ref,
+            &gmail_delete_script(&delete_route_ids),
+        )?;
+        if click.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            break;
+        }
+        if !gmail_delete_click_retryable(&click) || Instant::now() >= deadline {
+            anyhow::bail!("{}", gmail_delete_click_error_message(&thread_id, &click));
+        }
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
     }
     // Post-condition: the thread must be visible in Trash. A positive Trash
     // assertion beats "absent from inbox" -- the thread may simply be outside
     // the first page window, which would pass vacuously (#588).
     let trash_url = format!("{}#trash", gmail_base_url(&account));
     match poll_gmail_list_until(env, &account, handshake_ref, &trash_url, |listing| {
-        listing_contains_thread(listing, &thread_id)
+        listing_contains_any_thread_id(listing, &delete_route_ids)
     })? {
         Ok(_) => Ok(json!({
             "action": action,
@@ -219,6 +228,28 @@ fn gmail_delete(
             &trash,
         )),
     }
+}
+
+fn gmail_delete_click_retryable(click: &Value) -> bool {
+    !click.get("ok").and_then(Value::as_bool).unwrap_or(false)
+        && click
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason == "delete button not visible")
+}
+
+fn gmail_delete_click_error_message(thread_id: &str, click: &Value) -> String {
+    let reason = click
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let href = click.get("href").and_then(Value::as_str).unwrap_or("");
+    let hash = click.get("hash").and_then(Value::as_str).unwrap_or("");
+    let labels = click.get("labels").cloned().unwrap_or(Value::Null);
+    let candidates = click.get("candidates").cloned().unwrap_or(Value::Null);
+    format!(
+        "Gmail delete button was not found for thread `{thread_id}`: {reason}; href={href:?}; hash={hash:?}; labels={labels}; candidates={candidates}"
+    )
 }
 
 fn gmail_draft(
@@ -302,8 +333,7 @@ fn gmail_thread_reply_draft(
     let account = gmail_action_account(config, input)?;
     let url = gmail_thread_url(&account, input, &thread_id);
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
-    open_gmail_url(env, &account, handshake_ref, &url)?;
-    wait_gmail_thread_ready(env, &account, handshake_ref, &thread_id)?;
+    open_gmail_thread_for_action(env, &account, handshake_ref, input, &url, &thread_id)?;
     let save = evaluate_gmail_script(
         env,
         &account,
@@ -360,8 +390,7 @@ fn verify_gmail_reply_draft_in_thread(
     let neutral_url = format!("{}#inbox", gmail_base_url(account));
     open_gmail_url(env, account, handshake, &neutral_url)?;
     wait_gmail_ready(env, account, handshake)?;
-    open_gmail_url(env, account, handshake, thread_url)?;
-    wait_gmail_thread_ready(env, account, handshake, thread_id)?;
+    open_gmail_thread_ready(env, account, handshake, thread_url, thread_id)?;
     let verification = evaluate_gmail_script(
         env,
         account,
@@ -420,7 +449,23 @@ fn gmail_send_email(
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
     open_gmail_url(env, &account, handshake_ref, &url)?;
     wait_gmail_ready(env, &account, handshake_ref)?;
-    let click = evaluate_gmail_script(env, &account, handshake_ref, GMAIL_SEND_SCRIPT)?;
+    let prepare = evaluate_gmail_script(
+        env,
+        &account,
+        handshake_ref,
+        &gmail_prepare_send_script(&fields),
+    )?;
+    if !prepare.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        anyhow::bail!(
+            "Gmail send compose was not prepared: {}",
+            prepare
+                .get("reason")
+                .and_then(Value::as_str)
+                .or_else(|| prepare.get("status").and_then(Value::as_str))
+                .unwrap_or("unknown")
+        );
+    }
+    let click = evaluate_gmail_script(env, &account, handshake_ref, &gmail_send_script(&fields))?;
     if !click.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         anyhow::bail!(
             "Gmail send button was not found: {}",
@@ -491,7 +536,7 @@ fn evaluate_gmail_script(
     let root_session = format!("gmail-browser-{}", safe_session_part(&env.topic));
     let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
     loop {
-        let value = crate::daemon_browser::send_daemon_request(
+        let value = match crate::daemon_browser::send_daemon_request(
             handshake,
             "browser_agent",
             json!({
@@ -502,8 +547,17 @@ fn evaluate_gmail_script(
                 "height": BROWSER_HEIGHT,
                 "script": script,
             }),
-        )
-        .context("evaluate Gmail action script")?;
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let error = error.context("evaluate Gmail action script");
+                if gmail_evaluate_error_retryable(&error.to_string()) && Instant::now() < deadline {
+                    std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+                    continue;
+                }
+                return Err(error);
+            }
+        };
         let result = value.get("value").cloned().unwrap_or(Value::Null);
         if result.get("ok").and_then(Value::as_bool).unwrap_or(false) || Instant::now() >= deadline
         {
@@ -511,6 +565,11 @@ fn evaluate_gmail_script(
         }
         std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
     }
+}
+
+fn gmail_evaluate_error_retryable(message: &str) -> bool {
+    message.contains("timed out waiting for browser evaluation")
+        || message.contains("timed out waiting on channel")
 }
 
 fn wait_gmail_ready(
@@ -526,23 +585,173 @@ fn wait_gmail_ready(
     Ok(result)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum GmailThreadReadyDecision {
+    Ready(Value),
+    Pending,
+}
+
+fn gmail_thread_ready_decision(
+    account: &str,
+    thread_id: &str,
+    result: &Value,
+) -> Result<GmailThreadReadyDecision> {
+    if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        ensure_gmail_action_ready(account, result)?;
+        return Ok(GmailThreadReadyDecision::Ready(result.clone()));
+    }
+    let status = result.get("status").and_then(Value::as_str).unwrap_or("ok");
+    if status == "loading" {
+        return Ok(GmailThreadReadyDecision::Pending);
+    }
+    ensure_gmail_action_ready(account, result)?;
+    anyhow::bail!("Gmail thread `{thread_id}` did not become ready for account `{account}`")
+}
+
+fn open_gmail_thread_for_action(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    input: &Value,
+    url: &str,
+    thread_id: &str,
+) -> Result<Value> {
+    let navigation_thread_id = gmail_thread_navigation_id(input, thread_id);
+    let route_ids = gmail_thread_route_ids(thread_id, &navigation_thread_id, None);
+    if let Some(source_url) = gmail_thread_source_list_url(input, thread_id) {
+        let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+        if let Ok(listing) =
+            open_gmail_view_settled(env, account, handshake, &source_url, deadline)?
+        {
+            if listing_contains_any_thread_id(&listing, &route_ids) {
+                let click = evaluate_gmail_script(
+                    env,
+                    account,
+                    handshake,
+                    &gmail_open_thread_row_script(&route_ids),
+                )?;
+                if click.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                    return wait_gmail_thread_ready(env, account, handshake, thread_id);
+                }
+            }
+        }
+    }
+    open_gmail_thread_ready(env, account, handshake, url, thread_id)
+}
+
+fn open_gmail_thread_ready(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    url: &str,
+    thread_id: &str,
+) -> Result<Value> {
+    open_gmail_url(env, account, handshake, url)?;
+    wait_gmail_network_idle(env, account, handshake);
+    match wait_gmail_thread_ready_result(env, account, handshake, thread_id)? {
+        Ok(result) => return Ok(result),
+        Err(latest) if !gmail_thread_ready_needs_warm_reopen(&latest) => {
+            anyhow::bail!(
+                "{}",
+                gmail_thread_ready_timeout_message(account, thread_id, &latest)
+            );
+        }
+        Err(_) => {}
+    }
+
+    let inbox_url = format!("{}#inbox", gmail_base_url(account));
+    open_gmail_url(env, account, handshake, &inbox_url)?;
+    wait_gmail_network_idle(env, account, handshake);
+    open_gmail_url(env, account, handshake, url)?;
+    wait_gmail_network_idle(env, account, handshake);
+    wait_gmail_thread_ready(env, account, handshake, thread_id)
+}
+
+fn wait_gmail_thread_ready_result(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    thread_id: &str,
+) -> Result<std::result::Result<Value, Value>> {
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    loop {
+        let result = evaluate_gmail_script(
+            env,
+            account,
+            handshake,
+            &gmail_thread_ready_script(thread_id),
+        )?;
+        match gmail_thread_ready_decision(account, thread_id, &result)? {
+            GmailThreadReadyDecision::Ready(result) => return Ok(Ok(result)),
+            GmailThreadReadyDecision::Pending => {}
+        }
+        if Instant::now() >= deadline {
+            return Ok(Err(result));
+        }
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+    }
+}
+
 fn wait_gmail_thread_ready(
     env: &SubscriberEnv,
     account: &str,
     handshake: &crate::daemon::Handshake,
     thread_id: &str,
 ) -> Result<Value> {
-    let result = evaluate_gmail_script(
-        env,
-        account,
-        handshake,
-        &gmail_thread_ready_script(thread_id),
-    )?;
-    ensure_gmail_action_ready(account, &result)?;
-    if !result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        anyhow::bail!("Gmail thread `{thread_id}` did not become ready for account `{account}`");
+    match wait_gmail_thread_ready_result(env, account, handshake, thread_id)? {
+        Ok(result) => Ok(result),
+        Err(latest) => {
+            anyhow::bail!(
+                "{}",
+                gmail_thread_ready_timeout_message(account, thread_id, &latest)
+            )
+        }
     }
-    Ok(result)
+}
+
+fn gmail_thread_ready_needs_warm_reopen(result: &Value) -> bool {
+    if result.get("status").and_then(Value::as_str) != Some("loading") {
+        return false;
+    }
+    if result.get("routeReady").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    if result
+        .get("threadDetailReady")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let body_text = result
+        .get("bodyText")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    body_text.contains("search mail")
+        && body_text.contains("compose")
+        && body_text.contains("inbox")
+}
+
+fn gmail_thread_ready_timeout_message(account: &str, thread_id: &str, result: &Value) -> String {
+    let field = |key: &str| result.get(key).and_then(Value::as_str).unwrap_or("unknown");
+    let bool_field = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    format!(
+        "Gmail thread `{thread_id}` did not become ready for account `{account}`; last URL `{}`, title `{}`, status `{}`, hash `{}`, routeReady={}, threadDetailReady={}, bodyText={:?}",
+        field("href"),
+        field("title"),
+        field("status"),
+        field("hash"),
+        bool_field("routeReady"),
+        bool_field("threadDetailReady"),
+        field("bodyText"),
+    )
 }
 
 fn ensure_gmail_action_ready(account: &str, result: &Value) -> Result<()> {
@@ -617,6 +826,12 @@ fn listing_contains_thread(listing: &Value, thread_id: &str) -> bool {
         .any(|row| crate::browser_action_verify::row_matches_thread(row, thread_id))
 }
 
+fn listing_contains_any_thread_id(listing: &Value, thread_ids: &[String]) -> bool {
+    thread_ids
+        .iter()
+        .any(|thread_id| listing_contains_thread(listing, thread_id))
+}
+
 fn gmail_action_account(config: &GmailBrowserConfig, input: &Value) -> Result<String> {
     let requested = string_input(input, "account").or_else(|| string_input(input, "account_slug"));
     if let Some(account) = requested {
@@ -642,11 +857,19 @@ fn gmail_thread_id(input: &Value) -> Result<String> {
 }
 
 fn optional_gmail_thread_id(input: &Value) -> Option<String> {
-    string_input(input, "thread_id")
-        .or_else(|| string_input(input, "gmail_thread_id"))
-        .or_else(|| string_input(input, "message_id"))
-        .or_else(|| string_input(input, "id"))
-        .filter(|value| !value.trim().is_empty())
+    [
+        "thread_id",
+        "gmail_thread_id",
+        "gmailThreadId",
+        "threadId",
+        "message_id",
+        "messageId",
+        "id",
+    ]
+    .iter()
+    .find_map(|key| string_input(input, key))
+    .map(|value| value.trim().trim_start_matches('#').to_string())
+    .filter(|value| !value.is_empty())
 }
 
 fn gmail_collection_url(account: &str, input: &Value) -> String {
@@ -697,12 +920,95 @@ fn gmail_thread_url(account: &str, input: &Value, thread_id: &str) -> String {
         "spam" | "junk" => "spam".to_string(),
         other => other.to_string(),
     };
+    let navigation_thread_id = gmail_thread_navigation_id(input, thread_id);
     format!(
         "{}#{}/{}",
         gmail_base_url(account),
         url_fragment(&fragment),
-        url_fragment(thread_id)
+        url_fragment(&navigation_thread_id)
     )
+}
+
+fn gmail_thread_source_list_url(input: &Value, thread_id: &str) -> Option<String> {
+    string_input(input, "url")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| !gmail_url_targets_thread(value, thread_id))
+        .filter(|value| value.contains("mail.google.com") && value.contains('#'))
+}
+
+fn gmail_thread_navigation_id(input: &Value, fallback: &str) -> String {
+    [
+        "threadId",
+        "legacyThreadId",
+        "id",
+        "message_id",
+        "messageId",
+    ]
+    .iter()
+    .find_map(|key| string_input(input, key))
+    .map(|value| value.trim().trim_start_matches('#').to_string())
+    .filter(|value| is_navigable_gmail_thread_fragment(value))
+    .unwrap_or_else(|| fallback.trim().trim_start_matches('#').to_string())
+}
+
+fn gmail_thread_ready_route_id(result: &Value) -> Option<String> {
+    result
+        .get("hash")
+        .and_then(Value::as_str)
+        .and_then(gmail_hash_thread_segment)
+        .or_else(|| {
+            result
+                .get("href")
+                .and_then(Value::as_str)
+                .and_then(|href| href.split('#').nth(1))
+                .and_then(gmail_hash_thread_segment)
+        })
+}
+
+fn gmail_hash_thread_segment(fragment: &str) -> Option<String> {
+    let fragment = fragment.trim().trim_start_matches('#').trim_matches('/');
+    if !fragment.contains('/') {
+        return None;
+    }
+    fragment
+        .rsplit('/')
+        .next()
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+}
+
+fn gmail_delete_route_ids(
+    thread_id: &str,
+    navigation_thread_id: &str,
+    ready_route_id: Option<&str>,
+) -> Vec<String> {
+    gmail_thread_route_ids(thread_id, navigation_thread_id, ready_route_id)
+}
+
+fn gmail_thread_route_ids(
+    thread_id: &str,
+    navigation_thread_id: &str,
+    ready_route_id: Option<&str>,
+) -> Vec<String> {
+    [Some(thread_id), Some(navigation_thread_id), ready_route_id]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().trim_start_matches('#').to_string())
+        .filter(|value| !value.is_empty())
+        .fold(Vec::<String>::new(), |mut ids, value| {
+            if !ids.iter().any(|existing| existing == &value) {
+                ids.push(value);
+            }
+            ids
+        })
+}
+
+fn is_navigable_gmail_thread_fragment(value: &str) -> bool {
+    let normalized = value.trim().trim_start_matches('#').to_ascii_lowercase();
+    normalized.starts_with("fmfc")
+        || (normalized.len() >= 12 && normalized.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn gmail_url_targets_thread(url: &str, thread_id: &str) -> bool {
@@ -767,6 +1073,10 @@ fn gmail_compose_url_for_fields(account: &str, fields: &GmailComposeFields) -> S
     )
 }
 
+fn gmail_prepare_send_script(fields: &GmailComposeFields) -> String {
+    gmail_save_draft_script(fields)
+}
+
 struct GmailComposeFields {
     to: Vec<String>,
     cc: Vec<String>,
@@ -800,11 +1110,15 @@ impl GmailComposeFields {
 /// not a failure: Gmail heartbeats may never let the network settle, so the
 /// caller merely loses the fast path and falls back to its confirmation
 /// scrapes.
+fn should_wait_network_idle_after_previous_attempt(previous_attempt_succeeded: bool) -> bool {
+    previous_attempt_succeeded
+}
+
 fn wait_gmail_network_idle(
     env: &SubscriberEnv,
     account: &str,
     handshake: &crate::daemon::Handshake,
-) {
+) -> bool {
     let result = crate::daemon_browser::send_daemon_request(
         handshake,
         "browser_agent",
@@ -820,7 +1134,9 @@ fn wait_gmail_network_idle(
     );
     if result.is_err() {
         crate::gmail_browser_log::line(format!("gmail_network_idle_timeout topic={}", env.topic));
+        return false;
     }
+    true
 }
 
 /// Opens a Gmail list view and waits until it has verifiably rendered.
@@ -847,8 +1163,11 @@ fn open_gmail_view_settled(
     deadline: Instant,
 ) -> Result<std::result::Result<Value, Value>> {
     let route = expected_route_of(url);
+    let pre_navigation_signature = rescrape_gmail_list(env, account, handshake)
+        .ok()
+        .and_then(|listing| pre_navigation_row_signature(&listing, url));
     open_gmail_url(env, account, handshake, url)?;
-    wait_gmail_network_idle(env, account, handshake);
+    let mut network_idle_reliable = wait_gmail_network_idle(env, account, handshake);
     let mut warmed = false;
     let mut prev_sig: Option<String> = None;
     let mut latest = rescrape_gmail_list(env, account, handshake)?;
@@ -860,11 +1179,16 @@ fn open_gmail_view_settled(
         }
         if href_on_route(&latest, &route) {
             if status == "ok" {
-                let sig = row_signature(&latest);
-                if prev_sig.as_deref() == Some(sig.as_str()) {
-                    return Ok(Ok(latest));
+                if listing_reuses_pre_navigation_rows(&latest, pre_navigation_signature.as_deref())
+                {
+                    prev_sig = None;
+                } else {
+                    let sig = row_signature(&latest);
+                    if prev_sig.as_deref() == Some(sig.as_str()) {
+                        return Ok(Ok(latest));
+                    }
+                    prev_sig = Some(sig);
                 }
-                prev_sig = Some(sig);
             }
         } else {
             prev_sig = None;
@@ -875,9 +1199,18 @@ fn open_gmail_view_settled(
                 warmed = true;
                 let inbox_url = format!("{}#inbox", gmail_base_url(account));
                 open_gmail_url(env, account, handshake, &inbox_url)?;
-                wait_gmail_network_idle(env, account, handshake);
+                if should_wait_network_idle_after_previous_attempt(network_idle_reliable) {
+                    network_idle_reliable = wait_gmail_network_idle(env, account, handshake);
+                }
                 open_gmail_url(env, account, handshake, url)?;
-                wait_gmail_network_idle(env, account, handshake);
+                if should_wait_network_idle_after_previous_attempt(network_idle_reliable) {
+                    wait_gmail_network_idle(env, account, handshake);
+                }
+                latest = rescrape_gmail_list(env, account, handshake)?;
+                if Instant::now() >= deadline {
+                    return Ok(Err(latest));
+                }
+                continue;
             }
         }
         if Instant::now() >= deadline {
@@ -927,6 +1260,84 @@ fn row_signature(result: &Value) -> String {
         .join(",")
 }
 
+/// Returns the pre-navigation row signature when `current` is not already the
+/// target Gmail view. Gmail commits `location.hash` before replacing the row
+/// grid, so a new `#search/...` hash can briefly expose old rows as if they
+/// belonged to the new query. The signature gives [`open_gmail_view_settled`]
+/// a concrete stale-grid value to reject.
+fn pre_navigation_row_signature(current: &Value, target_url: &str) -> Option<String> {
+    let current_href = current.get("href").and_then(Value::as_str)?;
+    if same_gmail_view(current_href, target_url) {
+        return None;
+    }
+    let signature = row_signature(current);
+    (!signature.is_empty()).then_some(signature)
+}
+
+fn listing_reuses_pre_navigation_rows(
+    result: &Value,
+    pre_navigation_signature: Option<&str>,
+) -> bool {
+    if result
+        .get("empty")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let Some(pre_navigation_signature) =
+        pre_navigation_signature.filter(|signature| !signature.is_empty())
+    else {
+        return false;
+    };
+    row_signature(result) == pre_navigation_signature
+}
+
+fn same_gmail_view(left_url: &str, right_url: &str) -> bool {
+    normalized_gmail_fragment(left_url) == normalized_gmail_fragment(right_url)
+}
+
+fn normalized_gmail_fragment(url: &str) -> Option<String> {
+    url.split('#')
+        .nth(1)
+        .map(percent_decode_gmail_fragment)
+        .map(|fragment| fragment.trim_matches('/').to_ascii_lowercase())
+}
+
+fn percent_decode_gmail_fragment(fragment: &str) -> String {
+    let bytes = fragment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (
+                hex_digit_value(bytes[index + 1]),
+                hex_digit_value(bytes[index + 2]),
+            ) {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_digit_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Gmail list-view route prefix (`#search`, `#inbox`, ...) that `url` should
 /// land on. Only the prefix is meaningful: Gmail re-normalizes the fragment
 /// (percent-decoding operators like `newer_than:1d`), so an exact-fragment
@@ -949,7 +1360,23 @@ fn href_on_route(result: &Value, route: &str) -> bool {
         .get("href")
         .and_then(Value::as_str)
         .and_then(|href| href.split('#').nth(1))
-        .is_some_and(|fragment| format!("#{}", fragment.split('/').next().unwrap_or("")) == route)
+        .is_some_and(|fragment| {
+            let actual_route = format!("#{}", fragment.split('/').next().unwrap_or(""));
+            actual_route == route && !fragment_is_thread_detail(fragment)
+        })
+}
+
+fn fragment_is_thread_detail(fragment: &str) -> bool {
+    let Some(last_segment) = fragment.trim_matches('/').rsplit('/').next() else {
+        return false;
+    };
+    let normalized = last_segment
+        .trim()
+        .trim_start_matches('#')
+        .to_ascii_lowercase();
+    normalized.starts_with("thread-a:")
+        || normalized.starts_with("thread-f:")
+        || (normalized.len() >= 12 && normalized.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn gmail_base_url(account: &str) -> String {
@@ -1179,7 +1606,14 @@ fn gmail_thread_ready_script(thread_id: &str) -> String {
     node.getAttribute("title") || "",
     node.textContent || ""
   ].join(" ").trim();
-  const hasThreadHash = /\/[^/]+$/.test(hash) || hash.includes(expected);
+  const expectedId = String(expected || "").trim().replace(/^#/, "").toLowerCase();
+  const lowerHash = hash.toLowerCase();
+  const routeReady = /\/[^/]+$/.test(hash) || (expectedId && lowerHash.includes(expectedId));
+  const gmailChrome =
+    document.querySelector('[role="main"]') ||
+    document.querySelector('div[gh]') ||
+    document.querySelector('.nH') ||
+    /gmail/i.test(title);
   const replyButton = Array.from(document.querySelectorAll('[aria-label], [data-tooltip], [role="button"]'))
     .filter(visible)
     .some((node) => /^reply\b/i.test(label(node)) && !/reply all/i.test(label(node)));
@@ -1190,8 +1624,28 @@ fn gmail_thread_ready_script(thread_id: &str) -> String {
       (node.getAttribute("g_editable") === "true" && node.getAttribute("role") === "textbox")
     );
   const threadChrome = /Print all|In new window/i.test(bodyText);
-  if (hasThreadHash && (replyButton || draftBody || threadChrome)) {{
-    return {{ ok: true, status: "ok", href, title }};
+  const subjectHeading = Array.from(document.querySelectorAll('.hP'))
+    .filter(visible)
+    .some((node) => label(node).trim().length > 0);
+  const messageRegion = Array.from(document.querySelectorAll('[data-message-id], .adn, .ii.gt'))
+    .filter(visible)
+    .length > 0;
+  const threadDetailReady =
+    threadChrome || subjectHeading || messageRegion || replyButton || draftBody;
+  if (routeReady && threadDetailReady) {{
+    return {{
+      ok: true,
+      status: "ok",
+      href,
+      title,
+      gmailChrome: Boolean(gmailChrome),
+      replyButton,
+      draftBody,
+      threadChrome,
+      subjectHeading,
+      messageRegion,
+      threadDetailReady
+    }};
   }}
   return {{
     ok: false,
@@ -1199,6 +1653,11 @@ fn gmail_thread_ready_script(thread_id: &str) -> String {
     href,
     title,
     hash,
+    routeReady,
+    gmailChrome: Boolean(gmailChrome),
+    threadChrome,
+    subjectHeading,
+    messageRegion,
     bodyText: bodyText.slice(0, 200)
   }};
 }})()
@@ -1206,53 +1665,242 @@ fn gmail_thread_ready_script(thread_id: &str) -> String {
     )
 }
 
-const GMAIL_DELETE_SCRIPT: &str = r#"
-(() => {
-  const visible = (node) => {
+fn gmail_open_thread_row_script(route_ids: &[String]) -> String {
+    let route_ids = json!(route_ids
+        .iter()
+        .map(|value| value.trim().trim_start_matches('#').to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>())
+    .to_string();
+    format!(
+        r#"
+(() => {{
+  const routeIds = {route_ids}
+    .map((value) => String(value || "").trim().replace(/^#/, "").toLowerCase())
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+  const href = location.href || "";
+  const visible = (node) => {{
     if (!node) return false;
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
-  };
-  const label = (node) => [
-    node.getAttribute("aria-label") || "",
-    node.getAttribute("data-tooltip") || "",
-    node.getAttribute("title") || "",
-    node.textContent || ""
-  ].join(" ").trim();
-  const buttons = Array.from(document.querySelectorAll('[aria-label], [data-tooltip], [role="button"]'))
-    .filter(visible);
-  const button = buttons.find((node) => /^delete\b/i.test(label(node)) || /\bdelete\b/i.test(label(node)));
-  if (!button) {
-    return { ok: false, reason: "delete button not visible" };
-  }
-  button.click();
-  return { ok: true, label: label(button) };
-})()
-"#;
+  }};
+  const normalize = (value) => String(value || "").trim().replace(/^#/, "").toLowerCase();
+  const rowIds = (row) => [
+    row.getAttribute("data-legacy-thread-id") || "",
+    row.getAttribute("data-thread-id") || "",
+    row.getAttribute("data-legacy-message-id") || "",
+    row.getAttribute("data-message-id") || "",
+    row.getAttribute("data-id") || "",
+    ...Array.from(row.querySelectorAll("[data-legacy-thread-id], [data-thread-id], [data-legacy-message-id], [data-message-id], [data-id]"))
+      .flatMap((node) => [
+        node.getAttribute("data-legacy-thread-id") || "",
+        node.getAttribute("data-thread-id") || "",
+        node.getAttribute("data-legacy-message-id") || "",
+        node.getAttribute("data-message-id") || "",
+        node.getAttribute("data-id") || ""
+      ])
+  ].map(normalize).filter((value) => value.length > 0);
+  const activate = (node) => {{
+    for (const [type, Ctor] of [
+      ["pointerdown", window.PointerEvent || window.MouseEvent],
+      ["mousedown", window.MouseEvent],
+      ["mouseup", window.MouseEvent],
+      ["pointerup", window.PointerEvent || window.MouseEvent],
+      ["click", window.MouseEvent]
+    ]) {{
+      node.dispatchEvent(new Ctor(type, {{ bubbles: true, cancelable: true, view: window }}));
+    }}
+    node.click();
+  }};
+  const rows = Array.from(document.querySelectorAll('tr[role="row"]')).filter(visible);
+  const row = rows.find((candidate) => {{
+    const ids = rowIds(candidate);
+    return routeIds.some((routeId) => ids.includes(routeId));
+  }});
+  if (!row) {{
+    return {{
+      ok: false,
+      status: "loading",
+      reason: "thread row not visible",
+      href,
+      routeIds,
+      candidates: rows.slice(0, 25).map((candidate) => rowIds(candidate))
+    }};
+  }}
+  const target =
+    row.querySelector('a[href], [role="link"], .bog, .y6') ||
+    row;
+  setTimeout(() => activate(target), 0);
+  return {{ ok: true, href, routeIds, rowIds: rowIds(row) }};
+}})()
+"#
+    )
+}
 
-const GMAIL_SEND_SCRIPT: &str = r#"
-(() => {
-  const visible = (node) => {
+fn gmail_delete_script(route_ids: &[String]) -> String {
+    let route_ids = json!(route_ids
+        .iter()
+        .map(|value| value.trim().trim_start_matches('#').to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>())
+    .to_string();
+    format!(
+        r#"
+(() => {{
+  const routeIds = {route_ids}
+    .map((value) => String(value || "").trim().replace(/^#/, "").toLowerCase())
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+  const expected = routeIds[0] || "";
+  const href = location.href || "";
+  const hash = location.hash || "";
+  const lowerHref = href.toLowerCase();
+  const lowerHash = hash.toLowerCase();
+  const visible = (node) => {{
     if (!node) return false;
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
-  };
+  }};
   const label = (node) => [
     node.getAttribute("aria-label") || "",
     node.getAttribute("data-tooltip") || "",
     node.getAttribute("title") || "",
     node.textContent || ""
-  ].join(" ").trim();
-  const buttons = Array.from(document.querySelectorAll('[aria-label], [data-tooltip], [role="button"]'))
+  ].join(" ").replace(/\s+/g, " ").trim();
+  const candidate = (node) => ({{
+    tag: node.tagName || "",
+    role: node.getAttribute("role") || "",
+    ariaLabel: node.getAttribute("aria-label") || "",
+    tooltip: node.getAttribute("data-tooltip") || "",
+    title: node.getAttribute("title") || "",
+    act: node.getAttribute("act") || "",
+    text: label(node).slice(0, 120)
+  }});
+  const activate = (node) => {{
+    for (const [type, Ctor] of [
+      ["pointerdown", window.PointerEvent || window.MouseEvent],
+      ["mousedown", window.MouseEvent],
+      ["mouseup", window.MouseEvent],
+      ["pointerup", window.PointerEvent || window.MouseEvent],
+      ["click", window.MouseEvent]
+    ]) {{
+      node.dispatchEvent(new Ctor(type, {{ bubbles: true, cancelable: true, view: window }}));
+    }}
+    node.click();
+  }};
+  const routeActive = routeIds.some((id) => lowerHref.includes(id) || lowerHash.includes(id));
+  if (!routeActive) {{
+    return {{ ok: false, reason: "thread route not active", href, hash, expected, routeIds }};
+  }}
+  const buttons = Array.from(document.querySelectorAll('[aria-label], [data-tooltip], [role="button"], [act="10"]'))
     .filter(visible);
-  const button = buttons.find((node) => /^send\b/i.test(label(node)) && !/schedule/i.test(label(node)));
-  if (!button) {
-    return { ok: false, reason: "send button not visible" };
-  }
-  button.click();
-  return { ok: true, label: label(button) };
-})()
-"#;
+  const button = buttons.find((node) => {{
+    const text = label(node).toLowerCase();
+    if (/delete forever|delete label|delete draft|delete this message/.test(text)) return false;
+    return node.getAttribute("act") === "10" ||
+      /^delete\b/.test(text) ||
+      /\bmove to (trash|bin)\b/.test(text);
+  }});
+  if (!button) {{
+    return {{
+      ok: false,
+      reason: "delete button not visible",
+      href,
+      hash,
+      labels: buttons.map(label).filter((value) => /delete|trash/i.test(value)).slice(0, 10),
+      candidates: buttons.map(candidate).slice(0, 25)
+    }};
+  }}
+  setTimeout(() => activate(button), 0);
+  return {{ ok: true, label: label(button), href, hash }};
+}})()
+"#
+    )
+}
+
+fn gmail_send_script(fields: &GmailComposeFields) -> String {
+    let expected = json!({
+        "to": fields.to.clone(),
+        "cc": fields.cc.clone(),
+        "bcc": fields.bcc.clone(),
+        "subject": fields.subject.clone(),
+        "body": fields.body.clone(),
+    })
+    .to_string();
+    format!(
+        r#"
+(() => {{
+  const expected = {expected};
+  const visible = (node) => {{
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  const label = (node) => [
+    node.getAttribute("aria-label") || "",
+    node.getAttribute("data-tooltip") || "",
+    node.getAttribute("title") || "",
+    node.textContent || ""
+  ].join(" ").replace(/\s+/g, " ").trim();
+  const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const expectedRecipients = []
+    .concat(expected.to || [], expected.cc || [], expected.bcc || [])
+    .map((value) => normalize(value).toLowerCase())
+    .filter((value) => value.length > 0);
+  const rootText = (root) => normalize([
+    root.innerText || "",
+    root.innerHTML || ""
+  ].join(" ")).toLowerCase();
+  const rootMatchesExpected = (root) => {{
+    const haystack = rootText(root);
+    const subject = normalize(expected.subject || "").toLowerCase();
+    const body = normalize(expected.body || "").slice(0, 200).toLowerCase();
+    const subjectOk = !subject || haystack.includes(subject);
+    const bodyOk = !body || haystack.includes(body);
+    const recipientsOk = expectedRecipients.length === 0 ||
+      expectedRecipients.some((recipient) => haystack.includes(recipient));
+    return subjectOk && bodyOk && recipientsOk;
+  }};
+  const disabled = (node) =>
+    node.getAttribute("aria-disabled") === "true" ||
+    node.getAttribute("disabled") !== null ||
+    /disabled/i.test(node.getAttribute("aria-label") || "");
+  const activate = (node) => {{
+    for (const [type, Ctor] of [
+      ["pointerdown", window.PointerEvent || window.MouseEvent],
+      ["mousedown", window.MouseEvent],
+      ["mouseup", window.MouseEvent],
+      ["pointerup", window.PointerEvent || window.MouseEvent],
+      ["click", window.MouseEvent]
+    ]) {{
+      node.dispatchEvent(new Ctor(type, {{ bubbles: true, cancelable: true, view: window }}));
+    }}
+    node.click();
+  }};
+  const sendButtons = Array.from(document.querySelectorAll('[aria-label], [data-tooltip], [role="button"]'))
+    .filter(visible)
+    .filter((node) => /^send\b/i.test(label(node)) && !/schedule/i.test(label(node)));
+  const inspected = [];
+  for (const node of sendButtons) {{
+    const root = node.closest('[role="dialog"], .M9, .AD, .nH') || document.body;
+    const preview = normalize(root.innerText || "").slice(0, 200);
+    inspected.push({{ label: label(node), disabled: disabled(node), preview }});
+    if (!rootMatchesExpected(root)) continue;
+    if (disabled(node)) {{
+      return {{ ok: false, reason: "send button disabled", label: label(node), preview }};
+    }}
+    activate(node);
+    return {{ ok: true, label: label(node), scoped: true, preview }};
+  }}
+  return {{
+    ok: false,
+    reason: "send compose with expected content not visible",
+    sendButtonCount: sendButtons.length,
+    inspected
+  }};
+}})()
+"#
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -1527,10 +2175,506 @@ mod tests {
     }
 
     #[test]
+    fn href_on_route_rejects_thread_detail_for_plain_mailboxes() {
+        // A thread-detail URL under a mailbox route is not a settled list view:
+        // Gmail may land on `#trash/<thread>` immediately after deletion, but
+        // list post-conditions must force the actual Trash row list (#777).
+        assert!(!href_on_route(
+            &json!({"href": "https://mail.google.com/mail/u/0/#trash/thread-a:r123"}),
+            "#trash"
+        ));
+        assert!(!href_on_route(
+            &json!({"href": "https://mail.google.com/mail/u/0/#sent/19f45de75da2cdd7"}),
+            "#sent"
+        ));
+        assert!(href_on_route(
+            &json!({"href": "https://mail.google.com/mail/u/0/#category/social"}),
+            "#category"
+        ));
+    }
+
+    #[test]
+    fn pre_navigation_signature_blocks_rows_from_previous_gmail_view() {
+        let previous = json!({
+            "href": "https://mail.google.com/mail/u/0/#inbox",
+            "rows": [{
+                "id": "19f463fb7872a5a4",
+                "threadId": "19f463fb7872a5a4",
+            }]
+        });
+        let stale_search = json!({
+            "href": "https://mail.google.com/mail/u/0/#search/from%3Anonexistent-xyz-99",
+            "status": "ok",
+            "rows": [{
+                "id": "19f463fb7872a5a4",
+                "threadId": "19f463fb7872a5a4",
+            }]
+        });
+
+        let pre_navigation_signature = pre_navigation_row_signature(
+            &previous,
+            "https://mail.google.com/mail/u/0/#search/from%3Anonexistent-xyz-99",
+        );
+
+        assert_eq!(
+            pre_navigation_signature.as_deref(),
+            Some("19f463fb7872a5a4")
+        );
+        assert!(listing_reuses_pre_navigation_rows(
+            &stale_search,
+            pre_navigation_signature.as_deref()
+        ));
+    }
+
+    #[test]
+    fn pre_navigation_signature_allows_same_search_hash_after_normalization() {
+        let previous = json!({
+            "href": "https://mail.google.com/mail/u/0/#search/from:github",
+            "rows": [{
+                "id": "19f3b300efa7c96d",
+                "threadId": "19f3b300efa7c96d",
+            }]
+        });
+
+        assert_eq!(
+            pre_navigation_row_signature(
+                &previous,
+                "https://mail.google.com/mail/u/0/#search/from%3Agithub"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_search_result_does_not_reuse_pre_navigation_rows() {
+        let empty = json!({
+            "href": "https://mail.google.com/mail/u/0/#search/from%3Anonexistent-xyz-99",
+            "status": "ok",
+            "empty": true,
+            "rows": []
+        });
+
+        assert!(!listing_reuses_pre_navigation_rows(
+            &empty,
+            Some("19f463fb7872a5a4")
+        ));
+    }
+
+    #[test]
+    fn thread_id_input_prefers_gmail_thread_id_and_trims_hash() {
+        let row_input = json!({
+            "id": "19f45de75da2cdd7",
+            "threadId": "19f45de75da2cdd7",
+            "gmailThreadId": "#thread-a:r773037997993629613"
+        });
+        assert_eq!(
+            gmail_thread_id(&row_input).unwrap(),
+            "thread-a:r773037997993629613"
+        );
+    }
+
+    #[test]
+    fn thread_url_prefers_legacy_thread_id_for_navigation() {
+        let row_input = json!({
+            "category": "sent",
+            "id": "19f45de75da2cdd7",
+            "threadId": "19f45de75da2cdd7",
+            "gmailThreadId": "#thread-a:r773037997993629613"
+        });
+        let raw_thread_id = gmail_thread_id(&row_input).unwrap();
+        assert_eq!(raw_thread_id, "thread-a:r773037997993629613");
+        assert_eq!(
+            gmail_thread_url("me@example.com", &row_input, &raw_thread_id),
+            "https://mail.google.com/mail/u/0/#sent/19f45de75da2cdd7"
+        );
+    }
+
+    #[test]
+    fn thread_source_list_url_accepts_search_url_but_not_thread_url() {
+        let input = json!({
+            "url": "https://mail.google.com/mail/u/0/#search/in%3Asent+%22Puffer%22",
+        });
+        assert_eq!(
+            gmail_thread_source_list_url(&input, "thread-a:r123").as_deref(),
+            Some("https://mail.google.com/mail/u/0/#search/in%3Asent+%22Puffer%22")
+        );
+
+        let thread_input = json!({
+            "url": "https://mail.google.com/mail/u/0/#sent/19f45de75da2cdd7",
+        });
+        assert_eq!(
+            gmail_thread_source_list_url(&thread_input, "thread-a:r123"),
+            None
+        );
+    }
+
+    #[test]
+    fn open_thread_row_script_targets_raw_and_legacy_row_ids() {
+        let ids = gmail_thread_route_ids("thread-a:r123", "19f45de75da2cdd7", None);
+        let script = gmail_open_thread_row_script(&ids);
+
+        assert!(script.contains("thread-a:r123"));
+        assert!(script.contains("19f45de75da2cdd7"));
+        assert!(script.contains("data-legacy-thread-id"));
+        assert!(script.contains("data-thread-id"));
+        assert!(script.contains("thread row not visible"));
+        assert!(script.contains("setTimeout(() => activate(target), 0)"));
+    }
+
+    #[test]
+    fn network_idle_timeout_leaves_budget_for_cold_route_confirmation() {
+        // Once waitNetworkIdle times out, the idle signal is not reliable for
+        // this Gmail view; warm-navigation idle waits are skipped so the shared
+        // list-read deadline still leaves room for confirmation scrapes.
+        let worst_case_idle_ms = GMAIL_NETWORK_IDLE_TIMEOUT.as_millis();
+        let confirmation_ms = GMAIL_EVALUATE_INTERVAL.as_millis() * 2;
+        assert!(
+            worst_case_idle_ms + confirmation_ms < GMAIL_LOAD_TIMEOUT.as_millis(),
+            "network idle timeouts can exhaust Gmail list-read deadline before route/signature confirmation"
+        );
+    }
+
+    #[test]
+    fn timed_out_network_idle_disables_warm_navigation_idle_waits() {
+        assert!(should_wait_network_idle_after_previous_attempt(true));
+        assert!(!should_wait_network_idle_after_previous_attempt(false));
+    }
+
+    #[test]
     fn inbox_script_recognizes_zero_result_search_as_empty() {
         // A legitimate zero-hit search must yield `status:"ok", rows:[]`, not an
         // eternal `loading` (#777 adjacent defect).
         assert!(GMAIL_INBOX_SCRIPT.contains("no messages matched"));
+    }
+
+    #[test]
+    fn send_preflight_script_populates_compose_and_waits_for_autosave() {
+        let fields = GmailComposeFields {
+            to: vec!["me@example.com".to_string()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Puffer send preflight subject".to_string(),
+            body: "Puffer send preflight body".to_string(),
+        };
+        let script = gmail_prepare_send_script(&fields);
+        assert!(script.contains("Puffer send preflight subject"));
+        assert!(script.contains("Puffer send preflight body"));
+        assert!(script.contains("draft recipients were populated"));
+        assert!(script.contains("textarea[name=\"to\"]"));
+        assert!(script.contains("draft body was populated"));
+        assert!(script.contains("draft subject was populated"));
+        assert!(script.contains("Gmail is still saving the draft"));
+    }
+
+    #[test]
+    fn send_script_refuses_disabled_send_button() {
+        let fields = GmailComposeFields {
+            to: vec!["me@example.com".to_string()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Puffer disabled send subject".to_string(),
+            body: "Puffer disabled send body".to_string(),
+        };
+        let script = gmail_send_script(&fields);
+        assert!(script.contains("aria-disabled"));
+        assert!(script.contains("send button disabled"));
+    }
+
+    #[test]
+    fn send_script_scopes_click_to_expected_compose() {
+        let fields = GmailComposeFields {
+            to: vec!["me@example.com".to_string()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Puffer scoped send subject".to_string(),
+            body: "Puffer scoped send body".to_string(),
+        };
+        let script = gmail_send_script(&fields);
+        assert!(script.contains("Puffer scoped send subject"));
+        assert!(script.contains("Puffer scoped send body"));
+        assert!(script.contains("send compose with expected content not visible"));
+        assert!(script.contains("closest('[role=\"dialog\"], .M9, .AD, .nH')"));
+        assert!(script.contains("pointerdown"));
+    }
+
+    #[test]
+    fn gmail_evaluate_retries_browser_channel_timeouts_only() {
+        assert!(gmail_evaluate_error_retryable(
+            "evaluate Gmail action script: timed out waiting for browser evaluation: timed out waiting on channel"
+        ));
+        assert!(gmail_evaluate_error_retryable(
+            "timed out waiting for browser evaluation"
+        ));
+        assert!(!gmail_evaluate_error_retryable(
+            "evaluate Gmail action script: javascript exception"
+        ));
+        assert!(!gmail_evaluate_error_retryable(
+            "open Gmail browser tab: connection refused"
+        ));
+    }
+
+    #[test]
+    fn delete_script_requires_thread_route_and_precise_delete_button() {
+        let ids = gmail_delete_route_ids("thread-a:r123", "thread-a:r123", None);
+        let script = gmail_delete_script(&ids);
+        assert!(script.contains("thread-a:r123"));
+        assert!(script.contains("thread route not active"));
+        assert!(script.contains("delete button not visible"));
+        assert!(script.contains("pointerdown"));
+        assert!(script.contains("delete forever"));
+    }
+
+    #[test]
+    fn delete_script_accepts_navigation_thread_id_for_route_check() {
+        let ids = gmail_delete_route_ids("thread-a:r123", "19f45de75da2cdd7", None);
+        let script = gmail_delete_script(&ids);
+        assert!(script.contains("thread-a:r123"));
+        assert!(script.contains("19f45de75da2cdd7"));
+        assert!(script.contains("routeIds.some"));
+    }
+
+    #[test]
+    fn thread_ready_route_id_extracts_opaque_hash_segment() {
+        assert_eq!(
+            gmail_thread_ready_route_id(&json!({
+                "hash": "#sent/FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF",
+            }))
+            .as_deref(),
+            Some("FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF")
+        );
+        assert_eq!(
+            gmail_thread_ready_route_id(&json!({
+                "href": "https://mail.google.com/mail/u/0/#sent/FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF",
+            }))
+            .as_deref(),
+            Some("FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF")
+        );
+        assert_eq!(
+            gmail_thread_ready_route_id(&json!({
+                "hash": "#sent",
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn delete_route_ids_include_current_ready_hash_segment() {
+        let ids = gmail_delete_route_ids(
+            "thread-a:r123",
+            "19f45de75da2cdd7",
+            Some("FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF"),
+        );
+
+        assert_eq!(
+            ids,
+            vec![
+                "thread-a:r123".to_string(),
+                "19f45de75da2cdd7".to_string(),
+                "FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF".to_string(),
+            ]
+        );
+        let script = gmail_delete_script(&ids);
+        assert!(script.contains("thread-a:r123"));
+        assert!(script.contains("19f45de75da2cdd7"));
+        assert!(script.contains("FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF"));
+    }
+
+    #[test]
+    fn listing_contains_any_thread_id_accepts_delete_route_id_set() {
+        let listing = json!({
+            "rows": [{
+                "id": "19f45de75da2cdd7",
+                "threadId": "19f45de75da2cdd7",
+                "legacyThreadId": "19f45de75da2cdd7",
+            }]
+        });
+        let ids = gmail_delete_route_ids(
+            "thread-a:r773037997993629613",
+            "19f45de75da2cdd7",
+            Some("FFNDWNFRqzrJMnlflbszdrLcpnGKtfdF"),
+        );
+
+        assert!(!listing_contains_thread(
+            &listing,
+            "thread-a:r773037997993629613"
+        ));
+        assert!(listing_contains_any_thread_id(&listing, &ids));
+    }
+
+    #[test]
+    fn delete_script_targets_gmail_delete_action_button() {
+        let ids = gmail_delete_route_ids("thread-a:r123", "19f45de75da2cdd7", None);
+        let script = gmail_delete_script(&ids);
+        assert!(script.contains("[act=\"10\"]"));
+        assert!(script.contains("getAttribute(\"act\") === \"10\""));
+        assert!(script.contains("move to (trash|bin)"));
+    }
+
+    #[test]
+    fn delete_script_schedules_destructive_click_after_returning_result() {
+        let ids = gmail_delete_route_ids("thread-a:r123", "19f45de75da2cdd7", None);
+        let script = gmail_delete_script(&ids);
+
+        assert!(script.contains("setTimeout(() => activate(button), 0)"));
+    }
+
+    #[test]
+    fn delete_script_reports_visible_button_candidates_when_delete_missing() {
+        let ids = gmail_delete_route_ids("thread-a:r123", "19f45de75da2cdd7", None);
+        let script = gmail_delete_script(&ids);
+        assert!(script.contains("candidates"));
+        assert!(script.contains("ariaLabel"));
+        assert!(script.contains("tooltip"));
+        assert!(script.contains("act"));
+    }
+
+    #[test]
+    fn delete_click_retries_while_toolbar_button_is_still_loading() {
+        assert!(gmail_delete_click_retryable(&json!({
+            "ok": false,
+            "reason": "delete button not visible",
+            "href": "https://mail.google.com/mail/u/0/#sent/19f45de75da2cdd7",
+        })));
+        assert!(!gmail_delete_click_retryable(&json!({
+            "ok": false,
+            "reason": "thread route not active",
+            "href": "https://mail.google.com/mail/u/0/#sent",
+        })));
+    }
+
+    #[test]
+    fn delete_click_error_message_includes_script_diagnostics() {
+        let message = gmail_delete_click_error_message(
+            "thread-a:r123",
+            &json!({
+                "ok": false,
+                "reason": "delete button not visible",
+                "href": "https://mail.google.com/mail/u/0/#sent/19f45de75da2cdd7",
+                "hash": "#sent/19f45de75da2cdd7",
+                "labels": ["Archive", "More"],
+                "candidates": [{"ariaLabel": "More", "tooltip": "More", "act": "20"}],
+            }),
+        );
+        assert!(message.contains("delete button not visible"));
+        assert!(message.contains("labels"));
+        assert!(message.contains("Archive"));
+        assert!(message.contains("candidates"));
+        assert!(message.contains("More"));
+        assert!(message.contains("#sent/19f45de75da2cdd7"));
+    }
+
+    #[test]
+    fn thread_ready_script_is_not_coupled_to_reply_controls() {
+        let script = gmail_thread_ready_script("thread-a:r123");
+        assert!(script.contains("routeReady"));
+        assert!(script.contains("gmailChrome"));
+        assert!(!script.contains("replyButton || draftBody || threadChrome"));
+    }
+
+    #[test]
+    fn thread_ready_script_requires_thread_detail_not_only_gmail_chrome() {
+        let script = gmail_thread_ready_script("thread-a:r123");
+        assert!(script.contains("threadDetailReady"));
+        assert!(script.contains("routeReady && threadDetailReady"));
+        assert!(!script.contains("routeReady && gmailChrome"));
+    }
+
+    #[test]
+    fn thread_ready_script_avoids_generic_gmail_shell_classes() {
+        let script = gmail_thread_ready_script("thread-a:r123");
+        assert!(!script.contains(".gs"));
+    }
+
+    #[test]
+    fn thread_ready_script_avoids_generic_page_headings() {
+        let script = gmail_thread_ready_script("thread-a:r123");
+        assert!(!script.contains("h1, h2"));
+        assert!(!script.contains("[role=\"heading\"]"));
+        assert!(script.contains(".hP"));
+    }
+
+    #[test]
+    fn thread_ready_decision_retries_loading_result() {
+        let decision = gmail_thread_ready_decision(
+            "me@example.com",
+            "thread-a:r123",
+            &json!({
+                "ok": false,
+                "status": "loading",
+                "href": "https://mail.google.com/mail/u/0/#sent/19f45de75da2cdd7",
+                "routeReady": true,
+                "threadDetailReady": false,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(decision, GmailThreadReadyDecision::Pending);
+    }
+
+    #[test]
+    fn thread_ready_decision_accepts_ready_result() {
+        let result = json!({
+            "ok": true,
+            "status": "ok",
+            "href": "https://mail.google.com/mail/u/0/#sent/19f45de75da2cdd7",
+            "threadDetailReady": true,
+        });
+        let decision =
+            gmail_thread_ready_decision("me@example.com", "thread-a:r123", &result).unwrap();
+
+        assert_eq!(decision, GmailThreadReadyDecision::Ready(result));
+    }
+
+    #[test]
+    fn thread_ready_timeout_message_includes_last_probe_diagnostics() {
+        let message = gmail_thread_ready_timeout_message(
+            "me@example.com",
+            "thread-a:r123",
+            &json!({
+                "status": "loading",
+                "href": "https://mail.google.com/mail/u/0/#sent/19f463fb7872a5a4",
+                "hash": "#sent/19f463fb7872a5a4",
+                "routeReady": true,
+                "threadDetailReady": false,
+                "bodyText": "Loading conversation"
+            }),
+        );
+
+        assert!(message.contains("thread-a:r123"));
+        assert!(message.contains("me@example.com"));
+        assert!(message.contains("https://mail.google.com/mail/u/0/#sent/19f463fb7872a5a4"));
+        assert!(message.contains("#sent/19f463fb7872a5a4"));
+        assert!(message.contains("routeReady=true"));
+        assert!(message.contains("threadDetailReady=false"));
+        assert!(message.contains("Loading conversation"));
+    }
+
+    #[test]
+    fn thread_ready_needs_warm_reopen_for_hash_only_inbox_shell() {
+        let result = json!({
+            "status": "loading",
+            "href": "https://mail.google.com/mail/u/0/#sent/19f463fb7872a5a4",
+            "hash": "#sent/19f463fb7872a5a4",
+            "routeReady": true,
+            "bodyText": "\nSkip to content\nSearch mail\nMail\nCompose\nLabels\nInbox\n1,484"
+        });
+
+        assert!(gmail_thread_ready_needs_warm_reopen(&result));
+        assert!(!gmail_thread_ready_needs_warm_reopen(&json!({
+            "status": "loading",
+            "href": "https://mail.google.com/mail/u/0/#sent",
+            "hash": "#sent",
+            "routeReady": false,
+            "bodyText": "\nSkip to content\nSearch mail\nMail\nCompose\nLabels\nInbox\n1,484"
+        })));
+        assert!(!gmail_thread_ready_needs_warm_reopen(&json!({
+            "status": "loading",
+            "href": "https://mail.google.com/mail/u/0/#sent/19f463fb7872a5a4",
+            "hash": "#sent/19f463fb7872a5a4",
+            "routeReady": true,
+            "threadDetailReady": true,
+            "bodyText": "Puffer Gmail E2E 777 FINAL"
+        })));
     }
 
     #[test]

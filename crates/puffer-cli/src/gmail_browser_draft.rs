@@ -237,6 +237,47 @@ fn draft_script(fields: &GmailComposeFields, reply_mode: bool) -> String {
     bodyNode.closest('.AD') ||
     bodyNode.closest('.nH') ||
     document.body;
+  const expectedTo = (expected.to || [])
+    .map((value) => normalize(value).toLowerCase())
+    .filter((value) => value.length > 0);
+  if (expectedTo.length > 0) {{
+    const rootHaystack = [
+      normalize(composeRoot.innerText || ""),
+      normalize(composeRoot.innerHTML || "")
+    ].join(" ").toLowerCase();
+    const missingTo = expectedTo.filter((recipient) => !rootHaystack.includes(recipient));
+    if (missingTo.length > 0) {{
+      const recipientNode =
+        composeRoot.querySelector('textarea[name="to"], input[name="to"]') ||
+        Array.from(composeRoot.querySelectorAll('textarea, input, [contenteditable="true"]'))
+          .find((node) => {{
+            const nodeLabel = label(node);
+            const isSearch = /search mail|search all conversations/i.test(nodeLabel) ||
+              node.getAttribute("name") === "q";
+            if (isSearch || /subject/i.test(nodeLabel)) return false;
+            return /^to\b/i.test(nodeLabel) || /\brecipients?\b/i.test(nodeLabel);
+          }});
+      if (!recipientNode) {{
+        return {{ ok: false, status: "compose_loading", reason: "recipient field not visible" }};
+      }}
+      setEditableValue(recipientNode, missingTo.join(", "));
+      recipientNode.dispatchEvent(new KeyboardEvent("keydown", {{
+        bubbles: true,
+        cancelable: true,
+        key: "Enter",
+        code: "Enter"
+      }}));
+      recipientNode.dispatchEvent(new KeyboardEvent("keyup", {{
+        bubbles: true,
+        cancelable: true,
+        key: "Enter",
+        code: "Enter"
+      }}));
+      recipientNode.blur();
+      window.__pufferDraftStableSince = 0;
+      return {{ ok: false, status: "compose_populated", reason: "draft recipients were populated" }};
+    }}
+  }}
   const bodyText = normalize(bodyNode.innerText || bodyNode.textContent || bodyNode.value || "");
   const expectedBody = normalize(expected.body || "");
   if (expectedBody && !bodyText.includes(expectedBody.slice(0, 200))) {{
