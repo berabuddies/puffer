@@ -32,8 +32,6 @@ pub(crate) fn verification_failure(
 /// (legacy hex, `thread-f:...` raw ids, or a `#`-prefixed hash fragment), so
 /// the row's `threadId`/`legacyThreadId`/`gmailThreadId`/`id` fields are all
 /// compared after normalization.
-// TODO(task 4): remove this allow once gmail_delete wires the helper in.
-#[allow(dead_code)]
 pub(crate) fn row_matches_thread(row: &Value, thread_id: &str) -> bool {
     let expected = normalize_thread_id(thread_id);
     if expected.is_empty() {

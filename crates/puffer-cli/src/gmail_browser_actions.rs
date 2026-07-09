@@ -131,13 +131,45 @@ fn gmail_delete(
                 .unwrap_or("unknown")
         );
     }
-    Ok(json!({
-        "action": action,
-        "summary": format!("deleted Gmail thread {thread_id} for {account}"),
-        "account": account,
-        "thread_id": thread_id,
-        "url": url,
-    }))
+    // Post-condition: the thread must be visible in Trash. A positive Trash
+    // assertion beats "absent from inbox" -- the thread may simply be outside
+    // the first page window, which would pass vacuously (#588).
+    let trash_url = format!("{}#trash", gmail_base_url(&account));
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    loop {
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+        let trash = poll_account_at_url(env, &account, handshake_ref, &trash_url)?;
+        ensure_gmail_action_not_auth_blocked(&account, &trash)?;
+        let in_trash = trash
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .any(|row| crate::browser_action_verify::row_matches_thread(row, &thread_id))
+            })
+            .unwrap_or(false);
+        if in_trash {
+            return Ok(json!({
+                "action": action,
+                "summary": format!("deleted Gmail thread {thread_id} for {account}"),
+                "account": account,
+                "thread_id": thread_id,
+                "url": url,
+                "verification": {
+                    "matched": true,
+                    "method": "trash_list",
+                    "trash_url": trash_url,
+                },
+            }));
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::browser_action_verify::verification_failure(
+                action,
+                &format!("thread `{thread_id}` was not visible in Trash after clicking Delete"),
+                &trash,
+            ));
+        }
+    }
 }
 
 fn gmail_draft(
