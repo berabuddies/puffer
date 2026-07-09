@@ -886,6 +886,31 @@ fn poll_gmail_search_settled(
     }
 }
 
+/// Gmail list-view route prefix (`#search`, `#inbox`, ...) that `url` should
+/// land on. Only the prefix is meaningful: Gmail re-normalizes the fragment
+/// (percent-decoding operators like `newer_than:1d`), so an exact-fragment
+/// assertion would false-fail the very operator queries #582 enables.
+fn expected_route_of(url: &str) -> String {
+    match url
+        .split('#')
+        .nth(1)
+        .map(|f| f.split('/').next().unwrap_or(""))
+    {
+        Some(route) if !route.is_empty() => format!("#{route}"),
+        _ => "#inbox".to_string(),
+    }
+}
+
+/// Returns true when a scrape's `href` sits on `route` (`#search`, `#sent`,
+/// ...). Pages without a committed fragment match no route.
+fn href_on_route(result: &Value, route: &str) -> bool {
+    result
+        .get("href")
+        .and_then(Value::as_str)
+        .and_then(|href| href.split('#').nth(1))
+        .is_some_and(|fragment| format!("#{}", fragment.split('/').next().unwrap_or("")) == route)
+}
+
 fn gmail_base_url(account: &str) -> String {
     // Gmail must be addressed by signed-in-account *index* (`/u/N/`), not by the
     // `?authuser=<email>` query form. The query form triggers a full-page
@@ -1411,6 +1436,53 @@ mod tests {
         assert!(filters.matches(&row));
         let filters = GmailRowFilters::from_input(&json!({ "keywords": ["missing"] }));
         assert!(!filters.matches(&row));
+    }
+
+    #[test]
+    fn expected_route_of_extracts_route_prefix() {
+        assert_eq!(
+            expected_route_of("https://mail.google.com/mail/u/0/#search/from%3Agithub"),
+            "#search"
+        );
+        assert_eq!(
+            expected_route_of("https://mail.google.com/mail/u/0/#label/foo%20bar"),
+            "#label"
+        );
+        assert_eq!(
+            expected_route_of("https://mail.google.com/mail/u/0/#category/social"),
+            "#category"
+        );
+        assert_eq!(
+            expected_route_of("https://mail.google.com/mail/u/0/#inbox"),
+            "#inbox"
+        );
+        assert_eq!(
+            expected_route_of("https://mail.google.com/mail/u/0/#sent"),
+            "#sent"
+        );
+        // A bare base URL boots Gmail to the inbox.
+        assert_eq!(
+            expected_route_of("https://mail.google.com/mail/u/0/"),
+            "#inbox"
+        );
+    }
+
+    #[test]
+    fn href_on_route_matches_route_prefix_not_exact_fragment() {
+        // Gmail re-normalizes the hash (percent-decoding `newer_than:1d`), so
+        // only the route prefix may be asserted (#582).
+        let search = json!({"href": "https://mail.google.com/mail/u/0/#search/newer_than:1d"});
+        assert!(href_on_route(&search, "#search"));
+        assert!(!href_on_route(&search, "#inbox"));
+        let inbox = json!({"href": "https://mail.google.com/mail/u/0/#inbox"});
+        assert!(href_on_route(&inbox, "#inbox"));
+        assert!(!href_on_route(&inbox, "#search"));
+        // Mid-load pages without a committed fragment match no route yet.
+        assert!(!href_on_route(
+            &json!({"href": "https://mail.google.com/mail/u/0/"}),
+            "#inbox"
+        ));
+        assert!(!href_on_route(&json!({}), "#search"));
     }
 
     #[test]
