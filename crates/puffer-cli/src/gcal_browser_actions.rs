@@ -111,7 +111,7 @@ fn rsvp(
     let target = EventTarget::from_input(input)?;
     let handshake = super::ensure_browser_daemon(config, handshake)?;
     open_event(env, &account, handshake, &target)?;
-    let detail = wait_for_detail(env, &account, handshake)?;
+    wait_for_detail(env, &account, handshake)?;
     let result = evaluate_gcal_script(env, &account, handshake, &gcal_rsvp_script(response))
         .with_context(|| format!("click Google Calendar RSVP `{response}`"))?;
     if !result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -123,13 +123,39 @@ fn rsvp(
                 .unwrap_or("unknown reason")
         );
     }
-    Ok(json!({
-        "action": response,
-        "summary": format!("set Google Calendar RSVP to {response}"),
-        "account": account,
-        "clicked": result.get("label").cloned().unwrap_or(Value::Null),
-        "event": detail,
-    }))
+    // Post-condition: re-open the event (persistence, not the in-memory
+    // panel we just clicked) and require the RSVP control to show the
+    // selected state (#697/#698).
+    open_event(env, &account, handshake, &target)?;
+    let verified_detail = wait_for_detail(env, &account, handshake)?;
+    let deadline = Instant::now() + ACTION_TIMEOUT;
+    loop {
+        let verify =
+            evaluate_gcal_script(env, &account, handshake, &gcal_rsvp_verify_script(response))
+                .with_context(|| format!("verify Google Calendar RSVP `{response}`"))?;
+        if verify.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(json!({
+                "action": response,
+                "summary": format!("set Google Calendar RSVP to {response}"),
+                "account": account,
+                "clicked": result.get("label").cloned().unwrap_or(Value::Null),
+                "event": verified_detail,
+                "verification": {
+                    "matched": true,
+                    "method": verify.get("method").cloned().unwrap_or(Value::Null),
+                    "label": verify.get("label").cloned().unwrap_or(Value::Null),
+                },
+            }));
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::browser_action_verify::verification_failure(
+                response,
+                &format!("RSVP `{response}` was not reflected as selected in the event detail"),
+                &verify,
+            ));
+        }
+        std::thread::sleep(ACTION_INTERVAL);
+    }
 }
 
 fn open_event(
@@ -227,13 +253,11 @@ fn wait_for_detail(
             return Ok(result);
         }
         if Instant::now() >= deadline {
-            bail!(
-                "Google Calendar event detail was not visible: {}",
-                result
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("detail panel not found")
-            );
+            return Err(crate::browser_action_verify::verification_failure(
+                "get_detail",
+                "Google Calendar event detail was not visible",
+                &result,
+            ));
         }
         std::thread::sleep(ACTION_INTERVAL);
     }
@@ -497,6 +521,59 @@ fn gcal_rsvp_script(response: &str) -> String {
     )
 }
 
+fn gcal_rsvp_verify_script(response: &str) -> String {
+    let labels = if response == "accept" {
+        json!(["yes", "accept", "going"])
+    } else {
+        json!(["no", "decline", "deny", "not going"])
+    }
+    .to_string();
+    format!(
+        r#"
+(() => {{
+  const wanted = new Set({labels});
+  const visible = (node) => {{
+    if (!node) return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  const clean = (value) => String(value || "").trim().replace(/\s+/g, " ");
+  const labelFor = (node) => clean([
+    node.getAttribute && node.getAttribute("aria-label"),
+    node.getAttribute && node.getAttribute("title"),
+    node.textContent
+  ].filter(Boolean).join(" ")).toLowerCase();
+  const nodes = Array.from(document.querySelectorAll(
+    "button,[role='button'],[role='radio'],[aria-pressed],[aria-checked]"
+  ));
+  const candidates = [];
+  for (const node of nodes) {{
+    if (!visible(node)) continue;
+    const label = labelFor(node);
+    if (![...wanted].some((item) => label === item || label.includes(item))) continue;
+    const selected =
+      node.getAttribute("aria-pressed") === "true" ||
+      node.getAttribute("aria-checked") === "true" ||
+      node.getAttribute("aria-selected") === "true" ||
+      /(^|\s)(selected|checked)(\s|$)/i.test(node.className || "");
+    candidates.push({{ label: label.slice(0, 60), selected }});
+    if (selected) return {{ ok: true, label, method: "selected_state" }};
+  }}
+  return {{
+    ok: false,
+    reason: candidates.length
+      ? "RSVP button visible but not selected"
+      : "RSVP button not visible",
+    candidates: candidates.slice(0, 5),
+    href: location.href,
+    title: document.title || "",
+    bodyText: (document.body ? document.body.innerText || "" : "").slice(0, 200)
+  }};
+}})()
+"#
+    )
+}
+
 const GCAL_READY_SCRIPT: &str = r#"
 (() => {
   const href = location.href;
@@ -530,7 +607,16 @@ const GCAL_DETAIL_SCRIPT: &str = r#"
     "[data-eid]"
   ].join(","))).filter(visible);
   const panel = panels.find((node) => /edit|delete|guest|calendar|going|yes|no|meet|location|description/i.test(node.innerText || ""));
-  if (!panel) return { ok: false, reason: "detail panel not found" };
+  if (!panel) return {
+    ok: false,
+    reason: panels.length
+      ? "detail panel candidates were all rejected by the content gate"
+      : "detail panel not found",
+    candidateCount: panels.length,
+    href: location.href,
+    title: document.title || "",
+    bodyText: (document.body ? document.body.innerText || "" : "").slice(0, 200)
+  };
   const titleNode = panel.querySelector("[role='heading'], h1, h2, [aria-level='1'], [aria-level='2']");
   const bodyText = clean(panel.innerText || panel.textContent || "");
   return {
@@ -550,6 +636,23 @@ const GCAL_DETAIL_SCRIPT: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_script_failure_carries_diagnostics() {
+        assert!(GCAL_DETAIL_SCRIPT.contains("candidateCount"));
+        assert!(GCAL_DETAIL_SCRIPT.contains("bodyText: (document.body"));
+    }
+
+    #[test]
+    fn rsvp_verify_script_asserts_selected_state() {
+        let accept = gcal_rsvp_verify_script("accept");
+        assert!(accept.contains("aria-pressed"));
+        assert!(accept.contains("aria-checked"));
+        assert!(accept.contains("going"));
+        let deny = gcal_rsvp_verify_script("deny");
+        assert!(deny.contains("not going"));
+        assert!(deny.contains("RSVP button visible but not selected"));
+    }
 
     #[test]
     fn canonicalizes_action_aliases() {
