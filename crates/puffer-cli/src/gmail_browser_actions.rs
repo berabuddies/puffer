@@ -97,15 +97,74 @@ fn gmail_mark_read(
     let thread_id = gmail_thread_id(input)?;
     let url = gmail_thread_url(&account, input, &thread_id);
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
+    // Opening the thread IS Gmail's native mark-as-read mechanism; the defect
+    // was reporting success without checking the unread marker actually
+    // cleared (#591).
     open_gmail_url(env, &account, handshake_ref, &url)?;
     wait_gmail_thread_ready(env, &account, handshake_ref, &thread_id)?;
-    Ok(json!({
-        "action": action,
-        "summary": format!("opened Gmail thread {thread_id} for {account} to mark it read"),
-        "account": account,
-        "thread_id": thread_id,
-        "url": url,
-    }))
+    let collection_url = gmail_collection_url(&account, input);
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    loop {
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+        let listing = poll_account_at_url(env, &account, handshake_ref, &collection_url)?;
+        ensure_gmail_action_not_auth_blocked(&account, &listing)?;
+        let rows = listing
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let state = mark_read_verification_state(&rows, &thread_id);
+        if state == MarkReadVerification::Read {
+            return Ok(json!({
+                "action": action,
+                "summary": format!("marked Gmail thread {thread_id} read for {account}"),
+                "account": account,
+                "thread_id": thread_id,
+                "url": url,
+                "verification": {
+                    "matched": true,
+                    "method": "collection_unread_flag",
+                    "collection_url": collection_url,
+                },
+            }));
+        }
+        if Instant::now() >= deadline {
+            let expectation = match state {
+                MarkReadVerification::Read => unreachable!("read state returned before timeout"),
+                MarkReadVerification::StillUnread => {
+                    format!("thread `{thread_id}` still shows as unread in the list")
+                }
+                MarkReadVerification::Missing => format!(
+                    "thread `{thread_id}` was not visible in the first page of the list, so the read state could not be verified"
+                ),
+            };
+            return Err(crate::browser_action_verify::verification_failure(
+                action,
+                &expectation,
+                &listing,
+            ));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MarkReadVerification {
+    Read,
+    StillUnread,
+    Missing,
+}
+
+fn mark_read_verification_state(rows: &[Value], thread_id: &str) -> MarkReadVerification {
+    match rows
+        .iter()
+        .find(|row| crate::browser_action_verify::row_matches_thread(row, thread_id))
+    {
+        Some(row) if row.get("unread").and_then(Value::as_bool).unwrap_or(false) => {
+            MarkReadVerification::StillUnread
+        }
+        Some(_) => MarkReadVerification::Read,
+        None => MarkReadVerification::Missing,
+    }
 }
 
 fn gmail_delete(
@@ -1106,6 +1165,26 @@ mod tests {
             &empty,
             &json!({"rows":[{"subject":"anything","snippet":"x"}]})
         ));
+    }
+
+    #[test]
+    fn mark_read_verification_requires_matching_row_with_unread_cleared() {
+        let rows = vec![
+            json!({"threadId":"thread-f:read","unread":false}),
+            json!({"threadId":"thread-f:unread","unread":true}),
+        ];
+        assert_eq!(
+            mark_read_verification_state(&rows, "#thread-f:read"),
+            MarkReadVerification::Read
+        );
+        assert_eq!(
+            mark_read_verification_state(&rows, "thread-f:unread"),
+            MarkReadVerification::StillUnread
+        );
+        assert_eq!(
+            mark_read_verification_state(&rows, "thread-f:missing"),
+            MarkReadVerification::Missing
+        );
     }
 
     #[test]
