@@ -9,12 +9,18 @@ use gmail_browser_draft::{
     gmail_save_draft_script, sent_rows_contain,
 };
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::{
     ensure_browser_daemon, poll_account_at_url, safe_session_part, GmailBrowserConfig,
-    SubscriberEnv, BROWSER_HEIGHT, BROWSER_WIDTH, GMAIL_EVALUATE_INTERVAL, GMAIL_LOAD_TIMEOUT,
+    SubscriberEnv, BROWSER_HEIGHT, BROWSER_WIDTH, GMAIL_EVALUATE_INTERVAL, GMAIL_INBOX_SCRIPT,
+    GMAIL_LOAD_TIMEOUT,
 };
+
+/// Minimum time to let Gmail replace the transient pre-search inbox rows with
+/// the actual search results before trusting a scrape (see
+/// [`poll_gmail_search_settled`]).
+const GMAIL_SEARCH_SETTLE: Duration = Duration::from_millis(2500);
 
 /// Executes one Gmail-browser connector action through the managed Chrome profile.
 pub(super) fn handle_action(
@@ -51,23 +57,34 @@ fn gmail_list_emails(
     let account = gmail_action_account(config, input)?;
     let url = gmail_collection_url(&account, input);
     let handshake_ref = ensure_browser_daemon(config, handshake)?;
-    let result = poll_account_at_url(env, &account, handshake_ref, &url)?;
+    let mut result = poll_account_at_url(env, &account, handshake_ref, &url)?;
     ensure_gmail_action_ready(&account, &result)?;
     if let Some(query) = string_input(input, "query").filter(|value| !value.trim().is_empty()) {
-        // Confirm Gmail actually switched to a search view. We assert the
-        // `#search` route rather than the exact encoded query fragment: Gmail
-        // re-normalizes the hash (percent-decoding operators like
+        // A search must clear two async hurdles before its rows can be trusted,
+        // and the first scrape loses both races (#582):
+        //   1. Route: on a cold tab Gmail boots to `#inbox` and only then
+        //      applies the `#search` hash, so the first `href` is `#inbox`.
+        //   2. Rows: even once `#search` commits, Gmail swaps in the real
+        //      results a beat later, so the rows are still the prior inbox.
+        // Reporting either transient state would be a fresh false-success, so
+        // wait for the `#search` route to commit AND the result rows to settle.
+        // We assert the `#search` route rather than the exact encoded fragment:
+        // Gmail re-normalizes the hash (percent-decoding operators like
         // `newer_than:1d`), so an exact-fragment match would false-fail the very
-        // operator queries #582 enables. A missing `#search` route means the
-        // query was dropped and we are still on the inbox/auth page.
-        let href = result.get("href").and_then(Value::as_str).unwrap_or("");
-        if !href.contains("#search") {
-            return Err(crate::browser_action_verify::verification_failure(
-                action,
-                &format!("Gmail search view for `{query}` was not reached"),
-                &result,
-            ));
+        // operator queries #582 enables.
+        // A *cold* tab boots Gmail to `#inbox` and drops the `#search` hash
+        // outright, so a direct open of the search URL never reaches search.
+        // The hash only commits as a *warm* client-side navigation, so if the
+        // first scrape is not yet on `#search`, boot Gmail on the inbox and
+        // re-open the search URL as a warm hash change before settling.
+        if !href_is_search(&result) {
+            let inbox_url = format!("{}#inbox", gmail_base_url(&account));
+            poll_account_at_url(env, &account, handshake_ref, &inbox_url)?;
+            result = poll_account_at_url(env, &account, handshake_ref, &url)?;
+            ensure_gmail_action_not_auth_blocked(&account, &result)?;
         }
+        result = poll_gmail_search_settled(env, &account, handshake_ref, action, &query, result)?;
+        ensure_gmail_action_ready(&account, &result)?;
     }
     let limit = integer_input(input, "limit").unwrap_or(30).clamp(1, 100) as usize;
     let filters = GmailRowFilters::from_input(input);
@@ -768,9 +785,122 @@ impl GmailComposeFields {
     }
 }
 
+/// Re-scrapes the current Gmail list tab in place (no re-navigation) with the
+/// shared inbox script.
+fn rescrape_gmail_list(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+) -> Result<Value> {
+    let root_session = format!("gmail-browser-{}", safe_session_part(&env.topic));
+    let value = crate::daemon_browser::send_daemon_request(
+        handshake,
+        "browser_agent",
+        json!({
+            "action": "evaluate",
+            "sessionId": root_session,
+            "tabId": safe_session_part(account),
+            "width": BROWSER_WIDTH,
+            "height": BROWSER_HEIGHT,
+            "background": true,
+            "script": GMAIL_INBOX_SCRIPT,
+        }),
+    )
+    .context("re-scrape Gmail search results")?;
+    Ok(value.get("value").cloned().unwrap_or(Value::Null))
+}
+
+/// Ordered thread-id signature of a listing's rows, used to detect when a
+/// search's result set has stopped changing.
+fn row_signature(result: &Value) -> String {
+    listing_rows(result)
+        .iter()
+        .filter_map(|row| {
+            ["threadId", "legacyThreadId", "gmailThreadId", "id"]
+                .iter()
+                .find_map(|key| row.get(*key).and_then(Value::as_str))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn href_is_search(result: &Value) -> bool {
+    result
+        .get("href")
+        .and_then(Value::as_str)
+        .is_some_and(|href| href.contains("#search"))
+}
+
+/// Waits for a Gmail search to commit its `#search` route AND for its result
+/// rows to settle before the scrape can be trusted.
+///
+/// `initial` is the first scrape, which loses both races: on a cold tab its
+/// `href` is still `#inbox`, and even on a warm tab the rows are still the
+/// prior inbox until Gmail swaps in the results. Re-scrapes in place until the
+/// `href` is on `#search` AND the row signature is stable across two
+/// consecutive reads AND at least [`GMAIL_SEARCH_SETTLE`] has elapsed since the
+/// route committed. On [`GMAIL_LOAD_TIMEOUT`], returns the last scrape if
+/// `#search` was reached, otherwise a [`verification_failure`] so a dropped
+/// query is reported honestly rather than as stale inbox rows (#582).
+fn poll_gmail_search_settled(
+    env: &SubscriberEnv,
+    account: &str,
+    handshake: &crate::daemon::Handshake,
+    action: &str,
+    query: &str,
+    initial: Value,
+) -> Result<Value> {
+    let deadline = Instant::now() + GMAIL_LOAD_TIMEOUT;
+    let mut latest = initial;
+    let mut prev_sig = row_signature(&latest);
+    // Settle is measured from when `#search` first commits, not from entry, so
+    // the cold-tab `#inbox` boot phase does not eat the settle window.
+    let mut search_committed_at = href_is_search(&latest).then(Instant::now);
+    loop {
+        std::thread::sleep(GMAIL_EVALUATE_INTERVAL);
+        let next = rescrape_gmail_list(env, account, handshake)?;
+        ensure_gmail_action_not_auth_blocked(account, &next)?;
+        let on_search = href_is_search(&next);
+        let sig = row_signature(&next);
+        let stable = on_search && sig == prev_sig;
+        if on_search && search_committed_at.is_none() {
+            search_committed_at = Some(Instant::now());
+        }
+        prev_sig = sig;
+        latest = next;
+        if let Some(committed) = search_committed_at {
+            if stable && committed.elapsed() >= GMAIL_SEARCH_SETTLE {
+                return Ok(latest);
+            }
+        }
+        if Instant::now() >= deadline {
+            if href_is_search(&latest) {
+                return Ok(latest);
+            }
+            return Err(crate::browser_action_verify::verification_failure(
+                action,
+                &format!("Gmail search view for `{query}` was not reached"),
+                &latest,
+            ));
+        }
+    }
+}
+
 fn gmail_base_url(account: &str) -> String {
-    let encoded = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
-    format!("https://mail.google.com/mail/?authuser={encoded}")
+    // Gmail must be addressed by signed-in-account *index* (`/u/N/`), not by the
+    // `?authuser=<email>` query form. The query form triggers a full-page
+    // redirect that resolves the account and *drops the URL hash fragment* on
+    // the way, silently landing on the default `#inbox`. That broke every
+    // non-inbox navigation built on this base -- `#search/...` (agentenv/
+    // monorepo#582), and the plan-07 post-condition views `#sent` (send),
+    // `#trash` (delete), and `#inbox/<thread>` (mark_read / reply) -- because
+    // the intended view was never reached. The managed profile hosts a single
+    // signed-in account at index 0 (the old `?authuser=` already fell back to
+    // it regardless of the requested address), so `/u/0/` selects the same
+    // mailbox while preserving the fragment. Verified live: `/u/0/#search/...`
+    // reaches the search view where `?authuser=<email>#search/...` did not.
+    let _ = account;
+    "https://mail.google.com/mail/u/0/".to_string()
 }
 
 fn gmail_drafts_url(account: &str) -> String {
@@ -1067,15 +1197,45 @@ mod tests {
     fn collection_url_supports_query_category_and_label() {
         assert_eq!(
             gmail_collection_url("me@example.com", &json!({"category": "promotions"})),
-            "https://mail.google.com/mail/?authuser=me%40example.com#category/promotions"
+            "https://mail.google.com/mail/u/0/#category/promotions"
         );
         assert_eq!(
-            gmail_collection_url("me@example.com", &json!({"query": "from:alice has:attachment"})),
-            "https://mail.google.com/mail/?authuser=me%40example.com#search/from%3Aalice+has%3Aattachment"
+            gmail_collection_url(
+                "me@example.com",
+                &json!({"query": "from:alice has:attachment"})
+            ),
+            "https://mail.google.com/mail/u/0/#search/from%3Aalice+has%3Aattachment"
         );
         assert_eq!(
             gmail_collection_url("me@example.com", &json!({"label": "Clients/Acme"})),
-            "https://mail.google.com/mail/?authuser=me%40example.com#label/Clients%2FAcme"
+            "https://mail.google.com/mail/u/0/#label/Clients%2FAcme"
+        );
+    }
+
+    #[test]
+    fn base_url_uses_path_index_so_hash_fragment_survives_navigation() {
+        // Regression (agentenv/monorepo#582 + plan-07): the `?authuser=<email>`
+        // query form triggered a redirect that dropped the URL hash fragment,
+        // so `#search` / `#sent` / `#trash` / `#inbox/<thread>` navigations
+        // silently fell back to `#inbox`. Verified live that the `/u/N/` path
+        // form preserves the fragment where the query form did not.
+        let base = gmail_base_url("me@example.com");
+        assert!(
+            !base.contains("authuser"),
+            "base must not use the fragment-dropping authuser query form: {base}"
+        );
+        assert!(
+            base.starts_with("https://mail.google.com/mail/u/"),
+            "base must be a /u/N/ path form: {base}"
+        );
+        // The plan-07 post-condition views must carry their fragment intact.
+        assert_eq!(
+            format!("{base}#sent"),
+            "https://mail.google.com/mail/u/0/#sent"
+        );
+        assert_eq!(
+            format!("{base}#trash"),
+            "https://mail.google.com/mail/u/0/#trash"
         );
     }
 
@@ -1090,7 +1250,7 @@ mod tests {
                 }),
                 "19ef88112d77ab50",
             ),
-            "https://mail.google.com/mail/?authuser=me%40example.com#inbox/19ef88112d77ab50"
+            "https://mail.google.com/mail/u/0/#inbox/19ef88112d77ab50"
         );
     }
 
