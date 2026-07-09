@@ -6,6 +6,7 @@ mod basic_commands;
 mod benchmark_reflection;
 mod benchmark_run;
 mod browser;
+mod browser_action_verify;
 mod browser_args;
 mod browser_output;
 mod browser_profiles;
