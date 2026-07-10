@@ -171,6 +171,45 @@ pub enum ModelCompat {
 /// public OpenAI Responses API plus its codex / azure variants).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenAiResponsesCompat {
+    /// Prompt layering style. `codex` keeps top-level instructions stable
+    /// and moves runtime/project context into leading input items.
+    #[serde(default)]
+    pub prompt_style: Option<String>,
+    /// Optional prompt resource id for stable base instructions.
+    #[serde(default)]
+    pub base_instructions_id: Option<String>,
+    /// Whether skill usage instructions should be included in developer
+    /// context for Codex-style prompt layering.
+    #[serde(default)]
+    pub include_skills_usage_instructions: Option<bool>,
+    /// Whether the provider accepts developer-role input items.
+    #[serde(default)]
+    pub supports_developer_messages: Option<bool>,
+    /// Whether the provider accepts contextual user input items before the
+    /// actual user turn.
+    #[serde(default)]
+    pub supports_contextual_user_messages: Option<bool>,
+    /// Whether Codex-style client metadata may be emitted.
+    #[serde(default)]
+    pub supports_client_metadata: Option<bool>,
+    /// Whether `text.verbosity` may be emitted.
+    #[serde(default)]
+    pub supports_text_verbosity: Option<bool>,
+    /// Default `text.verbosity` when none is user-configured.
+    #[serde(default)]
+    pub default_verbosity: Option<String>,
+    /// Whether `reasoning.summary` is supported.
+    #[serde(default)]
+    pub supports_reasoning_summary: Option<bool>,
+    /// Default `reasoning.summary` value.
+    #[serde(default)]
+    pub default_reasoning_summary: Option<String>,
+    /// Whether this model should prefer the WebSocket transport.
+    #[serde(default)]
+    pub prefer_websockets: Option<bool>,
+    /// Whether `parallel_tool_calls` may be emitted.
+    #[serde(default)]
+    pub supports_parallel_tool_calls: Option<bool>,
     /// Whether the provider supports server-side response threading via
     /// `previous_response_id`. Auto-detected from
     /// `provider.id == "openai" && base_url.contains("api.openai.com")`

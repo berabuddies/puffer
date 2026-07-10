@@ -4,9 +4,11 @@ use super::{
     APP_VERSION, OPENAI_CODEX_COMPAT_VERSION,
 };
 mod adapters;
+mod codex_prompt;
 mod completions_session;
 pub(crate) mod conversation;
 mod legacy_streaming;
+mod prompt_context;
 mod responses_session;
 mod support;
 mod websocket;
@@ -503,11 +505,7 @@ pub(super) fn parse_openai_text(response: &Value) -> Result<String> {
     Ok(parts.join("\n"))
 }
 
-pub(super) fn openai_request_instructions(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    system_prompt: Option<&str>,
-) -> Result<String> {
+pub(super) fn openai_request_instructions(system_prompt: Option<&str>) -> String {
     let mut sections = Vec::new();
     if let Some(system_prompt) = system_prompt
         .map(str::trim)
@@ -515,19 +513,12 @@ pub(super) fn openai_request_instructions(
     {
         sections.push(system_prompt.to_string());
     }
-    if let Some(plan_mode_context) =
-        crate::plan_mode::take_plan_mode_context_message(state, resources)?
-            .map(|message| message.trim().to_string())
-            .filter(|message| !message.is_empty())
-    {
-        sections.push(plan_mode_context);
-    }
     // Dynamic context (date, git status, CLAUDE.md) is now injected as a
     // context user message in the `input` array, not here.  This keeps
     // `instructions` static and cacheable (matching Codex's design where
     // `instructions` = pure developer instructions, and contextual data
     // lives in `input` items).
-    Ok(sections.join("\n\n"))
+    sections.join("\n\n")
 }
 
 /// Builds the dynamic context message injected into the `input` array.

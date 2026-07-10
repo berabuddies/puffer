@@ -5,12 +5,16 @@ use super::super::openai_ws::{OpenAIWebSocket, WsApiError};
 use super::super::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
 };
-use super::super::system_prompt::render_runtime_system_prompt;
 use super::super::{run_turn_hooks, RetryAttemptKind, TurnStreamEvent};
 use super::conversation::{
-    append_managed_system_prompt_1_to_instructions, append_reasoning_items, append_tool_results,
-    compact_conversation, inject_post_compact_context, items_to_responses_input,
-    managed_system_prompt_1_from_env, transcript_to_items, ConversationItem,
+    append_reasoning_items, append_tool_results, compact_conversation, inject_post_compact_context,
+    items_to_responses_input, managed_system_prompt_1_from_env, transcript_to_items,
+    ConversationItem,
+};
+use super::prompt_context::{
+    apply_managed_system_prompt_to_bundle, apply_plan_mode_context_to_bundle,
+    apply_request_wire_compat, apply_text_verbosity_compat, build_openai_responses_prompt_bundle,
+    insert_leading_input_items, supports_client_metadata, supports_parallel_tool_calls,
 };
 use super::support::{
     apply_previous_response_id, is_openai_structured_output_error, openai_model_supports_reasoning,
@@ -18,9 +22,8 @@ use super::support::{
     structured_output_endpoint_id, OPENAI_STRUCTURED_OUTPUT_FAMILY,
 };
 use super::{
-    build_context_reminder_message, execute_openai_tool_calls, openai_request_instructions,
-    parse_openai_text, parse_openai_text_fallback, resolve_openai_execution_config,
-    OpenAIExecutionConfig,
+    build_context_reminder_message, execute_openai_tool_calls, parse_openai_text,
+    parse_openai_text_fallback, resolve_openai_execution_config, OpenAIExecutionConfig,
 };
 use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::AppState;
@@ -177,30 +180,56 @@ where
             request_tool_filter: options.tool_filter.cloned(),
         },
     )?;
-    let text = openai_responses_text_config(structured_output, use_native);
+    let mut text = openai_responses_text_config(structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
         &registry,
         structured_output,
         use_native,
         Some(&permission_context),
     )?;
-    let system_prompt = render_runtime_system_prompt(
+    let enabled_tool_names = tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let model = provider
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .cloned()
+        .unwrap_or_else(|| puffer_provider_registry::ModelDescriptor {
+            id: model_id.clone(),
+            display_name: model_id.clone(),
+            provider: provider.id.clone(),
+            api: provider.default_api.clone(),
+            context_window: 0,
+            max_output_tokens: 0,
+            supports_reasoning: false,
+            compat: None,
+            input: Vec::new(),
+            cost: None,
+        });
+    let mut prompt_bundle = build_openai_responses_prompt_bundle(
         state,
         resources,
-        &model_id,
-        &tools
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<std::collections::BTreeSet<_>>(),
+        provider,
+        &model,
+        &enabled_tool_names,
+        &permission_context,
+        &options,
     )?;
-    let mut instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
+    text = apply_text_verbosity_compat(text, &model);
     let mut items = transcript_to_items(state, input);
     let managed_system_prompt_1 = managed_system_prompt_1_from_env();
-    append_managed_system_prompt_1_to_instructions(
-        &mut instructions,
+    apply_managed_system_prompt_to_bundle(
+        &mut prompt_bundle,
+        &model,
         managed_system_prompt_1.as_deref(),
     );
+    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
+    apply_plan_mode_context_to_bundle(&mut prompt_bundle, &model, plan_mode_context.as_deref());
+    let instructions = super::openai_request_instructions(Some(&prompt_bundle.instructions));
 
+    insert_leading_input_items(&mut items, &prompt_bundle.leading_input_items);
     let context_reminder = build_context_reminder_message(state);
     super::conversation::insert_context_reminder_preserving_legacy_leading_system(
         &mut items,
@@ -209,9 +238,13 @@ where
 
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
-    let model = provider.models.iter().find(|m| m.id == model_id);
-    let supports_response_threading =
-        openai_supports_response_threading(provider, &execution.request_config.base_url, model);
+    let supports_response_threading = openai_supports_response_threading(
+        provider,
+        &execution.request_config.base_url,
+        Some(&model),
+    );
+    let supports_client_metadata = supports_client_metadata(&model);
+    let supports_parallel_tool_calls = supports_parallel_tool_calls(&model);
     let mut previous_response_id: Option<String> = None;
     let mut continuation_start: Option<usize> = None;
 
@@ -271,6 +304,12 @@ where
             supports_reasoning,
             text.clone(),
             true, // stream flag — will be stripped by send_response_create
+        );
+        apply_request_wire_compat(
+            &mut body,
+            state,
+            supports_client_metadata,
+            supports_parallel_tool_calls,
         );
         apply_previous_response_id(&mut body, prev_resp_id.as_deref());
 
