@@ -332,6 +332,9 @@ pub(super) fn openai_supports_response_threading(
     if env_flag("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING") {
         return true;
     }
+    if is_chatgpt_codex_backend(base_url) {
+        return false;
+    }
     if let Some(declared) =
         openai_responses_compat(model).and_then(|c| c.supports_response_threading)
     {
@@ -343,7 +346,13 @@ pub(super) fn openai_supports_response_threading(
 fn auto_detect_response_threading(provider: &ProviderDescriptor, base_url: &str) -> bool {
     let trimmed = base_url.trim_end_matches('/');
     (provider.id == "openai" && trimmed.contains("api.openai.com"))
-        || (trimmed.contains("/api/codex") && !trimmed.contains("chatgpt.com/backend-api"))
+        || (trimmed.contains("/api/codex") && !is_chatgpt_codex_backend(trimmed))
+}
+
+pub(super) fn is_chatgpt_codex_backend(base_url: &str) -> bool {
+    base_url
+        .trim_end_matches('/')
+        .contains("chatgpt.com/backend-api")
 }
 
 pub(super) fn openai_responses_path(base_url: &str) -> &'static str {
@@ -620,7 +629,9 @@ mod tests {
     use crate::runtime::tests::state;
     use crate::runtime::OPENAI_CHATGPT_BASE_URL;
     use anyhow::anyhow;
-    use puffer_provider_registry::ProviderDescriptor;
+    use puffer_provider_registry::{
+        ModelCompat, ModelDescriptor, OpenAiResponsesCompat, ProviderDescriptor,
+    };
     use serde_json::{json, Value};
     use std::ffi::OsString;
     use std::time::Duration;
@@ -667,6 +678,24 @@ mod tests {
             media: None,
             models: Vec::new(),
             chat_completions_path: None,
+        }
+    }
+
+    fn model_with_response_threading(declared: bool) -> ModelDescriptor {
+        ModelDescriptor {
+            id: "gpt-5.5".to_string(),
+            display_name: "GPT-5.5".to_string(),
+            provider: "openai".to_string(),
+            api: "openai-responses".to_string(),
+            context_window: 1_041_920,
+            max_output_tokens: 128_000,
+            supports_reasoning: true,
+            input: Default::default(),
+            cost: None,
+            compat: Some(ModelCompat::OpenAiResponses(OpenAiResponsesCompat {
+                supports_response_threading: Some(declared),
+                ..Default::default()
+            })),
         }
     }
 
@@ -1013,6 +1042,24 @@ mod tests {
             &provider,
             "https://chatgpt.com/backend-api/codex",
             None,
+        ));
+    }
+
+    #[test]
+    fn chatgpt_codex_backend_disables_response_threading_even_when_model_declares_support() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_RESPONSE_THREADING");
+        let _legacy_disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_PREVIOUS_RESPONSE_ID");
+        let _force_enable = ScopedEnvVar::unset("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING");
+        let provider = provider("openai", "https://api.openai.com");
+        let model = model_with_response_threading(true);
+
+        assert!(!openai_supports_response_threading(
+            &provider,
+            "https://chatgpt.com/backend-api/codex",
+            Some(&model),
         ));
     }
 }

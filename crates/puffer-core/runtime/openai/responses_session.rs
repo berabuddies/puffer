@@ -23,12 +23,17 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use super::conversation::{
-    append_managed_system_prompt_1_to_instructions, append_reasoning_items,
-    generate_openai_summary, insert_context_reminder_preserving_legacy_leading_system,
-    items_to_responses_input, managed_system_prompt_1_from_env, ConversationItem,
+    append_reasoning_items, generate_openai_summary,
+    insert_context_reminder_preserving_legacy_leading_system, items_to_responses_input,
+    managed_system_prompt_1_from_env, ConversationItem,
+};
+use super::prompt_context::{
+    apply_managed_system_prompt_to_bundle, apply_plan_mode_context_to_bundle,
+    apply_request_wire_compat, apply_text_verbosity_compat, build_openai_responses_prompt_bundle,
+    insert_leading_input_items, supports_client_metadata, supports_parallel_tool_calls,
 };
 use super::support::{
-    apply_previous_response_id, build_codex_openai_request_body,
+    apply_previous_response_id, build_codex_openai_request_body, is_chatgpt_codex_backend,
     is_openai_include_validation_error, is_retryable_openai_stream_error, openai_responses_path,
     openai_stream_max_attempts, openai_stream_retry_delay,
 };
@@ -44,7 +49,6 @@ use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::runtime::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
 };
-use crate::runtime::system_prompt::render_runtime_system_prompt;
 use crate::runtime::tool_executor::ToolExecutionBackend;
 use crate::runtime::TurnRequestOptions;
 use crate::runtime::{RetryAttemptKind, ToolCallRequest, TurnStreamEvent, TurnUsageReport};
@@ -65,10 +69,13 @@ pub(super) struct OpenAIResponsesTurnSession {
     pub model_id: String,
     pub supports_reasoning: bool,
     pub supports_response_threading: bool,
+    pub supports_client_metadata: bool,
+    pub supports_parallel_tool_calls: bool,
     /// Pre-rendered `<system-reminder>` text (currentDate + gitStatus +
     /// optional project-memory skill guidance). Computed once at session
     /// setup so `pre_loop_inject` does not need `&AppState`.
     pub context_reminder: String,
+    pub leading_input_items: Vec<ConversationItem>,
     /// Server-side response identifier from the most recent turn. When
     /// set, the next request omits already-known prefix items.
     pub previous_response_id: Option<String>,
@@ -130,6 +137,12 @@ impl OpenAIResponsesTurnSession {
             supports_reasoning,
             self.text.clone(),
             stream,
+        );
+        apply_request_wire_compat(
+            &mut body,
+            state,
+            self.supports_client_metadata,
+            self.supports_parallel_tool_calls,
         );
         let prev_resp_id = if self.supports_response_threading {
             self.previous_response_id.as_deref()
@@ -345,6 +358,13 @@ impl TurnSession for OpenAIResponsesTurnSession {
         auth_store: &mut AuthStore,
         items: &mut Vec<ConversationItem>,
     ) -> Result<AssistantTurn> {
+        if requires_streaming_responses_transport_for_blocking(
+            &self.execution.request_config.base_url,
+        ) {
+            let mut sink = |_: TurnStreamEvent| {};
+            return self.one_turn_streaming(state, auth_store, items, &mut sink);
+        }
+
         let items_len_at_request = items.len();
         let wire_input = self.build_wire_input(items);
 
@@ -481,6 +501,7 @@ impl TurnSession for OpenAIResponsesTurnSession {
         // — only this dynamic part belongs in `input`. The reminder text
         // was rendered once at session setup with `&AppState` access,
         // since this trait method does not receive state.
+        insert_leading_input_items(items, &self.leading_input_items);
         insert_context_reminder_preserving_legacy_leading_system(items, &self.context_reminder);
     }
 
@@ -491,6 +512,10 @@ impl TurnSession for OpenAIResponsesTurnSession {
         self.previous_response_id = None;
         self.continuation_start = None;
     }
+}
+
+fn requires_streaming_responses_transport_for_blocking(base_url: &str) -> bool {
+    is_chatgpt_codex_backend(base_url)
 }
 
 /// Builds an `OpenAIResponsesTurnSession` from agent-loop inputs.
@@ -516,7 +541,7 @@ pub(super) fn setup_responses_session(
             request_tool_filter: options.tool_filter.cloned(),
         },
     )?;
-    let text = openai_responses_text_config(options.structured_output, use_native);
+    let mut text = openai_responses_text_config(options.structured_output, use_native);
     let mut tools = openai_tool_definitions_for_request(
         &registry,
         options.structured_output,
@@ -541,26 +566,58 @@ pub(super) fn setup_responses_session(
         .map(|tool| tool.name.clone())
         .filter(|name| !name.is_empty())
         .collect::<std::collections::BTreeSet<_>>();
-    let mut instructions = if options.lightweight_context {
-        "Reply directly and concisely.".to_string()
-    } else {
-        let system_prompt =
-            render_runtime_system_prompt(state, resources, &model_id, &enabled_tool_names)?;
-        super::openai_request_instructions(state, resources, Some(&system_prompt))?
-    };
+    let model = provider
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .cloned()
+        .unwrap_or_else(|| puffer_provider_registry::ModelDescriptor {
+            id: model_id.clone(),
+            display_name: model_id.clone(),
+            provider: provider.id.clone(),
+            api: provider.default_api.clone(),
+            context_window: 0,
+            max_output_tokens: 0,
+            supports_reasoning: false,
+            compat: None,
+            input: Vec::new(),
+            cost: None,
+        });
+    let mut prompt_bundle = build_openai_responses_prompt_bundle(
+        state,
+        resources,
+        provider,
+        &model,
+        &enabled_tool_names,
+        &permission_context,
+        options,
+    )?;
+    text = apply_text_verbosity_compat(text, &model);
     let managed_system_prompt_1 = if options.lightweight_context {
         None
     } else {
         managed_system_prompt_1_from_env()
     };
-    append_managed_system_prompt_1_to_instructions(
-        &mut instructions,
+    apply_managed_system_prompt_to_bundle(
+        &mut prompt_bundle,
+        &model,
         managed_system_prompt_1.as_deref(),
     );
-    let model = provider.models.iter().find(|m| m.id == model_id);
+    let plan_mode_context = if options.lightweight_context {
+        None
+    } else {
+        crate::plan_mode::take_plan_mode_context_message(state, resources)?
+    };
+    apply_plan_mode_context_to_bundle(&mut prompt_bundle, &model, plan_mode_context.as_deref());
+    let instructions = super::openai_request_instructions(Some(&prompt_bundle.instructions));
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
-    let supports_response_threading =
-        openai_supports_response_threading(provider, &execution.request_config.base_url, model);
+    let supports_response_threading = openai_supports_response_threading(
+        provider,
+        &execution.request_config.base_url,
+        Some(&model),
+    );
+    let supports_client_metadata = supports_client_metadata(&model);
+    let supports_parallel_tool_calls = supports_parallel_tool_calls(&model);
 
     let context_reminder = if options.lightweight_context {
         String::new()
@@ -578,8 +635,26 @@ pub(super) fn setup_responses_session(
         model_id,
         supports_reasoning,
         supports_response_threading,
+        supports_client_metadata,
+        supports_parallel_tool_calls,
         context_reminder,
+        leading_input_items: prompt_bundle.leading_input_items,
         previous_response_id: None,
         continuation_start: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_streaming_responses_transport_for_blocking;
+
+    #[test]
+    fn chatgpt_codex_backend_requires_streaming_even_for_blocking_turns() {
+        assert!(requires_streaming_responses_transport_for_blocking(
+            "https://chatgpt.com/backend-api/codex"
+        ));
+        assert!(!requires_streaming_responses_transport_for_blocking(
+            "https://api.openai.com"
+        ));
+    }
 }

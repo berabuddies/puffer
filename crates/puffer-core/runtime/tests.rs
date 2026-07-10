@@ -459,7 +459,7 @@ pub(super) fn refresh_env_lock() -> &'static Mutex<()> {
     crate::test_locks::env_lock()
 }
 
-fn bundled_resources() -> LoadedResources {
+pub(super) fn bundled_resources() -> LoadedResources {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)

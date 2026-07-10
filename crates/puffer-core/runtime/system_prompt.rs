@@ -1,3 +1,5 @@
+use crate::permissions::profile::EffectiveSandboxMode;
+use crate::permissions::RuntimePermissionContext;
 use crate::AppState;
 use anyhow::Result;
 use puffer_resources::{render_prompt_for, LoadedResources, SkillSpec};
@@ -7,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SYSTEM_PROMPT_ID: &str = "system-base";
+const OPENAI_CODEX_CONTEXTUAL_USER_PROMPT_ID: &str = "openai-codex-contextual-user";
 const SYSTEM_PROMPT_TEMPLATE: &str = r#"You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
 
 IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
@@ -80,6 +83,90 @@ pub(super) fn render_runtime_system_prompt(
     model_id: &str,
     enabled_tools: &BTreeSet<String>,
 ) -> Result<String> {
+    render_runtime_system_prompt_inner(state, resources, model_id, enabled_tools, true)
+}
+
+pub(super) fn render_openai_runtime_base_system_prompt(
+    state: &AppState,
+    resources: &LoadedResources,
+    model_id: &str,
+    enabled_tools: &BTreeSet<String>,
+    permission_context: &RuntimePermissionContext,
+) -> Result<String> {
+    render_runtime_prompt_resource_with_environment(
+        state,
+        resources,
+        model_id,
+        enabled_tools,
+        SYSTEM_PROMPT_ID,
+        false,
+        build_environment_context_xml(state, permission_context),
+    )
+}
+
+fn render_runtime_system_prompt_inner(
+    state: &AppState,
+    resources: &LoadedResources,
+    model_id: &str,
+    enabled_tools: &BTreeSet<String>,
+    include_memory: bool,
+) -> Result<String> {
+    render_runtime_prompt_resource(
+        state,
+        resources,
+        model_id,
+        enabled_tools,
+        SYSTEM_PROMPT_ID,
+        include_memory,
+    )
+}
+
+pub(super) fn render_runtime_prompt_resource(
+    state: &AppState,
+    resources: &LoadedResources,
+    model_id: &str,
+    enabled_tools: &BTreeSet<String>,
+    prompt_id: &str,
+    include_memory: bool,
+) -> Result<String> {
+    render_runtime_prompt_resource_with_environment(
+        state,
+        resources,
+        model_id,
+        enabled_tools,
+        prompt_id,
+        include_memory,
+        build_environment_section(state, model_id)?,
+    )
+}
+
+pub(super) fn render_openai_codex_contextual_user_prompt(
+    state: &AppState,
+    resources: &LoadedResources,
+    model_id: &str,
+    enabled_tools: &BTreeSet<String>,
+    permission_context: &RuntimePermissionContext,
+) -> Result<String> {
+    render_runtime_prompt_resource_with_environment(
+        state,
+        resources,
+        model_id,
+        enabled_tools,
+        OPENAI_CODEX_CONTEXTUAL_USER_PROMPT_ID,
+        false,
+        build_environment_context_xml(state, permission_context),
+    )
+}
+
+fn render_runtime_prompt_resource_with_environment(
+    state: &AppState,
+    resources: &LoadedResources,
+    model_id: &str,
+    enabled_tools: &BTreeSet<String>,
+    prompt_id: &str,
+    include_memory: bool,
+    environment: String,
+) -> Result<String> {
     let variables = BTreeMap::from([
         (
             "USING_YOUR_TOOLS".to_string(),
@@ -89,20 +176,23 @@ pub(super) fn render_runtime_system_prompt(
             "SESSION_GUIDANCE".to_string(),
             build_session_guidance_section(resources, enabled_tools),
         ),
-        (
-            "ENVIRONMENT".to_string(),
-            build_environment_section(state, model_id)?,
-        ),
+        ("ENVIRONMENT".to_string(), environment),
     ]);
     let provider_id = state.current_provider.as_deref();
     let rendered = render_prompt_for(
         resources,
-        SYSTEM_PROMPT_ID,
+        prompt_id,
         provider_id,
         Some(model_id),
         &variables,
     )
-    .unwrap_or_else(|| render_fallback_prompt(&variables));
+    .unwrap_or_else(|| {
+        if prompt_id == SYSTEM_PROMPT_ID {
+            render_fallback_prompt(&variables)
+        } else {
+            String::new()
+        }
+    });
     let mut prompt = normalize_prompt_whitespace(&rendered);
     // soul.md / user.md are intentionally NOT appended to the system prompt.
     // The Anthropic system prompt carries `cache_control: ephemeral`, so it is
@@ -111,11 +201,106 @@ pub(super) fn render_runtime_system_prompt(
     // (the `<system-reminder>` block after the cache breakpoint), which is
     // rebuilt each turn and never rewrites prior messages. See
     // openai::conversation::build_system_reminder.
-    if let Some(memory) = load_memory_prompt(&state.cwd, provider_id) {
-        prompt.push_str("\n\n");
-        prompt.push_str(&memory);
+    if include_memory {
+        if let Some(memory) = load_memory_prompt(&state.cwd, provider_id) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&memory);
+        }
     }
     Ok(prompt)
+}
+
+pub(crate) fn load_openai_project_memory_context(cwd: &Path) -> Option<String> {
+    let mut agent_sections = load_agents_context_sections(cwd);
+    agent_sections.extend(load_global_context_sections("AGENTS.md"));
+    if !agent_sections.is_empty() {
+        return Some(agent_sections.join("\n\n"));
+    }
+
+    let mut claude_sections = Vec::new();
+    if let Some(content) = load_first_context_file(cwd, "CLAUDE.md") {
+        claude_sections.push(format_context_file_section(cwd, "CLAUDE.md", &content));
+    }
+    claude_sections.extend(load_global_context_sections("CLAUDE.md"));
+    (!claude_sections.is_empty()).then(|| claude_sections.join("\n\n"))
+}
+
+fn load_agents_context_sections(cwd: &Path) -> Vec<String> {
+    root_to_cwd_context_dirs(cwd)
+        .into_iter()
+        .filter_map(|dir| {
+            load_first_context_file(&dir, "AGENTS.md")
+                .map(|content| format_context_file_section(&dir, "AGENTS.md", &content))
+        })
+        .collect()
+}
+
+fn load_global_context_sections(filename: &str) -> Vec<String> {
+    let Some(home) = env::var_os("HOME") else {
+        return Vec::new();
+    };
+
+    [".claude", ".puffer"]
+        .into_iter()
+        .filter_map(|dir| {
+            let context_dir = Path::new(&home).join(dir);
+            load_first_context_file(&context_dir, filename)
+                .map(|content| format_context_file_section(&context_dir, filename, &content))
+        })
+        .collect()
+}
+
+fn format_context_file_section(dir: &Path, filename: &str, content: &str) -> String {
+    format!(
+        "# {filename} instructions for {}\n\n<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
+        dir.display(),
+        content
+    )
+}
+
+fn root_to_cwd_context_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let root = openai_project_context_root(cwd);
+    let mut dirs = Vec::new();
+
+    for dir in cwd.ancestors() {
+        if !dir.starts_with(&root) {
+            break;
+        }
+        dirs.push(dir.to_path_buf());
+        if dir == root {
+            break;
+        }
+    }
+
+    dirs.reverse();
+    dirs
+}
+
+fn openai_project_context_root(cwd: &Path) -> PathBuf {
+    if let Some(git_root) = cwd
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
+    {
+        return git_root;
+    }
+
+    cwd.ancestors()
+        .filter(|dir| dir.join("AGENTS.md").is_file() || dir.join("CLAUDE.md").is_file())
+        .last()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+fn load_first_context_file(cwd: &Path, filename: &str) -> Option<String> {
+    let path = cwd.join(filename);
+    let content = std::fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 const MEMORY_INSTRUCTION_PROMPT: &str = "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.";
@@ -357,6 +542,71 @@ fn build_environment_section(state: &AppState, model_id: &str) -> Result<String>
     Ok(lines.join("\n"))
 }
 
+fn build_environment_context_xml(
+    state: &AppState,
+    permission_context: &RuntimePermissionContext,
+) -> String {
+    let profile = permission_context.effective_profile();
+    let filesystem_type = match profile.sandbox_mode {
+        EffectiveSandboxMode::DangerFullAccess => "unrestricted",
+        EffectiveSandboxMode::ReadOnly => "read_only",
+        EffectiveSandboxMode::WorkspaceWrite => "workspace_write",
+        EffectiveSandboxMode::Custom => "custom",
+    };
+    let profile_type = if profile.grants.allow_all_tools {
+        "trusted"
+    } else {
+        "default"
+    };
+
+    let mut rendered = String::new();
+    rendered.push_str("<environment_context>\n");
+    push_xml_element(&mut rendered, "cwd", &state.cwd.display().to_string(), "  ");
+    if let Some(shell) = shell_name() {
+        push_xml_element(&mut rendered, "shell", &shell, "  ");
+    }
+    rendered.push_str("  <filesystem>\n");
+    rendered.push_str("    <workspace_roots>\n");
+    for root in &profile.workspace_roots {
+        push_xml_element(&mut rendered, "root", &root.display().to_string(), "      ");
+    }
+    rendered.push_str("    </workspace_roots>\n");
+    rendered.push_str("    <permission_profile type=\"");
+    push_xml_escaped_text(&mut rendered, profile_type);
+    rendered.push_str("\">\n");
+    rendered.push_str("      <file_system type=\"");
+    push_xml_escaped_text(&mut rendered, filesystem_type);
+    rendered.push_str("\" />\n");
+    rendered.push_str("    </permission_profile>\n");
+    rendered.push_str("  </filesystem>\n");
+    rendered.push_str("</environment_context>");
+    rendered
+}
+
+fn push_xml_element(rendered: &mut String, name: &str, value: &str, indent: &str) {
+    rendered.push_str(indent);
+    rendered.push('<');
+    rendered.push_str(name);
+    rendered.push('>');
+    push_xml_escaped_text(rendered, value);
+    rendered.push_str("</");
+    rendered.push_str(name);
+    rendered.push_str(">\n");
+}
+
+fn push_xml_escaped_text(rendered: &mut String, value: &str) {
+    for ch in value.chars() {
+        match ch {
+            '&' => rendered.push_str("&amp;"),
+            '<' => rendered.push_str("&lt;"),
+            '>' => rendered.push_str("&gt;"),
+            '"' => rendered.push_str("&quot;"),
+            '\'' => rendered.push_str("&apos;"),
+            _ => rendered.push(ch),
+        }
+    }
+}
+
 fn preferred_tool_name<'a>(enabled_tools: &'a BTreeSet<String>, names: &[&str]) -> Option<&'a str> {
     names
         .iter()
@@ -493,20 +743,26 @@ fn is_git_repository(cwd: &Path) -> bool {
 }
 
 fn shell_info_line() -> String {
-    let shell = env::var("SHELL").unwrap_or_else(|_| "unknown".to_string());
-    let shell_name = if shell.contains("zsh") {
-        "zsh"
-    } else if shell.contains("bash") {
-        "bash"
-    } else {
-        shell.as_str()
-    };
+    let shell_name = shell_name().unwrap_or_else(|| "unknown".to_string());
     if env::consts::OS == "windows" {
         format!(
             "Shell: {shell_name} (use Unix shell syntax, not Windows - e.g., /dev/null not NUL, forward slashes in paths)"
         )
     } else {
         format!("Shell: {shell_name}")
+    }
+}
+
+fn shell_name() -> Option<String> {
+    let shell = env::var("SHELL").unwrap_or_else(|_| "unknown".to_string());
+    if shell.contains("zsh") {
+        Some("zsh".to_string())
+    } else if shell.contains("bash") {
+        Some("bash".to_string())
+    } else if shell == "unknown" || shell.trim().is_empty() {
+        None
+    } else {
+        Some(shell)
     }
 }
 

@@ -1,0 +1,7 @@
+id: openai-codex-contextual-user
+description: OpenAI Codex-style contextual user message framing for environment context.
+template: |
+  $ENVIRONMENT
+variables:
+  - name: ENVIRONMENT
+    description: Dynamic environment summary for the active session.

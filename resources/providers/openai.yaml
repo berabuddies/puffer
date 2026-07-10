@@ -121,6 +121,22 @@ models:
     context_window: 1041920
     max_output_tokens: 128000
     supports_reasoning: true
+    compat:
+      api: openai-responses
+      prompt_style: codex
+      include_skills_usage_instructions: true
+      supports_developer_messages: true
+      supports_contextual_user_messages: true
+      supports_client_metadata: true
+      supports_text_verbosity: true
+      default_verbosity: low
+      supports_reasoning_summary: true
+      default_reasoning_summary: none
+      prefer_websockets: true
+      supports_parallel_tool_calls: true
+      supports_response_threading: true
+      responses_path: responses
+      oauth_base_url: https://chatgpt.com/backend-api/codex
     input: [text, image]
   - id: gpt-5.4
     display_name: GPT-5.4
